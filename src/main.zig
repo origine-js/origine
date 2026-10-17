@@ -1,4 +1,4 @@
-//! origine entry point: a single-scope managed JavaScript REPL.
+//! origine entry point: evaluate a JavaScript file or start a managed REPL.
 const std = @import("std");
 const v8 = @import("@v8");
 const m = @import("@managed");
@@ -48,9 +48,11 @@ fn show(scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
 /// ArrayBuffer backing stores; frees host storage on success/error without allocator teardown.
 /// Owns one V8 background worker until platform teardown; foreground jobs are
 /// pumped on the calling thread. No callback state escapes runtime teardown.
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var trace: StartupTrace = .init();
     const alloc = eu.alloc;
+    const args = try init.minimal.args.toSlice(alloc);
+    defer alloc.free(args);
     io_runtime = .init(alloc, .{});
     defer io_runtime.deinit();
     trace.mark("host_io");
@@ -59,6 +61,10 @@ pub fn main() !void {
     const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = .{ .zig = alloc } });
     trace.mark("runtime_isolate");
     defer rt.destroy();
+    if (args.len > 1) {
+        trace.report();
+        return runInit(alloc, init, rt, engine, args);
+    }
     const scope = try rt.createScope(.{});
     trace.mark("scope_create");
     trace.report();
@@ -85,4 +91,31 @@ pub fn main() !void {
         show(scope, result);
         rt.pumpPlatform(engine.platform);
     }
+}
+
+/// Runs `args[1]` as the init module: evaluates it, then calls its exported
+/// `main(api)` with every permission granted (the CLI grants the working directory
+/// read/write with sync access, all arguments after the init path, and the whole
+/// environment). Borrows everything through return.
+fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, engine: Engine, args: []const [:0]const u8) !void {
+    const user_args = try alloc.alloc([]const u8, args.len - 1);
+    defer alloc.free(user_args);
+    for (args[1..], user_args) |arg, *out| out.* = arg;
+    const keys = init.environ_map.keys();
+    const values = init.environ_map.values();
+    const env = try alloc.alloc(m.Api.EnvPair, keys.len);
+    defer alloc.free(env);
+    for (keys, values, env) |key, value, *out| out.* = .{ .name = key, .value = value };
+    var cwd = try std.Io.Dir.cwd().openDir(io_runtime.io(), ".", .{ .iterate = true });
+    defer cwd.close(io_runtime.io());
+    const host = try m.Api.Host.create(alloc, .{ .io = io_runtime.io(), .args = user_args, .env = env, .fs = .{ .root = cwd } });
+    defer host.destroy();
+    const scope = try rt.createScope(host.initOptions());
+    var error_info: m.ErrorInfo = .{};
+    defer error_info.deinit();
+    host.run(scope, engine.platform, args[1], &error_info) catch |err| {
+        print("{s}\n", .{@errorName(err)});
+        if (error_info.exception) |value| show(scope, value);
+        return err;
+    };
 }

@@ -52,6 +52,7 @@ pub const Scope = struct {
         ctx.setAlignedPointerInEmbedderData(1, scope);
         ctx.enter();
         defer ctx.exit();
+        ctx.setStackTraceLimit(options.stack_trace_limit);
         var tc_scope: v8.TryCatch = undefined;
         tc_scope.init(isolate);
         defer tc_scope.deinit();
@@ -66,6 +67,24 @@ pub const Scope = struct {
         try rt.scopes.append(rt.allocator, scope);
         startup_trace.mark(&timing, "scope_finalize");
         return scope;
+    }
+
+    /// Borrows self through a session on the runtime thread. Returns the native
+    /// context setting by value; retains no resources and invokes no JavaScript.
+    pub fn getStackTraceLimit(self: *Scope) v8.StackTraceLimit {
+        var session: Session = undefined;
+        session.init(self);
+        defer session.deinit();
+        return session.ctx.getStackTraceLimit();
+    }
+
+    /// Copies limit into the native context on the runtime thread. Enters the
+    /// context for the call; retains no caller resources or exception values.
+    pub fn setStackTraceLimit(self: *Scope, limit: v8.StackTraceLimit) void {
+        var session: Session = undefined;
+        session.init(self);
+        defer session.deinit();
+        session.ctx.setStackTraceLimit(limit);
     }
 
     const Helpers = struct {
@@ -101,6 +120,9 @@ pub const Scope = struct {
     }
 
     pub const Options = struct {
+        /// Copied into the native context at creation. Affects future captures;
+        /// guest JavaScript cannot read or change this setting.
+        stack_trace_limit: v8.StackTraceLimit = .{ .limited = 10 },
         /// Optional specifier rewriting before module-map lookup. Without a resolver
         /// or import map, specifiers are used unchanged as module-map keys.
         resolver: ?module_types.Resolver = null,

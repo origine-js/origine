@@ -21,6 +21,9 @@ pub const supported_v8_version = "15.2.124.1";
 ///   `Scope.Session` to do that safely in embedder code.
 pub const Runtime = struct {
     pub const Options = struct {
+        /// Whether Atomics.wait may block this isolate's thread. Copied at creation;
+        /// Atomics and SharedArrayBuffer remain available when false.
+        allow_explicit_blocking_api: bool = false,
         /// Default uses V8's native allocator. zig creates a runtime-owned adapter;
         /// its allocator state must be thread-safe and live through Runtime.destroy.
         /// borrowed leaves native allocator ownership with the caller, who must
@@ -85,12 +88,11 @@ pub const Runtime = struct {
         };
         var params = v8.Isolate.CreateParams.init();
         params.array_buffer_allocator = aba;
-        params.allow_atomics_wait = false;
+        params.allow_explicit_blocking_api = options.allow_explicit_blocking_api;
         const isolate = v8.Isolate.init(&params);
         isolate.enter();
         defer isolate.exit();
         isolate.setMicrotasksPolicy(.Explicit);
-        isolate.setAllowWasmCodeGenerationCallback(denyWasm);
         isolate.setHostImportModuleDynamicallyCallback(modules.dynamic);
         isolate.setHostImportModuleWithPhaseDynamicallyCallback(modules.dynamicPhase);
         isolate.setHostInitializeImportMetaObjectCallback(modules.importMeta);
@@ -192,8 +194,3 @@ pub const Runtime = struct {
         return error.StaleLoadToken;
     }
 };
-
-/// V8 callback denying WebAssembly code generation; accepts values, retains nothing.
-fn denyWasm(_: v8.Context, _: v8.String) callconv(.c) bool {
-    return false;
-}

@@ -7,9 +7,13 @@ A Zig application embedding V8. The REPL entry point is `src/main.zig`;
 ```sh
 zig build
 zig build run
+zig build run -- path/to/script.js
 zig build -Doptimize=small
 zig build test
 ```
+
+With a file argument, origine evaluates that JavaScript file and exits. Without
+one, it starts the interactive REPL.
 
 The executable is installed at `zig-out/bin/origine`. Darwin release builds use
 V8's matching `ld64.lld` with ThinLTO and identical-code folding; debug builds

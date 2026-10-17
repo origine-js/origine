@@ -1,5 +1,6 @@
 pub const Runtime = @import("managed/runtime.zig").Runtime;
 pub const Scope = @import("managed/scope.zig").Scope;
+pub const StackTraceLimit = @import("@v8").StackTraceLimit;
 pub const ModuleId = @import("managed/module_types.zig").ModuleId;
 pub const ImportAttribute = @import("managed/module_types.zig").ImportAttribute;
 pub const ImportCacheKey = @import("managed/module_types.zig").ImportCacheKey;
@@ -22,3 +23,4 @@ pub const ImportMapping = @import("managed/import_map.zig").Mapping;
 pub const ImportMapScope = @import("managed/import_map.zig").Scoped;
 pub const URLNormalizer = @import("managed/import_map.zig").URLNormalizer;
 pub const virtual_urls = @import("managed/import_map.zig").virtual_urls;
+pub const Api = @import("managed/api.zig");

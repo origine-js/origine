@@ -22,7 +22,8 @@ test "managed step 2: intrinsic inventory and code generation lockdown" {
         "(async function*(){}).constructor('yield 1')()",                                 "Date.prototype.setTime = () => 0",
     };
     for (attacks) |attack| try t.expectError(error.JavaScriptException, scope.eval(attack, "test:attack", null));
-    try check(scope, "typeof WebAssembly === 'undefined' && typeof SharedArrayBuffer === 'undefined' && typeof Atomics === 'undefined'");
+    try check(scope, "typeof WebAssembly === 'undefined' && typeof SharedArrayBuffer === 'function' && typeof Atomics === 'object'");
+    try check(scope, "const bytes = new Uint8Array(new SharedArrayBuffer(4)); bytes[0] = 42; bytes[0] === 42 && Object.isFrozen(SharedArrayBuffer.prototype)");
     try check(scope, "class C { #x = 1; inc() { return ++this.#x; } }; new C().inc() === 2 && [1,2].map(x=>x+1)[1] === 3");
     try check(scope, "Object.isFrozen(Object.getPrototypeOf(async()=>{}))");
     try check(scope, "globalThis.done = false; Promise.resolve().then(()=>{done = true}); true");
@@ -50,7 +51,7 @@ test "managed step 3: hardened sharing and private state" {
     defer cycle.deinit();
     try a.harden(cycle, null);
     try check(a, "accessed === 0 && Object.isFrozen(graph)");
-    const unsupported = [_][]const u8{ "new Map()", "new Uint8Array(1)", "Promise.resolve(1)", "new WeakRef({})", "[][Symbol.iterator]()", "globalThis", "new Proxy({}, {ownKeys(){throw 1}})" };
+    const unsupported = [_][]const u8{ "new Map()", "new Uint8Array(1)", "new SharedArrayBuffer(4)", "Promise.resolve(1)", "new WeakRef({})", "[][Symbol.iterator]()", "globalThis", "new Proxy({}, {ownKeys(){throw 1}})" };
     for (unsupported) |source| {
         const value = try a.eval(source, "test:unsupported", null);
         defer value.deinit();

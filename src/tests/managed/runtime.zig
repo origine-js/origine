@@ -8,6 +8,68 @@ const check = support.check;
 const exposeModule = support.exposeModule;
 const AttributeBackend = support.AttributeBackend;
 
+test "native stack limits are per scope and affect subsequent captures only" {
+    ensureV8();
+    const rt = try m.Runtime.create(t.allocator, .{});
+    defer rt.destroy();
+    const a = try rt.createScope(.{ .stack_trace_limit = .{ .limited = 2 } });
+    const b = try rt.createScope(.{});
+    try t.expectEqual(@as(u31, 2), a.getStackTraceLimit().limited);
+    try t.expectEqual(@as(u31, 10), b.getStackTraceLimit().limited);
+    const setup =
+        \\globalThis.capture = function descend(n) { return n ? descend(n - 1) : new Error('capture'); };
+        \\globalThis.frames = error => error.stack.split('\n').length - 1;
+        \\!Object.hasOwn(Error, 'stackTraceLimit')
+    ;
+    try check(a, setup);
+    try check(b, setup);
+    try check(a, "globalThis.saved = capture(24); frames(saved) === 2");
+    try check(b, "frames(capture(24)) === 10");
+    a.setStackTraceLimit(.unlimited);
+    try t.expect(a.getStackTraceLimit() == .unlimited);
+    try check(a, "frames(capture(24)) > 20 && frames(saved) === 2");
+    a.setStackTraceLimit(.none);
+    try t.expect(a.getStackTraceLimit() == .none);
+    try check(a, "frames(capture(24)) === 0");
+    try check(b, "frames(capture(24)) === 10");
+    a.setStackTraceLimit(.{ .limited = 0 });
+    try t.expect(a.getStackTraceLimit() == .none);
+    a.setStackTraceLimit(.{ .limited = 3 });
+    try check(a, "const target = {}; Error.captureStackTrace(target); frames(target) <= 3 && frames(capture(24)) === 3");
+}
+
+test "shared memory is available and blocking Atomics.wait is controlled per isolate" {
+    ensureV8();
+    const disabled = try m.Runtime.create(t.allocator, .{});
+    defer disabled.destroy();
+    const enabled = try m.Runtime.create(t.allocator, .{ .allow_explicit_blocking_api = true });
+    defer enabled.destroy();
+    const a = try disabled.createScope(.{});
+    const b = try enabled.createScope(.{});
+    const c = try enabled.createScope(.{});
+    for ([_]*m.Scope{ a, b, c }) |scope| {
+        try check(scope,
+            \\globalThis.cells = new Int32Array(new SharedArrayBuffer(4));
+            \\Atomics.store(cells, 0, 7) === 7 && Atomics.add(cells, 0, 2) === 7 &&
+            \\Atomics.load(cells, 0) === 9 && Atomics.notify(cells, 0) === 0 &&
+            \\Atomics.waitAsync(cells, 0, 0).value === 'not-equal' &&
+            \\Object.isFrozen(Atomics) && Object.isFrozen(SharedArrayBuffer.prototype)
+        );
+    }
+    try t.expectError(error.JavaScriptException, a.eval("Atomics.wait(cells, 0, 9, 0)", "test:wait-disabled", null));
+    try check(b, "Atomics.wait(cells, 0, 9, 0) === 'timed-out'");
+    try check(c, "Atomics.wait(cells, 0, 0, 0) === 'not-equal'");
+    disabled.isolate.setAllowExplicitBlockingApi(true);
+    try check(a, "Atomics.wait(cells, 0, 9, 0) === 'timed-out'");
+    enabled.isolate.setAllowExplicitBlockingApi(false);
+    for ([_]*m.Scope{ b, c }) |scope| {
+        try t.expectError(error.JavaScriptException, scope.eval("Atomics.wait(cells, 0, 9, 0)", "test:wait-toggled", null));
+    }
+    const later = try enabled.createScope(.{});
+    try t.expectError(error.JavaScriptException, later.eval("Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 0)", "test:future-context", null));
+    try check(a, "Atomics.wait(cells, 0, 9, 0) === 'timed-out'");
+}
+
 test "managed step 1: scopes, strict evaluation, persistent handles and context restoration" {
     ensureV8();
     const rt = try m.Runtime.create(t.allocator, .{});

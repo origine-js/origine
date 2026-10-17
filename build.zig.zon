@@ -1,0 +1,10 @@
+.{
+    .name = .origine,
+    .fingerprint = 0x150bb66fbc3d6918,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .v8 = .{ .path = "lib/v8_zig" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "lib", "docs", "README.md" },
+}

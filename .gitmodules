@@ -1,0 +1,3 @@
+[submodule "lib/v8_zig"]
+	path = lib/v8_zig
+	url = ssh://git@codeberg.org/cyans/v8_zig.git

@@ -1,0 +1,12 @@
+//! Behavioral tests use the same exported modules as embedders.
+test {
+    _ = @import("tests/managed/ownership.zig");
+    _ = @import("tests/managed/runtime.zig");
+    _ = @import("tests/managed/errors.zig");
+    _ = @import("tests/managed/capabilities.zig");
+    _ = @import("tests/managed/modules.zig");
+    _ = @import("tests/managed/import_maps.zig");
+    _ = @import("tests/managed/module_map.zig");
+    _ = @import("tests/managed/loading.zig");
+    _ = @import("tests/managed/cache.zig");
+}

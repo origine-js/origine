@@ -1,0 +1,88 @@
+//! origine entry point: a single-scope managed JavaScript REPL.
+const std = @import("std");
+const v8 = @import("@v8");
+const m = @import("@managed");
+const eu = @import("@util");
+const StartupTrace = @import("@diagnostics").StartupTrace;
+const Engine = @import("@engine").Engine;
+var io_runtime: std.Io.Threaded = undefined;
+
+/// Borrows format/arguments through buffered output; retains no resources.
+/// The global host I/O runtime must remain live through return, including I/O errors.
+fn print(comptime format: []const u8, args: anytype) void {
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io_runtime.io(), &buffer);
+    writer.interface.print(format, args) catch return;
+    writer.interface.flush() catch return;
+}
+
+/// Borrows scope/value through string conversion; caller keeps the runtime alive.
+/// Local V8 handles and UTF-8 storage are released before return.
+fn show(scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
+    const alloc = eu.alloc;
+    const isolate = scope.runtime.isolate;
+    isolate.enter();
+    defer isolate.exit();
+    var h_scope: v8.HandleScope = undefined;
+    h_scope.init(isolate);
+    defer h_scope.deinit();
+    const ctx = scope.context.deref();
+    ctx.enter();
+    defer ctx.exit();
+    // toString may invoke arbitrary guest code, including a throwing getter.
+    var tc_scope: v8.TryCatch = undefined;
+    tc_scope.init(isolate);
+    defer tc_scope.deinit();
+    const text = value.deref().toString(ctx) orelse {
+        print("<value conversion threw>\n", .{});
+        return;
+    };
+    const buffer = alloc.alloc(u8, text.lenUtf8(isolate)) catch return;
+    defer alloc.free(buffer);
+    const length = text.writeUtf8(isolate, buffer);
+    print("{s}\n", .{buffer[0..length]});
+}
+
+/// Owns the demo engine/runtime and host allocations until exit; releases all V8
+/// values before teardown. Uses process-lifetime eu.alloc for host allocations and
+/// ArrayBuffer backing stores; frees host storage on success/error without allocator teardown.
+/// Owns one V8 background worker until platform teardown; foreground jobs are
+/// pumped on the calling thread. No callback state escapes runtime teardown.
+pub fn main() !void {
+    var trace: StartupTrace = .init();
+    const alloc = eu.alloc;
+    io_runtime = .init(alloc, .{});
+    defer io_runtime.deinit();
+    trace.mark("host_io");
+    var engine = Engine.init(.{ .trace = &trace });
+    defer engine.deinit();
+    const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = .{ .zig = alloc } });
+    trace.mark("runtime_isolate");
+    defer rt.destroy();
+    const scope = try rt.createScope(.{});
+    trace.mark("scope_create");
+    trace.report();
+    @import("@diagnostics").scope.report();
+    print("JavaScript REPL: exit() or Ctrl+D exits.\n", .{});
+    var input_buffer: [8192]u8 = undefined;
+    var reader = std.Io.File.stdin().reader(io_runtime.io(), &input_buffer);
+    while (true) {
+        print("> ", .{});
+        const line = (reader.interface.takeDelimiter('\n') catch |err| {
+            print("Input error: {s}\n", .{@errorName(err)});
+            return;
+        }) orelse break;
+        const input = std.mem.trim(u8, line, " \r\t");
+        if (std.mem.eql(u8, input, "exit()")) break;
+        var error_info: m.ErrorInfo = .{};
+        defer error_info.deinit();
+        const result = scope.eval(input, "app:/shell.js", &error_info) catch |err| {
+            print("Evaluation failed: {s}\n", .{@errorName(err)});
+            if (error_info.exception) |value| show(scope, value);
+            continue;
+        };
+        defer result.deinit();
+        show(scope, result);
+        rt.pumpPlatform(engine.platform);
+    }
+}

@@ -22,7 +22,7 @@ test "managed step 2: intrinsic inventory and code generation lockdown" {
         "(async function*(){}).constructor('yield 1')()",                                 "Date.prototype.setTime = () => 0",
     };
     for (attacks) |attack| try t.expectError(error.JavaScriptException, scope.eval(attack, "test:attack", null));
-    try check(scope, "typeof WebAssembly === 'undefined' && typeof SharedArrayBuffer === 'function' && typeof Atomics === 'object'");
+    try check(scope, "typeof WebAssembly === 'object' && Object.isFrozen(WebAssembly) && typeof SharedArrayBuffer === 'function' && typeof Atomics === 'object'");
     try check(scope, "const bytes = new Uint8Array(new SharedArrayBuffer(4)); bytes[0] = 42; bytes[0] === 42 && Object.isFrozen(SharedArrayBuffer.prototype)");
     try check(scope, "class C { #x = 1; inc() { return ++this.#x; } }; new C().inc() === 2 && [1,2].map(x=>x+1)[1] === 3");
     try check(scope, "Object.isFrozen(Object.getPrototypeOf(async()=>{}))");

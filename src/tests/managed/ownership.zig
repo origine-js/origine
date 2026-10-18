@@ -16,6 +16,8 @@ const scopeAllocationFailures = support.scopeAllocationFailures;
 
 test "runtime allocators: owned Zig backing stores are zeroed and released" {
     ensureV8();
+    // Zig-allocated ArrayBuffer memory cannot live inside the V8 sandbox.
+    if (v8.V8.isSandboxEnabled()) return error.SkipZigTest;
     var backing = std.heap.DebugAllocator(.{ .thread_safe = true, .enable_memory_limit = true }){};
     defer t.expect(backing.deinit() == .ok) catch @panic("backing-store leak");
     {
@@ -37,6 +39,8 @@ test "runtime allocators: owned Zig backing stores are zeroed and released" {
 
 test "runtime allocators: borrowed adapter survives runtime with retained backing store" {
     ensureV8();
+    // Zig-allocated ArrayBuffer memory cannot live inside the V8 sandbox.
+    if (v8.V8.isSandboxEnabled()) return error.SkipZigTest;
     var backing = std.heap.DebugAllocator(.{ .thread_safe = true, .enable_memory_limit = true }){};
     defer t.expect(backing.deinit() == .ok) catch @panic("borrowed allocator leak");
     const aba = try v8.ArrayBuffer.Allocator.fromZig(backing.allocator());
@@ -76,6 +80,8 @@ test "runtime allocators: borrowed adapter survives runtime with retained backin
 
 test "runtime allocators: mimalloc metadata and ArrayBuffer integration" {
     ensureV8();
+    // Zig-allocated ArrayBuffer memory cannot live inside the V8 sandbox.
+    if (v8.V8.isSandboxEnabled()) return error.SkipZigTest;
     const rt = try m.Runtime.create(mimalloc.allocator, .{ .array_buffer_allocator = .{ .zig = mimalloc.allocator } });
     defer rt.destroy();
     const scope = try rt.createScope(.{});

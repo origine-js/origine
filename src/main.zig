@@ -60,7 +60,11 @@ pub fn main(init: std.process.Init) !void {
     var engine = Engine.init(.{ .trace = &trace });
     defer engine.deinit();
     const snapshot = embeddedSnapshot(init.environ_map);
-    const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = .{ .zig = alloc }, .snapshot = snapshot });
+    // The V8 sandbox only accepts its own ArrayBuffer memory, so Zig-allocated backing stores
+    // are limited to builds without it.
+    const buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator") =
+        if (v8.V8.isSandboxEnabled()) .default else .{ .zig = alloc };
+    const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = buffer_allocator, .snapshot = snapshot });
     trace.mark("runtime_isolate");
     defer rt.destroy();
     if (args.len > 1) {

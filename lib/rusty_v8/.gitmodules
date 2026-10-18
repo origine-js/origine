@@ -1,0 +1,64 @@
+[submodule "v8"]
+	path = v8
+	url = https://github.com/denoland/v8.git
+[submodule "build"]
+	path = build
+	url = https://github.com/denoland/chromium_build.git
+[submodule "tools/clang"]
+	path = tools/clang
+	url = https://chromium.googlesource.com/chromium/src/tools/clang.git
+[submodule "third_party/jinja2"]
+	path = third_party/jinja2
+	url = https://chromium.googlesource.com/chromium/src/third_party/jinja2.git
+[submodule "third_party/markupsafe"]
+	path = third_party/markupsafe
+	url = https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git
+[submodule "buildtools"]
+	path = buildtools
+	url = https://chromium.googlesource.com/chromium/src/buildtools.git
+[submodule "third_party/icu"]
+	path = third_party/icu
+	url = https://chromium.googlesource.com/chromium/deps/icu.git
+[submodule "third_party/abseil-cpp"]
+	path = third_party/abseil-cpp
+	url = https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git
+[submodule "third_party/fp16/src"]
+	path = third_party/fp16/src
+	url = https://github.com/Maratyszcza/FP16.git
+[submodule "third_party/libc++/src"]
+	path = third_party/libc++/src
+	url = https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git
+[submodule "third_party/libc++abi/src"]
+	path = third_party/libc++abi/src
+	url = https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git
+[submodule "third_party/libunwind/src"]
+	path = third_party/libunwind/src
+	url = https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git
+[submodule "third_party/fast_float/src"]
+	path = third_party/fast_float/src
+	url = https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git
+[submodule "third_party/llvm-libc/src"]
+	path = third_party/llvm-libc/src
+	url = https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git
+[submodule "third_party/simdutf"]
+	path = third_party/simdutf
+	url = https://chromium.googlesource.com/chromium/src/third_party/simdutf
+[submodule "third_party/highway/src"]
+	path = third_party/highway/src
+	url = https://chromium.googlesource.com/external/github.com/google/highway.git
+[submodule "third_party/partition_alloc"]
+	path = third_party/partition_alloc
+	url = https://chromium.googlesource.com/chromium/src/base/allocator/partition_allocator.git
+[submodule "third_party/dragonbox/src"]
+	path = third_party/dragonbox/src
+	url = https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git
+[submodule "third_party/rust"]
+	path = third_party/rust
+	url = https://chromium.googlesource.com/chromium/src/third_party/rust
+[submodule "tools/win"]
+	path = tools/win
+	url = https://chromium.googlesource.com/chromium/src/tools/win
+	# Windows builds need DebugVisualizers from this checkout, but its standalone
+	# mirror can advertise commits before their objects are available. CI and the
+	# source-build instructions download the pinned archive instead.
+	update = none

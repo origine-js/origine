@@ -54,10 +54,15 @@ export const FileKind = freeze({ file: 1, directory: 2, sym_link: 3, other: 4 })
 // authority-free: the fs object behind `io` does the work and checks the grant.
 
 const isSync = io => io.kind === 'sync';
-// Runs an fs op on `io`; sync results are checked and mapped, async results chained.
-const run = (io, name, args, then = v => v) => {
-  const value = io[name](...args);
-  return isSync(io) ? then(IoError.check(io, value)) : value.then(then);
+// Finishes an fs op result for `io`: sync results are errno-checked and mapped,
+// async results (promises) are chained. Call sites pass fixed arguments straight
+// to `io[name](...)`, so no argument arrays are allocated.
+const done = (io, value, then) => {
+  if (isSync(io)) {
+    const checked = IoError.check(io, value);
+    return then === undefined ? checked : then(checked);
+  }
+  return then === undefined ? value : value.then(then);
 };
 // Sequences steps for both modes: `steps` is a generator yielding op results.
 const sequence = (io, steps) => {
@@ -78,7 +83,9 @@ const sequence = (io, steps) => {
 };
 
 const MODES = { read_only: 'read', write_only: 'write', read_write: 'readwrite', read: 'read', write: 'write', readwrite: 'readwrite' };
-const openFlags = (options = {}) => ({ mode: MODES[options.mode ?? 'read_only'] ?? 'read', create: false });
+const READ = Object.freeze({ mode: 'read' });
+const UNLIMITED = Object.freeze({ limit: Infinity });
+const openFlags = options => options === undefined ? READ : { mode: MODES[options.mode ?? 'read_only'] ?? 'read' };
 const wrapDir = d => new DirImpl(d.fs, d.id);
 const wrapFile = f => new FileImpl(f.fs, f.id);
 
@@ -90,35 +97,39 @@ class DirImpl {
     freeze(this);
   }
   /// Zig `Dir.openFile`. options: `{ mode: 'read_only' | 'write_only' | 'read_write' }`.
-  openFile(io, path, options) { return run(io, 'dirOpenFile', [this, path, openFlags(options)], wrapFile); }
+  openFile(io, path, options) { return done(io, io.dirOpenFile(this, path, openFlags(options)), wrapFile); }
   /// Zig `Dir.createFile`. options: `{ read = false, truncate = true, exclusive = false }`.
   createFile(io, path, options = {}) {
     const flags = { mode: options.read ? 'readwrite' : 'write', create: true, truncate: options.truncate ?? true, exclusive: options.exclusive ?? false };
-    return run(io, 'dirOpenFile', [this, path, flags], wrapFile);
+    return done(io, io.dirOpenFile(this, path, flags), wrapFile);
   }
-  openDir(io, path) { return run(io, 'dirOpenDir', [this, path], wrapDir); }
-  close(io) { return run(io, 'dirClose', [this]); }
-  createDir(io, path) { return run(io, 'dirCreateDir', [this, path]); }
-  createDirPath(io, path) { return run(io, 'dirCreateDirPath', [this, path]); }
+  openDir(io, path) { return done(io, io.dirOpenDir(this, path), wrapDir); }
+  close(io) { return done(io, io.dirClose(this)); }
+  createDir(io, path) { return done(io, io.dirCreateDir(this, path)); }
+  createDirPath(io, path) { return done(io, io.dirCreateDirPath(this, path)); }
   /// Zig `Dir.createDirPathOpen`.
   createDirPathOpen(io, path) {
-    return sequence(io, function* () { yield run(io, 'dirCreateDirPath', [this, path]); return yield run(io, 'dirOpenDir', [this, path], wrapDir); }.bind(this));
+    return sequence(io, function* () { yield done(io, io.dirCreateDirPath(this, path)); return yield done(io, io.dirOpenDir(this, path), wrapDir); }.bind(this));
   }
-  deleteFile(io, path) { return run(io, 'dirDeleteFile', [this, path]); }
-  deleteDir(io, path) { return run(io, 'dirDeleteDir', [this, path]); }
-  deleteTree(io, path) { return run(io, 'dirDeleteTree', [this, path]); }
+  deleteFile(io, path) { return done(io, io.dirDeleteFile(this, path)); }
+  deleteDir(io, path) { return done(io, io.dirDeleteDir(this, path)); }
+  deleteTree(io, path) { return done(io, io.dirDeleteTree(this, path)); }
   /// Zig `Dir.rename(old_dir, old_sub_path, new_dir, new_sub_path, io)`, here `oldDir.rename(io, old, newDir, new)`.
-  rename(io, oldPath, newDir, newPath) { return run(io, 'dirRename', [this, oldPath, newDir, newPath]); }
+  rename(io, oldPath, newDir, newPath) { return done(io, io.dirRename(this, oldPath, newDir, newPath)); }
   /// Zig `Dir.stat`: metadata of this directory.
-  stat(io) { return run(io, 'dirStat', [this, '']); }
+  stat(io) { return done(io, io.dirStat(this, '')); }
   /// Zig `Dir.statFile`: symlinks are not followed.
-  statFile(io, path) { return run(io, 'dirStat', [this, path]); }
+  statFile(io, path) { return done(io, io.dirStat(this, path)); }
   /// Zig `Dir.access`: rejects with FileNotFound (etc.) when the path is not reachable.
-  access(io, path) { return run(io, 'dirStat', [this, path], () => undefined); }
+  access(io, path) { return done(io, io.dirStat(this, path), () => undefined); }
   /// Zig `Dir.iterate` collected into an array of `{ name, kind }` (iterable).
-  iterate(io) { return run(io, 'dirRead', [this]); }
+  iterate(io) { return done(io, io.dirRead(this)); }
   /// Zig `Dir.readFileAlloc`: whole file as a Uint8Array, at most `limit` bytes.
   readFile(io, path, limit = Limit.unlimited) {
+    if (isSync(io)) {
+      const file = this.openFile(io, path);
+      try { return file.readAll(io, limit); } finally { file.close(io); }
+    }
     const dir = this;
     return sequence(io, function* () {
       const file = yield dir.openFile(io, path);
@@ -127,6 +138,11 @@ class DirImpl {
   }
   /// Zig `Dir.writeFile(io, { sub_path, data, flags })`.
   writeFile(io, { sub_path, data, flags } = {}) {
+    if (isSync(io)) {
+      const file = this.createFile(io, sub_path, flags);
+      try { file.writeStreamingAll(io, data); } finally { file.close(io); }
+      return undefined;
+    }
     const dir = this;
     return sequence(io, function* () {
       const file = yield dir.createFile(io, sub_path, flags);
@@ -142,12 +158,12 @@ class FileImpl {
     this.id = id;
     freeze(this);
   }
-  close(io) { return run(io, 'fileClose', [this]); }
-  stat(io) { return run(io, 'fileStat', [this]); }
-  length(io) { return run(io, 'fileStat', [this], s => s.size); }
+  close(io) { return done(io, io.fileClose(this)); }
+  stat(io) { return done(io, io.fileStat(this)); }
+  length(io) { return done(io, io.fileStat(this), s => s.size); }
   /// Zig `File.readStreaming` into one buffer: returns the byte count, 0 at end.
-  readStreaming(io, buffer) { return run(io, 'fileRead', [this, buffer]); }
-  readPositional(io, buffer, offset) { return run(io, 'filePread', [this, buffer, offset]); }
+  readStreaming(io, buffer) { return done(io, io.fileRead(this, buffer)); }
+  readPositional(io, buffer, offset) { return done(io, io.filePread(this, buffer, offset)); }
   /// Zig `File.readPositionalAll`: fills `buffer` from `offset` until full or end; returns the count.
   readPositionalAll(io, buffer, offset) {
     const file = this;
@@ -162,13 +178,13 @@ class FileImpl {
     });
   }
   /// Everything from the current position, at most `limit` bytes (`Limit` semantics).
-  readAll(io, limit = Limit.unlimited) { return run(io, 'fileReadAll', [this, { limit }]); }
+  readAll(io, limit = Limit.unlimited) { return done(io, io.fileReadAll(this, limit === Infinity ? UNLIMITED : { limit })); }
   /// Zig `File.writeStreaming` of one slice: returns the byte count (may be partial).
-  writeStreaming(io, bytes) { return run(io, 'fileWrite', [this, bytes]); }
-  writeStreamingAll(io, bytes) { return run(io, 'fileWriteAll', [this, bytes]); }
-  writePositionalAll(io, bytes, offset) { return run(io, 'filePwriteAll', [this, bytes, offset]); }
-  setLength(io, length) { return run(io, 'fileSetLength', [this, length]); }
-  sync(io) { return run(io, 'fileSync', [this]); }
+  writeStreaming(io, bytes) { return done(io, io.fileWrite(this, bytes)); }
+  writeStreamingAll(io, bytes) { return done(io, io.fileWriteAll(this, bytes)); }
+  writePositionalAll(io, bytes, offset) { return done(io, io.filePwriteAll(this, bytes, offset)); }
+  setLength(io, length) { return done(io, io.fileSetLength(this, length)); }
+  sync(io) { return done(io, io.fileSync(this)); }
 }
 freeze(DirImpl.prototype);
 freeze(FileImpl.prototype);

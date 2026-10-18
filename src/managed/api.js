@@ -26,13 +26,17 @@
 
   const OPEN_WRITE = 1, OPEN_CREATE = 2, OPEN_TRUNCATE = 4, OPEN_EXCLUSIVE = 8;
   function openBits(flags) {
-    const mode = own(flags, 'mode') ?? 'read';
+    // Each field is read exactly once into a local, so a getter cannot change
+    // what the native sees; the grant bounds anything an option can request.
+    if (flags === undefined || flags === null) return 0;
+    if (typeof flags !== 'object') return -1;
+    const mode = flags.mode ?? 'read';
     let bits = 0;
     if (mode === 'write' || mode === 'readwrite') bits |= OPEN_WRITE;
     else if (mode !== 'read') return -1;
-    if (own(flags, 'create') === true) bits |= OPEN_CREATE;
-    if (own(flags, 'truncate') === true) bits |= OPEN_TRUNCATE;
-    if (own(flags, 'exclusive') === true) bits |= OPEN_EXCLUSIVE;
+    if (flags.create === true) bits |= OPEN_CREATE;
+    if (flags.truncate === true) bits |= OPEN_TRUNCATE;
+    if (flags.exclusive === true) bits |= OPEN_EXCLUSIVE;
     return bits;
   }
 
@@ -87,7 +91,7 @@
       fileReadAll(file, options) {
         const f = fileArgs(file);
         if (f === null) return bad();
-        const limit = own(options, 'limit') ?? Infinity;
+        const limit = (options === undefined ? undefined : options.limit) ?? Infinity;
         if (typeof limit !== 'number' || !(limit >= 0)) return bad();
         return ops.readAll(errno, f.fs, f.id, limit);
       },

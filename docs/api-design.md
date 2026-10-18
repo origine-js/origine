@@ -11,10 +11,13 @@ Implemented on branch `draft-1` (`src/managed/api.zig`, `api.js`, `std_io.js`; d
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. **No snapshot yet**: the init is re-evaluated every start. |
 | `@engine/std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`, served by the init loader. |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. |
-| `api.fs` | `request({root, write, sync})`, `narrow(...)`. Real backend only (no memory/overlay). Ops: `dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirDeleteFile`, `dirRead`, `fileReadAll`, `fileWriteAll`, `fileClose`. |
+| `api.fs` | `request({root, write, mode: {async, sync}})`, `narrow(...)`. Real backend only (no memory/overlay). Ops: `dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirDeleteFile`, `dirRead`, `fileReadAll`, `fileWriteAll`, `fileClose`. |
 | Errors | Errno in `Uint32Array` (`fs.errno`) for `fs.sync`; `fs.async` rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |
 | `api.scope` | `create({main, importMap, loader, preload})`, `narrow({count})`; handle has `run()` and `close()`. |
+| Intrinsics snapshot | Done (engine level, not the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the 397 KB result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. |
 | `net`, `isolate` | Absent. |
+
+Measured (release V8, debug app build, one scope): `Context::New` 3.75 ms average (7.6 ms first) with the unfrozen built-in seed, because each context installs features and freezes the intrinsic graph, versus 0.18 ms restored from a finalized custom snapshot. Scope creation drops from about 4.3 ms to about 0.55 ms; the snapshot takes 7.5 ms and 397 KB and is generated at build time. Isolate creation (about 2.5 ms) is unchanged. Remaining ideas: snapshot the `bootstrap.js` helpers (`addDataToContext`), and snapshot the evaluated init module graph.
 
 Known draft-1 limitations:
 - **Async fs is inline.** `fs.async` calls the native op on the isolate thread and returns an already-settled promise. There is no work queue.
@@ -83,8 +86,8 @@ interface Api {
 ### 4.1 Request, then grant (`fs`)
 
 ```ts
-const fs: Fs = await api.fs.request({ root?, write?, sync? });   // hint only
-interface Fs { sync: FsOps<sync>; async: FsOps<Promise> }
+const fs: Fs = await api.fs.request({ root?, write?, mode?: { async?, sync? } });   // hint only; mode omitted = async only
+interface Fs { errno: Uint32Array; sync?: FsOps<sync>; async?: FsOps<Promise> }   // only requested, permitted variants are present
 ```
 
 - The guest sends a **hint**. The **host's provider decides** and returns one of: the real fs (rooted), a virtual (memory) fs, an overlay (lower read-only plus upper writable), or a denial. The guest cannot tell which one it got and cannot choose.
@@ -123,7 +126,7 @@ Tbd. Reserved name. Constraints already fixed: it is an `api` capability, it is 
 Each capability narrows itself: `api.fs.narrow(spec)`, `api.net.narrow(spec)`, `api.env.narrow(spec)`, `api.scope.narrow(spec)`. Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
 
 ```js
-const roFs   = api.fs.narrow({ root: "/data", write: false, sync: false });
+const roFs   = api.fs.narrow({ root: "/data", write: false, mode: { sync: false } });
 const env    = api.env.narrow({ allow: ["HOME", "PATH"] });
 const scopes = api.scope.narrow({ depth: 1, count: 4 });
 ```
@@ -139,7 +142,7 @@ const scopes = api.scope.narrow({ depth: 1, count: 4 });
   | `Limit.nothing` | `0`; reads nothing |
 
   `@engine/std/io` exposes the same three values to JS. They are the `limit` argument of reads (`fileReadAll(file, { limit })`) and the byte quota in fs specs. Quotas are not a bag of unrelated knobs: any byte budget is a `Limit`, and narrowing takes the minimum of two limits.
-- **`sync` is the init's decision.** The init chooses whether to expose `sync` to anything it hands a capability to, by narrowing it away (`sync: false`) or leaving it.
+- **`sync` is the init's decision.** The init chooses whether to expose `sync` to anything it hands a capability to, by narrowing it away (`mode: { sync: false }`) or leaving it.
 - Revoking a parent revokes its descendants: each grant has a generation and a `revoked` flag that every call checks (the `StaleLoadToken` pattern from `Runtime.completeLoad`). `Scope.destroy` and `child.close()` bump it, and in-flight completions fail with the stale-handle error (`IoError.StaleHandle`, see section 6).
 
 ## 6. Security properties
@@ -178,7 +181,7 @@ import { makeNodeFs }   from "./node/fs.js";    // factories take `api` slices
 import { makeProcess }  from "./node/process.js";
 
 export async function main(api) {
-  const fs = await api.fs.request({ root: "/", write: true, sync: true });
+  const fs = await api.fs.request({ root: "/", write: true, mode: { async: true, sync: true } });
 
   const nodeFs  = makeNodeFs(fs, Dir);
   const process = makeProcess(api.env.narrow({ allow: ["HOME", "PATH"] }));

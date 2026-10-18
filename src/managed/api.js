@@ -130,11 +130,15 @@
         const write = own(hint, 'write') === true && spec.write;
         const ops = native.fsRequest(errno, root, write);
         if (errno[0] !== 0) return Promise.reject(failure(errno[0]));
-        const sync = own(hint, 'sync') === true && spec.sync && ops.sync === true;
+        // `mode` picks the variants to return; omitted means async only.
+        const mode = own(hint, 'mode');
+        const wantAsync = mode === undefined ? true : own(mode, 'async') === true;
+        const wantSync = own(mode, 'sync') === true;
         const { raw, asyncOps } = makeFs(ops, errno);
-        const fs = { id: ops.id, errno, async: freeze(asyncOps) };
-        if (sync) fs.sync = freeze(raw);
-        return Promise.resolve(freeze(fs));
+        const fs = { id: ops.id, errno };
+        if (wantAsync && spec.async) fs.async = freeze(asyncOps);
+        if (wantSync && spec.sync && ops.sync === true) fs.sync = freeze(raw);
+        return Promise.resolve(fs);
       },
       narrow(next) {
         const root = own(next, 'root');
@@ -142,7 +146,8 @@
         return makeFsCap({
           root: joinPath(spec.root, root),
           write: spec.write && own(next, 'write') !== false,
-          sync: spec.sync && own(next, 'sync') !== false,
+          async: spec.async && own(own(next, 'mode'), 'async') !== false,
+          sync: spec.sync && own(own(next, 'mode'), 'sync') !== false,
         });
       },
     });
@@ -215,7 +220,7 @@
   }
 
   return freeze({
-    fs: makeFsCap({ root: undefined, write: true, sync: true }),
+    fs: makeFsCap({ root: undefined, write: true, async: true, sync: true }),
     env: makeEnvCap(null),
     scope: makeScopeCap({ remaining: Infinity }),
   });

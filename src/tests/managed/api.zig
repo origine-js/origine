@@ -55,7 +55,7 @@ test "api: main receives env and an fs with sync and async variants" {
         \\  const out = globalThis.report = {};
         \\  out.args = api.env.args().join(',');
         \\  out.home = api.env.get('HOME');
-        \\  const fs = await api.fs.request({ write: true, sync: true });
+        \\  const fs = await api.fs.request({ write: true, mode: { async: true, sync: true } });
         \\  const f = IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'a.txt', { mode: 'write', create: true, truncate: true }));
         \\  fs.sync.fileWriteAll(f, Uint8Array.from([104, 105]));
         \\  fs.sync.fileClose(f);
@@ -75,6 +75,7 @@ test "api: main receives env and an fs with sync and async variants" {
         \\  const entries = fs.sync.dirRead(Dir.cwd());
         \\  out.listed = entries.some(e => e.name === 'a.txt');
         \\  out.stat = fs.sync.dirStat(Dir.cwd(), 'a.txt').size;
+        \\  out.deleted = delete fs.sync && fs.sync === undefined && fs.async !== undefined;
         \\}
     , true, &.{ "x", "y" });
     defer fx.deinit();
@@ -83,7 +84,7 @@ test "api: main receives env and an fs with sync and async variants" {
     try check(fx.scope, "report.text === 'hi' && report.limited === 1 && report.nothing === 0");
     try check(fx.scope, "report.missing === true && report.asyncMissing === true");
     try check(fx.scope, "report.escapes.length === 3 && report.escapes.every(x => x)");
-    try check(fx.scope, "report.listed === true && report.stat === 2");
+    try check(fx.scope, "report.listed === true && report.stat === 2 && report.deleted === true");
 }
 
 test "api: narrowing is monotonic and the host grant is the ceiling" {
@@ -92,13 +93,16 @@ test "api: narrowing is monotonic and the host grant is the ceiling" {
         \\import { Dir, IoError } from '@engine/std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const ro = api.fs.narrow({ write: false, sync: false });
-        \\  const rfs = await ro.request({ write: true, sync: true });
+        \\  const ro = api.fs.narrow({ write: false, mode: { sync: false } });
+        \\  const rfs = await ro.request({ write: true, mode: { async: true, sync: true } });
         \\  out.syncAbsent = rfs.sync === undefined;
         \\  await rfs.async.dirOpenFile(Dir.cwd(), 'b.txt', { mode: 'write', create: true }).catch(e => { out.denied = IoError.is(e, IoError.AccessDenied); });
-        \\  const again = ro.narrow({ write: true, sync: true });
-        \\  const afs = await again.request({ write: true, sync: true });
+        \\  const again = ro.narrow({ write: true, mode: { sync: true } });
+        \\  const afs = await again.request({ write: true, mode: { async: true, sync: true } });
         \\  out.stillRo = afs.sync === undefined;
+        \\  const syncOnly = await api.fs.request({ mode: { sync: true } });
+        \\  out.modes = syncOnly.async === undefined && typeof syncOnly.sync === 'object';
+        \\  out.defaultMode = (await api.fs.request({})).sync === undefined;
         \\  const one = api.env.narrow({ allow: ['HOME'] });
         \\  out.home = one.get('HOME'); out.path = one.get('PATH');
         \\  const none = one.narrow({ allow: ['PATH'] });
@@ -110,7 +114,7 @@ test "api: narrowing is monotonic and the host grant is the ceiling" {
     , true, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.syncAbsent && report.denied && report.stillRo");
+    try check(fx.scope, "report.syncAbsent && report.denied && report.stillRo && report.modes && report.defaultMode");
     try check(fx.scope, "report.home === '/home/test' && report.path === undefined && report.widened === false");
     try check(fx.scope, "report.noScopes === true && report.frozen === true");
 }

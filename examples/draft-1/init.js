@@ -4,7 +4,7 @@ const text = bytes => String.fromCharCode(...bytes);
 
 export async function main(api) {
   print('args:', api.env.args().join(' '));
-  const fs = await api.fs.request({ root: 'examples/draft-1/work', write: true, sync: true });
+  const fs = await api.fs.request({ root: 'examples/draft-1/work', write: true, mode: { async: true, sync: true } });
   const file = IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'hello.txt', { mode: 'write', create: true, truncate: true }));
   fs.sync.fileWriteAll(file, Uint8Array.from([104, 105, 10]));
   fs.sync.fileClose(file);

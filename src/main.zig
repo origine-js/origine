@@ -5,6 +5,7 @@ const m = @import("@managed");
 const eu = @import("@util");
 const StartupTrace = @import("@diagnostics").StartupTrace;
 const Engine = @import("@engine").Engine;
+const build_options = @import("build_options");
 var io_runtime: std.Io.Threaded = undefined;
 
 /// Borrows format/arguments through buffered output; retains no resources.
@@ -58,7 +59,8 @@ pub fn main(init: std.process.Init) !void {
     trace.mark("host_io");
     var engine = Engine.init(.{ .trace = &trace });
     defer engine.deinit();
-    const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = .{ .zig = alloc } });
+    const snapshot = embeddedSnapshot(init.environ_map);
+    const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = .{ .zig = alloc }, .snapshot = snapshot });
     trace.mark("runtime_isolate");
     defer rt.destroy();
     if (args.len > 1) {
@@ -118,4 +120,17 @@ fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, eng
         if (error_info.exception) |value| show(scope, value);
         return err;
     };
+}
+
+/// The frozen-intrinsics startup snapshot generated at build time (see build.zig and
+/// snapshot_tool.zig). `align(16)` as V8 requires; empty when the build could not
+/// generate one (cross builds).
+const embedded_snapshot: [if (build_options.has_snapshot) @embedFile("engine_snapshot").len else 0]u8 align(16) =
+    if (build_options.has_snapshot) @embedFile("engine_snapshot").* else .{};
+
+/// Returns the embedded snapshot, or null to use V8's built-in seed (no embedded
+/// blob, or ORIGINE_NO_SNAPSHOT is set for comparison runs).
+fn embeddedSnapshot(environ: *const std.process.Environ.Map) ?[]align(16) const u8 {
+    if (embedded_snapshot.len == 0 or environ.get("ORIGINE_NO_SNAPSHOT") != null) return null;
+    return &embedded_snapshot;
 }

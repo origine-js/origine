@@ -3,6 +3,8 @@ const v8 = @import("@v8");
 const modules = @import("module_map.zig");
 const module_types = @import("module_types.zig");
 const Scope = @import("scope.zig").Scope;
+/// Smaller than any real V8 startup snapshot header; guards V8's fatal size CHECK.
+const min_snapshot_bytes = 512;
 pub const supported_v8_version = "15.2.124.1";
 
 /// Embedder-side isolate host owning zero or more `Scope`s (isolated contexts).
@@ -28,6 +30,11 @@ pub const Runtime = struct {
         /// its allocator state must be thread-safe and live through Runtime.destroy.
         /// borrowed leaves native allocator ownership with the caller, who must
         /// retain it until the runtime and all its backing stores have been released.
+        /// Startup snapshot from `snapshot.create`, 16-byte aligned. Borrowed: the
+        /// bytes must outlive the Runtime (V8 reads them throughout the isolate's
+        /// life). Contexts then restore finalized instead of re-freezing the
+        /// intrinsics. Null uses V8's built-in unfrozen seed.
+        snapshot: ?[]align(16) const u8 = null,
         array_buffer_allocator: union(enum) {
             default,
             zig: std.mem.Allocator,
@@ -68,13 +75,15 @@ pub const Runtime = struct {
     scopes: std.ArrayList(*Scope) = .empty,
     queue: v8.MicrotaskQueue,
     next_load_token: module_types.LoadToken = 1,
+    /// Snapshot descriptor the isolate points at; must keep a stable address.
+    startup: v8.StartupData = .{ .data = null, .raw_size = 0 },
 
     /// Borrows alloc (and its state) until `destroy` returns; options are copied.
     /// Returns a heap-allocated, owning Runtime at a stable address; release it with
     /// `destroy`. A zig array-buffer adapter becomes runtime-owned, while a borrowed
     /// allocator stays caller-owned and may outlive the runtime. With an owned
     /// allocator, release all backing stores before `destroy`.
-    /// Errors (UnsupportedV8Version, OutOfMemory, adapter failure) retain nothing.
+    /// Errors (UnsupportedV8Version, InvalidSnapshot, OutOfMemory, adapter failure) retain nothing.
     /// V8 OOM during isolate creation is fatal and does not return. V8 must already
     /// be initialized.
     pub fn create(alloc: std.mem.Allocator, options: Options) !*Runtime {
@@ -89,6 +98,17 @@ pub const Runtime = struct {
         var params = v8.Isolate.CreateParams.init();
         params.array_buffer_allocator = aba;
         params.allow_explicit_blocking_api = options.allow_explicit_blocking_api;
+        // The isolate keeps the descriptor pointer for its whole life (it is read on
+        // every context creation), so it lives in the Runtime, not on this stack.
+        var startup: v8.StartupData = .{ .data = null, .raw_size = 0 };
+        if (options.snapshot) |bytes| {
+            // V8 aborts (does not return false) on blobs shorter than its header.
+            if (bytes.len < min_snapshot_bytes) return error.InvalidSnapshot;
+            startup = .{ .data = bytes.ptr, .raw_size = @intCast(bytes.len) };
+            if (!startup.isValid()) return error.InvalidSnapshot;
+            rt.startup = startup;
+            params.snapshot_blob = &rt.startup;
+        }
         const isolate = v8.Isolate.init(&params);
         isolate.enter();
         defer isolate.exit();
@@ -102,6 +122,7 @@ pub const Runtime = struct {
             .owns_array_buffer_allocator = options.array_buffer_allocator != .borrowed,
             .allocator = alloc,
             .queue = .init(isolate, .Explicit),
+            .startup = startup,
         };
         return rt;
     }

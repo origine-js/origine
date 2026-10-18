@@ -130,6 +130,15 @@ fn cleanPath(path: []const u8) !void {
     while (parts.next()) |part| if (std.mem.eql(u8, part, "..")) return error.InvalidPath;
 }
 
+/// Like `cleanPath`, but also rejects paths naming the grant root itself
+/// (empty or only `.` components), for operations that must not target it.
+fn cleanSubPath(path: []const u8) !void {
+    try cleanPath(path);
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| if (part.len != 0 and !std.mem.eql(u8, part, ".")) return;
+    return error.InvalidPath;
+}
+
 const JsLoader = struct {
     host: *Host,
     parent: *Scope,
@@ -388,6 +397,15 @@ const Call = struct {
         return value.u32Value(self.ctx) orelse error.BadHandle;
     }
 
+    /// Non-negative finite integer argument as u64 (file offsets and lengths).
+    fn uint64(self: *const Call, index: c_int) !u64 {
+        const value = self.arg(index);
+        if (!value.isNumber()) return error.InvalidPath;
+        const number = value.numberValue(self.ctx) orelse return error.InvalidPath;
+        if (!(number >= 0) or number > 9007199254740991.0) return error.InvalidPath;
+        return @intFromFloat(number);
+    }
+
     fn bytes(self: *const Call, index: c_int) ![]u8 {
         return viewBytes(self.arg(index)) orelse error.InvalidPath;
     }
@@ -474,6 +492,17 @@ fn fsRequestImpl(call: *Call, state: *ScopeState) !void {
     setFn(ctx, ops, "writeAll", fsOp(opWriteAll), grant);
     setFn(ctx, ops, "close", fsOp(opClose), grant);
     setFn(ctx, ops, "closeDir", fsOp(opCloseDir), grant);
+    setFn(ctx, ops, "createDirPath", fsOp(opCreateDirPath), grant);
+    setFn(ctx, ops, "deleteDir", fsOp(opDeleteDir), grant);
+    setFn(ctx, ops, "deleteTree", fsOp(opDeleteTree), grant);
+    setFn(ctx, ops, "rename", fsOp(opRename), grant);
+    setFn(ctx, ops, "fileStat", fsOp(opFileStat), grant);
+    setFn(ctx, ops, "fileRead", fsOp(opFileRead), grant);
+    setFn(ctx, ops, "filePread", fsOp(opFilePread), grant);
+    setFn(ctx, ops, "fileWrite", fsOp(opFileWrite), grant);
+    setFn(ctx, ops, "filePwriteAll", fsOp(opFilePwriteAll), grant);
+    setFn(ctx, ops, "fileSetLength", fsOp(opFileSetLength), grant);
+    setFn(ctx, ops, "fileSync", fsOp(opFileSync), grant);
     call.ret.set(ops.value);
 }
 
@@ -628,6 +657,109 @@ fn opCloseDir(grant: *FsGrant, call: *Call) !void {
     const dir = try grant.dirFor(fs_id, id);
     dir.close(grant.host.io);
     grant.dirs.items[id - 1] = null;
+}
+
+/// Shared prologue for single-path mutators: writable grant, resolved dir, copied path.
+const PathArgs = struct {
+    dir: std.Io.Dir,
+    path: []u8,
+
+    fn read(grant: *FsGrant, call: *Call, comptime mutating: bool) !PathArgs {
+        if (mutating and !grant.write) return error.AccessDenied;
+        const dir = try grant.dirFor(try call.uint(1), try call.uint(2));
+        const path = try call.string(3, grant.host.allocator);
+        errdefer grant.host.allocator.free(path);
+        if (mutating) try cleanSubPath(path) else try cleanPath(path);
+        return .{ .dir = dir, .path = path };
+    }
+};
+
+fn opCreateDirPath(grant: *FsGrant, call: *Call) !void {
+    const args = try PathArgs.read(grant, call, true);
+    defer grant.host.allocator.free(args.path);
+    try args.dir.createDirPath(grant.host.io, args.path);
+}
+
+fn opDeleteDir(grant: *FsGrant, call: *Call) !void {
+    const args = try PathArgs.read(grant, call, true);
+    defer grant.host.allocator.free(args.path);
+    try args.dir.deleteDir(grant.host.io, args.path);
+}
+
+fn opDeleteTree(grant: *FsGrant, call: *Call) !void {
+    const args = try PathArgs.read(grant, call, true);
+    defer grant.host.allocator.free(args.path);
+    try args.dir.deleteTree(grant.host.io, args.path);
+}
+
+/// rename(err, fs, dirId, oldPath, newFs, newDirId, newPath)
+fn opRename(grant: *FsGrant, call: *Call) !void {
+    const alloc = grant.host.allocator;
+    if (!grant.write) return error.AccessDenied;
+    const old_dir = try grant.dirFor(try call.uint(1), try call.uint(2));
+    const old_path = try call.string(3, alloc);
+    defer alloc.free(old_path);
+    const new_dir = try grant.dirFor(try call.uint(4), try call.uint(5));
+    const new_path = try call.string(6, alloc);
+    defer alloc.free(new_path);
+    try cleanSubPath(old_path);
+    try cleanSubPath(new_path);
+    try std.Io.Dir.rename(old_dir, old_path, new_dir, new_path, grant.host.io);
+}
+
+fn opFileStat(grant: *FsGrant, call: *Call) !void {
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    const stat = try file.stat(grant.host.io);
+    const array = v8.Array.init(call.isolate, 2);
+    _ = array.object.setIndex(call.ctx, 0, v8.Number.initUInt(call.isolate, kindCode(stat.kind)).numeric.primitive.value);
+    _ = array.object.setIndex(call.ctx, 1, v8.Number.init(call.isolate, @floatFromInt(stat.size)).numeric.primitive.value);
+    call.ret.set(array.object.value);
+}
+
+/// Streaming read into the caller's buffer; returns the byte count (0 at end).
+fn opFileRead(grant: *FsGrant, call: *Call) !void {
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    const buffer = try call.bytes(3);
+    const count = if (buffer.len == 0) 0 else file.readStreaming(grant.host.io, &.{buffer}) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => return err,
+    };
+    call.ret.setDouble(@floatFromInt(count));
+}
+
+fn opFilePread(grant: *FsGrant, call: *Call) !void {
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    const buffer = try call.bytes(3);
+    const offset = try call.uint64(4);
+    const count = if (buffer.len == 0) 0 else try file.readPositional(grant.host.io, &.{buffer}, offset);
+    call.ret.setDouble(@floatFromInt(count));
+}
+
+/// Streaming write that may be partial; returns the byte count written.
+fn opFileWrite(grant: *FsGrant, call: *Call) !void {
+    if (!grant.write) return error.AccessDenied;
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    const data = try call.bytes(3);
+    const count = if (data.len == 0) 0 else try file.writeStreaming(grant.host.io, "", &.{data}, 1);
+    call.ret.setDouble(@floatFromInt(count));
+}
+
+fn opFilePwriteAll(grant: *FsGrant, call: *Call) !void {
+    if (!grant.write) return error.AccessDenied;
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    const data = try call.bytes(3);
+    try file.writePositionalAll(grant.host.io, data, try call.uint64(4));
+}
+
+fn opFileSetLength(grant: *FsGrant, call: *Call) !void {
+    if (!grant.write) return error.AccessDenied;
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    try file.setLength(grant.host.io, try call.uint64(3));
+}
+
+fn opFileSync(grant: *FsGrant, call: *Call) !void {
+    const file = try grant.fileFor(try call.uint(1), try call.uint(2));
+    try file.sync(grant.host.io);
 }
 
 // ---- scope ----------------------------------------------------------------

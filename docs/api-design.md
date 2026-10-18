@@ -9,7 +9,7 @@ Implemented on branch `draft-1` (`src/managed/api.zig`, `api.js`, `std_io.js`; d
 | Area | State |
 |---|---|
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. **No snapshot yet**: the init is re-evaluated every start. |
-| `@engine/std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`, served by the init loader. |
+| `@engine/std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`. `Dir`/`File` descriptors carry Zig's method names and take the `io` first (`fs.sync` blocks and throws; `fs.async` returns promises): `Dir`: `openFile`, `createFile`, `openDir`, `close`, `createDir`, `createDirPath`, `createDirPathOpen`, `deleteFile`, `deleteDir`, `deleteTree`, `rename`, `stat`, `statFile`, `access`, `iterate`, `readFile`, `writeFile`; `File`: `close`, `stat`, `length`, `readStreaming`, `readPositional`, `readPositionalAll`, `readAll`, `writeStreaming`, `writeStreamingAll`, `writePositionalAll`, `setLength`, `sync`. Not shipped: symlink/readlink/realpath/copyFile/permissions. |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. |
 | `api.fs` | `request({root, write, mode: {async, sync}})`, `narrow(...)`. Real backend only (no memory/overlay). Ops: `dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirDeleteFile`, `dirRead`, `fileReadAll`, `fileWriteAll`, `fileClose`. |
 | Errors | Errno in `Uint32Array` (`fs.errno`) for `fs.sync`; `fs.async` rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |

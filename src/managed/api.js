@@ -101,6 +101,62 @@
         if (f === null) return void bad();
         ops.close(errno, f.fs, f.id);
       },
+      dirCreateDirPath(dir, path) {
+        const d = dirArgs(dir);
+        if (d === null || typeof path !== 'string') return void bad();
+        ops.createDirPath(errno, d.fs, d.id, path);
+      },
+      dirDeleteDir(dir, path) {
+        const d = dirArgs(dir);
+        if (d === null || typeof path !== 'string') return void bad();
+        ops.deleteDir(errno, d.fs, d.id, path);
+      },
+      dirDeleteTree(dir, path) {
+        const d = dirArgs(dir);
+        if (d === null || typeof path !== 'string') return void bad();
+        ops.deleteTree(errno, d.fs, d.id, path);
+      },
+      dirRename(dir, oldPath, newDir, newPath) {
+        const d = dirArgs(dir), n = dirArgs(newDir);
+        if (d === null || n === null || typeof oldPath !== 'string' || typeof newPath !== 'string') return void bad();
+        ops.rename(errno, d.fs, d.id, oldPath, n.fs, n.id, newPath);
+      },
+      fileStat(file) {
+        const f = fileArgs(file);
+        if (f === null) return bad();
+        const out = ops.fileStat(errno, f.fs, f.id);
+        return errno[0] === 0 ? freeze({ kind: out[0], size: out[1] }) : undefined;
+      },
+      fileRead(file, buffer) {
+        const f = fileArgs(file);
+        if (f === null || !(buffer instanceof Uint8Array)) return bad();
+        return ops.fileRead(errno, f.fs, f.id, buffer);
+      },
+      filePread(file, buffer, offset) {
+        const f = fileArgs(file);
+        if (f === null || !(buffer instanceof Uint8Array)) return bad();
+        return ops.filePread(errno, f.fs, f.id, buffer, offset);
+      },
+      fileWrite(file, bytes) {
+        const f = fileArgs(file);
+        if (f === null || !(bytes instanceof Uint8Array)) return bad();
+        return ops.fileWrite(errno, f.fs, f.id, bytes);
+      },
+      filePwriteAll(file, bytes, offset) {
+        const f = fileArgs(file);
+        if (f === null || !(bytes instanceof Uint8Array)) return void bad();
+        ops.filePwriteAll(errno, f.fs, f.id, bytes, offset);
+      },
+      fileSetLength(file, length) {
+        const f = fileArgs(file);
+        if (f === null) return void bad();
+        ops.fileSetLength(errno, f.fs, f.id, length);
+      },
+      fileSync(file) {
+        const f = fileArgs(file);
+        if (f === null) return void bad();
+        ops.fileSync(errno, f.fs, f.id);
+      },
     };
     // Async variant: same names, promise-returning. Draft-1 runs the operation
     // inline on the isolate thread and settles immediately; a host work queue
@@ -136,8 +192,8 @@
         const wantSync = own(mode, 'sync') === true;
         const { raw, asyncOps } = makeFs(ops, errno);
         const fs = { id: ops.id, errno };
-        if (wantAsync && spec.async) fs.async = freeze(asyncOps);
-        if (wantSync && spec.sync && ops.sync === true) fs.sync = freeze(raw);
+        if (wantAsync && spec.async) fs.async = freeze({ kind: 'async', ...asyncOps });
+        if (wantSync && spec.sync && ops.sync === true) fs.sync = freeze({ kind: 'sync', errno, ...raw });
         return Promise.resolve(fs);
       },
       narrow(next) {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const t = std.testing;
+const v8 = @import("@v8");
 const m = @import("@managed");
 const support = @import("../support.zig");
 const ensureV8 = support.ensureV8;
@@ -36,7 +37,27 @@ const Fixture = struct {
     fn run(self: *Fixture) !void {
         var error_info: m.ErrorInfo = .{};
         defer error_info.deinit();
-        try self.host.run(self.scope, support.engine.platform, self.init_path, &error_info);
+        self.host.run(self.scope, support.engine.platform, self.init_path, &error_info) catch |err| {
+            if (error_info.exception) |exception| self.describe(exception);
+            return err;
+        };
+    }
+
+    /// Prints the rejection value of a failed run to stderr for diagnosis.
+    fn describe(self: *Fixture, exception: v8.Global.Of(v8.Value)) void {
+        var session: m.Scope.Session = undefined;
+        session.init(self.scope);
+        defer session.deinit();
+        var shown = exception.deref();
+        if (shown.toObject(session.ctx)) |object| {
+            if (object.get(session.ctx, v8.String.initUtf8(session.isolate(), "stack").name.primitive.value)) |stack| {
+                if (stack.isString()) shown = stack;
+            }
+        }
+        const text = shown.toDetailString(session.ctx) orelse return;
+        var buffer: [2048]u8 = undefined;
+        const length = text.writeUtf8(session.isolate(), &buffer);
+        std.debug.print("init failed: {s}\n", .{buffer[0..length]});
     }
 
     fn deinit(self: *Fixture) void {
@@ -166,6 +187,64 @@ test "api: child scopes inherit no authority and no scope capability" {
     defer fx.deinit();
     try fx.run();
     try check(fx.rt.scopes.items[1], "keys === 0 && typeof api === 'undefined'");
+}
+
+test "api: Zig-style Dir and File methods over sync and async io" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { Dir, File, IoError, Limit, FileKind } from '@engine/std/io';
+        \\const text = bytes => String.fromCharCode(...bytes);
+        \\const bytes = s => Uint8Array.from([...s].map(c => c.charCodeAt(0)));
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const fs = await api.fs.request({ write: true, mode: { async: true, sync: true } });
+        \\  const io = fs.sync, cwd = Dir.cwd();
+        \\  cwd.writeFile(io, { sub_path: 'w.txt', data: bytes('hello world') });
+        \\  out.read = text(cwd.readFile(io, 'w.txt'));
+        \\  out.limited = text(cwd.readFile(io, 'w.txt', Limit.limited(5)));
+        \\  const f = cwd.openFile(io, 'w.txt', { mode: 'read_write' });
+        \\  out.isFile = File.is(f) && Dir.is(cwd) && Object.isFrozen(f);
+        \\  out.length = f.length(io);
+        \\  const buf = new Uint8Array(5);
+        \\  out.pread = f.readPositional(io, buf, 6) + ':' + text(buf);
+        \\  out.stream = f.readStreaming(io, buf) + ':' + text(buf);
+        \\  f.writePositionalAll(io, bytes('J'), 0);
+        \\  f.setLength(io, 5);
+        \\  f.sync(io);
+        \\  out.afterTruncate = text(cwd.readFile(io, 'w.txt'));
+        \\  out.kind = f.stat(io).kind === FileKind.file;
+        \\  f.close(io);
+        \\  cwd.createDirPath(io, 'a/b/c');
+        \\  const sub = cwd.createDirPathOpen(io, 'a/b');
+        \\  sub.writeFile(io, { sub_path: 'in.txt', data: bytes('x') });
+        \\  out.names = cwd.openDir(io, 'a/b').iterate(io).map(e => e.name).sort().join(',');
+        \\  cwd.rename(io, 'a/b/in.txt', cwd, 'moved.txt');
+        \\  out.moved = text(cwd.readFile(io, 'moved.txt'));
+        \\  cwd.access(io, 'moved.txt');
+        \\  try { cwd.access(io, 'ghost'); } catch (e) { out.ghost = IoError.is(e, IoError.FileNotFound); }
+        \\  try { cwd.deleteTree(io, '.'); } catch (e) { out.rootSafe = IoError.is(e, IoError.InvalidPath); }
+        \\  cwd.deleteTree(io, 'a');
+        \\  try { cwd.statFile(io, 'a'); } catch (e) { out.gone = IoError.is(e, IoError.FileNotFound); }
+        \\  const aio = fs.async;
+        \\  await cwd.writeFile(aio, { sub_path: 'async.txt', data: bytes('async!') });
+        \\  out.asyncRead = text(await cwd.readFile(aio, 'async.txt'));
+        \\  const af = await cwd.openFile(aio, 'async.txt');
+        \\  out.asyncLen = await af.length(aio);
+        \\  await af.close(aio);
+        \\  await cwd.openFile(aio, 'ghost').catch(e => { out.asyncGhost = IoError.is(e, IoError.FileNotFound); });
+        \\  const ro = await api.fs.narrow({ write: false }).request({ write: true, mode: { sync: true } });
+        \\  try { Dir.cwd().deleteFile(ro.sync, 'async.txt'); } catch (e) { out.roDelete = IoError.is(e, IoError.AccessDenied); }
+        \\  try { Dir.cwd().rename(ro.sync, 'async.txt', Dir.cwd(), 'z'); } catch (e) { out.roRename = IoError.is(e, IoError.AccessDenied); }
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.read === 'hello world' && report.limited === 'hello' && report.isFile && report.length === 11");
+    try check(fx.scope, "report.pread === '5:world' && report.stream === '5:hello' && report.afterTruncate === 'Jello' && report.kind");
+    try check(fx.scope, "report.names === 'c,in.txt' && report.moved === 'x'");
+    try check(fx.scope, "report.ghost && report.rootSafe && report.gone");
+    try check(fx.scope, "report.asyncRead === 'async!' && report.asyncLen === 6 && report.asyncGhost");
+    try check(fx.scope, "report.roDelete && report.roRename");
 }
 
 test "api: errno table in std_io.js matches Errno" {

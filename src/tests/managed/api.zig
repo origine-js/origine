@@ -429,6 +429,10 @@ const typed = struct {
     fn missing(_: *BindingState) !void {
         return error.FileNotFound;
     }
+    fn failing(_: *BindingState, fail: bool) !u32 {
+        if (fail) return error.FileNotFound;
+        return 4;
+    }
     fn maybe(_: *BindingState, yes: bool) ?u32 {
         return if (yes) 1 else null;
     }
@@ -469,6 +473,7 @@ test "binding: typed natives decode arguments, encode results and report errors"
             .pair = typed.pair,
             .point = typed.point,
             .missing = typed.missing,
+            .failing = typed.failing,
             .maybe = typed.maybe,
             .sum = typed.sum,
             .names = typed.names,
@@ -508,6 +513,34 @@ test "binding: typed natives decode arguments, encode results and report errors"
     try t.expectEqual(before, state.total);
     // The cell is cleared on entry to every call.
     try check(scope, "native.missing() === undefined && native.add(1, 1) === 2");
+    try t.expectEqual(@as(u32, 0), state.cell);
+}
+
+test "binding: hot natives take V8's fast API path and still agree with the slow path" {
+    ensureV8();
+    const rt = try m.Runtime.create(t.allocator, .{});
+    defer rt.destroy();
+    const scope = try rt.createScope(.{});
+    var state: BindingState = .{};
+    {
+        var session: m.Scope.Session = undefined;
+        session.init(scope);
+        defer session.deinit();
+        const env: m.Api.binding.Env = .{ .isolate = session.isolate(), .ctx = session.ctx };
+        const table = try m.Api.binding.object(env, BindingState, &state, .{ .add = typed.add, .failing = typed.failing });
+        try m.Api.binding.set(env, session.ctx.getGlobal(), "native", table.value);
+    }
+    // Once optimized, V8 calls the fast entry: results agree, and an error yields 0 (the cell is still set).
+    try check(scope,
+        \\(() => {
+        \\  const f = (x) => native.failing(x);
+        \\  %PrepareFunctionForOptimization(f);
+        \\  f(false); f(false);
+        \\  %OptimizeFunctionOnNextCall(f);
+        \\  return f(true) === 0 && f(false) === 4;
+        \\})()
+    );
+    try check(scope, "native.add(3, 4) === 7");
     try t.expectEqual(@as(u32, 0), state.cell);
 }
 

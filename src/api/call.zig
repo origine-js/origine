@@ -14,6 +14,13 @@ pub const Env = struct {
     ctx: v8.Context,
 };
 
+/// Writes the `Errno` for `err` into `cell` (mapped as `Call.fail` documents). Borrows
+/// `cell` for the call only; retains nothing.
+pub fn record(cell: *u32, err: anytype) void {
+    const code = if (comptime errno.isBinding(@TypeOf(err))) errno.of(err) else errno.ofFs(err);
+    cell.* = @intFromEnum(code);
+}
+
 pub const Call = struct {
     info: v8.FunctionCallbackInfo,
     isolate: v8.Isolate,
@@ -49,8 +56,7 @@ pub const Call = struct {
     /// closed binding set (`errno.Error`) map strictly (`errno.of`); anything else is
     /// an fs error, mapped by name (`errno.ofFs`).
     pub fn fail(self: *Call, err: anytype) void {
-        const code = if (comptime errno.isBinding(@TypeOf(err))) errno.of(err) else errno.ofFs(err);
-        self.errno_cell.* = @intFromEnum(code);
+        record(self.errno_cell, err);
     }
 
     /// The raw JS argument at `index` (undefined when absent).

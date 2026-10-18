@@ -23,6 +23,12 @@
 //! - **Results.** The return value (optionally an error union) is encoded (see
 //!   `encode`): integers, floats, bools, strings, `?T`, slices and tuples (arrays),
 //!   structs (objects), V8 handles, or any type with `pub fn encode(self, env) !v8.Value`.
+//! - **Fast calls.** A native whose parameters are all `u32`, `f64` or `bool` (after
+//!   the state) and whose result is void, bool, `u32`, `u64` or `f64` (or an
+//!   error union of one) also gets a V8 fast API entry (`fast`), so optimized JS calls it
+//!   without building a `FunctionCallbackInfo`. The slow callback stays as the fallback. On
+//!   the fast path a failure still writes the errno cell but the result is zero rather than
+//!   undefined; the guest reads the cell, so the difference is not observable there.
 //! - **Errors.** A returned error is mapped to an `Errno` (errno.zig), written into the
 //!   errno cell, and the call returns undefined. The guest reads the cell.
 const std = @import("std");
@@ -59,9 +65,20 @@ pub fn viewBytes(value: v8.Value) ?[]u8 {
     return base[view.byteOffset()..][0..length];
 }
 
-/// The state pointer a native was bound to (stored as the function's External data).
+/// The state pointer a native was bound to: the function's data, either an External or (for
+/// fast-call functions, whose data V8 will not pass to optimized code as an External) a
+/// Number holding the address. Borrows the handle; valid while the state lives.
+pub fn statePointer(comptime T: type, data: v8.Value) *T {
+    if (data.isNumber()) {
+        const number = v8.Number.from_opaque(data.data.handle).?;
+        return @ptrFromInt(@as(usize, @intFromFloat(number.Value())));
+    }
+    return @ptrCast(@alignCast(v8.External.from_opaque(data.data.handle).?.pointer().?));
+}
+
+/// The state pointer a native was bound to (stored as the function's data).
 pub fn externalPointer(comptime T: type, info: v8.FunctionCallbackInfo) *T {
-    return @ptrCast(@alignCast(v8.External.from_opaque(info.data().?.handle).?.pointer().?));
+    return statePointer(T, v8.Value.from_opaque(info.data().?.handle).?);
 }
 
 /// A new Uint8Array holding a copy of `data`.
@@ -129,6 +146,160 @@ fn setReturn(call: *Call, result: anytype) void {
         .float => call.ret.setDouble(result),
         else => call.ret.set(encode(call.env(), {}, result) catch |err| return call.fail(err)),
     }
+}
+
+// ---- fast calls ------------------------------------------------------------
+
+const FastType = @FieldType(v8.CTypeInfo, "type");
+
+/// The fast API type for a Zig parameter type, or null when only the slow path can
+/// decode it.
+fn fastParam(comptime T: type) ?FastType {
+    return switch (T) {
+        u32 => .Uint32,
+        f64 => .Float64,
+        bool => .Bool,
+        else => null,
+    };
+}
+
+/// The fast API type for a Zig result type, or null when only the slow path can encode it.
+fn fastResult(comptime T: type) ?FastType {
+    return switch (T) {
+        void => .Void,
+        u64 => .Uint64,
+        else => fastParam(T),
+    };
+}
+
+/// The payload of `T`, looking through an error union.
+fn Payload(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .error_union => |union_info| union_info.payload,
+        else => T,
+    };
+}
+
+/// True when `func` can be exposed through V8's fast API (see the file comment).
+fn isFast(comptime State: type, comptime func: anytype) bool {
+    const Fn = @typeInfo(@TypeOf(func)).@"fn";
+    if (Fn.param_types.len == 0 or Fn.param_types.len > max_fast_args + 1 or Fn.param_types[0].? != *State) return false;
+    inline for (Fn.param_types[1..]) |param| {
+        if (fastParam(param.?) == null) return false;
+    }
+    return fastResult(Payload(Fn.return_type.?)) != null;
+}
+
+const max_fast_args = 6;
+
+/// The fast API entry for `func`: the C callback plus the static type description V8
+/// and the overload list keep for as long as the function template lives (V8 retains
+/// pointers into them rather than copying).
+fn Fast(comptime State: type, comptime func: anytype) type {
+    return struct {
+        const Fn = @typeInfo(@TypeOf(func)).@"fn";
+        const arity = Fn.param_types.len - 1;
+        const Result = Payload(Fn.return_type.?);
+
+        const types = blk: {
+            // receiver, JS arguments, trailing callback options
+            var out: [arity + 2]v8.CTypeInfo = undefined;
+            out[0] = .{ .type = .V8Value, .flags = .{ .AllowSharedBit = false, .EnforceRangeBit = false, .ClampBit = false, .IsRestrictedBit = false } };
+            for (Fn.param_types[1..], 1..) |param, slot| out[slot] = .{ .type = fastParam(param.?).?, .flags = out[0].flags };
+            out[arity + 1] = .{ .type = .CallbackOptions, .flags = out[0].flags };
+            break :blk out;
+        };
+        const info: v8.CFunctionInfo = .{
+            .return_info_ = .{ .type = fastResult(Result).?, .flags = types[0].flags },
+            .repr_ = .Number,
+            .arg_count_ = arity + 2,
+            .arg_info_ = &types[0],
+        };
+
+        pub const c_function: v8.CFunction = .{ .address_ = @constCast(entry()), .type_info_ = &info };
+        /// The overload list V8 keeps a pointer to for the template's lifetime: static storage.
+        pub const overloads = [_]v8.CFunction{c_function};
+
+        fn P(comptime index: usize) type {
+            return Fn.param_types[index + 1].?;
+        }
+
+        /// Runs `func` with the state recovered from `options.data`. Borrows `options` for
+        /// the call; a failure is recorded in the errno cell and yields a zero result.
+        inline fn run(options: *const v8.FastApiCallbackOptions, js_args: anytype) Result {
+            const state = statePointer(State, v8.Value.from_opaque(v8.fromRawLocal(options.data)).?);
+            const cell = state.errnoCell();
+            cell.* = 0;
+            var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
+            args[0] = state;
+            inline for (0..arity) |index| args[index + 1] = js_args[index];
+            if (@typeInfo(Fn.return_type.?) == .error_union) {
+                return @call(.always_inline, func, args) catch |err| {
+                    call_mod.record(cell, err);
+                    return std.mem.zeroes(Result);
+                };
+            }
+            return @call(.always_inline, func, args);
+        }
+
+        /// One C-ABI callback per arity; V8 passes the receiver first and the options last.
+        fn entry() *const anyopaque {
+            const Receiver = ?*const anyopaque;
+            const Options = *const v8.FastApiCallbackOptions;
+            return switch (arity) {
+                0 => &struct {
+                    fn f(_: Receiver, o: Options) callconv(.c) Result {
+                        return run(o, .{});
+                    }
+                }.f,
+                1 => &struct {
+                    fn f(_: Receiver, a: P(0), o: Options) callconv(.c) Result {
+                        return run(o, .{a});
+                    }
+                }.f,
+                2 => &struct {
+                    fn f(_: Receiver, a: P(0), b: P(1), o: Options) callconv(.c) Result {
+                        return run(o, .{ a, b });
+                    }
+                }.f,
+                3 => &struct {
+                    fn f(_: Receiver, a: P(0), b: P(1), c: P(2), o: Options) callconv(.c) Result {
+                        return run(o, .{ a, b, c });
+                    }
+                }.f,
+                4 => &struct {
+                    fn f(_: Receiver, a: P(0), b: P(1), c: P(2), d: P(3), o: Options) callconv(.c) Result {
+                        return run(o, .{ a, b, c, d });
+                    }
+                }.f,
+                5 => &struct {
+                    fn f(_: Receiver, a: P(0), b: P(1), c: P(2), d: P(3), x: P(4), o: Options) callconv(.c) Result {
+                        return run(o, .{ a, b, c, d, x });
+                    }
+                }.f,
+                6 => &struct {
+                    fn f(_: Receiver, a: P(0), b: P(1), c: P(2), d: P(3), x: P(4), y: P(5), o: Options) callconv(.c) Result {
+                        return run(o, .{ a, b, c, d, x, y });
+                    }
+                }.f,
+                else => unreachable,
+            };
+        }
+    };
+}
+
+/// A JS function for `func` bound to `state`. Uses a function template with a fast API
+/// entry when `isFast` allows it, else a plain function. The returned handle is local to
+/// the current handle scope; `state` must outlive the function.
+fn function(env: Env, comptime State: type, state: *State, comptime func: anytype) v8.Function {
+    if (comptime !isFast(State, func)) {
+        const data = v8.External.init(env.isolate, state).value.data;
+        return v8.Function.init(env.ctx, native(State, func), data, 0, .Throw, .HasSideEffect);
+    }
+    const data = v8.Number.init(env.isolate, @floatFromInt(@intFromPtr(state))).numeric.primitive.value.data;
+    var builder: v8.FunctionTemplate.Builder = .{};
+    const template = builder.data(data).constructor_behavior(.Throw).build(env.isolate, native(State, func), @constCast(&Fast(State, func).overloads));
+    return template.getFunction(env.ctx).?;
 }
 
 // ---- decoding --------------------------------------------------------------
@@ -294,9 +465,7 @@ pub fn object(env: Env, comptime State: type, state: *State, comptime table: any
         const F = @TypeOf(field);
         switch (@typeInfo(F)) {
             .@"fn" => {
-                const data = v8.External.init(env.isolate, state).value.data;
-                const function = v8.Function.init(env.ctx, native(State, field), data, 0, .Throw, .HasSideEffect);
-                try set(env, target, name, function.object.value);
+                try set(env, target, name, function(env, State, state, field).object.value);
             },
             else => if (comptime isTable(F)) {
                 try set(env, target, name, (try object(env, State, state, field)).value);

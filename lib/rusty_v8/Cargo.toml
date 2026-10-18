@@ -14,6 +14,21 @@ repository = "https://github.com/denoland/rusty_v8"
 # https://github.com/rust-lang/rust/issues/75839
 # https://github.com/rust-lang/rust/issues/121028
 opt-level = 1
+# Faster debug builds: line tables are enough for backtraces, and more
+# codegen units + incremental trade runtime speed for compile time.
+debug = "line-tables-only"
+incremental = true
+codegen-units = 256
+# Keep unwinding: tests rely on catching panics.
+panic = "unwind"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+panic = "abort"
+strip = "debuginfo"
+codegen-units = 1
 
 [features]
 default = ["use_custom_libcxx", "v8_enable_pointer_compression", "v8_enable_sandbox"]
@@ -25,7 +40,7 @@ simdutf = []
 v8_enable_pointer_compression = []
 v8_enable_sandbox = ["v8_enable_pointer_compression"]
 v8_enable_v8_checks = []
-# v8_inspector + CRDTP bindings. Needs the matching shims in lib/v8_zig/binding (not ported yet).
+# v8_inspector + CRDTP bindings. Shims live at the end of lib/v8_zig/binding/rusty.cc.
 inspector = []
 
 [dependencies]

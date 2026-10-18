@@ -7055,12 +7055,12 @@ impl ClientCounterState {
   }
 }
 #[derive(Clone)]
-struct ClientCounter {
+pub(crate) struct ClientCounter {
   state: Rc<RefCell<ClientCounterState>>,
 }
 
 impl ClientCounter {
-  fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
       state: Rc::new(RefCell::new(ClientCounterState::new())),
     }
@@ -7088,12 +7088,12 @@ impl v8::inspector::V8InspectorClientImpl for ClientCounter {
   }
 }
 
-struct ChannelCounterState {
-  count_send_response: usize,
-  responses: Vec<String>,
-  count_send_notification: usize,
-  notifications: Vec<String>,
-  count_flush_protocol_notifications: usize,
+pub(crate) struct ChannelCounterState {
+  pub(crate) count_send_response: usize,
+  pub(crate) responses: Vec<String>,
+  pub(crate) count_send_notification: usize,
+  pub(crate) notifications: Vec<String>,
+  pub(crate) count_flush_protocol_notifications: usize,
 }
 
 impl ChannelCounterState {
@@ -7110,11 +7110,11 @@ impl ChannelCounterState {
 
 #[derive(Clone)]
 pub struct ChannelCounter {
-  state: Rc<RefCell<ChannelCounterState>>,
+  pub(crate) state: Rc<RefCell<ChannelCounterState>>,
 }
 
 impl ChannelCounter {
-  fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
       state: Rc::new(RefCell::new(ChannelCounterState::new())),
     }
@@ -9416,7 +9416,7 @@ fn value_serializer_and_deserializer() {
     value_serializer.write_double(55.44);
     value_serializer.write_uint32(22);
     buffer = value_serializer.release();
-    assert_eq!(value_serializer.release(), Vec::new());
+    assert_eq!(value_serializer.release(), Vec::<u8>::new());
   }
 
   let mut double: f64 = 0.0;
@@ -13855,6 +13855,7 @@ fn test_regexp() {
 #[cfg(feature = "inspector")]
 mod crdtp_tests {
   use super::*;
+  use crate::inspector_tests::{ChannelCounter, ClientCounter};
 
 #[test]
 fn crdtp_json_cbor_conversion() {

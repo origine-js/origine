@@ -1,25 +1,11 @@
 // `@engine/std/io`: Zig-style Io vocabulary for the init context.
-// Pure data: holding any of these values confers no authority. The errno table
-// must match `Errno` in api.zig.
+// Pure data: holding any of these values confers no authority. The errno table is
+// generated from `Errno` in src/api/errno.zig (`@engine/std/errno`), not written here.
+import { ERRNO } from '@engine/std/errno';
 import { quansync } from '@engine/std/quansync';
 
 const freeze = Object.freeze;
 
-const ERRNO = {
-  FileNotFound: 1,
-  AccessDenied: 2,
-  NotDir: 3,
-  IsDir: 4,
-  PathAlreadyExists: 5,
-  BadHandle: 6,
-  StaleHandle: 7,
-  InvalidPath: 8,
-  NoSpaceLeft: 9,
-  Unsupported: 10,
-  FileTooBig: 11,
-  InvalidData: 12,
-  Unexpected: 255,
-};
 const NAMES = new Map(Object.entries(ERRNO).map(([name, code]) => [code, name]));
 
 /// Errno values with Zig-style names. `is` accepts a number or any `{ errno }`.
@@ -62,11 +48,13 @@ export const FileKind = freeze({ file: 1, directory: 2, sym_link: 3, other: 4 })
 // ('sync' | 'async'), and the same functions are exported as `ops` for other
 // std modules to compose with `yield*`. Every op takes `(io, self, ...args)`.
 
-const MODES = { read_only: 'read', write_only: 'write', read_write: 'readwrite', read: 'read', write: 'write', readwrite: 'readwrite' };
-const READ = freeze({ mode: 'read' });
+// Zig `OpenMode` -> glue mode string (Python-style, see api.js). Writable handles
+// are read/write natively, so write_only and read_write coincide.
+const MODES = { read_only: 'r', write_only: 'rw', read_write: 'rw' };
 const UNLIMITED = freeze({ limit: Infinity });
-const openFlags = options => options === undefined ? READ : { mode: MODES[options.mode ?? 'read_only'] ?? 'read' };
-const createFlags = (options = {}) => ({ mode: options.read ? 'readwrite' : 'write', create: true, truncate: options.truncate ?? true, exclusive: options.exclusive ?? false });
+const openFlags = options => options === undefined ? 'r' : (MODES[options.mode ?? 'read_only'] ?? 'r');
+// Zig `createFile`: exclusive -> `x`, truncate (default) -> `w`, else create-and-keep `c`.
+const createFlags = (options = {}) => options.exclusive ? 'x' : (options.truncate ?? true) ? 'w' : 'c';
 const wrapDir = d => new DirImpl(d.fs, d.id);
 const wrapFile = f => new FileImpl(f.fs, f.id);
 const dropResult = () => undefined;
@@ -114,7 +102,7 @@ const dirCreateDirPathOpen = quansync(function* (io, dir, path) {
 });
 
 const dirReadFile = quansync(function* (io, dir, path, limit) {
-  const file = yield* dirOpenFile(io, dir, path, READ);
+  const file = yield* dirOpenFile(io, dir, path, 'r');
   try {
     return yield* fileReadAll(io, file, limit === Infinity ? UNLIMITED : { limit });
   } finally {
@@ -123,7 +111,7 @@ const dirReadFile = quansync(function* (io, dir, path, limit) {
 }, {
   // Hand-written sync path: no generator, no task objects.
   sync(io, dir, path, limit) {
-    const file = dirOpenFile.sync(io, dir, path, READ);
+    const file = dirOpenFile.sync(io, dir, path, 'r');
     try { return fileReadAll.sync(io, file, limit === Infinity ? UNLIMITED : { limit }); } finally { fileClose.sync(io, file); }
   },
 });
@@ -234,8 +222,8 @@ export const File = freeze({
 
 /// The quansync operations behind the methods, for composing in other std modules:
 /// `yield* ops.openFile(io, dir, path, flags)` inside a quansync generator, or
-/// `ops.openFile[io.kind](io, dir, path, flags)` directly. `flags` are the raw
-/// glue flags (`{ mode: 'read' | 'write' | 'readwrite', create, truncate, exclusive }`).
+/// `ops.openFile[io.kind](io, dir, path, flags)` directly. `flags` is the raw
+/// glue open mode string (`'r' | 'rw' | 'r+' | 'w' | 'w+' | 'x' | 'x+' | 'c' | 't'`).
 export const ops = freeze({
   openFile: dirOpenFile, openDir: dirOpenDir, closeDir: dirClose, stat: dirStat, access: dirAccess,
   createDir: dirCreateDir, createDirPath: dirCreateDirPath, createDirPathOpen: dirCreateDirPathOpen,

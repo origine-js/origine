@@ -4,7 +4,7 @@ Draft. Supersedes `API_PLAN_DRAFT_OLD.md`, which I leave untouched for you to de
 
 ## Draft-1 implementation status
 
-Implemented on branch `draft-1` (`src/managed/api.zig`, `api.js`, `std_io.js`; demo in `examples/draft-1/`; tests in `src/tests/managed/api.zig`). Run with `zig build run -- examples/draft-1/init.js args...`.
+Implemented on branch `draft-1`: host in `src/api/` (re-exported by `src/api.zig`), guest JS in `src/js/`, demo in `examples/draft-1/`, tests in `src/tests/managed/api.zig`. Run with `zig build run -- examples/draft-1/init.js args...`.
 
 | Area | State |
 |---|---|
@@ -15,12 +15,30 @@ Implemented on branch `draft-1` (`src/managed/api.zig`, `api.js`, `std_io.js`; d
 | `@engine/std/text` | `encodeUtf8`, `decodeUtf8` (returns `undefined` for invalid UTF-8); the context has no TextEncoder/TextDecoder. |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. |
 | `api.fs` | `request({root, write, mode: {async, sync}})`, `narrow(...)`. Real backend only (no memory/overlay). Ops: `dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirDeleteFile`, `dirRead`, `fileReadAll`, `fileWriteAll`, `fileClose`. |
-| Errors | Errno in `Uint32Array` (`fs.errno`) for `fs.sync`; `fs.async` rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |
+| Errors | Errno in a native-backed `Uint32Array` (one per scope, `fs.errno`; the glue fetches it once as `native.errno`) for `fs.sync`; `fs.async` rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |
 | `api.scope` | `create({main, importMap, loader, preload})`, `narrow({count})`; handle has `run()` and `close()`. |
 | Intrinsics snapshot | Done (engine level, not the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the 397 KB result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. |
 | `net`, `isolate` | Absent. |
 
 Measured (release V8, debug app build, one scope): `Context::New` 3.75 ms average (7.6 ms first) with the unfrozen built-in seed, because each context installs features and freezes the intrinsic graph, versus 0.18 ms restored from a finalized custom snapshot. Scope creation drops from about 4.3 ms to about 0.55 ms; the snapshot takes 7.5 ms and 397 KB and is generated at build time. Isolate creation (about 2.5 ms) is unchanged. Remaining ideas: snapshot the `bootstrap.js` helpers (`addDataToContext`), and snapshot the evaluated init module graph.
+
+### Writing natives (`src/api/binding.zig`)
+
+Natives are ordinary typed Zig functions; the binding layer decodes arguments, encodes results and reports errors:
+
+```zig
+fn openFile(g: *FsGrant, dir: DirRef, path: EntryPath, bits: u32) !u32 { ... }
+fn stat(g: *FsGrant, dir: DirRef, path: Path) !Stat { ... }          // Stat = struct { u32, f64 } -> [kind, size]
+fn list(state: *ScopeState, call: *Call) ![]const []const u8 { ... } // *Call is injected, takes no JS argument
+
+const ops = try call.object(FsGrant, grant, .{ .openFile = openFile, .stat = stat });
+```
+
+- **State.** The first parameter is the state the function is bound to (`FsGrant`, `ScopeState`, ...). A state type provides `errnoCell()` and `allocator()`.
+- **Arguments** are decoded in order: `u32`, `u64`, `f64`, `bool`, `[]const u8` (string, copied into the per-call arena), `[]u8` (typed-array bytes, aliased), `v8.Value/Function/Object`, `?T`, or any type with `pub fn decode(call, index) !T` and an optional `arity`. Validating types such as `Path`, `SubPath` and `DirRef` put the security checks at the boundary, so ops only see checked values. A mistyped or missing argument fails with `InvalidArgument` (reported as `InvalidPath`) before the function runs.
+- **Results** are encoded: ints/floats/bools directly, strings, `?T`, slices and tuples as arrays, named structs as objects, V8 handles, or `encode(self, env)`.
+- **Errors, two domains.** Natives return either the closed binding set `errno.Error` (env, scope, argument decoding, encoding) or `std.Io` fs errors. `errno.of(Error)` maps the closed set strictly (every member has a code, checked at compile time); `errno.ofFs` maps fs errors by name, resolved at compile time for a concrete error set (unknown members become `Unexpected`; `anyerror` is rejected). `error.OutOfMemory` is never an errno: it panics (natives allocate through `Call.allocSlice`/`print`, which panic, and the mapping functions panic on it). `Call.fail` picks the domain from the error set. Non-fs code narrows its internal errors with `errno.narrow` (the one boundary that also takes the managed layer's `anyerror`-typed callbacks) and asserts it with `comptime errno.requireBinding(native)`, so a native that leaks other errors fails to compile. The `Errno` enum is the single source of truth for the guest: `@engine/std/errno` (`ERRNO`) is generated from it at compile time and the glue gets `native.errors` generated at install, so adding a member needs no JS change.
+- **Tables.** `binding.object` builds a whole native surface from one comptime table: function fields become natives, named structs become nested objects, other fields are plain values.
 
 Known draft-1 limitations:
 - **Async fs is inline.** `fs.async` calls the native op on the isolate thread and returns an already-settled promise. There is no work queue.
@@ -67,7 +85,7 @@ Dir.at(token)   // descriptor wrapping a token that an fs gave out
 ```
 
 - `Dir` and `File` are **descriptors**: frozen, data-only values (`{ kind, id }`). Holding one confers **no authority**. They only name a thing inside an fs object.
-- Every operation takes a descriptor and goes through an fs object: `fs.async.dirOpenFile(Dir.cwd(), "a.txt", { mode: "read" })`, as in Zig's `dir.openFile(io, ...)`.
+- Every operation takes a descriptor and goes through an fs object: `fs.async.dirOpenFile(Dir.cwd(), "a.txt", "r")`, as in Zig's `dir.openFile(io, ...)`.
 - `Dir.cwd()` is a sentinel. **Each fs object decides what "cwd" means.** A real fs maps it to the process cwd or its root. A virtual fs maps it to its own root. This is what lets `readFileSync` code stay identical across backends.
 - Descriptors are **bound to the fs that issued them** (an fs id plus a generation). Using fs A's file with fs B fails with `IoError.BadHandle`.
 - The module is pure JS, so it is snapshot-safe and shared by all scopes.
@@ -207,7 +225,7 @@ export async function main(api) {
 export function makeNodeFs(fs, Dir) {
   return Object.freeze({
     readFileSync(path, options) {
-      const file = fs.sync.dirOpenFile(Dir.cwd(), path, { mode: "read" });
+      const file = fs.sync.dirOpenFile(Dir.cwd(), path, "r");
       try { return fs.sync.fileReadAll(file, options); }
       finally { fs.sync.fileClose(file); }
     },
@@ -230,7 +248,7 @@ export function makeNodeFs(fs, Dir) {
 | Narrowing | none | JS wrapper narrowing on the `api.*` function maps; optional native `Grant` intersect check; byte limits as `std.Io.Limit` |
 | Entry | `src/main.zig` evals a file | Read init file, snapshot, call `main`; default CLI grants `api` per flags |
 
-Suggested files: `src/managed/api.zig`, `capability.zig`, `fs.zig`, `net.zig`, `env.zig`, `snapshot.zig`, `src/js/std_io.js`, and `src/tests/managed/api.zig`.
+Layout (as built): `src/api/{host,fs,env,scope,js_loader,init_loader,errno,call,binding}.zig`, `src/js/{api,std_io,std_fs,std_text,quansync,bootstrap}.js`, tests in `src/tests/managed/api.zig`.
 
 ## 9. Phased delivery
 

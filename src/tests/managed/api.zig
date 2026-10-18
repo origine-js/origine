@@ -77,19 +77,19 @@ test "api: main receives env and an fs with sync and async variants" {
         \\  out.args = api.env.args().join(',');
         \\  out.home = api.env.get('HOME');
         \\  const fs = await api.fs.request({ write: true, mode: { async: true, sync: true } });
-        \\  const f = IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'a.txt', { mode: 'write', create: true, truncate: true }));
+        \\  const f = IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'a.txt', 'w'));
         \\  fs.sync.fileWriteAll(f, Uint8Array.from([104, 105]));
         \\  fs.sync.fileClose(f);
-        \\  const g = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', {});
+        \\  const g = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
         \\  out.text = String.fromCharCode(...await fs.async.fileReadAll(g, { limit: Limit.unlimited }));
-        \\  const h = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', {});
+        \\  const h = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
         \\  out.limited = (await fs.async.fileReadAll(h, { limit: Limit.limited(1) })).length;
-        \\  const i = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', {});
+        \\  const i = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
         \\  out.nothing = (await fs.async.fileReadAll(i, { limit: Limit.nothing })).length;
-        \\  try { IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'nope.txt', {})); } catch (e) { out.missing = IoError.is(e, IoError.FileNotFound); }
-        \\  await fs.async.dirOpenFile(Dir.cwd(), 'nope.txt', {}).catch(e => { out.asyncMissing = IoError.is(e, IoError.FileNotFound); });
+        \\  try { IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'nope.txt', 'r')); } catch (e) { out.missing = IoError.is(e, IoError.FileNotFound); }
+        \\  await fs.async.dirOpenFile(Dir.cwd(), 'nope.txt', 'r').catch(e => { out.asyncMissing = IoError.is(e, IoError.FileNotFound); });
         \\  for (const bad of ['../x', '/etc/passwd', 'a/../../x']) {
-        \\    fs.sync.dirOpenFile(Dir.cwd(), bad, {});
+        \\    fs.sync.dirOpenFile(Dir.cwd(), bad, 'r');
         \\    (out.escapes ??= []).push(fs.errno[0] === IoError.InvalidPath);
         \\  }
         \\  fs.errno[0] = 0;
@@ -108,6 +108,33 @@ test "api: main receives env and an fs with sync and async variants" {
     try check(fx.scope, "report.listed === true && report.stat === 2 && report.deleted === true");
 }
 
+test "api: errno is one native-backed array and open modes are python-style" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { Dir } from '@engine/std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const a = await api.fs.request({ write: true, mode: { sync: true } });
+        \\  const b = await api.fs.request({ write: true, mode: { sync: true } });
+        \\  out.shared = a.errno === b.errno && a.errno instanceof Uint32Array && a.errno.length === 1;
+        \\  try { structuredClone(a.errno.buffer, { transfer: [a.errno.buffer] }); } catch { out.pinned = true; }
+        \\  const s = a.sync, cwd = Dir.cwd();
+        \\  const bits = [];
+        \\  for (const mode of ['w+', 'x', 'x+', 'rw', 'r+', 'bogus', 42, {}]) {
+        \\    const f = s.dirOpenFile(cwd, 'm.txt', mode);
+        \\    bits.push(a.errno[0]);
+        \\    a.errno[0] = 0;
+        \\    if (f !== undefined) s.fileClose(f);
+        \\  }
+        \\  out.codes = bits.join(',');
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    // w+ creates (0); x/x+ hit the existing file (PathAlreadyExists 5); rw/r+ open it; junk is InvalidPath 8.
+    try check(fx.scope, "report.shared && report.pinned && report.codes === '0,5,5,0,0,8,8,8'");
+}
+
 test "api: narrowing is monotonic and the host grant is the ceiling" {
     var fx: Fixture = undefined;
     try fx.setup(
@@ -117,7 +144,7 @@ test "api: narrowing is monotonic and the host grant is the ceiling" {
         \\  const ro = api.fs.narrow({ write: false, mode: { sync: false } });
         \\  const rfs = await ro.request({ write: true, mode: { async: true, sync: true } });
         \\  out.syncAbsent = rfs.sync === undefined;
-        \\  await rfs.async.dirOpenFile(Dir.cwd(), 'b.txt', { mode: 'write', create: true }).catch(e => { out.denied = IoError.is(e, IoError.AccessDenied); });
+        \\  await rfs.async.dirOpenFile(Dir.cwd(), 'b.txt', 'c').catch(e => { out.denied = IoError.is(e, IoError.AccessDenied); });
         \\  const again = ro.narrow({ write: true, mode: { sync: true } });
         \\  const afs = await again.request({ write: true, mode: { async: true, sync: true } });
         \\  out.stillRo = afs.sync === undefined;
@@ -367,11 +394,164 @@ test "api: Rust-style fs over sync and async io" {
     try check(fx.scope, "report.kinds === 'sync,async' && report.syncIsSync && report.asyncIsPromise && report.utf8");
 }
 
-test "api: errno table in std_io.js matches Errno" {
+const BindingState = struct {
+    cell: u32 = 0,
+    total: u32 = 0,
+
+    pub fn errnoCell(self: *BindingState) *u32 {
+        return &self.cell;
+    }
+    pub fn allocator(_: *BindingState) std.mem.Allocator {
+        return t.allocator;
+    }
+};
+
+const Pair = struct { u32, bool };
+const Point = struct { x: u32, y: f64 };
+
+const typed = struct {
+    fn add(state: *BindingState, a: u32, b: u32) u32 {
+        state.total += a + b;
+        return a + b;
+    }
+    fn greet(_: *BindingState, call: *m.Api.Call, name: []const u8, suffix: ?[]const u8) []const u8 {
+        return call.print("hi {s}{s}", .{ name, suffix orelse "" });
+    }
+    fn middle(_: *BindingState, a: u32, _: *m.Api.Call, b: u32) u32 {
+        return a * 10 + b;
+    }
+    fn pair(_: *BindingState) Pair {
+        return .{ 7, true };
+    }
+    fn point(_: *BindingState) Point {
+        return .{ .x = 3, .y = 0.5 };
+    }
+    fn missing(_: *BindingState) !void {
+        return error.FileNotFound;
+    }
+    fn maybe(_: *BindingState, yes: bool) ?u32 {
+        return if (yes) 1 else null;
+    }
+    fn sum(_: *BindingState, bytes: []u8) u32 {
+        var total: u32 = 0;
+        for (bytes) |byte| total += byte;
+        return total;
+    }
+    fn names(_: *BindingState, call: *m.Api.Call) []const []const u8 {
+        const out = call.allocSlice([]const u8, 2);
+        out[0] = "a";
+        out[1] = "b";
+        return out;
+    }
+    fn big(_: *BindingState) u64 {
+        return 1 << 40;
+    }
+    fn fill(_: *BindingState, bytes: []u8) void {
+        @memset(bytes, 9);
+    }
+};
+
+test "binding: typed natives decode arguments, encode results and report errors" {
+    ensureV8();
+    const rt = try m.Runtime.create(t.allocator, .{});
+    defer rt.destroy();
+    const scope = try rt.createScope(.{});
+    var state: BindingState = .{};
+    {
+        var session: m.Scope.Session = undefined;
+        session.init(scope);
+        defer session.deinit();
+        const env: m.Api.binding.Env = .{ .isolate = session.isolate(), .ctx = session.ctx };
+        const table = try m.Api.binding.object(env, BindingState, &state, .{
+            .add = typed.add,
+            .greet = typed.greet,
+            .middle = typed.middle,
+            .pair = typed.pair,
+            .point = typed.point,
+            .missing = typed.missing,
+            .maybe = typed.maybe,
+            .sum = typed.sum,
+            .names = typed.names,
+            .big = typed.big,
+            .fill = typed.fill,
+            .label = "native",
+            .nested = .{ .add = typed.add, .deeper = .{ .pair = typed.pair } },
+        });
+        try m.Api.binding.set(env, session.ctx.getGlobal(), "native", table.value);
+    }
+    try check(scope, "native.add(2, 3) === 5");
+    try t.expectEqual(@as(u32, 5), state.total);
+    try t.expectEqual(@as(u32, 0), state.cell);
+    try check(scope, "native.greet('x') === 'hi x' && native.greet('x', '!') === 'hi x!' && native.greet('x', null) === 'hi x'");
+    // *Call takes no JS argument: (a, b) map to the parameters around it.
+    try check(scope, "native.middle(4, 2) === 42");
+    try check(scope, "Array.isArray(native.pair()) && native.pair()[0] === 7 && native.pair()[1] === true");
+    try check(scope, "native.point().x === 3 && native.point().y === 0.5");
+    try check(scope, "native.maybe(true) === 1 && native.maybe(false) === undefined");
+    try check(scope, "native.sum(Uint8Array.from([1, 2, 3])) === 6 && native.sum(new Uint8Array(0)) === 0");
+    try check(scope, "native.names().join() === 'a,b' && native.big() === 1099511627776");
+    try check(scope, "native.label === 'native' && native.nested.add(1, 1) === 2 && native.nested.deeper.pair()[0] === 7");
+    try check(scope, "(() => { const b = new Uint8Array(3); native.fill(b); return b.join() === '9,9,9'; })()");
+    try t.expectEqual(@as(u32, 0), state.cell);
+    // A returned Zig error lands in the errno cell and the call returns undefined.
+    try check(scope, "native.missing() === undefined");
+    try t.expectEqual(@intFromEnum(m.Api.Errno.FileNotFound), state.cell);
+    // Mistyped or missing arguments fail before the function runs (InvalidArgument -> InvalidPath).
+    const before = state.total;
+    for ([_][]const u8{ "native.add('x', 1)", "native.add(1)", "native.greet(5)", "native.sum([1, 2])", "native.greet('x', 5)", "native.maybe(1)" }) |call_source| {
+        const source = try std.fmt.allocPrint(t.allocator, "{s} === undefined", .{call_source});
+        defer t.allocator.free(source);
+        try check(scope, source);
+        try t.expectEqual(@intFromEnum(m.Api.Errno.InvalidPath), state.cell);
+        state.cell = 0;
+    }
+    try t.expectEqual(before, state.total);
+    // The cell is cleared on entry to every call.
+    try check(scope, "native.missing() === undefined && native.add(1, 1) === 2");
+    try t.expectEqual(@as(u32, 0), state.cell);
+}
+
+test "errno: binding errors map strictly, fs errors by name" {
+    const E = m.Api.Errno;
+    const Api = m.Api;
+    // Binding domain: the closed `Error` set; every member has a code.
+    const bound: Api.Error = error.StaleHandle;
+    try t.expectEqual(E.StaleHandle, Api.errnoOf(bound));
+    try t.expectEqual(E.InvalidPath, Api.errnoOf(error.InvalidArgument));
+    inline for (@typeInfo(Api.Error).error_set.error_names.?) |name| {
+        try t.expect(Api.errnoOf(@field(Api.Error, name)) != .ok);
+    }
+    // fs domain: concrete sets resolve at compile time.
+    try t.expectEqual(E.FileNotFound, Api.errnoOfFs(@as(error{FileNotFound}, error.FileNotFound)));
+    try t.expectEqual(E.AccessDenied, Api.errnoOfFs(@as(error{ PermissionDenied, Other }, error.PermissionDenied)));
+    try t.expectEqual(E.AccessDenied, Api.errnoOfFs(@as(error{ReadOnlyFileSystem}, error.ReadOnlyFileSystem)));
+    try t.expectEqual(E.Unexpected, Api.errnoOfFs(@as(error{Other}, error.Other)));
+    // narrow() is the explicit boundary for non-fs code.
+    try t.expectEqual(@as(Api.Error, error.BadHandle), Api.narrowError(error.BadHandle));
+    try t.expectEqual(@as(Api.Error, error.Unexpected), Api.narrowError(error.SomethingElse));
+    // isBinding tells the domains apart.
+    try t.expect(Api.binding_errors.isBinding(Api.Error));
+    try t.expect(Api.binding_errors.isBinding(error{ BadHandle, InvalidArgument }));
+    try t.expect(!Api.binding_errors.isBinding(error{ BadHandle, EndOfStream }));
+    try t.expect(!Api.binding_errors.isBinding(error{OutOfMemory}));
+}
+
+test "errno: the guest table is generated from Errno, not hard-coded" {
+    var count: usize = 0;
     inline for (std.enums.values(m.Api.Errno)) |tag| {
         if (tag == .ok) continue;
         const needle = try std.fmt.allocPrint(t.allocator, "  {s}: {d},", .{ @tagName(tag), @intFromEnum(tag) });
         defer t.allocator.free(needle);
-        try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, needle) != null);
+        try t.expect(std.mem.indexOf(u8, m.Api.errno_module_source, needle) != null);
+        count += 1;
     }
+    try t.expect(count > 0);
+    // The generated module is served, and std_io.js no longer carries its own table.
+    var served = false;
+    inline for (m.Api.std_modules) |module| {
+        if (std.mem.eql(u8, module.id, "@engine/std/errno")) served = module.source.ptr == m.Api.errno_module_source.ptr;
+    }
+    try t.expect(served);
+    try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "FileNotFound: 1") == null);
+    try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "@engine/std/errno") != null);
 }

@@ -125,9 +125,9 @@ const exists = quansync(function* (ctx, path) {
 
 const copy = quansync(function* (ctx, from, to) {
   const { io, dir } = ctx;
-  const source = yield* ops.openFile(io, dir, from, { mode: 'read' });
+  const source = yield* ops.openFile(io, dir, from, 'r');
   try {
-    const target = yield* ops.openFile(io, dir, to, { mode: 'write', create: true, truncate: true });
+    const target = yield* ops.openFile(io, dir, to, 'w');
     try {
       const size = (yield* ops.fileLength(io, source)) + 1; // +1 so one read sees the end
       const buffer = new Uint8Array(Math.min(size, COPY_CHUNK));
@@ -202,12 +202,8 @@ const openOptions = quansync(function* (ctx, path, spec) {
   if (spec.append) fail(IoError.Unsupported);
   if (!spec.read && !spec.write) fail(IoError.InvalidPath); // Rust: InvalidInput
   if (!spec.write && (spec.truncate || spec.create || spec.create_new)) fail(IoError.InvalidPath);
-  return yield* openWith(ctx, path, {
-    mode: spec.read && spec.write ? 'readwrite' : spec.write ? 'write' : 'read',
-    create: spec.create || spec.create_new,
-    truncate: spec.truncate,
-    exclusive: spec.create_new,
-  });
+  const create = spec.create || spec.create_new;
+  return yield* openWith(ctx, path, !spec.write ? 'r' : spec.create_new ? 'x' : create ? (spec.truncate ? 'w' : 'c') : spec.truncate ? 't' : 'rw');
 });
 
 /// `std::fs::OpenOptions` builder. `append` is not supported yet.
@@ -232,9 +228,9 @@ export function fs(io, dir = Dir.cwd()) {
   const one = task => { const run = task[kind]; return path => run(ctx, path); };
   const two = task => { const run = task[kind]; return (a, b) => run(ctx, a, b); };
   const File = freeze({
-    open: path => openWith[kind](ctx, path, { mode: 'read' }),
-    create: path => openWith[kind](ctx, path, { mode: 'write', create: true, truncate: true }),
-    create_new: path => openWith[kind](ctx, path, { mode: 'write', create: true, exclusive: true }),
+    open: path => openWith[kind](ctx, path, 'r'),
+    create: path => openWith[kind](ctx, path, 'w'),
+    create_new: path => openWith[kind](ctx, path, 'x'),
     options: () => new OpenOptionsBuilder(ctx),
   });
   const OpenOptions = freeze({ new: () => new OpenOptionsBuilder(ctx) });

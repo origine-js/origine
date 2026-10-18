@@ -29,7 +29,7 @@ export async function main(api) {
   time('raw dirStat (miss)', N, () => { io.dirStat(work, 'ghost'); io.errno[0] = 0; });
   time('Dir.access (miss, throws)', N, () => { try { work.access(io, 'ghost'); } catch {} });
   time('raw open+readAll+close (512 B)', N / 2, () => {
-    const f = io.dirOpenFile(work, 'small.txt', { mode: 'read' });
+    const f = io.dirOpenFile(work, 'small.txt', 'r');
     io.fileReadAll(f, {});
     io.fileClose(f);
   });

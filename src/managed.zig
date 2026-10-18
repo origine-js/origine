@@ -23,5 +23,5 @@ pub const ImportMapping = @import("managed/import_map.zig").Mapping;
 pub const ImportMapScope = @import("managed/import_map.zig").Scoped;
 pub const URLNormalizer = @import("managed/import_map.zig").URLNormalizer;
 pub const virtual_urls = @import("managed/import_map.zig").virtual_urls;
-pub const Api = @import("managed/api.zig");
+pub const Api = @import("api.zig");
 pub const snapshot = @import("managed/snapshot.zig");

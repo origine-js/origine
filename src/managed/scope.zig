@@ -98,7 +98,7 @@ pub const Scope = struct {
     /// helper functions; on error (BootstrapFailed) nothing is retained.
     fn bootstrap(self: *Scope, ctx: v8.Context, timing: *?i64) !Helpers {
         const isolate = self.runtime.isolate;
-        const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, @embedFile("bootstrap.js")), null) orelse return error.BootstrapFailed;
+        const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, @embedFile("../js/bootstrap.js")), null) orelse return error.BootstrapFailed;
         startup_trace.mark(timing, "bootstrap_compile");
         const initializer_value = script.run(ctx) orelse return error.BootstrapFailed;
         const initializer = v8.Function.from_opaque(initializer_value.data.handle) orelse return error.BootstrapFailed;

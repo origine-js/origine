@@ -247,6 +247,126 @@ test "api: Zig-style Dir and File methods over sync and async io" {
     try check(fx.scope, "report.roDelete && report.roRename");
 }
 
+test "quansync: leaves, composites, yields, errors, finally and fast paths" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { quansync } from '@engine/std/quansync';
+        \\export async function main() {
+        \\  const out = globalThis.report = {};
+        \\  const add = quansync({ sync: (a, b) => a + b, async: async (a, b) => a + b });
+        \\  const twice = quansync(function* (a) { const x = yield* add(a, a); return yield add(x, 1); });
+        \\  out.sync = twice.sync(2);
+        \\  out.async = await twice.async(2);
+        \\  out.awaited = await twice(3);
+        \\  out.leafSync = add.sync(1, 2);
+        \\  out.leafAwaited = await add(1, 2);
+        \\  const boom = quansync({ sync() { throw new Error('s'); }, async() { return Promise.reject(new Error('a')); } });
+        \\  const guarded = quansync(function* () { try { yield* boom(); } catch (e) { return e.message; } });
+        \\  out.errSync = guarded.sync();
+        \\  out.errAsync = await guarded.async();
+        \\  let cleaned = 0;
+        \\  const withFinally = quansync(function* () { try { yield* boom(); } finally { cleaned++; } });
+        \\  try { withFinally.sync(); } catch {}
+        \\  await withFinally.async().catch(() => {});
+        \\  out.cleaned = cleaned;
+        \\  const fast = quansync(function* () { return 'gen'; }, { sync: () => 'fast' });
+        \\  out.fast = fast.sync() + ':' + await fast.async();
+        \\  const bad = quansync(function* () { yield 42; });
+        \\  try { bad.sync(); } catch (e) { out.badYield = e instanceof TypeError; }
+        \\  out.run = quansync.run('sync', twice(1)) + ':' + await quansync.run('async', twice(1));
+        \\  out.byMode = add['sync'](2, 2) + ':' + await add['async'](2, 2);
+        \\  out.frozen = Object.isFrozen(add) && Object.isFrozen(twice);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.sync === 5 && report.async === 5 && report.awaited === 7 && report.leafSync === 3 && report.leafAwaited === 3");
+    try check(fx.scope, "report.errSync === 's' && report.errAsync === 'a' && report.cleaned === 2");
+    try check(fx.scope, "report.fast === 'fast:gen' && report.badYield === true && report.run === '3:3' && report.byMode === '4:4' && report.frozen");
+}
+
+test "api: Rust-style fs over sync and async io" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { IoError } from '@engine/std/io';
+        \\import { fs } from '@engine/std/fs';
+        \\import { encodeUtf8, decodeUtf8 } from '@engine/std/text';
+        \\const rejects = async (promiseOrThrow, code) => {
+        \\  try { await promiseOrThrow(); } catch (e) { return IoError.is(e, code); }
+        \\  return false;
+        \\};
+        \\async function exercise(rs, label, out) {
+        \\  const p = 'rust-' + label;
+        \\  await rs.create_dir_all(p + '/a/b');
+        \\  const text = 'héllo ✓ \u{1F600}';
+        \\  await rs.write(p + '/a/x.txt', text);
+        \\  out[label + 'text'] = (await rs.read_to_string(p + '/a/x.txt')) === text;
+        \\  out[label + 'len'] = (await rs.read(p + '/a/x.txt')).length === encodeUtf8(text).length;
+        \\  const md = await rs.metadata(p + '/a/x.txt');
+        \\  out[label + 'meta'] = md.is_file() && !md.is_dir() && md.len() === encodeUtf8(text).length && md.file_type().is_file();
+        \\  out[label + 'dirmeta'] = (await rs.metadata(p + '/a')).is_dir();
+        \\  const entries = await rs.read_dir(p + '/a');
+        \\  out[label + 'entries'] = entries.map(e => e.file_name()).sort().join(',') + '|' + entries.find(e => e.file_name() === 'x.txt').path() + '|' + entries.find(e => e.file_name() === 'b').file_type().is_dir();
+        \\  out[label + 'copy'] = (await rs.copy(p + '/a/x.txt', p + '/y.txt')) === encodeUtf8(text).length && (await rs.read_to_string(p + '/y.txt')) === text;
+        \\  await rs.rename(p + '/y.txt', p + '/z.txt');
+        \\  out[label + 'exists'] = (await rs.try_exists(p + '/z.txt')) && !(await rs.try_exists(p + '/y.txt')) && (await rs.exists(p + '/z.txt')) && !(await rs.exists(p + '/nope'));
+        \\  const f = await rs.File.create(p + '/f.bin');
+        \\  await f.write_all('abc');
+        \\  out[label + 'partial'] = (await f.write(Uint8Array.from([100, 101]))) > 0;
+        \\  await f.sync_all();
+        \\  await f.flush();
+        \\  await f.close();
+        \\  const g = await rs.File.open(p + '/f.bin');
+        \\  const buf = new Uint8Array(3);
+        \\  out[label + 'read'] = (await g.read(buf)) === 3 && decodeUtf8(buf) === 'abc';
+        \\  const rest = await g.read_to_end();
+        \\  out[label + 'rest'] = decodeUtf8(rest) === 'de' && (await g.metadata()).len() === 5;
+        \\  await g.close();
+        \\  const h = await rs.OpenOptions.new().read(true).write(true).create(true).open(p + '/h.bin');
+        \\  await h.write_all('xyz');
+        \\  await h.set_len(2);
+        \\  await h.close();
+        \\  out[label + 'options'] = (await rs.read_to_string(p + '/h.bin')) === 'xy';
+        \\  const exact = await rs.File.open(p + '/h.bin');
+        \\  out[label + 'exact'] = (await rejects(() => exact.read_exact(new Uint8Array(9)), IoError.InvalidData));
+        \\  await exact.close();
+        \\  out[label + 'append'] = await rejects(() => rs.OpenOptions.new().write(true).append(true).open(p + '/h.bin'), IoError.Unsupported);
+        \\  out[label + 'noflags'] = await rejects(() => rs.OpenOptions.new().open(p + '/h.bin'), IoError.InvalidPath);
+        \\  out[label + 'createWithoutWrite'] = await rejects(() => rs.OpenOptions.new().read(true).create(true).open(p + '/h.bin'), IoError.InvalidPath);
+        \\  out[label + 'createNew'] = await rejects(() => rs.File.create_new(p + '/h.bin'), IoError.PathAlreadyExists);
+        \\  await rs.write(p + '/bad.bin', Uint8Array.from([0xff, 0xfe]));
+        \\  out[label + 'invalidUtf8'] = await rejects(() => rs.read_to_string(p + '/bad.bin'), IoError.InvalidData);
+        \\  out[label + 'missing'] = await rejects(() => rs.read(p + '/ghost'), IoError.FileNotFound);
+        \\  await rs.remove_file(p + '/z.txt');
+        \\  await rs.create_dir(p + '/empty');
+        \\  await rs.remove_dir(p + '/empty');
+        \\  await rs.remove_dir_all(p + '/a');
+        \\  out[label + 'removed'] = !(await rs.exists(p + '/a')) && !(await rs.exists(p + '/z.txt'));
+        \\}
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = await api.fs.request({ write: true, mode: { sync: true, async: true } });
+        \\  await exercise(fs(io.sync), 'sync', out);
+        \\  await exercise(fs(io.async), 'async', out);
+        \\  out.kinds = fs(io.sync).kind + ',' + fs(io.async).kind;
+        \\  out.syncIsSync = !(fs(io.sync).read('rust-sync/h.bin') instanceof Promise);
+        \\  out.asyncIsPromise = fs(io.async).read('rust-async/h.bin') instanceof Promise;
+        \\  out.utf8 = decodeUtf8(encodeUtf8('aé✓\u{1F600}')) === 'aé✓\u{1F600}' && decodeUtf8(Uint8Array.from([0xc0, 0x80])) === undefined && decodeUtf8(Uint8Array.from([0xed, 0xa0, 0x80])) === undefined && encodeUtf8('\ud800').length === 3;
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    inline for (.{ "sync", "async" }) |label| {
+        const prefix = "report." ++ label;
+        try check(fx.scope, prefix ++ "text && " ++ prefix ++ "len && " ++ prefix ++ "meta && " ++ prefix ++ "dirmeta");
+        try check(fx.scope, prefix ++ "entries === 'b,x.txt|rust-" ++ label ++ "/a/x.txt|true' && " ++ prefix ++ "copy && " ++ prefix ++ "exists");
+        try check(fx.scope, prefix ++ "partial && " ++ prefix ++ "read && " ++ prefix ++ "rest && " ++ prefix ++ "options && " ++ prefix ++ "exact");
+        try check(fx.scope, prefix ++ "append && " ++ prefix ++ "noflags && " ++ prefix ++ "createWithoutWrite && " ++ prefix ++ "createNew");
+        try check(fx.scope, prefix ++ "invalidUtf8 && " ++ prefix ++ "missing && " ++ prefix ++ "removed");
+    }
+    try check(fx.scope, "report.kinds === 'sync,async' && report.syncIsSync && report.asyncIsPromise && report.utf8");
+}
+
 test "api: errno table in std_io.js matches Errno" {
     inline for (std.enums.values(m.Api.Errno)) |tag| {
         if (tag == .ok) continue;

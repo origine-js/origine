@@ -17,6 +17,13 @@ const ErrorInfo = @import("errors.zig").ErrorInfo;
 
 pub const std_io_id = "@engine/std/io";
 pub const std_io_source = @embedFile("std_io.js");
+/// Modules the init scope can import without touching the file system.
+pub const std_modules = [_]struct { id: []const u8, source: []const u8 }{
+    .{ .id = std_io_id, .source = std_io_source },
+    .{ .id = "@engine/std/quansync", .source = @embedFile("quansync.js") },
+    .{ .id = "@engine/std/fs", .source = @embedFile("std_fs.js") },
+    .{ .id = "@engine/std/text", .source = @embedFile("std_text.js") },
+};
 const glue_source = @embedFile("api.js");
 /// Largest file `fileReadAll` returns, regardless of the requested limit.
 const max_read_bytes: usize = 256 << 20;
@@ -36,6 +43,7 @@ pub const Errno = enum(u32) {
     NoSpaceLeft = 9,
     Unsupported = 10,
     FileTooBig = 11,
+    InvalidData = 12,
     Unexpected = 255,
 };
 
@@ -1004,7 +1012,9 @@ fn initResolve(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror
 
 fn initLoad(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {
     const host: *Host = @ptrCast(@alignCast(data.?));
-    if (std.mem.eql(u8, request.module_id, std_io_id)) return .{ .source = std_io_source };
+    inline for (std_modules) |module| {
+        if (std.mem.eql(u8, request.module_id, module.id)) return .{ .source = module.source };
+    }
     const source = std.Io.Dir.cwd().readFileAlloc(host.io, request.module_id, request.allocator, .unlimited) catch |err| return err;
     return .{ .source = source };
 }

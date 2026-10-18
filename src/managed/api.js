@@ -9,7 +9,7 @@
 ((native) => {
   'use strict';
   const { freeze, getOwnPropertyDescriptor } = Object;
-  const NAMES = freeze({ 1: 'FileNotFound', 2: 'AccessDenied', 3: 'NotDir', 4: 'IsDir', 5: 'PathAlreadyExists', 6: 'BadHandle', 7: 'StaleHandle', 8: 'InvalidPath', 9: 'NoSpaceLeft', 10: 'Unsupported', 11: 'FileTooBig', 255: 'Unexpected' });
+  const NAMES = freeze({ 1: 'FileNotFound', 2: 'AccessDenied', 3: 'NotDir', 4: 'IsDir', 5: 'PathAlreadyExists', 6: 'BadHandle', 7: 'StaleHandle', 8: 'InvalidPath', 9: 'NoSpaceLeft', 10: 'Unsupported', 11: 'FileTooBig', 12: 'InvalidData', 255: 'Unexpected' });
   const InvalidPath = 8;
   const Unsupported = 10;
   const failure = code => freeze({ errno: code, name: NAMES[code] ?? 'Unexpected' });

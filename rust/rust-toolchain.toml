@@ -1,0 +1,5 @@
+# LLVM must not be newer than V8's bundled clang (LLVM 23): cross-language LTO
+# links Rust bitcode with libv8_zig.a through V8's lld. Rust 1.99 ships LLVM 22.
+[toolchain]
+channel = "1.99"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,14 @@
+[package]
+name = "origine_oxc"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_codegen.workspace = true
+oxc_diagnostics.workspace = true
+oxc_parser.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_transformer.workspace = true

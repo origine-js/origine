@@ -1,0 +1,92 @@
+# All Rust code of origine, built into one static library (`liborigine_native.a`) so there is a
+# single Rust runtime to link into the executables.
+# Add a Rust part as a crate under crates/, list it here, and re-export it in src/lib.rs.
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+oxc_allocator = "=0.155.0"
+oxc_codegen = "=0.155.0"
+oxc_diagnostics = "=0.155.0"
+oxc_parser = "=0.155.0"
+oxc_semantic = "=0.155.0"
+oxc_span = "=0.155.0"
+oxc_transformer = "=0.155.0"
+origine_oxc = { path = "crates/origine_oxc" }
+
+[package]
+name = "origine_native"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+origine_oxc = { workspace = true, optional = true }
+
+[features]
+default = ["typescript"]
+# oxc-based TypeScript/JSX transformer (`zig build -Dtypescript=false` turns it off).
+typescript = ["dep:origine_oxc"]
+
+# Size first: everything is optimized for size (no loop unrolling) except the crates that sit on
+# a hot path (parsing, traversal, codegen, byte scanning), which get -O3. Add a crate here when
+# a profile shows it matters. Per-package opt-levels apply to dependencies too.
+[profile.release]
+lto = "thin"
+opt-level = "z"
+codegen-units = 16
+strip = true
+panic = "unwind"
+
+[profile.release.package.oxc_parser]
+opt-level = 3
+
+[profile.release.package.oxc_semantic]
+opt-level = 3
+
+[profile.release.package.oxc_transformer]
+opt-level = 3
+
+[profile.release.package.oxc_traverse]
+opt-level = 3
+
+[profile.release.package.oxc_codegen]
+opt-level = 3
+
+[profile.release.package.oxc_ast]
+opt-level = 3
+
+[profile.release.package.oxc_ast_visit]
+opt-level = 3
+
+[profile.release.package.oxc_allocator]
+opt-level = 3
+
+[profile.release.package.oxc_span]
+opt-level = 3
+
+[profile.release.package.oxc_str]
+opt-level = 3
+
+[profile.release.package.oxc_syntax]
+opt-level = 3
+
+[profile.release.package.oxc_ecmascript]
+opt-level = 3
+
+[profile.release.package.oxc_data_structures]
+opt-level = 3
+
+[profile.release.package.oxc_regular_expression]
+opt-level = 3
+
+[profile.release.package.memchr]
+opt-level = 3

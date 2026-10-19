@@ -1,4 +1,4 @@
-// `origine:@std/typescript`: host transformers for `api.scope.create({ transformers })`.
+// `origine:@std/transformer/typescript`: host transformers for `api.scope.create({ transformers })`.
 // `typescript(options)` returns a native function `(source, id) => string` (it throws a
 // SyntaxError with `file:line:col` diagnostics) that the host also recognizes, so a child
 // scope runs it without calling back into JavaScript. `tsx` and `jsx` are the same factory

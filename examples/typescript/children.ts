@@ -1,6 +1,6 @@
 // Run: zig build run -- examples/typescript/children.ts
 // A child scope gets transformers only when the init passes them, keyed by file extension.
-import { typescript, tsx } from 'origine:@std/typescript';
+import { typescript, tsx } from 'origine:@std/transformer/typescript';
 
 export async function main(api: any): Promise<void> {
   const sources: Record<string, string> = {

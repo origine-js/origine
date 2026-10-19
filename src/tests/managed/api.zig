@@ -219,7 +219,7 @@ test "typescript: child scopes get only the transformers the init passes" {
     if (!m.Api.oxc.enabled) return error.SkipZigTest;
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { typescript } from 'origine:@std/typescript';
+        \\import { typescript } from 'origine:@std/transformer/typescript';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const ts = typescript();

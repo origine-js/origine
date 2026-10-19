@@ -1,4 +1,4 @@
-//! `origine:@std/typescript`: factories for host transformers (see src/js/std_typescript.js).
+//! `origine:@std/transformer/typescript`: factories for host transformers (see src/js/std_transformer_typescript.js).
 //! Each `make` call creates a native function `(source, id) => string` backed by an `Instance`
 //! with its own oxc options, branded (transform_handle.zig) so `api.scope.create` can run it
 //! directly. Instances live in the module's per-scope state until `Host.destroy`.
@@ -135,8 +135,8 @@ fn make(cell: *module.Cell(Factory), c: *Call, options: ?v8.Object) !?v8.Value {
 pub fn modules() [if (oxc.enabled) 1 else 0]module.Module {
     if (!oxc.enabled) return .{};
     return .{.{
-        .id = "origine:@std/typescript",
-        .source = @embedFile("../js/std_typescript.js"),
+        .id = "origine:@std/transformer/typescript",
+        .source = @embedFile("../js/std_transformer_typescript.js"),
         .bindings = module.stateful(Factory, .{ .make = func(make, .{ .side_effect = .any }) }),
     }};
 }

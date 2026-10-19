@@ -33,7 +33,7 @@ Reuse an existing archive with `-Dprebuilt_v8_path=/absolute/path/libv8_zig.a`.
 `-Dv8_clang_dir=/path/to/llvm/bin` overrides the matching LLVM toolchain and
 `-Dcache_root=/path/to/cache` selects the V8 checkout cache.
 
-Full build documentation, including the V8 development loop, is in [docs/BUILD.md](docs/BUILD.md).
+Full build documentation, including the V8 development loop, is in [docs/BUILD.md](docs/BUILD.md). For all other documentation, see [DOCS.md](DOCS.md).
 
 The V8 package retains its own Git history, tests, build tooling, and documentation.
 Run package-specific commands from `lib/v8_zig`; run the application from here.

@@ -34,7 +34,15 @@ fn show(scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
     var tc_scope: v8.TryCatch = undefined;
     tc_scope.init(isolate);
     defer tc_scope.deinit();
-    const text = value.deref().toString(ctx) orelse {
+    // An Error's stack starts with "Name: message" and adds the frames; diagnostics from the
+    // TypeScript transformer put their file:line:col lines there.
+    var shown = value.deref();
+    if (shown.toObject(ctx)) |object| {
+        if (object.get(ctx, v8.String.initUtf8(isolate, "stack").name.primitive.value)) |stack| {
+            if (stack.isString()) shown = stack;
+        }
+    }
+    const text = shown.toString(ctx) orelse {
         print("<value conversion threw>\n", .{});
         return;
     };

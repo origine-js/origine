@@ -235,6 +235,24 @@
 
   // ---- scope ------------------------------------------------------------
 
+  // `{ ".ts": transformer, ... }` -> flat `[ext, transformer, ...]` for the native; undefined
+  // when absent, null when malformed. Own data properties only. The native validates again
+  // (extension syntax, count, duplicates, host-transformer brands): it is the trust anchor.
+  const MAX_TRANSFORMERS = 64;
+  function transformerList(map) {
+    if (map === undefined) return undefined;
+    if (map === null || typeof map !== 'object') return null;
+    const keys = Object.keys(map);
+    if (keys.length > MAX_TRANSFORMERS) return null;
+    const flat = [];
+    for (const ext of keys) {
+      const transformer = own(map, ext);
+      if (typeof transformer !== 'function') return null;
+      flat.push(ext, transformer);
+    }
+    return freeze(flat);
+  }
+
   function makeScopeCap(state) {
     function handle(id) {
       return freeze({
@@ -254,13 +272,14 @@
         const map = own(options, 'importMap');
         const loader = own(options, 'loader');
         const preload = own(options, 'preload') ?? [];
-        if (typeof main !== 'string' || (loader !== undefined && typeof loader !== 'function') || !Array.isArray(preload)) {
+        const flat = transformerList(own(options, 'transformers'));
+        if (typeof main !== 'string' || (loader !== undefined && typeof loader !== 'function') || !Array.isArray(preload) || flat === null || (flat !== undefined && loader === undefined)) {
           return Promise.reject(failure(InvalidPath));
         }
         if (state.remaining <= 0) return Promise.reject(failure(Unsupported));
         let mapJson;
         try { mapJson = map === undefined ? undefined : JSON.stringify(map); } catch { return Promise.reject(failure(InvalidPath)); }
-        const id = native.scope.create(main, mapJson, loader);
+        const id = native.scope.create(main, mapJson, loader, flat);
         if (errno[0] !== 0) return Promise.reject(failure(take()));
         state.remaining--;
         for (let i = 0; i < preload.length; i++) {

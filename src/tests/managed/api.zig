@@ -20,11 +20,17 @@ const Fixture = struct {
     }
 
     fn setupWith(self: *Fixture, source: []const u8, grant_fs: bool, args: []const []const u8, modules: []const m.Api.module.Module) !void {
+        return self.setupFull("init.js", source, grant_fs, args, modules, m.Api.transformers.defaults);
+    }
+
+    /// Writes `source` as `name` in the tmp dir (the init module) and runs with the given
+    /// embedded modules and transformer map.
+    fn setupFull(self: *Fixture, name: []const u8, source: []const u8, grant_fs: bool, args: []const []const u8, modules: []const m.Api.module.Module, transformers: []const m.Api.transformer.Entry) !void {
         ensureV8();
         self.tmp = t.tmpDir(.{ .iterate = true });
         errdefer self.tmp.cleanup();
-        try self.tmp.dir.writeFile(t.io, .{ .sub_path = "init.js", .data = source });
-        self.init_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/init.js", .{self.tmp.sub_path});
+        try self.tmp.dir.writeFile(t.io, .{ .sub_path = name, .data = source });
+        self.init_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.tmp.sub_path, name });
         errdefer t.allocator.free(self.init_path);
         self.rt = try m.Runtime.create(t.allocator, .{});
         errdefer self.rt.destroy();
@@ -34,6 +40,7 @@ const Fixture = struct {
             .env = &.{ .{ .name = "HOME", .value = "/home/test" }, .{ .name = "PATH", .value = "/bin" } },
             .fs = if (grant_fs) .{ .root = self.tmp.dir } else null,
             .modules = modules,
+            .transformers = transformers,
         });
         errdefer self.host.destroy();
         self.scope = try self.rt.createScope(self.host.initOptions());
@@ -206,6 +213,55 @@ test "api: child scopes with import map, sync and async loaders and preload valu
     try check(fx.rt.scopes.items[1], "seen === 42");
     try check(fx.rt.scopes.items[2], "seen === 42");
     try check(fx.scope, "failed === 'ModuleError' && closed === 7");
+}
+
+test "typescript: child scopes get only the transformers the init passes" {
+    if (!m.Api.oxc.enabled) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { typescript } from 'origine:@std/typescript';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const ts = typescript();
+        \\  const sources = id => id === 'app:/main.ts' ? "import { n } from 'dep'; const x: number = n + 1; globalThis.seen = x;" : 'export const n: number = 41;';
+        \\  const spec = { main: 'app:/main.ts', importMap: { imports: { dep: 'app:/dep.ts' } } };
+        \\  // 1: a host transformer with a synchronous loader; 2: the same with an asynchronous one.
+        \\  await (await api.scope.create({ ...spec, loader: sources, transformers: { '.ts': ts } })).run();
+        \\  await (await api.scope.create({ ...spec, loader: async id => sources(id), transformers: { '.ts': ts } })).run();
+        \\  // 3: a guest function as transformer (parent realm, synchronous).
+        \\  const ids = [];
+        \\  await (await api.scope.create({ main: 'app:/note.txt', loader: () => 'hello', transformers: { '.txt': (source, id) => { ids.push(id); return 'globalThis.seen = ' + JSON.stringify(source.toUpperCase()); } } })).run();
+        \\  out.ids = ids.join(',');
+        \\  // Failures reach the importer as a ModuleError whose message holds the diagnostics.
+        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: () => 'const x: number = ;', transformers: { '.ts': ts } })).run().catch(e => { out.hostError = e.message; });
+        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: async () => 'const x: number = ;', transformers: { '.ts': ts } })).run().catch(e => { out.asyncError = e.message; });
+        \\  await (await api.scope.create({ main: 'app:/x.txt', loader: () => 'x', transformers: { '.txt': () => { throw new Error('boom'); } } })).run().catch(e => { out.jsError = e.message; });
+        \\  // Without a map the TypeScript source reaches V8 as it is.
+        \\  await (await api.scope.create({ main: 'app:/plain.ts', loader: () => 'const x: number = 1;' })).run().catch(e => { out.plain = e.message; });
+        \\  // Malformed maps are rejected: bad extension syntax, non-functions, no loader.
+        \\  const rejects = options => api.scope.create({ main: 'app:/m.ts', ...options }).then(() => false, () => true);
+        \\  out.rejected = [
+        \\    await rejects({ loader: () => '', transformers: { ts } }),
+        \\    await rejects({ loader: () => '', transformers: { '.a/b': ts } }),
+        \\    await rejects({ loader: () => '', transformers: { '.': ts } }),
+        \\    await rejects({ loader: () => '', transformers: { '.ts': 1 } }),
+        \\    await rejects({ transformers: { '.ts': ts } }),
+        \\    await rejects({ loader: () => '', transformers: 'nope' }),
+        \\  ].join(',');
+        \\  // A host transformer is also a plain function (source, id) => string.
+        \\  out.direct = ts('const a: number = 1; export { a }', 'x.ts').includes('const a = 1');
+        \\  out.options = typeof typescript({ jsx: 'classic', pragma: 'h' }) === 'function' && (() => { try { typescript({ jsx: 'bogus' }); return false; } catch (e) { return e instanceof TypeError; } })();
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.rt.scopes.items[1], "seen === 42");
+    try check(fx.rt.scopes.items[2], "seen === 42");
+    try check(fx.rt.scopes.items[3], "seen === 'HELLO'");
+    try check(fx.scope, "report.ids === 'app:/note.txt'");
+    try check(fx.scope, "report.hostError.includes('app:/bad.ts:1:') && report.asyncError.includes('app:/bad.ts:1:')");
+    try check(fx.scope, "report.jsError.includes('boom') && report.plain.includes('SyntaxError') ");
+    try check(fx.scope, "report.rejected === 'true,true,true,true,true,true' && report.direct && report.options");
 }
 
 test "api: child scopes inherit no authority and no scope capability" {
@@ -665,6 +721,78 @@ test "binding: func options pick side effect, fast path and constructor behavior
     );
     // Constructor behavior: throws by default, allowed on request.
     try check(scope, "(() => { try { new native.plain(1, 2); return false } catch (e) { return e instanceof TypeError } })() && typeof new native.ctor(1, 2) === 'object'");
+}
+
+test "transformer registry: longest suffix, query and fragment stripped, case-sensitive" {
+    const T = m.Api.transformer;
+    const nop = struct {
+        fn run(_: ?*anyopaque, request: T.Request) anyerror!T.Outcome {
+            return .{ .source = request.source };
+        }
+    }.run;
+    var one: u8 = 1;
+    var two: u8 = 2;
+    const registry: T.Registry = .{ .entries = &.{
+        .{ .ext = ".ts", .transformer = .{ .data = &one, .run = nop } },
+        .{ .ext = ".d.ts", .transformer = .{ .data = &two, .run = nop } },
+    } };
+    try t.expectEqual(@as(?*anyopaque, &one), registry.find("a/b.ts").?.data);
+    try t.expectEqual(@as(?*anyopaque, &one), registry.find("b.ts?v=1#x").?.data);
+    try t.expectEqual(@as(?*anyopaque, &two), registry.find("types.d.ts").?.data);
+    try t.expect(registry.find("b.TS") == null);
+    try t.expect(registry.find("b.js") == null);
+    try t.expect(registry.find(".ts") == null);
+    try t.expect(registry.find("ts") == null);
+    try t.expect((T.Registry{}).find("a.ts") == null);
+}
+
+test "typescript: .ts and .tsx imports are transformed by extension" {
+    if (!m.Api.oxc.enabled) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    try fx.setupFull("init.ts",
+        \\import { sum, Color } from './lib.ts';
+        \\import { make } from './view.tsx';
+        \\interface Shape { kind: string }
+        \\namespace Space { export const value: number = 7 }
+        \\class Point { constructor(public x: number, private y: number) {} total(): number { return this.x + this.y } }
+        \\export async function main(): Promise<void> {
+        \\  const shape: Shape = { kind: 'k' };
+        \\  globalThis.report = { sum: sum(1, 2), color: Color[Color.Green], space: Space.value, kind: shape.kind, point: new Point(3, 4).total(), view: JSON.stringify(make()) };
+        \\}
+    , false, &.{}, &m.Api.std_modules, m.Api.transformers.defaults);
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "lib.ts", .data = "export enum Color { Red, Green }\nexport const sum = (a: number, b: number): number => a + b;\n" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "view.tsx", .data = "/** @jsxRuntime classic */\n/** @jsx h */\nconst h = (tag: string, props: Record<string, string> | null) => ({ tag, props });\nexport const make = () => <div id=\"a\" />;\n" });
+    try fx.run();
+    try check(fx.scope, "report.sum === 3 && report.color === 'Green' && report.space === 7 && report.kind === 'k' && report.point === 7");
+    try check(fx.scope, "report.view === '{\"tag\":\"div\",\"props\":{\"id\":\"a\"}}'");
+}
+
+test "typescript: syntax errors carry file:line:col and an empty map leaves .ts alone" {
+    if (!m.Api.oxc.enabled) return error.SkipZigTest;
+    var bad: Fixture = undefined;
+    try bad.setupFull("init.ts", "export function main() {\n  const x: number = ;\n}\n", false, &.{}, &m.Api.std_modules, m.Api.transformers.defaults);
+    defer bad.deinit();
+    var error_info: m.ErrorInfo = .{};
+    defer error_info.deinit();
+    try t.expectError(error.InitFailed, bad.host.run(bad.scope, support.engine.platform, bad.init_path, &error_info));
+    {
+        var session: m.Scope.Session = undefined;
+        session.init(bad.scope);
+        defer session.deinit();
+        const exception = error_info.exception.?.deref();
+        const stack = exception.toObject(session.ctx).?.get(session.ctx, v8.String.initUtf8(session.isolate(), "stack").name.primitive.value).?;
+        var buffer: [512]u8 = undefined;
+        const length = stack.toString(session.ctx).?.writeUtf8(session.isolate(), &buffer);
+        try t.expect(std.mem.indexOf(u8, buffer[0..length], "init.ts:2:21: error:") != null);
+    }
+    var off: Fixture = undefined;
+    try off.setupFull("init.ts", "export function main(): void {}\n", false, &.{}, &m.Api.std_modules, &.{});
+    defer off.deinit();
+    var off_info: m.ErrorInfo = .{};
+    defer off_info.deinit();
+    // Without a transformer the type annotation reaches V8 as plain JavaScript.
+    try t.expectError(error.InitFailed, off.host.run(off.scope, support.engine.platform, off.init_path, &off_info));
 }
 
 test "errno: binding errors map strictly, fs errors by name" {

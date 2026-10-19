@@ -15,6 +15,16 @@ pub fn build(b: *std.Build) void {
     const clang_bin = b.option([]const u8, "v8_clang_dir", "Matching V8 LLVM bin directory") orelse "";
     const cache_root = b.option([]const u8, "cache_root", "V8 checkout and toolchain cache") orelse
         (b.root.joinString(b.allocator, "lib/v8_zig/.lp-cache") catch @panic("OOM"));
+    // The Rust staticlib (rust/) is part of the core and always built; `typescript` only selects
+    // whether the oxc transformer is compiled into it.
+    const typescript = b.option(bool, "typescript", "Include the oxc TypeScript/JSX transformer in the Rust library (default true)") orelse true;
+    const cargo_offline = b.option(bool, "cargo-offline", "Run cargo with --offline") orelse false;
+    const rust_lib: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, typescript, external_link);
+    // Zig-linked programs (debug, tests) resolve duplicate Rust runtime symbols on their own and
+    // would break on a pre-linked object (thread-locals), so they take the plain archive.
+    const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, typescript, false);
+    const config = b.addOptions();
+    config.addOption(bool, "typescript", typescript);
     const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
     const v8 = v8Dependency(b, options, !external_link);
     const root = b.createModule(.{
@@ -27,7 +37,7 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "@v8", "@util", "@diagnostics" }) |name| {
         root.addImport(name, v8.module(name));
     }
-    const modules = hostModules(b, v8, target, optimize);
+    const modules = hostModules(b, v8, target, optimize, config);
     root.addImport("@managed", modules.managed);
     root.addImport("@engine", modules.engine);
 
@@ -49,14 +59,14 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "@v8", "@util", "@diagnostics" }) |name| tool_module.addImport(name, v8.module(name));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg(tool);
         const blob = generate.addOutputFileArg("engine.snapshot");
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -72,7 +82,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the V8 package tests and the managed runtime tests");
     test_step.dependOn(&test_v8.builder.top_level_steps.get("test").?.step);
 
-    const test_modules = hostModules(b, test_v8, target, optimize);
+    const test_modules = hostModules(b, test_v8, target, optimize, config);
     const test_root = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
@@ -83,6 +93,7 @@ pub fn build(b: *std.Build) void {
     }
     test_root.addImport("@managed", test_modules.managed);
     test_root.addImport("@engine", test_modules.engine);
+    if (rust_archive) |lib| test_root.addObjectFile(lib);
     const tests = b.addTest(.{ .root_module = test_root });
     if (optimize != .debug) {
         tests.use_llvm = true;
@@ -126,20 +137,75 @@ const HostModules = struct { engine: *std.Build.Module, managed: *std.Build.Modu
 
 /// Borrows b and dependency through build teardown; returns build-owned modules importing the
 /// dependency's @v8 and @diagnostics. Retains no runtime state.
-fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) HostModules {
+fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, config: *std.Build.Step.Options) HostModules {
     const engine = b.createModule(.{ .root_source_file = b.path("src/engine.zig"), .target = target, .optimize = optimize });
     const managed = b.createModule(.{ .root_source_file = b.path("src/managed.zig"), .target = target, .optimize = optimize });
     for ([_]*std.Build.Module{ engine, managed }) |module| {
         module.addImport("@v8", dependency.module("@v8"));
         module.addImport("@diagnostics", dependency.module("@diagnostics"));
     }
+    managed.addOptions("origine_config", config);
     return .{ .engine = engine, .managed = managed };
+}
+
+/// Builds the Rust workspace in rust/ with cargo and returns the linkable result (see below),
+/// a cache file so consumers depend on its content. Borrows b through build
+/// teardown. Cargo keeps its own incremental state in rust/target (gitignored), so the step
+/// always runs and is cheap when nothing changed. Unsupported targets are a build error.
+fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, typescript: bool, hide_symbols: bool) std.Build.LazyPath {
+    const result = target.result;
+    const arch = switch (result.cpu.arch) {
+        .aarch64 => "aarch64",
+        .x86_64 => "x86_64",
+        else => std.debug.panic("No Rust target for {s}", .{@tagName(result.cpu.arch)}),
+    };
+    const triple = switch (result.os.tag) {
+        .macos => b.fmt("{s}-apple-darwin", .{arch}),
+        .linux => b.fmt("{s}-unknown-linux-{s}", .{ arch, if (result.abi.isMusl()) "musl" else "gnu" }),
+        .windows => b.fmt("{s}-pc-windows-{s}", .{ arch, if (result.abi == .msvc) "msvc" else "gnu" }),
+        else => std.debug.panic("No Rust target for {s}", .{@tagName(result.os.tag)}),
+    };
+    const cargo = b.addSystemCommand(&.{ "cargo", "build", "--release", "--locked", "--target", triple });
+    if (offline) cargo.addArg("--offline");
+    if (!typescript) cargo.addArg("--no-default-features");
+    cargo.addArgs(&.{ "--manifest-path", (b.root.joinString(b.allocator, "rust/Cargo.toml") catch @panic("OOM")), "--target-dir", (b.root.joinString(b.allocator, "rust/target") catch @panic("OOM")) });
+    cargo.has_side_effects = true;
+    const file_name = if (result.os.tag == .windows and result.abi == .msvc) "origine_native.lib" else "liborigine_native.a";
+    const built = b.path(b.fmt("rust/target/{s}/release/{s}", .{ triple, file_name }));
+    const copy = b.addWriteFiles();
+    copy.step.dependOn(&cargo.step);
+    const archive = copy.addCopyFile(built, file_name);
+    // The archive carries its own copy of Rust's std, which defines symbols (rust_eh_personality,
+    // ...) that V8's bundled Rust code defines too. Pre-link the whole archive into one object
+    // that exports only the `origine_*` C API; everything else becomes local to it, so the
+    // final link sees no duplicates. Windows links the archive as it is.
+    if (!hide_symbols) return archive;
+    switch (result.os.tag) {
+        .macos => {
+            const partial = b.addSystemCommand(&.{ "/usr/bin/clang", "-arch", if (result.cpu.arch == .aarch64) "arm64" else "x86_64", "-r", "-nostdlib" });
+            partial.addPrefixedFileArg("-Wl,-exported_symbols_list,", b.path("rust/exports.macos.txt"));
+            partial.addArg("-Wl,-all_load");
+            partial.addFileArg(archive);
+            partial.addArg("-o");
+            return partial.addOutputFileArg("origine_native.o");
+        },
+        .linux => {
+            const merge = b.addSystemCommand(&.{ "ld", "-r", "--whole-archive" });
+            merge.addFileArg(archive);
+            merge.addArg("-o");
+            const merged = merge.addOutputFileArg("origine_native_all.o");
+            const localize = b.addSystemCommand(&.{ "objcopy", "--wildcard", "--keep-global-symbol=origine_*" });
+            localize.addFileArg(merged);
+            return localize.addOutputFileArg("origine_native.o");
+        },
+        else => return archive,
+    }
 }
 
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         const link = b.addSystemCommand(&.{"/usr/bin/clang++"});
@@ -151,9 +217,11 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         link.addArtifactArg(object);
         link.addFileArg(v8.namedLazyPath("v8"));
         link.addArtifactArg(v8.artifact("mimalloc"));
+        if (rust_lib) |lib| link.addFileArg(lib);
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
     }
+    if (rust_lib) |lib| module.addObjectFile(lib);
     const exe = b.addExecutable(.{ .name = name, .root_module = module });
     if (optimize != .debug) {
         exe.use_llvm = true;

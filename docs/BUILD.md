@@ -11,6 +11,9 @@
   pkg.lightpanda.io for the first build. No credentials are needed.
 - macOS: Xcode or Command Line Tools. GN picks the SDK from `xcode-select` /
   `DEVELOPER_DIR`; do not pass an absolute `-Dmac_sdk_path`.
+- Rust (rustup; `rust/rust-toolchain.toml` pins the toolchain). Rust is part of the core;
+  the first build fetches its crates (oxc today) from crates.io. Build without network with
+  `-Dcargo-offline`.
 - Optional: [just](https://github.com/casey/just) for the shortcuts below.
 
 The first build downloads depot_tools and V8 15.2.124.1 into `lib/v8_zig/.lp-cache/`
@@ -97,6 +100,8 @@ Pass these to `zig build` at the root unless noted.
 | `-Dprebuilt_v8_path=/abs/libv8_zig.a` | Skip building V8 and link an existing archive |
 | `-Dcache_root=<dir>` | V8 / depot_tools checkout cache (default `lib/v8_zig/.lp-cache`) |
 | `-Dv8_clang_dir=<llvm/bin>` | Override the matching LLVM toolchain |
+| `-Dtypescript=false` | Build the Rust library without the oxc transformer (no `.ts/.tsx/.jsx` support; default true) |
+| `-Dcargo-offline` | Pass `--offline` to cargo |
 
 `lib/v8_zig` additionally accepts `-Dthin_lto`, `-Dexclude_unwind_tables`,
 `-Dtemporal`, `-Dsymbol_level`, `-Dis_asan`, `-Dis_tsan`, `-Dv8_enable_sandbox`,
@@ -135,3 +140,48 @@ Run package-specific steps from `lib/v8_zig`. `lib/v8_zig` has its own `justfile
   longer use to reclaim disk space; they are rebuilt on demand.
 - If a checkout was modified outside the patch tooling and a revert fails, reset the
   checkout to pristine upstream and delete its `.zig-patches/` directory.
+
+## Rust and TypeScript support
+
+All Rust code lives in one Cargo workspace, `rust/`. The root package `origine_native`
+builds a single `staticlib` (ThinLTO, `opt-level = "z"`, with the hot crates at `opt-level = 3`, see `[profile.release.package.*]`) that re-exports the member crates
+(`rust/crates/origine_oxc` today). `zig build` runs cargo and links the archive into
+`origine`; there is no shared library to ship.
+
+Symbol collisions: the archive embeds Rust's std, and V8's archive embeds Chromium's.
+Both define `rust_eh_personality` and friends. In macOS non-debug builds (V8's `ld64.lld`
+external link) `build.zig` first runs `clang -r -exported_symbols_list rust/exports.macos.txt`
+so only `_origine_*` stays global. Debug builds and tests link the plain archive (a
+pre-linked object breaks Mach-O thread-locals there). Linux has an `ld -r` + `objcopy`
+equivalent in `build.zig` that is not exercised yet.
+
+### Size overhead (macOS arm64, `-Doptimize=small`)
+
+Rust is always linked; `-Dtypescript=false` only leaves oxc out of it.
+
+| Measurement | Bytes |
+| --- | --- |
+| `origine`, all `z` (first measurement), `-Dtypescript=false` / TypeScript | 34,859,008 (no Rust linked) / 36,560,448 |
+| `origine`, hot crates at O3, `-Dtypescript=false` (Rust runtime only) | 35,158,048 |
+| `origine`, hot crates at O3, TypeScript | 37,477,888 (+2,319,840 over the Rust-only build) |
+
+The O3 crates (parser, semantic, transformer, traverse, codegen, AST, allocator, memchr, ...)
+cost about 0.6 MB over the all-`z` build; move a crate out of
+`[profile.release.package.*]` in `rust/Cargo.toml` to trade speed back for size.
+
+Rust object before final dead-stripping (pre-linked, `_origine_*` exported only):
+
+| Profile | Object bytes | gzip -9 |
+| --- | --- | --- |
+| ThinLTO, z, cgu 16 (default) | 5,201,864 | 1,231,109 |
+| ThinLTO, s | 4,966,528 | 1,241,668 |
+| ThinLTO, z, cgu 1 | 4,563,344 | 1,124,319 |
+| ThinLTO, z, `panic=abort` | 4,891,256 | 1,159,934 |
+| fat LTO, z | 4,034,832 | 1,102,359 |
+| ThinLTO, opt-level 3 | 5,062,880 | 1,443,630 |
+| ThinLTO, z with hot crates at 3 (current) | 5,011,824 | 1,397,714 |
+
+`panic = "unwind"` is kept so a parser bug becomes an error result instead of aborting
+the shell. Fat LTO or `codegen-units = 1` would save roughly 10-20% of the object at a
+cost in build time; the final executable delta is smaller than the object because the
+linker strips unused code.

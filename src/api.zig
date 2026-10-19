@@ -22,3 +22,6 @@ pub const std_io_id = @import("api/std_io.zig").id;
 pub const std_io_source = @import("api/std_io.zig").source;
 pub const std_modules = @import("api/init_loader.zig").std_modules;
 pub const module = @import("api/module.zig");
+pub const transformer = @import("api/transformer.zig");
+pub const oxc = @import("api/oxc.zig");
+pub const transformers = @import("api/transformers.zig");

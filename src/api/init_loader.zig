@@ -4,6 +4,7 @@ const std = @import("std");
 const module_types = @import("../managed/module_types.zig");
 const binding = @import("binding.zig");
 const origine_modules = @import("origine_modules.zig");
+const transformer_api = @import("transformer.zig");
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
@@ -43,7 +44,11 @@ pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!modul
     // never take such an id (and so never receives the natives `meta` hands to std modules).
     if (std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) return error.FileNotFound;
     const source = try std.Io.Dir.cwd().readFileAlloc(host.io, request.module_id, request.allocator, .unlimited);
-    return .{ .source = source };
+    const outcome = try host.transformers.apply(.{ .allocator = request.allocator, .module_id = request.module_id, .source = source });
+    return switch (outcome) {
+        .source => |text| .{ .source = text },
+        .diagnostics => |text| .{ .exception = transformer_api.syntaxError(text) },
+    };
 }
 
 /// Fills `import.meta.native` for the embedded modules that declare `bindings`; every

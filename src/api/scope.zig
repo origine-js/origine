@@ -50,12 +50,14 @@ comptime {
     errno.requireBinding(close);
 }
 
-/// `create(main, importMapJson?, loader?)`: returns the child id.
-pub fn create(state: *ScopeState, main: []const u8, map_json: ?[]const u8, loader_fn: ?v8.Function) Error!u32 {
-    return createImpl(state, main, map_json, loader_fn) catch |err| return errno.narrow(err);
+/// `create(main, importMapJson?, loader?, transformers?)`: returns the child id.
+/// `transformers` is the flat array `[ext, transformer, ext, ...]` (see `JsLoader.setTransformers`)
+/// and needs a `loader`.
+pub fn create(state: *ScopeState, main: []const u8, map_json: ?[]const u8, loader_fn: ?v8.Function, transformers: ?v8.Object) Error!u32 {
+    return createImpl(state, main, map_json, loader_fn, transformers) catch |err| return errno.narrow(err);
 }
 
-fn createImpl(state: *ScopeState, main: []const u8, map_json: ?[]const u8, loader_fn: ?v8.Function) !u32 {
+fn createImpl(state: *ScopeState, main: []const u8, map_json: ?[]const u8, loader_fn: ?v8.Function, transformers: ?v8.Object) !u32 {
     const host = state.host;
     const alloc = host.allocator;
     if (host.in_loader) return error.Unsupported;
@@ -77,6 +79,11 @@ fn createImpl(state: *ScopeState, main: []const u8, map_json: ?[]const u8, loade
         loader = try alloc.create(JsLoader);
         loader.?.* = .{ .host = host, .parent = state.scope, .function = .new(v8.Isolate.getCurrent(), function) };
         options.loader = loader.?.loader();
+    }
+    if (transformers) |list| {
+        const made = loader orelse return error.InvalidPath;
+        const isolate = v8.Isolate.getCurrent();
+        try made.setTransformers(isolate.getCurrentContext(), isolate, list);
     }
     try host.children.ensureUnusedCapacity(alloc, 1);
     try host.loaders.ensureUnusedCapacity(alloc, 1);

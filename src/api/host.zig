@@ -20,6 +20,8 @@ const scope_api = @import("scope.zig");
 const init_loader = @import("init_loader.zig");
 const origine_modules = @import("origine_modules.zig");
 const module_api = @import("module.zig");
+const transformer_api = @import("transformer.zig");
+const transformers = @import("transformers.zig");
 const JsLoader = @import("js_loader.zig").JsLoader;
 const Runtime = @import("../managed/runtime.zig").Runtime;
 const Scope = @import("../managed/scope.zig").Scope;
@@ -42,6 +44,10 @@ pub const Config = struct {
     /// Embedded `origine:` modules the init scope serves. Static storage, borrowed until
     /// `destroy`. Tests substitute their own to exercise module-owned state.
     modules: []const module_api.Module = &origine_modules.all,
+    /// Extension-to-transformer map the init scope applies to the sources it loads (TypeScript
+    /// and JSX by default; an empty slice disables transformation). Static storage, borrowed
+    /// until `destroy`.
+    transformers: []const transformer_api.Entry = transformers.defaults,
 };
 
 /// Per-scope native state. The guest's errno array lives in sandbox memory (V8 refuses
@@ -90,6 +96,7 @@ pub const Host = struct {
     env: []const env_api.Pair,
     fs: ?FsConfig,
     modules: []const module_api.Module,
+    transformers: transformer_api.Registry,
     grants: std.ArrayList(*fs_api.FsGrant) = .empty,
     states: std.ArrayList(*ScopeState) = .empty,
     children: std.ArrayList(scope_api.Child) = .empty,
@@ -104,7 +111,7 @@ pub const Host = struct {
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
     pub fn create(allocator: std.mem.Allocator, config: Config) !*Host {
         const host = try allocator.create(Host);
-        host.* = .{ .allocator = allocator, .io = config.io, .args = config.args, .env = config.env, .fs = config.fs, .modules = config.modules };
+        host.* = .{ .allocator = allocator, .io = config.io, .args = config.args, .env = config.env, .fs = config.fs, .modules = config.modules, .transformers = .{ .entries = config.transformers } };
         return host;
     }
 

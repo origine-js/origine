@@ -15,6 +15,6 @@ import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 `decodeUtf8` returning `undefined` is the contract: callers choose the error
 (`fs.read_to_string` fails with `IoError.InvalidData`).
 
-The exports call native versions ([std_text.zig](../../api/std_text.zig)) that the host
+The exports call native versions ([std/text.zig](../../api/std/text.zig)) that the host
 hands the module through `import.meta.native`; `utf8Js` is the plain JS implementation
 (also the fallback when the natives are absent).

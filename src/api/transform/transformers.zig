@@ -2,8 +2,8 @@
 //! `transform_*.zig` with an `entries` array and concatenating it here.
 const transformer = @import("transformer.zig");
 const oxc = @import("oxc.zig");
-const transform_ts = @import("transform_ts.zig");
-const transform_jsx = @import("transform_jsx.zig");
+const transform_ts = @import("ts.zig");
+const transform_jsx = @import("jsx.zig");
 
 const all = transform_ts.entries ++ transform_jsx.entries;
 

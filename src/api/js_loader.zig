@@ -10,8 +10,8 @@ const Scope = @import("../managed/scope.zig").Scope;
 const module_types = @import("../managed/module_types.zig");
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
-const transformer = @import("transformer.zig");
-const transform_handle = @import("transform_handle.zig");
+const transformer = @import("transform/transformer.zig");
+const transform_handle = @import("transform/handle.zig");
 
 /// A guest-written transformer `(source, id) => string | { source }`, run in the parent realm.
 const JsTransformer = struct {

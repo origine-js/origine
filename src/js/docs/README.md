@@ -2,7 +2,7 @@
 
 Importable only from the **init context** (see [docs/api-design.md](../../../docs/api-design.md)).
 They are plain JS embedded into the binary and served by
-[origine_modules.zig](../../api/origine_modules.zig) (one `std_*.zig` per module); the implementation of each module
+[modules.zig](../../api/std/modules.zig) (one file per module under `src/api/std/`); the implementation of each module
 sits one directory up.
 
 | Module | Source | Doc | What it is |

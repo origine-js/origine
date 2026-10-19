@@ -2,7 +2,7 @@
 //! the natives its host hands it, with state of the module's own.
 //!
 //! Each `std_*.zig` returns its modules from a `modules()` function and
-//! `origine_modules.zig` concatenates them. A module's natives come in two flavours:
+//! `std/modules.zig` concatenates them. A module's natives come in two flavours:
 //!
 //! - `stateless(table)`: natives take the scope's `*ScopeState` (errno cell, host).
 //! - `stateful(S, table)`: the module owns one `S` per scope, created the first time the

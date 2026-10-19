@@ -249,9 +249,9 @@ export function makeNodeFs(fs, Dir) {
 | Narrowing | none | JS wrapper narrowing on the `api.*` function maps; optional native `Grant` intersect check; byte limits as `std.Io.Limit` |
 | Entry | `src/main.zig` evals a file | Read init file, snapshot, call `main`; default CLI grants `api` per flags |
 
-Embedded modules are `Module { id, source, bindings }` values (`src/api/module.zig`), one `std_*.zig` each, joined in `origine_modules.zig`. `bindings` is `stateless(table)` (natives bound to the scope state) or `stateful(S, table)` (one `S` per scope, created on the module's first `import.meta` read, `init`/`deinit` optional, torn down by `Host.destroy`); `Config.modules` replaces the table, which is how tests add their own.
+Embedded modules are `Module { id, source, bindings }` values (`src/api/module.zig`), one file each under `std/`, joined in `std/modules.zig`. `bindings` is `stateless(table)` (natives bound to the scope state) or `stateful(S, table)` (one `S` per scope, created on the module's first `import.meta` read, `init`/`deinit` optional, torn down by `Host.destroy`); `Config.modules` replaces the table, which is how tests add their own.
 
-Layout (as built): `src/api/{host,fs,env,scope,js_loader,init_loader,errno,call,binding,module,origine_modules,std_io,std_errno,std_quansync,std_fs,std_text}.zig`, `src/js/{api,std_io,std_fs,std_text,quansync,bootstrap}.js`, tests in `src/tests/managed/api.zig`.
+Layout (as built): `src/api/{host,fs,env,scope,js_loader,init_loader,errno,call,binding,module}.zig`, `src/api/std/{modules,io,errno,quansync,fs,text,transformer/typescript}.zig`, `src/api/transform/{transformer,transformers,ts,jsx,handle,oxc}.zig`, `src/js/{api,std_io,std_fs,std_text,quansync,bootstrap}.js`, tests in `src/tests/managed/api.zig`.
 
 ## 9. Phased delivery
 

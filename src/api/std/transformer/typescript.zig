@@ -4,14 +4,14 @@
 //! directly. Instances live in the module's per-scope state until `Host.destroy`.
 const std = @import("std");
 const v8 = @import("@v8");
-const binding = @import("binding.zig");
+const binding = @import("../../binding.zig");
 const Call = binding.Call;
 const func = binding.func;
-const module = @import("module.zig");
-const ScopeState = @import("host.zig").ScopeState;
-const oxc = @import("oxc.zig");
-const transformer = @import("transformer.zig");
-const transform_handle = @import("transform_handle.zig");
+const module = @import("../../module.zig");
+const ScopeState = @import("../../host.zig").ScopeState;
+const oxc = @import("../../transform/oxc.zig");
+const transformer = @import("../../transform/transformer.zig");
+const transform_handle = @import("../../transform/handle.zig");
 
 /// One transformer: the options it was made with (strings owned) and the `Transformer` handle
 /// the host runs. Native state of the function `make` returns.
@@ -136,7 +136,7 @@ pub fn modules() [if (oxc.enabled) 1 else 0]module.Module {
     if (!oxc.enabled) return .{};
     return .{.{
         .id = "origine:@std/transformer/typescript",
-        .source = @embedFile("../js/std_transformer_typescript.js"),
+        .source = @embedFile("../../../js/std_transformer_typescript.js"),
         .bindings = module.stateful(Factory, .{ .make = func(make, .{ .side_effect = .any }) }),
     }};
 }

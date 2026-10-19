@@ -2,10 +2,10 @@
 //! they reach this module alone, as `import.meta.native`, which it captures and deletes.
 const std = @import("std");
 const v8 = @import("@v8");
-const binding = @import("binding.zig");
+const binding = @import("../binding.zig");
 const Call = binding.Call;
-const module = @import("module.zig");
-const ScopeState = @import("host.zig").ScopeState;
+const module = @import("../module.zig");
+const ScopeState = @import("../host.zig").ScopeState;
 const simdutf = v8.simdutf;
 
 pub fn modules() [1]module.Module {
@@ -38,7 +38,7 @@ pub fn modules() [1]module.Module {
     };
     return .{.{
         .id = "origine:@std/text",
-        .source = @embedFile("../js/std_text.js"),
+        .source = @embedFile("../../js/std_text.js"),
         .bindings = module.stateless(.{
             .encode = binding.func(natives.encode, .{ .side_effect = .none }),
             .decode = binding.func(natives.decode, .{ .side_effect = .none }),

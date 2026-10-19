@@ -1,8 +1,22 @@
-// `@engine/std/text`: UTF-8 encoding and decoding. The hardened context has no
-// TextEncoder/TextDecoder, so this is plain JS; fs helpers use it for strings.
+// `origine:@std/text`: UTF-8 encoding and decoding. The hardened context has no
+// TextEncoder/TextDecoder; fs helpers use these for strings. The host hands this module
+// native versions (V8 string conversion and simdutf) through `import.meta.native`, which
+// only the embedded `origine:` modules get. They are captured here and deleted from `import.meta`,
+// never exported, and only reachable through the wrappers below. `utf8Js` is the plain
+// JS implementation used when they are absent, and the reference for tests and benchmarks.
+const { encode: nativeEncode, decode: nativeDecode } = import.meta.native ?? {};
 
 /// Encodes a string as UTF-8. Lone surrogates become U+FFFD, like TextEncoder.
-export function encodeUtf8(text) {
+export const encodeUtf8 = nativeEncode === undefined ? encodeJs : text => typeof text === 'string' ? nativeEncode(text) : encodeJs(text);
+
+/// Decodes UTF-8 bytes to a string, or returns `undefined` when the bytes are not
+/// valid UTF-8 (overlong forms, surrogates, > U+10FFFF and truncation included).
+export const decodeUtf8 = nativeDecode === undefined ? decodeJs : bytes => bytes instanceof Uint8Array ? nativeDecode(bytes) : decodeJs(bytes);
+
+/// The JS implementations, whether or not natives are installed.
+export const utf8Js = Object.freeze({ encode: encodeJs, decode: decodeJs });
+
+function encodeJs(text) {
   const length = text.length;
   let size = 0;
   for (let i = 0; i < length; i++) {
@@ -38,9 +52,7 @@ export function encodeUtf8(text) {
 
 const CHUNK = 8192;
 
-/// Decodes UTF-8 bytes to a string, or returns `undefined` when the bytes are not
-/// valid UTF-8 (overlong forms, surrogates, > U+10FFFF and truncation included).
-export function decodeUtf8(bytes) {
+function decodeJs(bytes) {
   const length = bytes.length;
   let result = '';
   let units = [];

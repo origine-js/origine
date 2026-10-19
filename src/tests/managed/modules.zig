@@ -50,6 +50,35 @@ test "managed step 4: native ESM graphs, cycles, TLA and defining scope" {
     }
 }
 
+test "managed: the origine: namespace needs enable_origine_namespace" {
+    ensureV8();
+    var memory: Memory = .{};
+    const rt = try m.Runtime.create(t.allocator, .{});
+    defer rt.destroy();
+    var enabled_options = memory.options();
+    enabled_options.enable_origine_namespace = true;
+    const closed = try rt.createScope(memory.options());
+    const open = try rt.createScope(enabled_options);
+    try exposeModule(open, "origine:mod", "direct");
+    try exposeModule(open, "uses-origine", "indirect");
+    try check(open, "direct.value === 7 && indirect.value === 7");
+    for ([_][]const u8{ "origine:mod", "uses-origine" }) |id| {
+        const promise = try closed.importModule(id, null);
+        defer promise.deinit();
+        rt.pump();
+        rt.isolate.enter();
+        defer rt.isolate.exit();
+        var h_scope: v8.HandleScope = undefined;
+        h_scope.init(rt.isolate);
+        defer h_scope.deinit();
+        try t.expectEqual(v8.Promise.PromiseState.Rejected, promise.deref().state());
+    }
+    // Dynamic import is gated too.
+    try check(closed, "globalThis.gated = 0; import('origine:mod').catch(() => { gated = 1 }); true");
+    rt.pump();
+    try check(closed, "gated === 1");
+}
+
 test "managed step 5: deferred backend, deduplication, cycles and stale tokens" {
     ensureV8();
     var backend: Deferred = .{};

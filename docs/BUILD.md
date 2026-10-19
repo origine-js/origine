@@ -14,7 +14,8 @@
 - Optional: [just](https://github.com/casey/just) for the shortcuts below.
 
 The first build downloads depot_tools and V8 15.2.124.1 into `lib/v8_zig/.lp-cache/`
-and compiles V8: expect 20+ minutes. Later builds are incremental.
+and compiles V8: expect 20+ minutes. Later builds reuse that V8 archive; rebuild it
+with `zig build build-v8` after changing V8 or its patches.
 
 ## Everyday commands
 
@@ -42,24 +43,27 @@ objects, cached.
 We patch the V8 Engine (e.g. V8, ICU, and PartitionAlloc)
 
 Patches are applied by ordered series in
-`lib/v8_zig/build-tools/patches/{v8,icu,partition_alloc}/`. Every `zig build`:
+`lib/v8_zig/build-tools/patches/{v8,icu,partition_alloc}/`. The first `zig build`, and every
+`zig build build-v8` (plain builds otherwise reuse the last archive), does:
 
 1. fetches V8 if missing,
 2. syncs each checkout with its series (`scripts/apply-patches.sh`): only the first changed
    patch and those after it are reverted and reapplied,
 3. runs `gn` and incremental `ninja`.
 
-Nothing is copied or installed by hand: edit or add a patch and run `zig build`. A patch
-that no longer applies stops the build and names the file. The V8 series currently
+Nothing is copied or installed by hand: edit or add a patch and run
+`zig build build-v8`. A patch that no longer applies stops the build and names the file. The V8 series currently
 removes `Date` except `Date.now()` (Temporal replaces it), hardens the intrinsics, and
 routes allocations through mimalloc; see `lib/v8_zig/build-tools/README.md`.
 
 ## Working on V8: debug V8
 
-While changing V8 or its patches, use a debug V8 for quick incremental compiles:
+While changing V8 or its patches, use a debug V8 for quick incremental compiles. Plain
+builds do not re-run ninja, so rebuild V8 explicitly after each change:
 
 ```sh
-zig build run -Dv8_debug=true     # or: just v8-dev
+zig build build-v8 -Dv8_debug=true
+zig build run -Dv8_debug=true     # both steps: just v8-dev
 ```
 
 Debug and release V8 use separate GN output directories (`.lp-cache/v8-*/out/`), so
@@ -109,7 +113,7 @@ arguments. `-Dtemporal=false` disables Temporal, leaving no date functionality b
 | `build-shell` | root | Build and install the REPL |
 | `test` | root, `lib/v8_zig` | Library tests |
 | `patch-v8` | both | Fetch V8 and apply patches only |
-| `build-v8` | `lib/v8_zig` | Build the V8 static library |
+| `build-v8` | root, `lib/v8_zig` | Rebuild V8 (plain builds reuse the last archive) |
 | `gen`, `check-generated`, `check-bindings` | `lib/v8_zig` | Regenerate / verify bindings |
 | `test-icu-lazy` | `lib/v8_zig` | Deferred ICU loading, in a fresh process |
 

@@ -1,8 +1,8 @@
 // fs micro-benchmark: `zig build run -Doptimize=ReleaseFast -- bench/fs.js`
 // Compares the raw glue ops with the Zig-style Dir/File methods. Uses Date.now,
 // the only clock the hardened context keeps, so every case loops long enough.
-import { Dir, Limit } from '@engine/std/io';
-import { fs as rustFs } from '@engine/std/fs';
+import { Dir, Limit } from 'origine:@std/io';
+import { fs as rustFs } from 'origine:@std/fs';
 
 const bytes = n => new Uint8Array(n).fill(97);
 

@@ -7,6 +7,7 @@
 const std = @import("std");
 const v8 = @import("@v8");
 const binding = @import("binding.zig");
+const func = binding.func;
 const Call = binding.Call;
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
@@ -216,27 +217,27 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, write: bool) !v8.Ob
     try host.grants.append(alloc, grant);
     host.next_fs_id += 1;
     const ops = try call.object(FsGrant, grant, .{
-        .openFile = openFile,
-        .openDir = openDir,
-        .stat = stat,
-        .createDir = createDir,
-        .deleteFile = deleteFile,
-        .readDir = readDir,
-        .readAll = readAll,
-        .writeAll = writeAll,
-        .close = close,
-        .closeDir = closeDir,
-        .createDirPath = createDirPath,
-        .deleteDir = deleteDir,
-        .deleteTree = deleteTree,
-        .rename = rename,
-        .fileStat = fileStat,
-        .fileRead = fileRead,
-        .filePread = filePread,
-        .fileWrite = fileWrite,
-        .filePwriteAll = filePwriteAll,
-        .fileSetLength = fileSetLength,
-        .fileSync = fileSync,
+        .openFile = func(openFile, .{ .side_effect = .any }),
+        .openDir = func(openDir, .{ .side_effect = .any }),
+        .stat = func(stat, .{ .side_effect = .none }),
+        .createDir = func(createDir, .{ .side_effect = .any }),
+        .deleteFile = func(deleteFile, .{ .side_effect = .any }),
+        .readDir = func(readDir, .{ .side_effect = .none }),
+        .readAll = func(readAll, .{ .side_effect = .any }),
+        .writeAll = func(writeAll, .{ .side_effect = .any }),
+        .close = func(close, .{ .side_effect = .any }),
+        .closeDir = func(closeDir, .{ .side_effect = .any }),
+        .createDirPath = func(createDirPath, .{ .side_effect = .any }),
+        .deleteDir = func(deleteDir, .{ .side_effect = .any }),
+        .deleteTree = func(deleteTree, .{ .side_effect = .any }),
+        .rename = func(rename, .{ .side_effect = .any }),
+        .fileStat = func(fileStat, .{ .side_effect = .none }),
+        .fileRead = func(fileRead, .{ .side_effect = .any }),
+        .filePread = func(filePread, .{ .side_effect = .none }),
+        .fileWrite = func(fileWrite, .{ .side_effect = .any }),
+        .filePwriteAll = func(filePwriteAll, .{ .side_effect = .any }),
+        .fileSetLength = func(fileSetLength, .{ .side_effect = .any }),
+        .fileSync = func(fileSync, .{ .side_effect = .any }),
     });
     try call.set(ops, "id", grant.id);
     try call.set(ops, "sync", config.sync);

@@ -6,7 +6,7 @@ then go to the nearest `docs/` to the file you are reading.
 | Looking for | Go to |
 | --- | --- |
 | Native bindings: how Zig functions become JS natives, V8 fast calls | [src/api/docs/](src/api/docs/) (`fast-calls.md`) and the `//!` header of [src/api/binding.zig](src/api/binding.zig) |
-| Guest-side `@engine/std/*` modules (`io`, `fs`, `quansync`, `text`, `errno`) | [src/js/docs/](src/js/docs/README.md) |
+| Guest-side `origine:@std/*` modules (`io`, `fs`, `quansync`, `text`, `errno`) | [src/js/docs/](src/js/docs/README.md) |
 | Overall `api` design, grants, init context, scopes | [docs/api-design.md](docs/api-design.md) |
 | Building, V8 dev loop | [docs/BUILD.md](docs/BUILD.md) |
 | Shell performance notes | [docs/shell-performance.md](docs/shell-performance.md) |

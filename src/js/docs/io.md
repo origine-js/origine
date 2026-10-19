@@ -1,11 +1,11 @@
-# `@engine/std/io`
+# `origine:@std/io`
 
 Source: [std_io.js](../std_io.js). Zig-style `std.Io` vocabulary. Everything exported is
 pure data or code: **holding a `Dir` or `File` confers no authority**. The fs object behind
 the `io` you pass does the work and checks the grant.
 
 ```js
-import { Dir, File, FileKind, IoError, Limit, ops } from '@engine/std/io';
+import { Dir, File, FileKind, IoError, Limit, ops } from 'origine:@std/io';
 ```
 
 ## The `io` argument

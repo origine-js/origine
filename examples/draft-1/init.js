@@ -1,4 +1,4 @@
-import { Dir, IoError, Limit } from '@engine/std/io';
+import { Dir, IoError, Limit } from 'origine:@std/io';
 
 const text = bytes => String.fromCharCode(...bytes);
 

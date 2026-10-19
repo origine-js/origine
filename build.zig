@@ -8,8 +8,9 @@ pub fn build(b: *std.Build) void {
     const external_link = target.result.os.tag == .macos and optimize != .debug;
     // Release V8 by default; a debug V8 compiles faster and is for working on V8 patches.
     const v8_debug = b.option(bool, "v8_debug", "Build V8 in debug mode for quick iteration on V8 patches (default: release V8)") orelse false;
-    // V8 always builds from source (patches apply automatically, ninja makes it incremental);
-    // an explicit archive skips that.
+    // V8 builds from source only on the first build and for `zig build build-v8` (patches apply
+    // automatically, ninja makes it incremental); other builds reuse the last archive. An
+    // explicit archive skips that.
     const prebuilt: ?[]const u8 = b.option([]const u8, "prebuilt_v8_path", "Path to a prebuilt V8 archive");
     const clang_bin = b.option([]const u8, "v8_clang_dir", "Matching V8 LLVM bin directory") orelse "";
     const cache_root = b.option([]const u8, "cache_root", "V8 checkout and toolchain cache") orelse
@@ -66,6 +67,7 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run origine").dependOn(&run.step);
     b.step("shell", "Run the JS REPL").dependOn(&run.step);
     const test_v8 = if (external_link) v8Dependency(b, options, true) else v8;
+    if (prebuilt == null) b.step("build-v8", "Fetch, patch and rebuild V8; ordinary builds reuse the last archive").dependOn(&v8.builder.top_level_steps.get("build-v8").?.step);
     b.step("patch-v8", "Fetch V8 and apply the patch series without building").dependOn(&v8.builder.top_level_steps.get("patch-v8").?.step);
     const test_step = b.step("test", "Run the V8 package tests and the managed runtime tests");
     test_step.dependOn(&test_v8.builder.top_level_steps.get("test").?.step);

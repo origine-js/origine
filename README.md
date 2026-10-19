@@ -19,14 +19,16 @@ The executable is installed at `zig-out/bin/origine`. Darwin release builds use
 V8's matching `ld64.lld` with ThinLTO and identical-code folding; debug builds
 cache native archive conversion.
 
-V8 is always built from source by the same command: the patch series in
-`lib/v8_zig/build-tools/patches/` is applied automatically and ninja keeps rebuilds
-incremental, so a patch edit is picked up by the next `zig build` with nothing to
-install or copy. V8 is **release** by default for every application mode, because a
-debug V8 makes the shell slow. The application optimization mode (`-Doptimize`)
-controls only the executable. While changing V8 or its patches, pass `-Dv8_debug=true`
-(or `just v8-dev`) for quick incremental V8 compiles; debug and release V8 keep
-separate build directories, so switching back does not rebuild. `zig build patch-v8`
+V8 is built from source: the first `zig build` fetches it, applies the patch series in
+`lib/v8_zig/build-tools/patches/` and runs ninja. Later `zig build`s reuse that archive
+without invoking ninja (saving ~400ms); after changing V8 or its patches, run
+`zig build build-v8` (or `just build-v8`) to rebuild it incrementally.
+
+V8 is **release** by default for every application mode, because a debug V8 makes the
+shell slow. The application optimization mode (`-Doptimize`) controls only the
+executable. While changing V8 or its patches, pass `-Dv8_debug=true` (or use
+`just v8-dev`, which rebuilds V8 first) for quick incremental V8 compiles; debug and
+release V8 keep separate build directories, so switching back does not rebuild. `zig build patch-v8`
 fetches V8 and applies the patches without building, ready for editing.
 
 Reuse an existing archive with `-Dprebuilt_v8_path=/absolute/path/libv8_zig.a`.

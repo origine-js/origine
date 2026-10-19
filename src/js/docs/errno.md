@@ -1,11 +1,11 @@
-# `@engine/std/errno`
+# `origine:@std/errno`
 
 Source: generated at compile time from `Errno` in [errno.zig](../../api/errno.zig)
 (`module_source`). Never edit a table by hand; add a member to `Errno` and the module,
 `IoError` and `native.errors` all follow.
 
 ```js
-import { ERRNO } from '@engine/std/errno';
+import { ERRNO } from 'origine:@std/errno';
 ERRNO.FileNotFound // 1
 ```
 

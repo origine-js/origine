@@ -49,6 +49,8 @@ pub const Memory = struct {
         self.loads += 1;
         if (std.mem.eql(u8, id, "dep")) return .{ .source = if (scope == 0) "export const value = 1" else "export const value = 2" };
         if (std.mem.eql(u8, id, "main")) return .{ .source = "import {value} from 'dep'; export const answer = value; export const origin = import.meta.url; export async function later(){return (await import('dep')).value};" };
+        if (std.mem.eql(u8, id, "origine:mod")) return .{ .source = "export const value = 7" };
+        if (std.mem.eql(u8, id, "uses-origine")) return .{ .source = "export { value } from 'origine:mod'" };
         if (std.mem.eql(u8, id, "cycle-a")) return .{ .source = "import {b} from 'cycle-b'; export const a = 3; export function read(){ return b() }" };
         if (std.mem.eql(u8, id, "cycle-b")) return .{ .source = "import {a} from 'cycle-a'; export function b(){return a}" };
         if (std.mem.eql(u8, id, "await")) return .{ .source = "export const value = await Promise.resolve(42)" };

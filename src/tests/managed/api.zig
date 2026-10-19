@@ -16,6 +16,10 @@ const Fixture = struct {
     init_path: []u8,
 
     fn setup(self: *Fixture, source: []const u8, grant_fs: bool, args: []const []const u8) !void {
+        return self.setupWith(source, grant_fs, args, &m.Api.std_modules);
+    }
+
+    fn setupWith(self: *Fixture, source: []const u8, grant_fs: bool, args: []const []const u8, modules: []const m.Api.module.Module) !void {
         ensureV8();
         self.tmp = t.tmpDir(.{ .iterate = true });
         errdefer self.tmp.cleanup();
@@ -29,6 +33,7 @@ const Fixture = struct {
             .args = args,
             .env = &.{ .{ .name = "HOME", .value = "/home/test" }, .{ .name = "PATH", .value = "/bin" } },
             .fs = if (grant_fs) .{ .root = self.tmp.dir } else null,
+            .modules = modules,
         });
         errdefer self.host.destroy();
         self.scope = try self.rt.createScope(self.host.initOptions());
@@ -71,7 +76,7 @@ const Fixture = struct {
 test "api: main receives env and an fs with sync and async variants" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { Dir, IoError, Limit } from '@engine/std/io';
+        \\import { Dir, IoError, Limit } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  out.args = api.env.args().join(',');
@@ -111,7 +116,7 @@ test "api: main receives env and an fs with sync and async variants" {
 test "api: errno is one native-backed array and open modes are python-style" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { Dir } from '@engine/std/io';
+        \\import { Dir } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const a = await api.fs.request({ write: true, mode: { sync: true } });
@@ -138,7 +143,7 @@ test "api: errno is one native-backed array and open modes are python-style" {
 test "api: narrowing is monotonic and the host grant is the ceiling" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { Dir, IoError } from '@engine/std/io';
+        \\import { Dir, IoError } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const ro = api.fs.narrow({ write: false, mode: { sync: false } });
@@ -170,7 +175,7 @@ test "api: narrowing is monotonic and the host grant is the ceiling" {
 test "api: without a host grant fs is denied" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { IoError } from '@engine/std/io';
+        \\import { IoError } from 'origine:@std/io';
         \\export async function main(api) {
         \\  await api.fs.request({}).catch(e => { globalThis.denied = IoError.is(e, IoError.AccessDenied); });
         \\}
@@ -219,7 +224,7 @@ test "api: child scopes inherit no authority and no scope capability" {
 test "api: Zig-style Dir and File methods over sync and async io" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { Dir, File, IoError, Limit, FileKind } from '@engine/std/io';
+        \\import { Dir, File, IoError, Limit, FileKind } from 'origine:@std/io';
         \\const text = bytes => String.fromCharCode(...bytes);
         \\const bytes = s => Uint8Array.from([...s].map(c => c.charCodeAt(0)));
         \\export async function main(api) {
@@ -277,7 +282,7 @@ test "api: Zig-style Dir and File methods over sync and async io" {
 test "quansync: leaves, composites, yields, errors, finally and fast paths" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { quansync } from '@engine/std/quansync';
+        \\import { quansync } from 'origine:@std/quansync';
         \\export async function main() {
         \\  const out = globalThis.report = {};
         \\  const add = quansync({ sync: (a, b) => a + b, async: async (a, b) => a + b });
@@ -315,9 +320,9 @@ test "quansync: leaves, composites, yields, errors, finally and fast paths" {
 test "api: Rust-style fs over sync and async io" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { IoError } from '@engine/std/io';
-        \\import { fs } from '@engine/std/fs';
-        \\import { encodeUtf8, decodeUtf8 } from '@engine/std/text';
+        \\import { IoError } from 'origine:@std/io';
+        \\import { fs } from 'origine:@std/fs';
+        \\import { encodeUtf8, decodeUtf8, utf8Js } from 'origine:@std/text';
         \\const rejects = async (promiseOrThrow, code) => {
         \\  try { await promiseOrThrow(); } catch (e) { return IoError.is(e, code); }
         \\  return false;
@@ -378,6 +383,11 @@ test "api: Rust-style fs over sync and async io" {
         \\  out.kinds = fs(io.sync).kind + ',' + fs(io.async).kind;
         \\  out.syncIsSync = !(fs(io.sync).read('rust-sync/h.bin') instanceof Promise);
         \\  out.asyncIsPromise = fs(io.async).read('rust-async/h.bin') instanceof Promise;
+        \\  const strings = ['', 'abc', 'é', '✓', '\u{1F600}', 'a\ud800b', '\udc00', '\ud83d', 'x\ud83d\ude00y', 'aé✓\u{1F600}'.repeat(300), 'z'.repeat(20000)];
+        \\  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+        \\  out.utf8Encode = strings.every(t => same(encodeUtf8(t), utf8Js.encode(t)));
+        \\  const blobs = [[], [0x61], [0xc3, 0xa9], [0xc0, 0x80], [0xc3], [0xe2, 0x9c], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xf0, 0x9f, 0x98, 0x80], [0xff], [0x61, 0x80], [0xe0, 0x80, 0x80], [0xf0, 0x80, 0x80, 0x80]].map(b => Uint8Array.from(b)).concat(strings.map(t => utf8Js.encode(t)));
+        \\  out.utf8Decode = blobs.every(b => decodeUtf8(b) === utf8Js.decode(b)) && decodeUtf8(new Uint8Array(0)) === '' && decodeUtf8(encodeUtf8('x\ud83d\ude00y').subarray(1, 5)) === '\u{1F600}';
         \\  out.utf8 = decodeUtf8(encodeUtf8('aé✓\u{1F600}')) === 'aé✓\u{1F600}' && decodeUtf8(Uint8Array.from([0xc0, 0x80])) === undefined && decodeUtf8(Uint8Array.from([0xed, 0xa0, 0x80])) === undefined && encodeUtf8('\ud800').length === 3;
         \\}
     , true, &.{});
@@ -391,7 +401,79 @@ test "api: Rust-style fs over sync and async io" {
         try check(fx.scope, prefix ++ "append && " ++ prefix ++ "noflags && " ++ prefix ++ "createWithoutWrite && " ++ prefix ++ "createNew");
         try check(fx.scope, prefix ++ "invalidUtf8 && " ++ prefix ++ "missing && " ++ prefix ++ "removed");
     }
-    try check(fx.scope, "report.kinds === 'sync,async' && report.syncIsSync && report.asyncIsPromise && report.utf8");
+    try check(fx.scope, "report.kinds === 'sync,async' && report.syncIsSync && report.asyncIsPromise && report.utf8 && report.utf8Encode && report.utf8Decode");
+}
+
+test "api: import.meta natives reach only the embedded std modules" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import * as text from 'origine:@std/text';
+        \\export async function main() {
+        \\  const out = globalThis.report = {};
+        \\  // The std module got native versions (its exports are not the JS reference ones).
+        \\  out.native = text.encodeUtf8 !== text.utf8Js.encode && text.decodeUtf8 !== text.utf8Js.decode;
+        \\  out.exports = Object.keys(text).sort().join(',');
+        \\  // User code sees a bare import.meta, no natives on the global, and no way to import std internals.
+        \\  out.bareMeta = Object.keys(import.meta).join(',') === 'url' && import.meta.native === undefined;
+        \\  out.noGlobal = !('__engineText' in globalThis);
+        \\  out.reserved = await import('origine:@std/unknown').then(() => false, () => true);
+        \\  out.reservedPrivate = await import('origine:private/bindings').then(() => false, () => true);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.native && report.exports === 'decodeUtf8,encodeUtf8,utf8Js'");
+    try check(fx.scope, "report.bareMeta && report.noGlobal && report.reserved && report.reservedPrivate");
+}
+
+/// State a test module keeps for one scope; `torn_down` records `deinit` runs.
+const CounterState = struct {
+    var created: u32 = 0;
+    var torn_down: u32 = 0;
+    count: u32 = 0,
+
+    pub fn init(_: *m.Api.module.ScopeState) !CounterState {
+        created += 1;
+        return .{ .count = 100 };
+    }
+    pub fn deinit(_: *CounterState) void {
+        torn_down += 1;
+    }
+    fn next(cell: *m.Api.module.Cell(CounterState)) u32 {
+        cell.data.count += 1;
+        return cell.data.count;
+    }
+};
+
+test "api: a module owns per-scope state that lives until the host is destroyed" {
+    CounterState.created = 0;
+    CounterState.torn_down = 0;
+    const counter_module = m.Api.module.Module{
+        .id = "origine:test/counter",
+        .source = "const { next } = import.meta.native; delete import.meta.native; export const bump = () => next();",
+        .bindings = m.Api.module.stateful(CounterState, .{ .next = m.Api.binding.func(CounterState.next, .{ .side_effect = .any }) }),
+    };
+    const modules = m.Api.std_modules ++ [_]m.Api.module.Module{counter_module};
+    var fx: Fixture = undefined;
+    try fx.setupWith(
+        \\import { bump } from 'origine:test/counter';
+        \\export async function main() {
+        \\  globalThis.report = { first: bump(), second: bump(), third: bump() };
+        \\  // A second import of the module sees the same instance and the same state.
+        \\  globalThis.report.again = (await import('origine:test/counter')).bump();
+        \\}
+    , false, &.{}, &modules);
+    try fx.run();
+    try check(fx.scope, "report.first === 101 && report.second === 102 && report.third === 103 && report.again === 104");
+    try t.expectEqual(@as(u32, 1), CounterState.created);
+    try t.expectEqual(@as(u32, 0), CounterState.torn_down);
+    fx.deinit();
+    try t.expectEqual(@as(u32, 1), CounterState.torn_down);
+}
+
+/// Test natives are classified `.any`: nothing here is side-effect free.
+fn any(comptime f: anytype) m.Api.binding.Wrapped(@TypeOf(f)) {
+    return m.Api.binding.func(f, .{ .side_effect = .any });
 }
 
 const BindingState = struct {
@@ -467,20 +549,20 @@ test "binding: typed natives decode arguments, encode results and report errors"
         defer session.deinit();
         const env: m.Api.binding.Env = .{ .isolate = session.isolate(), .ctx = session.ctx };
         const table = try m.Api.binding.object(env, BindingState, &state, .{
-            .add = typed.add,
-            .greet = typed.greet,
-            .middle = typed.middle,
-            .pair = typed.pair,
-            .point = typed.point,
-            .missing = typed.missing,
-            .failing = typed.failing,
-            .maybe = typed.maybe,
-            .sum = typed.sum,
-            .names = typed.names,
-            .big = typed.big,
-            .fill = typed.fill,
+            .add = any(typed.add),
+            .greet = any(typed.greet),
+            .middle = any(typed.middle),
+            .pair = any(typed.pair),
+            .point = any(typed.point),
+            .missing = any(typed.missing),
+            .failing = any(typed.failing),
+            .maybe = any(typed.maybe),
+            .sum = any(typed.sum),
+            .names = any(typed.names),
+            .big = any(typed.big),
+            .fill = any(typed.fill),
             .label = "native",
-            .nested = .{ .add = typed.add, .deeper = .{ .pair = typed.pair } },
+            .nested = .{ .add = any(typed.add), .deeper = .{ .pair = any(typed.pair) } },
         });
         try m.Api.binding.set(env, session.ctx.getGlobal(), "native", table.value);
     }
@@ -527,7 +609,7 @@ test "binding: hot natives take V8's fast API path and still agree with the slow
         session.init(scope);
         defer session.deinit();
         const env: m.Api.binding.Env = .{ .isolate = session.isolate(), .ctx = session.ctx };
-        const table = try m.Api.binding.object(env, BindingState, &state, .{ .add = typed.add, .failing = typed.failing });
+        const table = try m.Api.binding.object(env, BindingState, &state, .{ .add = any(typed.add), .failing = any(typed.failing) });
         try m.Api.binding.set(env, session.ctx.getGlobal(), "native", table.value);
     }
     // Once optimized, V8 calls the fast entry: results agree, and an error yields 0 (the cell is still set).
@@ -542,6 +624,47 @@ test "binding: hot natives take V8's fast API path and still agree with the slow
     );
     try check(scope, "native.add(3, 4) === 7");
     try t.expectEqual(@as(u32, 0), state.cell);
+}
+
+test "binding: func options pick side effect, fast path and constructor behavior" {
+    const binding = m.Api.binding;
+    // Builder style and options struct agree.
+    const by_options = comptime binding.func(typed.failing, .{ .side_effect = .none, .nofast = true, .constructor = .allow });
+    const by_builder = comptime binding.func(typed.failing, .{}).side_effect(.none).nofast(true).constructor(.allow);
+    comptime std.debug.assert(by_options.options.side_effect.? == by_builder.options.side_effect.? and
+        by_options.options.nofast == by_builder.options.nofast and by_options.options.constructor == by_builder.options.constructor);
+    comptime std.debug.assert(binding.func(typed.add, .{}).options.side_effect == null);
+
+    ensureV8();
+    const rt = try m.Runtime.create(t.allocator, .{});
+    defer rt.destroy();
+    const scope = try rt.createScope(.{});
+    var state: BindingState = .{};
+    {
+        var session: m.Scope.Session = undefined;
+        session.init(scope);
+        defer session.deinit();
+        const env: binding.Env = .{ .isolate = session.isolate(), .ctx = session.ctx };
+        const table = try binding.object(env, BindingState, &state, .{
+            .fast = binding.func(typed.failing, .{}).side_effect(.receiver),
+            .slow = binding.func(typed.failing, .{}).side_effect(.none).nofast(true),
+            .ctor = binding.func(typed.add, .{ .side_effect = .any, .constructor = .allow }),
+            .plain = binding.func(typed.add, .{ .side_effect = .any }),
+        });
+        try binding.set(env, session.ctx.getGlobal(), "native", table.value);
+    }
+    // The fast entry yields 0 for an error; the same native with nofast stays on the slow path (undefined).
+    try check(scope,
+        \\(() => {
+        \\  const g = (x) => native.fast(x), h = (x) => native.slow(x);
+        \\  %PrepareFunctionForOptimization(g); %PrepareFunctionForOptimization(h);
+        \\  g(false); g(false); h(false); h(false);
+        \\  %OptimizeFunctionOnNextCall(g); %OptimizeFunctionOnNextCall(h);
+        \\  return g(true) === 0 && h(true) === undefined && h(false) === 4;
+        \\})()
+    );
+    // Constructor behavior: throws by default, allowed on request.
+    try check(scope, "(() => { try { new native.plain(1, 2); return false } catch (e) { return e instanceof TypeError } })() && typeof new native.ctor(1, 2) === 'object'");
 }
 
 test "errno: binding errors map strictly, fs errors by name" {
@@ -582,9 +705,9 @@ test "errno: the guest table is generated from Errno, not hard-coded" {
     // The generated module is served, and std_io.js no longer carries its own table.
     var served = false;
     inline for (m.Api.std_modules) |module| {
-        if (std.mem.eql(u8, module.id, "@engine/std/errno")) served = module.source.ptr == m.Api.errno_module_source.ptr;
+        if (std.mem.eql(u8, module.id, "origine:@std/errno")) served = module.source.ptr == m.Api.errno_module_source.ptr;
     }
     try t.expect(served);
     try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "FileNotFound: 1") == null);
-    try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "@engine/std/errno") != null);
+    try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "origine:@std/errno") != null);
 }

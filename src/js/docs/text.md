@@ -1,10 +1,10 @@
-# `@engine/std/text`
+# `origine:@std/text`
 
 Source: [std_text.js](../std_text.js). Plain JS; the hardened context has no
-`TextEncoder`/`TextDecoder`. [`@engine/std/fs`](fs.md) uses it for string contents.
+`TextEncoder`/`TextDecoder`. [`origine:@std/fs`](fs.md) uses it for string contents.
 
 ```js
-import { encodeUtf8, decodeUtf8 } from '@engine/std/text';
+import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 ```
 
 | Export | Behavior |
@@ -15,5 +15,6 @@ import { encodeUtf8, decodeUtf8 } from '@engine/std/text';
 `decodeUtf8` returning `undefined` is the contract: callers choose the error
 (`fs.read_to_string` fails with `IoError.InvalidData`).
 
-There are also native versions in [text.zig](../../api/text.zig) (prototype); the JS
-module does not call them.
+The exports call native versions ([std_text.zig](../../api/std_text.zig)) that the host
+hands the module through `import.meta.native`; `utf8Js` is the plain JS implementation
+(also the fallback when the natives are absent).

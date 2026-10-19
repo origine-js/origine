@@ -17,6 +17,7 @@ const LoadRequest = @import("module_types.zig").LoadRequest;
 const LoadResult = @import("module_types.zig").LoadResult;
 const Completion = @import("module_types.zig").Completion;
 const Loader = @import("module_types.zig").Loader;
+const origine_prefix = @import("module_types.zig").origine_prefix;
 
 const Dependency = struct { specifier: []const u8, attributes: []const ImportAttribute, entry: *Entry };
 const Entry = struct {
@@ -151,8 +152,12 @@ pub const ModuleMap = struct {
     /// Borrows inputs and alloc through the resolver call. The resolver's
     /// contract returns bytes owned by alloc; errors transfer no result storage.
     fn resolve(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) ![]const u8 {
+        const enabled = self.scope.options.enable_origine_namespace;
+        if (!enabled and std.mem.startsWith(u8, specifier, origine_prefix)) return error.OrigineNamespaceDisabled;
         const resolver = self.scope.options.resolver orelse return alloc.dupe(u8, specifier);
-        return resolver.resolve(resolver.data, .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .import_attributes = attributes });
+        const id = try resolver.resolve(resolver.data, .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .import_attributes = attributes });
+        if (!enabled and std.mem.startsWith(u8, id, origine_prefix)) return error.OrigineNamespaceDisabled;
+        return id;
     }
 
     /// Borrows entry/exception through return; retains an independent persistent
@@ -583,11 +588,13 @@ pub fn fromContext(ctx: v8.Context) *Scope {
     return @ptrCast(@alignCast(ctx.getAlignedPointerFromEmbedderData(1).?));
 }
 /// Borrows local callback handles through return in the entered context;
-/// V8 copies the module URL into meta. Retains no host storage or handles.
+/// V8 copies the module URL into meta, then the scope's meta hook (if any) adds its
+/// properties. Retains no host storage or handles.
 pub fn importMeta(ctx: v8.Context, module: v8.Module, meta: v8.Object) callconv(.c) void {
     const scope = fromContext(ctx);
     const entry = scope.module_map.find(module) orelse return;
     _ = meta.createDataProperty(ctx, v8.String.initUtf8(scope.runtime.isolate, "url").name, v8.String.initUtf8(scope.runtime.isolate, entry.id).name.primitive.value);
+    if (scope.options.meta) |hook| hook.init(hook.data, .{ .context = ctx, .scope_id = scope.id, .module_id = entry.id, .meta = meta });
 }
 /// Borrows callback locals in the entered context through return; scratch
 /// allocations are released on success/error. Returns a local module handle

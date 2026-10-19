@@ -1,5 +1,5 @@
-// `@engine/std/fs`: Rust `std::fs`-style API (snake_case) over the same grant as
-// `@engine/std/io`. There is no ambient cwd, so the API is bound to an `io`
+// `origine:@std/fs`: Rust `std::fs`-style API (snake_case) over the same grant as
+// `origine:@std/io`. There is no ambient cwd, so the API is bound to an `io`
 // (`fs.sync` or `fs.async`) and a directory (default `Dir.cwd()`):
 //
 //   const rs = fs(api_fs.sync);                // or fs(api_fs.async, someDir)
@@ -10,14 +10,14 @@
 //
 // Rust's `Result` maps to throw (sync) / reject (async) with `{ errno, name }`
 // error values (`IoError`). All of it is written once with quansync and shares the
-// Zig-style ops from `@engine/std/io`, so it costs one extra JS call per operation.
+// Zig-style ops from `origine:@std/io`, so it costs one extra JS call per operation.
 //
 // Not shipped yet: canonicalize, read_link, symlink, set_permissions, hard_link,
 // File::seek and append mode (no native support), and lazy ReadDir iterators
 // (`read_dir` returns an array of DirEntry).
-import { quansync } from '@engine/std/quansync';
-import { Dir, FileKind, IoError, ops } from '@engine/std/io';
-import { decodeUtf8, encodeUtf8 } from '@engine/std/text';
+import { quansync } from 'origine:@std/quansync';
+import { Dir, FileKind, IoError, ops } from 'origine:@std/io';
+import { decodeUtf8, encodeUtf8 } from 'origine:@std/text';
 
 const freeze = Object.freeze;
 const UNLIMITED = freeze({ limit: Infinity });

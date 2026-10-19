@@ -127,6 +127,15 @@ pub const Scope = struct {
         /// or import map, specifiers are used unchanged as module-map keys.
         resolver: ?module_types.Resolver = null,
         loader: ?module_types.Loader = null,
+        /// Makes module IDs starting with `origine:` (the host's own namespace) usable from
+        /// code in this scope: static and dynamic imports, whether the specifier or the
+        /// resolved ID carries the prefix. Off by default, in which case such imports
+        /// reject no matter what the resolver, import map or loader would have served.
+        /// The host decides which scopes get it; guest code cannot change it.
+        enable_origine_namespace: bool = false,
+        /// Optional hook that populates each module's `import.meta`; the one way to give
+        /// specific modules host values that no importer or other module can reach.
+        meta: ?module_types.MetaInitializer = null,
         /// Per-scope specifier-to-specifier import map, applied before module-map lookup.
         /// Borrows the map through createScope only; entries are cloned per scope.
         /// Caller may reuse/deinit it afterward. URLNormalizer.data remains host-owned

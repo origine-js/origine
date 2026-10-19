@@ -1,8 +1,8 @@
-// `@engine/std/io`: Zig-style Io vocabulary for the init context.
+// `origine:@std/io`: Zig-style Io vocabulary for the init context.
 // Pure data: holding any of these values confers no authority. The errno table is
-// generated from `Errno` in src/api/errno.zig (`@engine/std/errno`), not written here.
-import { ERRNO } from '@engine/std/errno';
-import { quansync } from '@engine/std/quansync';
+// generated from `Errno` in src/api/errno.zig (`origine:@std/errno`), not written here.
+import { ERRNO } from 'origine:@std/errno';
+import { quansync } from 'origine:@std/quansync';
 
 const freeze = Object.freeze;
 

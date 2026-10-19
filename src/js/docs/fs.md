@@ -1,11 +1,11 @@
-# `@engine/std/fs`
+# `origine:@std/fs`
 
 Source: [std_fs.js](../std_fs.js). Rust `std::fs`-style API (snake_case) built on the
-Zig-style ops of [`@engine/std/io`](io.md). There is no ambient cwd, so the API is bound to
+Zig-style ops of [`origine:@std/io`](io.md). There is no ambient cwd, so the API is bound to
 an `io` and a directory.
 
 ```js
-import { fs } from '@engine/std/fs';
+import { fs } from 'origine:@std/fs';
 
 const rs = fs(api.fs.sync);                 // or fs(api.fs.async, someDir)
 rs.write('a.txt', 'hello');

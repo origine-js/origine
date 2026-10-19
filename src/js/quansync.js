@@ -1,4 +1,4 @@
-// `@engine/std/quansync`: write an operation once, run it synchronously or
+// `origine:@std/quansync`: write an operation once, run it synchronously or
 // asynchronously. Modeled on https://github.com/quansync-dev/quansync, with one
 // difference: a function is indexable by mode name, so a caller that already
 // knows its mode (for example from an `io` object) dispatches without branching:

@@ -9,10 +9,10 @@ Implemented on branch `draft-1`: host in `src/api/` (re-exported by `src/api.zig
 | Area | State |
 |---|---|
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. **No snapshot yet**: the init is re-evaluated every start. |
-| `@engine/std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`. `Dir`/`File` descriptors carry Zig's method names and take the `io` first (`fs.sync` blocks and throws; `fs.async` returns promises): `Dir`: `openFile`, `createFile`, `openDir`, `close`, `createDir`, `createDirPath`, `createDirPathOpen`, `deleteFile`, `deleteDir`, `deleteTree`, `rename`, `stat`, `statFile`, `access`, `iterate`, `readFile`, `writeFile`; `File`: `close`, `stat`, `length`, `readStreaming`, `readPositional`, `readPositionalAll`, `readAll`, `writeStreaming`, `writeStreamingAll`, `writePositionalAll`, `setLength`, `sync`. Not shipped: symlink/readlink/realpath/copyFile/permissions. |
-| `@engine/std/quansync` | Write once, run sync or async (after [quansync](https://github.com/quansync-dev/quansync)). `quansync({ sync, async })` is a zero-overhead leaf; `quansync(function* () { yield* other(...) }, { sync? })` is a composite with optional hand-written fast paths. Functions expose `.sync`, `.async`, are awaitable, and are indexable by mode (`f[io.kind](...)`). `@engine/std/io` and `@engine/std/fs` are built on it. |
-| `@engine/std/fs` | Rust `std::fs`-style API bound to an `io` and a directory: `fs(io, dir = Dir.cwd())` returns `read`, `read_to_string`, `write`, `read_dir`, `metadata`, `try_exists`, `exists`, `copy`, `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `remove_dir_all`, `rename`, `File` (`open`, `create`, `create_new`, `options`; instances: `read`, `read_exact`, `read_to_end`, `read_to_string`, `write`, `write_all`, `flush`, `set_len`, `sync_all`, `metadata`, `close`) and `OpenOptions.new()`. Errors are thrown/rejected `IoError` values. Not shipped: canonicalize, read_link, symlink, set_permissions, seek, append, lazy `ReadDir`. |
-| `@engine/std/text` | `encodeUtf8`, `decodeUtf8` (returns `undefined` for invalid UTF-8); the context has no TextEncoder/TextDecoder. |
+| `origine:@std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`. `Dir`/`File` descriptors carry Zig's method names and take the `io` first (`fs.sync` blocks and throws; `fs.async` returns promises): `Dir`: `openFile`, `createFile`, `openDir`, `close`, `createDir`, `createDirPath`, `createDirPathOpen`, `deleteFile`, `deleteDir`, `deleteTree`, `rename`, `stat`, `statFile`, `access`, `iterate`, `readFile`, `writeFile`; `File`: `close`, `stat`, `length`, `readStreaming`, `readPositional`, `readPositionalAll`, `readAll`, `writeStreaming`, `writeStreamingAll`, `writePositionalAll`, `setLength`, `sync`. Not shipped: symlink/readlink/realpath/copyFile/permissions. |
+| `origine:@std/quansync` | Write once, run sync or async (after [quansync](https://github.com/quansync-dev/quansync)). `quansync({ sync, async })` is a zero-overhead leaf; `quansync(function* () { yield* other(...) }, { sync? })` is a composite with optional hand-written fast paths. Functions expose `.sync`, `.async`, are awaitable, and are indexable by mode (`f[io.kind](...)`). `origine:@std/io` and `origine:@std/fs` are built on it. |
+| `origine:@std/fs` | Rust `std::fs`-style API bound to an `io` and a directory: `fs(io, dir = Dir.cwd())` returns `read`, `read_to_string`, `write`, `read_dir`, `metadata`, `try_exists`, `exists`, `copy`, `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `remove_dir_all`, `rename`, `File` (`open`, `create`, `create_new`, `options`; instances: `read`, `read_exact`, `read_to_end`, `read_to_string`, `write`, `write_all`, `flush`, `set_len`, `sync_all`, `metadata`, `close`) and `OpenOptions.new()`. Errors are thrown/rejected `IoError` values. Not shipped: canonicalize, read_link, symlink, set_permissions, seek, append, lazy `ReadDir`. |
+| `origine:@std/text` | `encodeUtf8`, `decodeUtf8` (returns `undefined` for invalid UTF-8), `utf8Js` (the plain JS reference implementation); the context has no TextEncoder/TextDecoder. Native versions (V8 string conversion, simdutf) reach the module through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. Scopes only see `origine:*` when created with `enable_origine_namespace` (the init scope has it; child scopes never do). |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. |
 | `api.fs` | `request({root, write, mode: {async, sync}})`, `narrow(...)`. Real backend only (no memory/overlay). Ops: `dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirDeleteFile`, `dirRead`, `fileReadAll`, `fileWriteAll`, `fileClose`. |
 | Errors | Errno in a native-backed `Uint32Array` (one per scope, `fs.errno`; the glue fetches it once as `native.errno`) for `fs.sync`; `fs.async` rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |
@@ -37,7 +37,7 @@ const ops = try call.object(FsGrant, grant, .{ .openFile = openFile, .stat = sta
 - **State.** The first parameter is the state the function is bound to (`FsGrant`, `ScopeState`, ...). A state type provides `errnoCell()` and `allocator()`.
 - **Arguments** are decoded in order: `u32`, `u64`, `f64`, `bool`, `[]const u8` (string, copied into the per-call arena), `[]u8` (typed-array bytes, aliased), `v8.Value/Function/Object`, `?T`, or any type with `pub fn decode(call, index) !T` and an optional `arity`. Validating types such as `Path`, `SubPath` and `DirRef` put the security checks at the boundary, so ops only see checked values. A mistyped or missing argument fails with `InvalidArgument` (reported as `InvalidPath`) before the function runs.
 - **Results** are encoded: ints/floats/bools directly, strings, `?T`, slices and tuples as arrays, named structs as objects, V8 handles, or `encode(self, env)`.
-- **Errors, two domains.** Natives return either the closed binding set `errno.Error` (env, scope, argument decoding, encoding) or `std.Io` fs errors. `errno.of(Error)` maps the closed set strictly (every member has a code, checked at compile time); `errno.ofFs` maps fs errors by name, resolved at compile time for a concrete error set (unknown members become `Unexpected`; `anyerror` is rejected). `error.OutOfMemory` is never an errno: it panics (natives allocate through `Call.allocSlice`/`print`, which panic, and the mapping functions panic on it). `Call.fail` picks the domain from the error set. Non-fs code narrows its internal errors with `errno.narrow` (the one boundary that also takes the managed layer's `anyerror`-typed callbacks) and asserts it with `comptime errno.requireBinding(native)`, so a native that leaks other errors fails to compile. The `Errno` enum is the single source of truth for the guest: `@engine/std/errno` (`ERRNO`) is generated from it at compile time and the glue gets `native.errors` generated at install, so adding a member needs no JS change.
+- **Errors, two domains.** Natives return either the closed binding set `errno.Error` (env, scope, argument decoding, encoding) or `std.Io` fs errors. `errno.of(Error)` maps the closed set strictly (every member has a code, checked at compile time); `errno.ofFs` maps fs errors by name, resolved at compile time for a concrete error set (unknown members become `Unexpected`; `anyerror` is rejected). `error.OutOfMemory` is never an errno: it panics (natives allocate through `Call.allocSlice`/`print`, which panic, and the mapping functions panic on it). `Call.fail` picks the domain from the error set. Non-fs code narrows its internal errors with `errno.narrow` (the one boundary that also takes the managed layer's `anyerror`-typed callbacks) and asserts it with `comptime errno.requireBinding(native)`, so a native that leaks other errors fails to compile. The `Errno` enum is the single source of truth for the guest: `origine:@std/errno` (`ERRNO`) is generated from it at compile time and the glue gets `native.errors` generated at install, so adding a member needs no JS change.
 - **Tables.** `binding.object` builds a whole native surface from one comptime table: function fields become natives, named structs become nested objects, other fields are plain values.
 
 Known draft-1 limitations:
@@ -68,18 +68,18 @@ origine init.js [args...]
   4. main phase     call exported `main(api)`; await its result; pump until idle
 ```
 
-- **Init context.** Hardened like any scope. The only host-provided import is `@engine/std/io` (section 3). It cannot do I/O or read the clock, environment or randomness, so the snapshot is deterministic and cacheable.
+- **Init context.** Hardened like any scope. The only host-provided import is `origine:@std/io` (section 3). It cannot do I/O or read the clock, environment or randomness, so the snapshot is deterministic and cacheable.
 - **Snapshot.** Contains the init module graph, the module sources and compiled code for anything init defined (e.g. an entire `node:*` library), and `main`. It cannot contain host handles, so `api` is never captured. It is injected only at step 4.
 - **`main(api)`.** Gets the root `api`, which grants all permissions. It may be `async`. The process exit code comes from its result or its rejection.
 - **Why snapshot.** A node-compat layer is megabytes of JS. Parsing and evaluating it on every start is the cost the snapshot removes.
 - **Snapshot reuse.** If the init files are unchanged, the cached snapshot is reused and steps 1-2 are skipped, so the evaluation cost is paid only when the init changes. Cache key: a hash of every init module (source, resolved specifier, import map) plus the engine build id and V8 version and flags. Any change in the key invalidates the cache. Because the init context is deterministic (no clock, env or randomness), equal keys give equal snapshots. Cache location and eviction are open (section 10).
 
-## 3. `@engine/std/io` (init-visible, authority-free)
+## 3. `origine:@std/io` (init-visible, authority-free)
 
 Zig-style Io API: plain data types plus a naming convention. It has no capabilities of its own.
 
 ```js
-import { Dir, File, OpenFlags, Stat, IoError } from "@engine/std/io";
+import { Dir, File, OpenFlags, Stat, IoError } from "origine:@std/io";
 Dir.cwd()       // sentinel descriptor, not a handle to a real directory
 Dir.at(token)   // descriptor wrapping a token that an fs gave out
 ```
@@ -162,7 +162,7 @@ const scopes = api.scope.narrow({ depth: 1, count: 4 });
   | `Limit.limited(n)` | `n`; reads at most `n` bytes |
   | `Limit.nothing` | `0`; reads nothing |
 
-  `@engine/std/io` exposes the same three values to JS. They are the `limit` argument of reads (`fileReadAll(file, { limit })`) and the byte quota in fs specs. Quotas are not a bag of unrelated knobs: any byte budget is a `Limit`, and narrowing takes the minimum of two limits.
+  `origine:@std/io` exposes the same three values to JS. They are the `limit` argument of reads (`fileReadAll(file, { limit })`) and the byte quota in fs specs. Quotas are not a bag of unrelated knobs: any byte budget is a `Limit`, and narrowing takes the minimum of two limits.
 - **`sync` is the init's decision.** The init chooses whether to expose `sync` to anything it hands a capability to, by narrowing it away (`mode: { sync: false }`) or leaving it.
 - Revoking a parent revokes its descendants: each grant has a generation and a `revoked` flag that every call checks (the `StaleLoadToken` pattern from `Runtime.completeLoad`). `Scope.destroy` and `child.close()` bump it, and in-flight completions fail with the stale-handle error (`IoError.StaleHandle`, see section 6).
 
@@ -183,7 +183,7 @@ Node-style string codes are cryptic and per-failure `Error` objects with capture
 
 - **Error state is a `Uint32Array`.** The native side exposes a `Uint32Array` as the error state. When an operation fails it writes a **non-zero errno** into element 0 and returns a neutral value (e.g. `-1` / `undefined`). On success it leaves element 0 as `0` (the caller resets it, or the native side clears it on entry). A failure check is one typed-array read, with no allocation and no stack capture.
 - **Detailed errors via an out parameter.** When more than an errno is needed, the caller passes a **pre-constructed cppgc object** as an out parameter, and the native side fills it in. Reuse is the caller's choice, so the common path allocates nothing.
-- **`IoError` in `@engine/std/io`** is a frozen table of errno values with Zig-style names (`IoError.FileNotFound`, `AccessDenied`, `NotDir`, `StaleHandle`, `BadHandle`). It is data only, so it is snapshot-safe.
+- **`IoError` in `origine:@std/io`** is a frozen table of errno values with Zig-style names (`IoError.FileNotFound`, `AccessDenied`, `NotDir`, `StaleHandle`, `BadHandle`). It is data only, so it is snapshot-safe.
 - **Node layer maps to codes in userland.** `node:fs` turns `IoError.FileNotFound` into a Node-style error with `code: "ENOENT"`, paying for stack capture only where Node semantics demand it.
 - **No host details.** The errno is the whole default payload. Paths and Zig internals go to the audit hook.
 
@@ -197,7 +197,7 @@ Open points:
 `init.js` (snapshotted):
 
 ```js
-import { Dir } from "@engine/std/io";
+import { Dir } from "origine:@std/io";
 import { makeNodeFs }   from "./node/fs.js";    // factories take `api` slices
 import { makeProcess }  from "./node/process.js";
 
@@ -248,11 +248,13 @@ export function makeNodeFs(fs, Dir) {
 | Narrowing | none | JS wrapper narrowing on the `api.*` function maps; optional native `Grant` intersect check; byte limits as `std.Io.Limit` |
 | Entry | `src/main.zig` evals a file | Read init file, snapshot, call `main`; default CLI grants `api` per flags |
 
-Layout (as built): `src/api/{host,fs,env,scope,js_loader,init_loader,errno,call,binding}.zig`, `src/js/{api,std_io,std_fs,std_text,quansync,bootstrap}.js`, tests in `src/tests/managed/api.zig`.
+Embedded modules are `Module { id, source, bindings }` values (`src/api/module.zig`), one `std_*.zig` each, joined in `origine_modules.zig`. `bindings` is `stateless(table)` (natives bound to the scope state) or `stateful(S, table)` (one `S` per scope, created on the module's first `import.meta` read, `init`/`deinit` optional, torn down by `Host.destroy`); `Config.modules` replaces the table, which is how tests add their own.
+
+Layout (as built): `src/api/{host,fs,env,scope,js_loader,init_loader,errno,call,binding,module,origine_modules,std_io,std_errno,std_quansync,std_fs,std_text}.zig`, `src/js/{api,std_io,std_fs,std_text,quansync,bootstrap}.js`, tests in `src/tests/managed/api.zig`.
 
 ## 9. Phased delivery
 
-1. Snapshot plus `main(api)` with an empty `api`; `@engine/std/io` descriptors.
+1. Snapshot plus `main(api)` with an empty `api`; `origine:@std/io` descriptors.
 2. `fs` (memory backend, then real, then overlay) with sync/async variants and `narrow`.
 3. `scope.create` with import map and preload `values` and a basic JS callback loader (custom resolver later).
 4. `env`. `net` is tbd.

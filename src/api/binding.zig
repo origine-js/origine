@@ -6,8 +6,20 @@
 //! fn openFile(g: *FsGrant, dir: DirRef, path: FilePath, bits: u32) !u32 { ... }
 //! fn stat(g: *FsGrant, call: *Call, dir: DirRef, path: Path) !Stat { ... }
 //!
-//! const ops = try call.object(FsGrant, grant, .{ .openFile = openFile, .stat = stat });
+//! const ops = try call.object(FsGrant, grant, .{
+//!     .openFile = func(openFile, .{ .side_effect = .any }),
+//!     .stat = func(stat, .{ .side_effect = .none }),
+//!     .hot = func(hot, .{}).side_effect(.none).nofast(true), // builder style
+//! });
 //! ```
+//!
+//! - **Wrapping.** Every function in a table is wrapped in `func`, which states what V8
+//!   cannot infer: `side_effect` (`.none`: reads nothing it could change, safe for
+//!   throw-on-side-effect evaluation; `.receiver`: changes only its receiver; `.any`), is
+//!   required and has no default, so each native is classified on purpose. `nofast`
+//!   (default false) keeps a native off the fast API path even if its signature qualifies,
+//!   and `constructor` (`.throw`, the default, or `.allow`) sets the constructor behavior;
+//!   `.allow` implies no fast entry. A bare function in a table is a compile error.
 //!
 //! - **State.** The first parameter is the state pointer (`*State`) the function was
 //!   bound to. `State` provides two methods: `errnoCell(self) *u32` (where failures are
@@ -91,23 +103,23 @@ pub fn bytesValue(env: Env, data: []const u8) !v8.Value {
 
 // ---- natives ---------------------------------------------------------------
 
-/// Wraps the typed function `func` as a V8 callback. `func` must take `*State` first;
+/// Wraps the typed function `callee` as a V8 callback. `callee` must take `*State` first;
 /// see the file comment for argument, result and error handling.
-pub fn native(comptime State: type, comptime func: anytype) v8.FunctionCallback {
+pub fn native(comptime State: type, comptime callee: anytype) v8.FunctionCallback {
     return struct {
         fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
             const state = externalPointer(State, info);
             var arena = std.heap.ArenaAllocator.init(state.allocator());
             defer arena.deinit();
             var call = Call.init(info, state.errnoCell(), arena.allocator());
-            invoke(State, func, state, &call) catch |err| call.fail(err);
+            invoke(State, callee, state, &call) catch |err| call.fail(err);
         }
     }.callback;
 }
 
-fn invoke(comptime State: type, comptime func: anytype, state: *State, call: *Call) !void {
-    const Fn = @typeInfo(@TypeOf(func)).@"fn";
-    var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
+fn invoke(comptime State: type, comptime callee: anytype, state: *State, call: *Call) !void {
+    const Fn = @typeInfo(@TypeOf(callee)).@"fn";
+    var args: std.meta.ArgsTuple(@TypeOf(callee)) = undefined;
     inline for (Fn.param_types, 0..) |maybe_type, position| {
         const P = maybe_type.?;
         if (position == 0) {
@@ -121,8 +133,8 @@ fn invoke(comptime State: type, comptime func: anytype, state: *State, call: *Ca
     }
     const Result = Fn.return_type.?;
     switch (@typeInfo(Result)) {
-        .error_union => setReturn(call, try @call(.auto, func, args)),
-        else => setReturn(call, @call(.auto, func, args)),
+        .error_union => setReturn(call, try @call(.auto, callee, args)),
+        else => setReturn(call, @call(.auto, callee, args)),
     }
 }
 
@@ -180,9 +192,9 @@ fn Payload(comptime T: type) type {
     };
 }
 
-/// True when `func` can be exposed through V8's fast API (see the file comment).
-fn isFast(comptime State: type, comptime func: anytype) bool {
-    const Fn = @typeInfo(@TypeOf(func)).@"fn";
+/// True when `callee` can be exposed through V8's fast API (see the file comment).
+fn isFast(comptime State: type, comptime callee: anytype) bool {
+    const Fn = @typeInfo(@TypeOf(callee)).@"fn";
     if (Fn.param_types.len == 0 or Fn.param_types.len > max_fast_args + 1 or Fn.param_types[0].? != *State) return false;
     inline for (Fn.param_types[1..]) |param| {
         if (fastParam(param.?) == null) return false;
@@ -192,12 +204,12 @@ fn isFast(comptime State: type, comptime func: anytype) bool {
 
 const max_fast_args = 6;
 
-/// The fast API entry for `func`: the C callback plus the static type description V8
+/// The fast API entry for `callee`: the C callback plus the static type description V8
 /// and the overload list keep for as long as the function template lives (V8 retains
 /// pointers into them rather than copying).
-fn Fast(comptime State: type, comptime func: anytype) type {
+fn Fast(comptime State: type, comptime callee: anytype) type {
     return struct {
-        const Fn = @typeInfo(@TypeOf(func)).@"fn";
+        const Fn = @typeInfo(@TypeOf(callee)).@"fn";
         const arity = Fn.param_types.len - 1;
         const Result = Payload(Fn.return_type.?);
 
@@ -224,22 +236,22 @@ fn Fast(comptime State: type, comptime func: anytype) type {
             return Fn.param_types[index + 1].?;
         }
 
-        /// Runs `func` with the state recovered from `options.data`. Borrows `options` for
+        /// Runs `callee` with the state recovered from `options.data`. Borrows `options` for
         /// the call; a failure is recorded in the errno cell and yields a zero result.
         inline fn run(options: *const v8.FastApiCallbackOptions, js_args: anytype) Result {
             const state = statePointer(State, v8.Value.from_opaque(v8.fromRawLocal(options.data)).?);
             const cell = state.errnoCell();
             cell.* = 0;
-            var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
+            var args: std.meta.ArgsTuple(@TypeOf(callee)) = undefined;
             args[0] = state;
             inline for (0..arity) |index| args[index + 1] = js_args[index];
             if (@typeInfo(Fn.return_type.?) == .error_union) {
-                return @call(.always_inline, func, args) catch |err| {
+                return @call(.always_inline, callee, args) catch |err| {
                     call_mod.record(cell, err);
                     return std.mem.zeroes(Result);
                 };
             }
-            return @call(.always_inline, func, args);
+            return @call(.always_inline, callee, args);
         }
 
         /// One C-ABI callback per arity; V8 passes the receiver first and the options last.
@@ -288,17 +300,94 @@ fn Fast(comptime State: type, comptime func: anytype) type {
     };
 }
 
-/// A JS function for `func` bound to `state`. Uses a function template with a fast API
-/// entry when `isFast` allows it, else a plain function. The returned handle is local to
-/// the current handle scope; `state` must outlive the function.
-fn function(env: Env, comptime State: type, state: *State, comptime func: anytype) v8.Function {
-    if (comptime !isFast(State, func)) {
+/// What a native may change, as V8's throw-on-side-effect evaluation sees it.
+pub const SideEffect = enum {
+    /// Observable state is never changed.
+    none,
+    /// Only the receiver may change.
+    receiver,
+    /// Anything may change.
+    any,
+
+    fn toV8(self: SideEffect) v8.SideEffectType {
+        return switch (self) {
+            .none => .HasNoSideEffect,
+            .receiver => .HasSideEffectToReceiver,
+            .any => .HasSideEffect,
+        };
+    }
+};
+
+/// Whether `new` on the native is allowed.
+pub const Constructor = enum {
+    throw,
+    allow,
+
+    fn toV8(self: Constructor) v8.ConstructorBehavior {
+        return switch (self) {
+            .throw => .Throw,
+            .allow => .Allow,
+        };
+    }
+};
+
+/// Per-native settings for `func`.
+pub const FuncOptions = struct {
+    /// Required: the table cannot be built while this is unset.
+    side_effect: ?SideEffect = null,
+    /// Keep the native on the slow callback even if it could take the fast API path.
+    nofast: bool = false,
+    constructor: Constructor = .throw,
+};
+
+/// A native function plus its `Options`; build one with `func`. Immutable: each builder
+/// method returns an updated copy. Comptime-only (it holds the function by pointer).
+pub fn Wrapped(comptime F: type) type {
+    return struct {
+        callee: *const F,
+        options: FuncOptions,
+
+        pub const is_wrapped_native = true;
+        const Self = @This();
+
+        pub fn side_effect(self: Self, value: SideEffect) Self {
+            var next = self;
+            next.options.side_effect = value;
+            return next;
+        }
+
+        pub fn nofast(self: Self, value: bool) Self {
+            var next = self;
+            next.options.nofast = value;
+            return next;
+        }
+
+        pub fn constructor(self: Self, value: Constructor) Self {
+            var next = self;
+            next.options.constructor = value;
+            return next;
+        }
+    };
+}
+
+/// Marks the typed Zig function `callee` as a native with `options` (see the file
+/// comment); start a builder chain with `func(f, .{})`. Comptime only; retains nothing.
+pub fn func(comptime callee: anytype, comptime options: FuncOptions) Wrapped(@TypeOf(callee)) {
+    return .{ .callee = &callee, .options = options };
+}
+
+/// A JS function for `callee` bound to `state`. Uses a function template with a fast API
+/// entry when `isFast` allows it (and `options` do not forbid it), else a plain function.
+/// The returned handle is local to the current handle scope; `state` must outlive the function.
+fn function(env: Env, comptime State: type, state: *State, comptime callee: anytype, comptime options: FuncOptions) v8.Function {
+    const side_effect = options.side_effect.?.toV8();
+    if (comptime options.nofast or options.constructor == .allow or !isFast(State, callee)) {
         const data = v8.External.init(env.isolate, state).value.data;
-        return v8.Function.init(env.ctx, native(State, func), data, 0, .Throw, .HasSideEffect);
+        return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
     }
     const data = v8.Number.init(env.isolate, @floatFromInt(@intFromPtr(state))).numeric.primitive.value.data;
     var builder: v8.FunctionTemplate.Builder = .{};
-    const template = builder.data(data).constructor_behavior(.Throw).build(env.isolate, native(State, func), @constCast(&Fast(State, func).overloads));
+    const template = builder.data(data).constructor_behavior(.Throw).side_effect_type(side_effect).build(env.isolate, native(State, callee), @constCast(&Fast(State, callee).overloads));
     return template.getFunction(env.ctx).?;
 }
 
@@ -431,9 +520,14 @@ fn encodeList(env: Env, items: anytype) !v8.Value {
 /// types with their own `encode`).
 fn isTable(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct" => |info| !info.is_tuple and !@hasDecl(T, "encode") and !isHandle(T),
+        .@"struct" => |info| !info.is_tuple and !@hasDecl(T, "encode") and !isHandle(T) and !isWrapped(T),
         else => false,
     };
+}
+
+/// True for the result of `func`.
+fn isWrapped(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_wrapped_native");
 }
 
 /// V8 handle types encode to themselves rather than as tables or plain structs.
@@ -447,15 +541,15 @@ pub fn set(env: Env, target: v8.Object, name: []const u8, x: anytype) !void {
     if (!ok) return error.JavaScriptException;
 }
 
-/// Builds an object from a comptime table. Function fields become natives bound to
-/// `state` (see `native`); named-struct fields become nested objects; everything else
+/// Builds an object from a comptime table. `func(...)` fields become natives bound to
+/// `state` (see `native`; bare functions are rejected); named-struct fields become nested objects; everything else
 /// is encoded as a plain value.
 ///
 /// ```zig
 /// const target = try binding.object(env, Scope, state, .{
-///     .env = .{ .args = args, .get = get },   // nested object of natives
+///     .env = .{ .args = func(args, .{ .side_effect = .none }) },   // nested object of natives
 ///     .version = "1.0",                       // plain value
-///     .open = open,                           // native
+///     .open = func(open, .{ .side_effect = .any }),  // native
 /// });
 /// ```
 pub fn object(env: Env, comptime State: type, state: *State, comptime table: anytype) !v8.Object {
@@ -463,10 +557,13 @@ pub fn object(env: Env, comptime State: type, state: *State, comptime table: any
     inline for (@typeInfo(@TypeOf(table)).@"struct".field_names) |name| {
         const field = @field(table, name);
         const F = @TypeOf(field);
+        if (comptime isWrapped(F)) {
+            if (comptime field.options.side_effect == null) @compileError("native `" ++ name ++ "` needs an explicit side_effect: func(f, .{ .side_effect = .none })");
+            try set(env, target, name, function(env, State, state, field.callee.*, field.options).object.value);
+            continue;
+        }
         switch (@typeInfo(F)) {
-            .@"fn" => {
-                try set(env, target, name, function(env, State, state, field).object.value);
-            },
+            .@"fn" => @compileError("native `" ++ name ++ "` must be wrapped: func(f, .{ .side_effect = .none | .receiver | .any })"),
             else => if (comptime isTable(F)) {
                 try set(env, target, name, (try object(env, State, state, field)).value);
             } else {

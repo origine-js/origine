@@ -18,7 +18,7 @@ const binding = @import("binding.zig");
 
 /// Names match Zig error names so errors map by name. This enum is the single source
 /// of truth: the guest-side tables are generated from it (`module_source` for
-/// `@engine/std/errno`, `table` for `native.errors`), never written by hand.
+/// `origine:@std/errno`, `table` for `native.errors`), never written by hand.
 pub const Errno = enum(u32) {
     ok = 0,
     FileNotFound = 1,
@@ -136,7 +136,7 @@ pub fn requireBinding(comptime func: anytype) void {
     if (!isBinding(set)) @compileError(@typeName(@TypeOf(func)) ++ " must return errno.Error, not " ++ @typeName(set) ++ " (narrow with errno.narrow)");
 }
 
-/// Source of the synthetic `@engine/std/errno` module, generated from `Errno` at
+/// Source of the synthetic `origine:@std/errno` module, generated from `Errno` at
 /// compile time: `export const ERRNO = { FileNotFound: 1, ... }` (every member but `ok`).
 pub const module_source: []const u8 = blk: {
     @setEvalBranchQuota(10_000);

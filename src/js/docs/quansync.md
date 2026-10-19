@@ -1,4 +1,4 @@
-# `@engine/std/quansync`
+# `origine:@std/quansync`
 
 Source: [quansync.js](../quansync.js). Write an operation once; run it synchronously or
 asynchronously. After [quansync](https://github.com/quansync-dev/quansync), with one
@@ -6,7 +6,7 @@ difference: a function is **indexable by mode name**, so a caller that knows its
 (from `io.kind`) dispatches without branching.
 
 ```js
-import { quansync } from '@engine/std/quansync';
+import { quansync } from 'origine:@std/quansync';
 
 // leaf: two hand-written implementations
 const stat = quansync({ sync: (io, p) => io.statSync(p), async: (io, p) => io.stat(p) });

@@ -5,7 +5,8 @@ Tests: "binding: hot natives take V8's fast API path" in [src/tests/managed/api.
 Background: [Node's guide to adding V8 fast APIs](https://github.com/nodejs/node/blob/main/doc/contributing/adding-v8-fast-api.md).
 
 A native written for `binding.object` / `binding.native` gets a V8 *fast API* entry
-automatically when its signature allows it. Once TurboFan optimizes a JS caller, V8 calls
+automatically when its signature allows it, unless it is declared
+`func(f, .{ .side_effect = ..., .nofast = true })` (or `.nofast(true)` in builder style). Once TurboFan optimizes a JS caller, V8 calls
 the Zig function directly with raw C arguments instead of building a
 `FunctionCallbackInfo`. You write nothing extra.
 
@@ -33,8 +34,10 @@ adding them to `fastParam`/`fastResult` also means adding `decode`/`encode` supp
 - **Cold calls.** Interpreted and baseline code always use the slow callback. The fast
   entry runs only in optimized code, and V8 deoptimizes back to the slow callback when
   argument types do not match the signature.
-- **Side effects.** Functions are registered `HasSideEffect` and `ConstructorBehavior.Throw`
-  (fast calls are not allowed on constructors).
+- **Side effects and constructors.** Every native states its `side_effect` (`.none`,
+  `.receiver`, `.any`) in its `func` wrapper; it is passed to V8 as the function's side-effect
+  type. Fast calls are not allowed on constructors, so `constructor = .allow` also keeps a
+  native on the slow path; the default is `.throw`.
 
 ## How it is wired
 

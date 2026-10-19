@@ -5,6 +5,9 @@ const v8 = @import("@v8");
 /// UTF-8 logical module identity. This alias does not imply ownership;
 /// the containing request, result, or function documents the slice lifetime.
 pub const ModuleId = []const u8;
+/// Module IDs with this prefix are the host's namespace; scopes opt in through
+/// `Scope.Options.enable_origine_namespace`.
+pub const origine_prefix = "origine:";
 /// Caller-owned key. Public cache operations borrow it, including nested strings,
 /// only until the operation returns; they never take ownership of caller memory.
 pub const ModuleMapKey = struct { module_id: ModuleId, import_attributes: []const ImportAttribute = &.{} };
@@ -81,4 +84,24 @@ pub const Loader = struct {
     /// Request bytes for this token remain readable during this callback, then
     /// become invalid as teardown proceeds. No result or ownership is transferred.
     cancel: ?*const fn (data: ?*anyopaque, token: LoadToken) void = null,
+};
+
+/// Everything `MetaInitializer.init` may touch. All fields are borrowed for the
+/// callback only: `context` is the entered context, `module_id` is runtime-owned,
+/// and `meta` is V8's fresh `import.meta` object for that module.
+pub const MetaRequest = struct {
+    context: v8.Context,
+    scope_id: usize,
+    module_id: ModuleId,
+    meta: v8.Object,
+};
+/// Optional host hook that adds properties to a module's `import.meta` the first
+/// time the module reads it (after the engine's own `url`). Synchronous, on the
+/// isolate thread, inside a live HandleScope; it cannot fail the import, so a host
+/// that cannot populate `meta` simply leaves it without the property.
+pub const MetaInitializer = struct {
+    /// Host-owned state, borrowed without destruction; must outlive Runtime.destroy.
+    data: ?*anyopaque = null,
+    /// Must not retain `request` or any handle in it after returning.
+    init: *const fn (data: ?*anyopaque, request: MetaRequest) void,
 };

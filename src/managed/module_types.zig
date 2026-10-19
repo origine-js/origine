@@ -70,7 +70,14 @@ pub const LoadResult = union(enum) { source: []const u8, exports: []const Export
 /// Borrowed inputs: no input is accessed after completeLoad returns, on success or
 /// error. Accepted content/exceptions are copied/retained independently. Caller
 /// releases its own memory/exception handle. Handles must belong to this runtime.
-pub const Completion = union(enum) { content: Content, failure: anyerror, exception: v8.Global.Of(v8.Value) };
+pub const Completion = union(enum) {
+    content: Content,
+    failure: anyerror,
+    exception: v8.Global.Of(v8.Value),
+    /// Fails the load with a `SyntaxError` created in the module's own realm whose message and
+    /// stack are this text (for example compiler diagnostics). Borrowed for the call.
+    syntax_error: []const u8,
+};
 pub const Loader = struct {
     /// Host-owned state, borrowed without destruction; must outlive Runtime.destroy.
     data: ?*anyopaque = null,

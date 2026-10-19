@@ -173,6 +173,18 @@ pub const ModuleMap = struct {
         return v8.Exception.@"error"(v8.String.initUtf8(self.isolate(), @errorName(err))).?;
     }
 
+    /// A `SyntaxError` whose message and stack are `text` (borrowed for the call). Returns a
+    /// local value in the current HandleScope; requires the isolate and this scope's context
+    /// entered.
+    fn syntaxErrorValue(self: *ModuleMap, text: []const u8) v8.Value {
+        const message = v8.String.initUtf8(self.isolate(), std.mem.trimEnd(u8, text, "\n"));
+        const exception = v8.Exception.syntaxError(message).?;
+        if (exception.toObject(self.ctx())) |object| {
+            _ = object.createDataProperty(self.ctx(), v8.String.initUtf8(self.isolate(), "stack").name, message.name.primitive.value);
+        }
+        return exception;
+    }
+
     /// Borrows immutable bytes through return; returns a copied length or
     /// overflow error and retains no resources.
     fn componentSize(bytes: []const u8) !usize {
@@ -254,6 +266,7 @@ pub const ModuleMap = struct {
             switch (completion) {
                 .failure => |err| self.fail(entry, self.errorValue(err)),
                 .exception => |exception| self.fail(entry, exception.deref()),
+                .syntax_error => |text| self.fail(entry, self.syntaxErrorValue(text)),
                 .content => |content| self.compile(entry, content) catch |err| self.fail(entry, tc_scope.getException() orelse self.errorValue(err)),
             }
             return true;

@@ -43,8 +43,21 @@ pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!modul
     // The `origine:` namespace belongs to the embedded modules: a working-directory file can
     // never take such an id (and so never receives the natives `meta` hands to std modules).
     if (std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) return error.FileNotFound;
-    const source = try std.Io.Dir.cwd().readFileAlloc(host.io, request.module_id, request.allocator, .unlimited);
-    const outcome = try host.transformers.apply(.{ .allocator = request.allocator, .module_id = request.module_id, .source = source });
+    // A file that needs a transformer is mapped and handed to it in place, with no intermediate
+    // buffer; only the transformed output is copied out. Plain files keep the read path, since
+    // V8 copies the source into its own heap either way.
+    const transformer = host.transformers.find(request.module_id) orelse {
+        const source = try std.Io.Dir.cwd().readFileAlloc(host.io, request.module_id, request.allocator, .unlimited);
+        return .{ .source = source };
+    };
+    const file = try std.Io.Dir.cwd().openFile(host.io, request.module_id, .{});
+    defer file.close(host.io);
+    const size = std.math.cast(usize, (try file.stat(host.io)).size) orelse return error.FileTooBig;
+    // Mapping zero bytes is invalid, and an empty module needs no transformer.
+    if (size == 0) return .{ .source = "" };
+    var map = try file.createMemoryMap(host.io, .{ .len = size, .protection = .{ .read = true, .write = false } });
+    defer map.destroy(host.io);
+    const outcome = try transformer.run(transformer.data, .{ .allocator = request.allocator, .module_id = request.module_id, .source = map.memory[0..size] });
     return switch (outcome) {
         .source => |text| .{ .source = text },
         .diagnostics => |text| .{ .exception = transformer_api.syntaxError(text) },

@@ -11,6 +11,9 @@ pub const Request = struct {
     /// loaders, the host allocator in asynchronous ones, which then frees the result).
     allocator: std.mem.Allocator,
     module_id: []const u8,
+    /// May be a read-only memory map of the file (the init loader maps instead of copying), so a
+    /// transformer must not keep a reference past `run` and must not assume it is NUL-terminated.
+    /// The file changing while it is mapped is the caller's problem, as for any mmap.
     source: []const u8,
 };
 

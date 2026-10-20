@@ -2,5 +2,5 @@
 const Module = @import("../module.zig").Module;
 
 pub fn modules() [1]Module {
-    return .{.{ .id = "origine:@std/quansync", .source = @embedFile("../../js/quansync.js") }};
+    return .{.{ .id = "origine:@std/quansync", .source = @embedFile("../../js/std/quansync.js") }};
 }

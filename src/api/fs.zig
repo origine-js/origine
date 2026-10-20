@@ -246,7 +246,7 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, write: bool) !v8.Ob
 
 // ---- ops: (state, [call], args...) -> result ---------------------------------
 
-/// Open bits: 1 write, 2 create, 4 truncate, 8 exclusive (src/js/api.js `OPEN_MODES`).
+/// Open bits: 1 write, 2 create, 4 truncate, 8 exclusive (src/js/glue/fs.js `OPEN_MODES`).
 fn openFile(g: *FsGrant, dir: DirRef, path: EntryPath, bits: u32) !u32 {
     if (bits & 0b1111 != 0) try g.writable();
     const parent = try g.dir(dir);

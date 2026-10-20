@@ -506,7 +506,7 @@ test "api: a module owns per-scope state that lives until the host is destroyed"
     CounterState.torn_down = 0;
     const counter_module = m.Api.module.Module{
         .id = "origine:test/counter",
-        .source = "const { next } = import.meta.native; delete import.meta.native; export const bump = () => next();",
+        .source = "const { next } = import.meta.native; export const bump = () => next();",
         .bindings = m.Api.module.stateful(CounterState, .{ .next = m.Api.binding.func(CounterState.next, .{ .side_effect = .any }) }),
     };
     const modules = m.Api.std_modules ++ [_]m.Api.module.Module{counter_module};
@@ -638,14 +638,14 @@ test "binding: typed natives decode arguments, encode results and report errors"
     try t.expectEqual(@as(u32, 0), state.cell);
     // A returned Zig error lands in the errno cell and the call returns undefined.
     try check(scope, "native.missing() === undefined");
-    try t.expectEqual(@intFromEnum(m.Api.Errno.FileNotFound), state.cell);
+    try t.expectEqual(@backingInt(m.Api.Errno.FileNotFound), state.cell);
     // Mistyped or missing arguments fail before the function runs (InvalidArgument -> InvalidPath).
     const before = state.total;
     for ([_][]const u8{ "native.add('x', 1)", "native.add(1)", "native.greet(5)", "native.sum([1, 2])", "native.greet('x', 5)", "native.maybe(1)" }) |call_source| {
         const source = try std.fmt.allocPrint(t.allocator, "{s} === undefined", .{call_source});
         defer t.allocator.free(source);
         try check(scope, source);
-        try t.expectEqual(@intFromEnum(m.Api.Errno.InvalidPath), state.cell);
+        try t.expectEqual(@backingInt(m.Api.Errno.InvalidPath), state.cell);
         state.cell = 0;
     }
     try t.expectEqual(before, state.total);
@@ -824,7 +824,7 @@ test "errno: the guest table is generated from Errno, not hard-coded" {
     var count: usize = 0;
     inline for (std.enums.values(m.Api.Errno)) |tag| {
         if (tag == .ok) continue;
-        const needle = try std.fmt.allocPrint(t.allocator, "  {s}: {d},", .{ @tagName(tag), @intFromEnum(tag) });
+        const needle = try std.fmt.allocPrint(t.allocator, "  {s}: {d},", .{ @tagName(tag), @backingInt(tag) });
         defer t.allocator.free(needle);
         try t.expect(std.mem.indexOf(u8, m.Api.errno_module_source, needle) != null);
         count += 1;

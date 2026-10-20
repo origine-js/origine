@@ -1,6 +1,6 @@
 # `origine:@std/text`
 
-Source: [std_text.js](../std_text.js). Plain JS; the hardened context has no
+Source: [std/text.js](../std/text.js). Plain JS; the hardened context has no
 `TextEncoder`/`TextDecoder`. [`origine:@std/fs`](fs.md) uses it for string contents.
 
 ```js

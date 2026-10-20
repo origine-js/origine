@@ -1,5 +1,5 @@
 //! Error codes shared between native bindings and the guest (`IoError` in
-//! src/js/std_io.js). A failing binding writes one of these into the scope's errno
+//! src/js/std/io.js). A failing binding writes one of these into the scope's errno
 //! cell; the guest reads it from a `Uint32Array`.
 //!
 //! Two error domains feed it, both concrete Zig error sets resolved at compile time:

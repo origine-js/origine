@@ -1,6 +1,6 @@
 # `origine:@std/io`
 
-Source: [std_io.js](../std_io.js). Zig-style `std.Io` vocabulary. Everything exported is
+Source: [std/io.js](../std/io.js). Zig-style `std.Io` vocabulary. Everything exported is
 pure data or code: **holding a `Dir` or `File` confers no authority**. The fs object behind
 the `io` you pass does the work and checks the grant.
 
@@ -70,7 +70,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs
 - **`ops`** — the underlying [quansync](quansync.md) operations, each `(io, self, ...args)`,
   for composing in other std modules: `yield* ops.openFile(io, dir, path, flags)` or
   `ops.openFile[io.kind](...)`. `flags` is the raw glue open-mode string
-  (`'r' 'rw' 'r+' 'w' 'w+' 'x' 'x+' 'c' 't'`, see [api.js](../api.js)). Names: `openFile openDir
+  (`'r' 'rw' 'r+' 'w' 'w+' 'x' 'x+' 'c' 't'`, see [glue/fs.js](../glue/fs.js)). Names: `openFile openDir
   closeDir stat access createDir createDirPath createDirPathOpen deleteFile deleteDir deleteTree
   rename readDir readFile writeFile fileClose fileStat fileLength fileRead filePread fileReadAll
   fileWrite fileWriteAll filePwriteAll fileSetLength fileSync fileReadPositionalAll`.

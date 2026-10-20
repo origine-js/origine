@@ -1,6 +1,6 @@
 # `origine:@std/fs`
 
-Source: [std_fs.js](../std_fs.js). Rust `std::fs`-style API (snake_case) built on the
+Source: [std/fs.js](../std/fs.js). Rust `std::fs`-style API (snake_case) built on the
 Zig-style ops of [`origine:@std/io`](io.md). There is no ambient cwd, so the API is bound to
 an `io` and a directory.
 

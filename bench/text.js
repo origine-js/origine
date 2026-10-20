@@ -1,5 +1,5 @@
 // utf8 micro-benchmark: `zig build run -Doptimize=ReleaseFast -- bench/text.js`
-// Compares the plain JS implementation in std_text.js with the exported (native) one.
+// Compares the plain JS implementation in std/text.js with the exported (native) one.
 import { encodeUtf8, decodeUtf8, utf8Js } from 'origine:@std/text';
 
 function time(name, iterations, fn) {

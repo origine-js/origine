@@ -3,7 +3,7 @@
 //!
 //! The Zig host owns all authority. Guest code only holds native functions whose V8
 //! External data points at a grant or per-scope state record, plus plain descriptors
-//! that name things inside one grant. `src/js/api.js` shapes the surface; every native
+//! that name things inside one grant. `src/js/glue/` shapes the surface; every native
 //! validates its own inputs through typed bindings (binding.zig).
 //!
 //! Error protocol: each scope owns one native-backed `Uint32Array` (`native.errno`,
@@ -27,7 +27,7 @@ const Runtime = @import("../managed/runtime.zig").Runtime;
 const Scope = @import("../managed/scope.zig").Scope;
 const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
 
-const glue_source = @embedFile("../js/api.js");
+const glue_script = @import("glue.zig");
 
 /// What the host grants to `fs.request`. `root` is borrowed and must outlive the Host.
 pub const FsConfig = struct {
@@ -194,7 +194,7 @@ pub const Host = struct {
         });
         try binding.set(env, native, "errno", try errnoArray(isolate, state));
         try binding.set(env, native, "errors", (try errno_api.table(env)).value);
-        const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, glue_source), scope.scriptOrigin("engine:api.js", false)) orelse return error.JavaScriptException;
+        const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, glue_script.source), scope.scriptOrigin(glue_script.origin, false)) orelse return error.JavaScriptException;
         const glue = v8.Function.from_opaque((script.run(ctx) orelse return error.JavaScriptException).data.handle) orelse return error.BootstrapFailed;
         const api = glue.call(ctx, v8.Primitive.initUndefined(isolate).value, &.{native.value}) orelse return error.JavaScriptException;
         try scope.hardenLocal(api);

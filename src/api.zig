@@ -3,7 +3,7 @@
 //! - `Host` owns authority and drives the init -> `main(api)` lifecycle.
 //! - `binding` / `Call` are the DX for writing JS-native functions as ordinary typed
 //!   Zig functions; see src/api/binding.zig.
-//! - The guest side lives in src/js/ (`api.js` glue and the `origine:@std/*` modules).
+//! - The guest side lives in src/js/ (`glue/` and the `origine:@std/*` modules).
 pub const Host = @import("api/host.zig").Host;
 pub const Config = @import("api/host.zig").Config;
 pub const FsConfig = @import("api/host.zig").FsConfig;

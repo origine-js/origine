@@ -10,8 +10,7 @@
 // Options (all optional): jsx: 'automatic' | 'classic', importSource, pragma, pragmaFrag,
 // development, verbatimImports, inlineSourceMap.
 const native = import.meta.native;
-delete import.meta.native;
 
 export const typescript = options => native.make(options);
-export const tsx = typescript;
-export const jsx = typescript;
+export const tsx = options => native.make(options);
+export const jsx = options => native.make(options);

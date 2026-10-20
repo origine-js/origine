@@ -48,7 +48,7 @@ export const FileKind = freeze({ file: 1, directory: 2, sym_link: 3, other: 4 })
 // ('sync' | 'async'), and the same functions are exported as `ops` for other
 // std modules to compose with `yield*`. Every op takes `(io, self, ...args)`.
 
-// Zig `OpenMode` -> glue mode string (Python-style, see api.js). Writable handles
+// Zig `OpenMode` -> glue mode string (Python-style, see glue/fs.js). Writable handles
 // are read/write natively, so write_only and read_write coincide.
 const MODES = { read_only: 'r', write_only: 'rw', read_write: 'rw' };
 const UNLIMITED = freeze({ limit: Infinity });

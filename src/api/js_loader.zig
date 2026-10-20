@@ -21,6 +21,8 @@ const JsTransformer = struct {
 
 /// Most `[extension, transformer]` pairs one child may have.
 pub const max_transformers = 64;
+/// Longest extension, in UTF-8 bytes, a transformer map accepts.
+const max_extension_len = 64;
 
 pub const JsLoader = struct {
     host: *Host,
@@ -58,41 +60,40 @@ pub const JsLoader = struct {
         const length = (list.get(ctx, binding.string(isolate, "length")) orelse return error.InvalidPath).u32Value(ctx) orelse return error.InvalidPath;
         if (length % 2 != 0 or length / 2 > max_transformers) return error.InvalidPath;
         const count = length / 2;
+
+        // Pass 1: read and validate every pair into stack storage; nothing is allocated yet.
+        var ext_buffers: [max_transformers][max_extension_len]u8 = undefined;
+        var parsed: [max_transformers]struct { ext: []const u8, function: v8.Value, host: ?*const transformer.Transformer } = undefined;
         var js_count: usize = 0;
         for (0..count) |pair| {
             const ext_value = list.getIndex(ctx, @intCast(pair * 2)) orelse return error.InvalidPath;
             const function = list.getIndex(ctx, @intCast(pair * 2 + 1)) orelse return error.InvalidPath;
             if (!ext_value.isString() or !function.isFunction()) return error.InvalidPath;
-            var buffer: [64]u8 = undefined;
             const text = ext_value.toString(ctx) orelse return error.InvalidPath;
-            if (text.lenUtf8(isolate) > buffer.len) return error.InvalidPath;
-            const ext = buffer[0..text.writeUtf8(isolate, &buffer)];
+            if (text.lenUtf8(isolate) > max_extension_len) return error.InvalidPath;
+            const ext = ext_buffers[pair][0..text.writeUtf8(isolate, &ext_buffers[pair])];
             if (!validExtension(ext)) return error.InvalidPath;
-            for (0..pair) |earlier| {
-                const other = list.getIndex(ctx, @intCast(earlier * 2)) orelse return error.InvalidPath;
-                var other_buffer: [64]u8 = undefined;
-                const other_text = other.toString(ctx) orelse return error.InvalidPath;
-                if (other_text.lenUtf8(isolate) <= other_buffer.len and std.mem.eql(u8, ext, other_buffer[0..other_text.writeUtf8(isolate, &other_buffer)])) return error.InvalidPath;
+            for (parsed[0..pair]) |earlier| {
+                if (std.mem.eql(u8, earlier.ext, ext)) return error.InvalidPath;
             }
-            if (transform_handle.read(ctx, isolate, function) == null) js_count += 1;
+            const host_transformer = transform_handle.read(ctx, isolate, function);
+            if (host_transformer == null) js_count += 1;
+            parsed[pair] = .{ .ext = ext, .function = function, .host = host_transformer };
         }
+
+        // Pass 2: copy into host-allocated storage owned by the loader.
         const alloc = self.host.allocator;
         const entries = alloc.alloc(transformer.Entry, count) catch binding.oom();
         const exts = alloc.alloc([]u8, count) catch binding.oom();
         const js = alloc.alloc(JsTransformer, js_count) catch binding.oom();
         var js_next: usize = 0;
-        for (0..count) |pair| {
-            const ext_value = list.getIndex(ctx, @intCast(pair * 2)).?;
-            const function = list.getIndex(ctx, @intCast(pair * 2 + 1)).?;
-            const text = ext_value.toString(ctx).?;
-            const owned = alloc.alloc(u8, text.lenUtf8(isolate)) catch binding.oom();
-            _ = text.writeUtf8(isolate, owned);
-            exts[pair] = owned;
-            if (transform_handle.read(ctx, isolate, function)) |host_transformer| {
-                entries[pair] = .{ .ext = owned, .transformer = host_transformer.* };
+        for (parsed[0..count], 0..) |item, pair| {
+            exts[pair] = alloc.dupe(u8, item.ext) catch binding.oom();
+            if (item.host) |host_transformer| {
+                entries[pair] = .{ .ext = exts[pair], .transformer = host_transformer.* };
             } else {
-                js[js_next] = .{ .loader = self, .function = .new(isolate, v8.Function.from_opaque(function.data.handle).?) };
-                entries[pair] = .{ .ext = owned, .transformer = .{ .data = &js[js_next], .run = runJs } };
+                js[js_next] = .{ .loader = self, .function = .new(isolate, v8.Function.from_opaque(item.function.data.handle).?) };
+                entries[pair] = .{ .ext = exts[pair], .transformer = .{ .data = &js[js_next], .run = runJs } };
                 js_next += 1;
             }
         }

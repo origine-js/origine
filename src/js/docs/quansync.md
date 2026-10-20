@@ -1,6 +1,6 @@
 # `origine:@std/quansync`
 
-Source: [quansync.js](../quansync.js). Write an operation once; run it synchronously or
+Source: [std/quansync.js](../std/quansync.js). Write an operation once; run it synchronously or
 asynchronously. After [quansync](https://github.com/quansync-dev/quansync), with one
 difference: a function is **indexable by mode name**, so a caller that knows its mode
 (from `io.kind`) dispatches without branching.
@@ -38,5 +38,5 @@ const size = quansync(function* (io, p) {
 
 A leaf's `.sync` and `.async` *are* the given implementations: no wrapper, no allocation.
 A composite costs one generator per call, so hot composites should supply a `{ sync }`
-fast path (`dirReadFile` in [std_io.js](../std_io.js) does). Inside a generator you may only
+fast path (`dirReadFile` in [std/io.js](../std/io.js) does). Inside a generator you may only
 `yield` a leaf effect or another task; anything else throws `TypeError`.

@@ -8,16 +8,24 @@ const std = @import("std");
 /// Script origin reported in stack traces.
 pub const origin = "engine:api.js";
 
+/// A glue part as a bare expression: the formatter ends each file with `;`, which would not
+/// parse inside the parentheses `source` puts around it.
+fn part(comptime text: []const u8) []const u8 {
+    const trimmed = std.mem.trimEnd(u8, text, " \t\r\n");
+    return if (trimmed.len != 0 and trimmed[trimmed.len - 1] == ';') trimmed[0 .. trimmed.len - 1] else trimmed;
+}
+
 pub const source = std.fmt.comptimePrint(
     \\(native) => {{
     \\  'use strict';
     \\  const util = ({[util]s})(native);
-    \\  return ({[index]s})(native, util, ({[fs]s}), ({[env]s}), ({[scope]s}));
+    \\  return ({[index]s})(native, util, ({[fs]s}), ({[env]s}), ({[scope]s}), ({[io]s}));
     \\}}
 , .{
-    .util = @embedFile("../js/glue/util.js"),
-    .index = @embedFile("../js/glue/index.js"),
-    .fs = @embedFile("../js/glue/fs.js"),
-    .env = @embedFile("../js/glue/env.js"),
-    .scope = @embedFile("../js/glue/scope.js"),
+    .util = part(@embedFile("../js/glue/util.js")),
+    .index = part(@embedFile("../js/glue/index.js")),
+    .fs = part(@embedFile("../js/glue/fs.js")),
+    .env = part(@embedFile("../js/glue/env.js")),
+    .scope = part(@embedFile("../js/glue/scope.js")),
+    .io = part(@embedFile("../js/glue/io.js")),
 });

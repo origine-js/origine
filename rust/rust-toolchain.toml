@@ -1,5 +1,7 @@
-# LLVM must not be newer than V8's bundled clang (LLVM 23): cross-language LTO
-# links Rust bitcode with libv8_zig.a through V8's lld. Rust 1.99 ships LLVM 22.
+# Pinned nightly (Rust 1.101): Miri runs on the same toolchain as the build, `!` is stable, and
+# the allocator API is stable. Rust's LLVM (23.1.x) has the same major version as V8's bundled
+# clang (23); the Rust staticlib is linked as native code, so cross-language LTO is not used.
+# Bump deliberately: `rustup toolchain install nightly-YYYY-MM-DD -c rustfmt -c clippy -c miri -c rust-src`.
 [toolchain]
-channel = "1.99"
-components = ["rustfmt", "clippy"]
+channel = "nightly-2026-10-19"
+components = ["rustfmt", "clippy", "miri", "rust-src"]

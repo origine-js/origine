@@ -20,12 +20,17 @@ const Fixture = struct {
     }
 
     fn setupWith(self: *Fixture, source: []const u8, grant_fs: bool, args: []const []const u8, modules: []const m.Api.module.Module) !void {
-        return self.setupFull("init.js", source, grant_fs, args, modules, m.Api.transformers.defaults);
+        return self.setupFull("init.js", source, grant_fs, args, modules, m.Api.transformers.defaults, .{});
+    }
+
+    /// Like `setup` with an explicit runtime ceiling (`null`: no `api.io`).
+    fn setupRuntime(self: *Fixture, source: []const u8, grant_fs: bool, runtime: ?m.Api.RuntimeConfig) !void {
+        return self.setupFull("init.js", source, grant_fs, &.{}, &m.Api.std_modules, m.Api.transformers.defaults, runtime);
     }
 
     /// Writes `source` as `name` in the tmp dir (the init module) and runs with the given
     /// embedded modules and transformer map.
-    fn setupFull(self: *Fixture, name: []const u8, source: []const u8, grant_fs: bool, args: []const []const u8, modules: []const m.Api.module.Module, transformers: []const m.Api.transformer.Entry) !void {
+    fn setupFull(self: *Fixture, name: []const u8, source: []const u8, grant_fs: bool, args: []const []const u8, modules: []const m.Api.module.Module, transformers: []const m.Api.transformer.Entry, runtime: ?m.Api.RuntimeConfig) !void {
         ensureV8();
         self.tmp = t.tmpDir(.{ .iterate = true });
         errdefer self.tmp.cleanup();
@@ -41,6 +46,7 @@ const Fixture = struct {
             .fs = if (grant_fs) .{ .root = self.tmp.dir } else null,
             .modules = modules,
             .transformers = transformers,
+            .runtime = runtime,
         });
         errdefer self.host.destroy();
         self.scope = try self.rt.createScope(self.host.initOptions());
@@ -88,27 +94,32 @@ test "api: main receives env and an fs with sync and async variants" {
         \\  const out = globalThis.report = {};
         \\  out.args = api.env.args().join(',');
         \\  out.home = api.env.get('HOME');
-        \\  const fs = await api.fs.request({ write: true, mode: { async: true, sync: true } });
-        \\  const f = IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'a.txt', 'w'));
-        \\  fs.sync.fileWriteAll(f, Uint8Array.from([104, 105]));
-        \\  fs.sync.fileClose(f);
-        \\  const g = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
-        \\  out.text = String.fromCharCode(...await fs.async.fileReadAll(g, { limit: Limit.unlimited }));
-        \\  const h = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
-        \\  out.limited = (await fs.async.fileReadAll(h, { limit: Limit.limited(1) })).length;
-        \\  const i = await fs.async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
-        \\  out.nothing = (await fs.async.fileReadAll(i, { limit: Limit.nothing })).length;
-        \\  try { IoError.check(fs, fs.sync.dirOpenFile(Dir.cwd(), 'nope.txt', 'r')); } catch (e) { out.missing = IoError.is(e, IoError.FileNotFound); }
-        \\  await fs.async.dirOpenFile(Dir.cwd(), 'nope.txt', 'r').catch(e => { out.asyncMissing = IoError.is(e, IoError.FileNotFound); });
+        \\  const sync = api.fs.requestSync({ write: true });
+        \\  const io = api.io.create({});
+        \\  const async = await api.fs.requestAsync({ io, write: true });
+        \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'a.txt', 'w'));
+        \\  sync.fileWriteAll(f, Uint8Array.from([104, 105]));
+        \\  sync.fileClose(f);
+        \\  const g = await async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
+        \\  out.text = String.fromCharCode(...await async.fileReadAll(g, { limit: Limit.unlimited }));
+        \\  const h = await async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
+        \\  out.limited = (await async.fileReadAll(h, { limit: Limit.limited(1) })).length;
+        \\  const i = await async.dirOpenFile(Dir.cwd(), 'a.txt', 'r');
+        \\  out.nothing = (await async.fileReadAll(i, { limit: Limit.nothing })).length;
+        \\  try { IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'nope.txt', 'r')); } catch (e) { out.missing = IoError.is(e, IoError.FileNotFound); }
+        \\  await async.dirOpenFile(Dir.cwd(), 'nope.txt', 'r').catch(e => { out.asyncMissing = IoError.is(e, IoError.FileNotFound); });
         \\  for (const bad of ['../x', '/etc/passwd', 'a/../../x']) {
-        \\    fs.sync.dirOpenFile(Dir.cwd(), bad, 'r');
-        \\    (out.escapes ??= []).push(fs.errno[0] === IoError.InvalidPath);
+        \\    sync.dirOpenFile(Dir.cwd(), bad, 'r');
+        \\    (out.escapes ??= []).push(sync.errno[0] === IoError.InvalidPath);
+        \\    await async.dirOpenFile(Dir.cwd(), bad, 'r').catch(e => { (out.asyncEscapes ??= []).push(IoError.is(e, IoError.InvalidPath)); });
         \\  }
-        \\  fs.errno[0] = 0;
-        \\  const entries = fs.sync.dirRead(Dir.cwd());
+        \\  sync.errno[0] = 0;
+        \\  const entries = sync.dirRead(Dir.cwd());
         \\  out.listed = entries.some(e => e.name === 'a.txt');
-        \\  out.stat = fs.sync.dirStat(Dir.cwd(), 'a.txt').size;
-        \\  out.deleted = delete fs.sync && fs.sync === undefined && fs.async !== undefined;
+        \\  out.stat = sync.dirStat(Dir.cwd(), 'a.txt').size;
+        \\  out.asyncNoErrno = async.errno === undefined && sync.errno instanceof Uint32Array;
+        \\  out.frozen = Object.isFrozen(sync) && Object.isFrozen(async) && sync.kind === 'sync' && async.kind === 'async';
+        \\  await io.close();
         \\}
     , true, &.{ "x", "y" });
     defer fx.deinit();
@@ -117,7 +128,7 @@ test "api: main receives env and an fs with sync and async variants" {
     try check(fx.scope, "report.text === 'hi' && report.limited === 1 && report.nothing === 0");
     try check(fx.scope, "report.missing === true && report.asyncMissing === true");
     try check(fx.scope, "report.escapes.length === 3 && report.escapes.every(x => x)");
-    try check(fx.scope, "report.listed === true && report.stat === 2 && report.deleted === true");
+    try check(fx.scope, "report.listed === true && report.stat === 2 && report.asyncNoErrno && report.frozen && report.asyncEscapes.length === 3 && report.asyncEscapes.every(x => x)");
 }
 
 test "api: errno is one native-backed array and open modes are python-style" {
@@ -126,11 +137,11 @@ test "api: errno is one native-backed array and open modes are python-style" {
         \\import { Dir } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const a = await api.fs.request({ write: true, mode: { sync: true } });
-        \\  const b = await api.fs.request({ write: true, mode: { sync: true } });
+        \\  const a = api.fs.requestSync({ write: true });
+        \\  const b = api.fs.requestSync({ write: true });
         \\  out.shared = a.errno === b.errno && a.errno instanceof Uint32Array && a.errno.length === 1;
         \\  try { structuredClone(a.errno.buffer, { transfer: [a.errno.buffer] }); } catch { out.pinned = true; }
-        \\  const s = a.sync, cwd = Dir.cwd();
+        \\  const s = a, cwd = Dir.cwd();
         \\  const bits = [];
         \\  for (const mode of ['w+', 'x', 'x+', 'rw', 'r+', 'bogus', 42, {}]) {
         \\    const f = s.dirOpenFile(cwd, 'm.txt', mode);
@@ -154,15 +165,27 @@ test "api: narrowing is monotonic and the host grant is the ceiling" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const ro = api.fs.narrow({ write: false, mode: { sync: false } });
-        \\  const rfs = await ro.request({ write: true, mode: { async: true, sync: true } });
-        \\  out.syncAbsent = rfs.sync === undefined;
-        \\  await rfs.async.dirOpenFile(Dir.cwd(), 'b.txt', 'c').catch(e => { out.denied = IoError.is(e, IoError.AccessDenied); });
+        \\  const io = api.io.create({});
+        \\  const rfs = await ro.requestAsync({ io, write: true });
+        \\  try { ro.requestSync({}); } catch (e) { out.syncAbsent = IoError.is(e, IoError.AccessDenied); }
+        \\  await rfs.dirOpenFile(Dir.cwd(), 'b.txt', 'c').catch(e => { out.denied = IoError.is(e, IoError.AccessDenied); });
         \\  const again = ro.narrow({ write: true, mode: { sync: true } });
-        \\  const afs = await again.request({ write: true, mode: { async: true, sync: true } });
-        \\  out.stillRo = afs.sync === undefined;
-        \\  const syncOnly = await api.fs.request({ mode: { sync: true } });
-        \\  out.modes = syncOnly.async === undefined && typeof syncOnly.sync === 'object';
-        \\  out.defaultMode = (await api.fs.request({})).sync === undefined;
+        \\  const afs = await again.requestAsync({ io, write: true });
+        \\  await afs.dirOpenFile(Dir.cwd(), 'b.txt', 'c').catch(e => { out.stillRo = IoError.is(e, IoError.AccessDenied); });
+        \\  try { again.requestSync({ write: true }); out.syncStillOff = false; } catch (e) { out.syncStillOff = IoError.is(e, IoError.AccessDenied); }
+        \\  const syncOnly = api.fs.narrow({ mode: { async: false } });
+        \\  out.modes = typeof syncOnly.requestSync({}) === 'object' && await syncOnly.requestAsync({ io }).then(() => false, e => IoError.is(e, IoError.AccessDenied));
+        \\  const asyncOnly = api.fs.narrow({ mode: { sync: false } });
+        \\  out.defaultMode = typeof (await asyncOnly.requestAsync({ io })) === 'object';
+        \\  // The io ceiling is narrowable too: backend list and runtime count.
+        \\  const capped = api.io.narrow({ maxRuntimes: 1, backends: ['threaded'] });
+        \\  const first = capped.create({});
+        \\  out.narrowedBackend = first.backend;
+        \\  try { capped.create({}); } catch (e) { out.countCapped = IoError.is(e, IoError.Unsupported); }
+        \\  try { api.io.narrow({ backends: ['threaded'] }).create({ backend: 'uring' }); } catch (e) { out.backendCapped = IoError.is(e, IoError.Unsupported); }
+        \\  await first.close();
+        \\  await capped.create({}).close();
+        \\  await io.close();
         \\  const one = api.env.narrow({ allow: ['HOME'] });
         \\  out.home = one.get('HOME'); out.path = one.get('PATH');
         \\  const none = one.narrow({ allow: ['PATH'] });
@@ -174,7 +197,8 @@ test "api: narrowing is monotonic and the host grant is the ceiling" {
     , true, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.syncAbsent && report.denied && report.stillRo && report.modes && report.defaultMode");
+    try check(fx.scope, "report.syncAbsent && report.denied && report.stillRo && report.syncStillOff && report.modes && report.defaultMode");
+    try check(fx.scope, "report.narrowedBackend === 'threaded' && report.countCapped && report.backendCapped");
     try check(fx.scope, "report.home === '/home/test' && report.path === undefined && report.widened === false");
     try check(fx.scope, "report.noScopes === true && report.frozen === true");
 }
@@ -184,12 +208,15 @@ test "api: without a host grant fs is denied" {
     try fx.setup(
         \\import { IoError } from 'origine:@std/io';
         \\export async function main(api) {
-        \\  await api.fs.request({}).catch(e => { globalThis.denied = IoError.is(e, IoError.AccessDenied); });
+        \\  const io = api.io.create({});
+        \\  try { api.fs.requestSync({}); } catch (e) { globalThis.denied = IoError.is(e, IoError.AccessDenied); }
+        \\  await api.fs.requestAsync({ io }).catch(e => { globalThis.asyncDenied = IoError.is(e, IoError.AccessDenied); });
+        \\  await io.close();
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "denied === true");
+    try check(fx.scope, "denied === true && asyncDenied === true");
 }
 
 test "api: child scopes with import map, sync and async loaders and preload values" {
@@ -285,8 +312,8 @@ test "api: Zig-style Dir and File methods over sync and async io" {
         \\const bytes = s => Uint8Array.from([...s].map(c => c.charCodeAt(0)));
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const fs = await api.fs.request({ write: true, mode: { async: true, sync: true } });
-        \\  const io = fs.sync, cwd = Dir.cwd();
+        \\  const rt = api.io.create({});
+        \\  const io = api.fs.requestSync({ write: true }), cwd = Dir.cwd();
         \\  cwd.writeFile(io, { sub_path: 'w.txt', data: bytes('hello world') });
         \\  out.read = text(cwd.readFile(io, 'w.txt'));
         \\  out.limited = text(cwd.readFile(io, 'w.txt', Limit.limited(5)));
@@ -313,16 +340,20 @@ test "api: Zig-style Dir and File methods over sync and async io" {
         \\  try { cwd.deleteTree(io, '.'); } catch (e) { out.rootSafe = IoError.is(e, IoError.InvalidPath); }
         \\  cwd.deleteTree(io, 'a');
         \\  try { cwd.statFile(io, 'a'); } catch (e) { out.gone = IoError.is(e, IoError.FileNotFound); }
-        \\  const aio = fs.async;
+        \\  const aio = await api.fs.requestAsync({ io: rt, write: true });
         \\  await cwd.writeFile(aio, { sub_path: 'async.txt', data: bytes('async!') });
         \\  out.asyncRead = text(await cwd.readFile(aio, 'async.txt'));
         \\  const af = await cwd.openFile(aio, 'async.txt');
         \\  out.asyncLen = await af.length(aio);
         \\  await af.close(aio);
         \\  await cwd.openFile(aio, 'ghost').catch(e => { out.asyncGhost = IoError.is(e, IoError.FileNotFound); });
-        \\  const ro = await api.fs.narrow({ write: false }).request({ write: true, mode: { sync: true } });
-        \\  try { Dir.cwd().deleteFile(ro.sync, 'async.txt'); } catch (e) { out.roDelete = IoError.is(e, IoError.AccessDenied); }
-        \\  try { Dir.cwd().rename(ro.sync, 'async.txt', Dir.cwd(), 'z'); } catch (e) { out.roRename = IoError.is(e, IoError.AccessDenied); }
+        \\  const ro = api.fs.narrow({ write: false }).requestSync({ write: true });
+        \\  try { Dir.cwd().deleteFile(ro, 'async.txt'); } catch (e) { out.roDelete = IoError.is(e, IoError.AccessDenied); }
+        \\  try { Dir.cwd().rename(ro, 'async.txt', Dir.cwd(), 'z'); } catch (e) { out.roRename = IoError.is(e, IoError.AccessDenied); }
+        \\  const aro = await api.fs.narrow({ write: false }).requestAsync({ io: rt, write: true });
+        \\  await Dir.cwd().deleteFile(aro, 'async.txt').catch(e => { out.asyncRoDelete = IoError.is(e, IoError.AccessDenied); });
+        \\  await Dir.cwd().rename(aro, 'async.txt', Dir.cwd(), 'z').catch(e => { out.asyncRoRename = IoError.is(e, IoError.AccessDenied); });
+        \\  await rt.close();
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -332,7 +363,7 @@ test "api: Zig-style Dir and File methods over sync and async io" {
     try check(fx.scope, "report.names === 'c,in.txt' && report.moved === 'x'");
     try check(fx.scope, "report.ghost && report.rootSafe && report.gone");
     try check(fx.scope, "report.asyncRead === 'async!' && report.asyncLen === 6 && report.asyncGhost");
-    try check(fx.scope, "report.roDelete && report.roRename");
+    try check(fx.scope, "report.roDelete && report.roRename && report.asyncRoDelete && report.asyncRoRename");
 }
 
 test "quansync: leaves, composites, yields, errors, finally and fast paths" {
@@ -433,12 +464,15 @@ test "api: Rust-style fs over sync and async io" {
         \\}
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const io = await api.fs.request({ write: true, mode: { sync: true, async: true } });
-        \\  await exercise(fs(io.sync), 'sync', out);
-        \\  await exercise(fs(io.async), 'async', out);
-        \\  out.kinds = fs(io.sync).kind + ',' + fs(io.async).kind;
-        \\  out.syncIsSync = !(fs(io.sync).read('rust-sync/h.bin') instanceof Promise);
-        \\  out.asyncIsPromise = fs(io.async).read('rust-async/h.bin') instanceof Promise;
+        \\  const rt = api.io.create({});
+        \\  const sio = api.fs.requestSync({ write: true });
+        \\  const aio = await api.fs.requestAsync({ io: rt, write: true });
+        \\  await exercise(fs(sio), 'sync', out);
+        \\  await exercise(fs(aio), 'async', out);
+        \\  out.kinds = fs(sio).kind + ',' + fs(aio).kind;
+        \\  out.syncIsSync = !(fs(sio).read('rust-sync/h.bin') instanceof Promise);
+        \\  out.asyncIsPromise = fs(aio).read('rust-async/h.bin') instanceof Promise;
+        \\  await rt.close();
         \\  const strings = ['', 'abc', 'é', '✓', '\u{1F600}', 'a\ud800b', '\udc00', '\ud83d', 'x\ud83d\ude00y', 'aé✓\u{1F600}'.repeat(300), 'z'.repeat(20000)];
         \\  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
         \\  out.utf8Encode = strings.every(t => same(encodeUtf8(t), utf8Js.encode(t)));
@@ -458,6 +492,203 @@ test "api: Rust-style fs over sync and async io" {
         try check(fx.scope, prefix ++ "invalidUtf8 && " ++ prefix ++ "missing && " ++ prefix ++ "removed");
     }
     try check(fx.scope, "report.kinds === 'sync,async' && report.syncIsSync && report.asyncIsPromise && report.utf8 && report.utf8Encode && report.utf8Decode");
+}
+
+/// Runs an init module whose `@BACKEND@` placeholder is replaced by `backend`.
+fn setupBackend(fx: *Fixture, template: []const u8, backend: []const u8, runtime: ?m.Api.RuntimeConfig) !void {
+    const source = try std.mem.replaceOwned(u8, t.allocator, template, "@BACKEND@", backend);
+    defer t.allocator.free(source);
+    try fx.setupRuntime(source, true, runtime);
+}
+
+const async_concurrent_source =
+    \\import { Dir, IoError } from 'origine:@std/io';
+    \\const bytes = s => Uint8Array.from([...s].map(c => c.charCodeAt(0)));
+    \\const text = b => String.fromCharCode(...b);
+    \\export async function main(api) {
+    \\  const out = globalThis.report = {};
+    \\  const rt = api.io.create({ backend: '@BACKEND@' });
+    \\  out.handle = rt.kind === 'io' && typeof rt.id === 'number' && typeof rt.backend === 'string' && Object.isFrozen(rt);
+    \\  const sync = api.fs.requestSync({ write: true });
+    \\  const fs = await api.fs.requestAsync({ io: rt, write: true });
+    \\  const cwd = Dir.cwd();
+    \\  // Many writes, then many reads, all in flight together.
+    \\  const names = Array.from({ length: 24 }, (_, i) => 'f' + i + '.txt');
+    \\  await Promise.all(names.map((n, i) => cwd.writeFile(fs, { sub_path: n, data: bytes('data-' + i) })));
+    \\  const texts = await Promise.all(names.map(n => cwd.readFile(fs, n)));
+    \\  out.roundTrip = texts.every((b, i) => text(b) === 'data-' + i);
+    \\  out.listed = (await cwd.iterate(fs)).filter(e => e.name.startsWith('f')).length === 24;
+    \\  // Concurrent failures: each rejection carries its own errno and the sync cell stays clean.
+    \\  const results = await Promise.allSettled([
+    \\    cwd.openFile(fs, 'missing.txt'),
+    \\    cwd.openFile(fs, '../escape'),
+    \\    cwd.createDir(fs, 'f0.txt'),
+    \\    cwd.openDir(fs, 'f1.txt'),
+    \\    cwd.readFile(fs, 'f2.txt'),
+    \\    cwd.openFile(fs, 'f3.txt', { mode: 'read_only' }).then(f => f.close(fs)),
+    \\  ]);
+    \\  out.codes = results.map(r => (r.status === 'fulfilled' ? 0 : r.reason.errno)).join(',');
+    \\  out.names = results.filter(r => r.status === 'rejected').map(r => r.reason.name).join(',');
+    \\  out.cellClean = sync.errno[0] === 0;
+    \\  // Directories.
+    \\  await cwd.createDirPath(fs, 'a/b/c');
+    \\  const sub = await cwd.createDirPathOpen(fs, 'a/b');
+    \\  await sub.writeFile(fs, { sub_path: 'in.txt', data: bytes('x') });
+    \\  out.sub = (await sub.iterate(fs)).map(e => e.name).sort().join(',');
+    \\  await sub.close(fs);
+    \\  await cwd.rename(fs, 'a/b/in.txt', cwd, 'moved.txt');
+    \\  out.moved = text(await cwd.readFile(fs, 'moved.txt'));
+    \\  await cwd.deleteTree(fs, 'a');
+    \\  await cwd.statFile(fs, 'a').catch(e => { out.treeGone = IoError.is(e, IoError.FileNotFound); });
+    \\  out.rootSafe = await cwd.deleteTree(fs, '.').then(() => false, e => IoError.is(e, IoError.InvalidPath));
+    \\  await cwd.createDir(fs, 'empty');
+    \\  await cwd.deleteDir(fs, 'empty');
+    \\  await cwd.deleteFile(fs, 'moved.txt');
+    \\  // Positional and streaming file operations, several preads at once.
+    \\  const file = await cwd.createFile(fs, 'p.bin');
+    \\  await file.writeStreamingAll(fs, bytes('hello world'));
+    \\  await file.writePositionalAll(fs, bytes('J'), 0);
+    \\  const parts = [new Uint8Array(5), new Uint8Array(5), new Uint8Array(5)];
+    \\  const counts = await Promise.all(parts.map((buf, i) => file.readPositional(fs, buf, i * 3)));
+    \\  out.preads = counts.join(',') + ':' + parts.map(text).join('|');
+    \\  out.length = await file.length(fs);
+    \\  await file.setLength(fs, 5);
+    \\  await file.sync(fs);
+    \\  out.truncated = (await file.stat(fs)).size + ':' + text(await cwd.readFile(fs, 'p.bin'));
+    \\  const buf = new Uint8Array(8);
+    \\  out.streamEnd = (await file.readStreaming(fs, buf)) + ':' + (await file.readStreaming(fs, buf));
+    \\  await file.close(fs);
+    \\  out.closedFile = await file.stat(fs).then(() => false, e => e.errno === IoError.BadHandle || e.errno === IoError.StaleHandle);
+    \\  // A read-only grant on the same runtime.
+    \\  const ro = await api.fs.narrow({ write: false }).requestAsync({ io: rt, write: true });
+    \\  out.roRead = text(await cwd.readFile(ro, 'f5.txt')) === 'data-5';
+    \\  const denied = e => IoError.is(e, IoError.AccessDenied);
+    \\  out.roDenied = [
+    \\    await cwd.writeFile(ro, { sub_path: 'f5.txt', data: bytes('z') }).then(() => false, denied),
+    \\    await cwd.createDir(ro, 'nope').then(() => false, denied),
+    \\    await cwd.createDirPath(ro, 'n/o').then(() => false, denied),
+    \\    await cwd.deleteFile(ro, 'f5.txt').then(() => false, denied),
+    \\    await cwd.deleteTree(ro, 'f5.txt').then(() => false, denied),
+    \\    await cwd.rename(ro, 'f5.txt', cwd, 'g').then(() => false, denied),
+    \\  ].join(',');
+    \\  // A sub-root grant resolves paths inside the root only.
+    \\  await cwd.createDir(fs, 'inner');
+    \\  const inner = await api.fs.requestAsync({ io: rt, root: 'inner', write: true });
+    \\  await cwd.writeFile(inner, { sub_path: 'x.txt', data: bytes('in') });
+    \\  out.inner = text(await cwd.readFile(fs, 'inner/x.txt'));
+    \\  out.innerEscape = await cwd.readFile(inner, '../f0.txt').then(() => false, e => IoError.is(e, IoError.InvalidPath));
+    \\  // Closing the runtime: the handle is dead for new grants and idempotent to close again.
+    \\  await rt.close();
+    \\  await rt.close();
+    \\  out.afterClose = await api.fs.requestAsync({ io: rt }).then(() => 'ok', e => e.errno);
+    \\  out.opAfterClose = await cwd.readFile(fs, 'f0.txt').then(() => 'ok', e => e.errno !== 0);
+    \\}
+;
+
+test "api: async fs runs concurrently on an io runtime (auto and threaded backends)" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, async_concurrent_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.handle && report.roundTrip && report.listed");
+        try check(fx.scope, "report.codes === '1,8,5,3,0,0' && report.names === 'FileNotFound,InvalidPath,PathAlreadyExists,NotDir' && report.cellClean");
+        try check(fx.scope, "report.sub === 'c,in.txt' && report.moved === 'x' && report.treeGone && report.rootSafe");
+        try check(fx.scope, "report.preads === '5,5,5:Jello|lo wo|world' && report.length === 11 && report.truncated === '5:Jello'");
+        try check(fx.scope, "report.streamEnd === '0:0' && report.closedFile");
+        try check(fx.scope, "report.roRead && report.roDenied === 'true,true,true,true,true,true'");
+        try check(fx.scope, "report.inner === 'in' && report.innerEscape && report.afterClose === 6 && report.opAfterClose === true");
+    }
+}
+
+test "api: closing an io runtime cancels in-flight operations and frees its slot" {
+    var fx: Fixture = undefined;
+    try setupBackend(&fx,
+        \\import { Dir, IoError } from 'origine:@std/io';
+        \\const bytes = s => Uint8Array.from([...s].map(c => c.charCodeAt(0)));
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const first = api.io.create({ backend: '@BACKEND@' });
+        \\  const second = api.io.create({});
+        \\  // The embedder ceiling (max_runtimes = 2) applies to live runtimes.
+        \\  try { api.io.create({}); out.third = false; } catch (e) { out.third = true; }
+        \\  const fs = await api.fs.requestAsync({ io: first, write: true });
+        \\  const cwd = Dir.cwd();
+        \\  await cwd.writeFile(fs, { sub_path: 'big.bin', data: new Uint8Array(1 << 20).fill(97) });
+        \\  const pending = [];
+        \\  for (let i = 0; i < 64; i++) pending.push(cwd.readFile(fs, 'big.bin'), cwd.writeFile(fs, { sub_path: 'w' + i, data: bytes('z') }), cwd.deleteTree(fs, 'nothing' + i));
+        \\  const closing = first.close();
+        \\  const settled = await Promise.allSettled(pending);
+        \\  await closing;
+        \\  // Every operation settled: finished before the close, or canceled/stale after it.
+        \\  const allowed = [IoError.Canceled, IoError.StaleHandle, IoError.BadHandle, IoError.FileNotFound];
+        \\  out.settled = settled.length === pending.length && settled.every(r => r.status === 'fulfilled' || allowed.includes(r.reason.errno));
+        \\  out.canceledKnown = IoError.Canceled === 14 && IoError.name(14) === 'Canceled';
+        \\  // The slot is free again; the other runtime is unaffected.
+        \\  const third = api.io.create({});
+        \\  const other = await api.fs.requestAsync({ io: second });
+        \\  out.otherWorks = (await cwd.readFile(other, 'big.bin')).length === 1 << 20;
+        \\  await third.close();
+        \\  await second.close();
+        \\  // Left in flight: Host.destroy drains them without leaking.
+        \\  const last = api.io.create({});
+        \\  const lastFs = await api.fs.requestAsync({ io: last });
+        \\  globalThis.dangling = [cwd.readFile(lastFs, 'big.bin'), cwd.readFile(lastFs, 'big.bin')].map(p => p.catch(() => undefined));
+        \\}
+    , "threaded", .{ .max_runtimes = 2 });
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.third && report.settled && report.canceledKnown && report.otherWorks");
+}
+
+test "api: requestAsync needs a live io handle of this scope" {
+    var fx: Fixture = undefined;
+    try fx.setupRuntime(
+        \\import { IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const code = p => p.then(() => 0, e => e.errno);
+        \\  const rt = api.io.create({});
+        \\  const other = api.io.create({});
+        \\  out.missing = await code(api.fs.requestAsync({}));
+        \\  out.notHandle = await code(api.fs.requestAsync({ io: 7 }));
+        \\  out.forged = await code(api.fs.requestAsync({ io: Object.freeze({ kind: 'io', id: rt.id, backend: 'auto' }) }));
+        \\  out.getter = await code(api.fs.requestAsync({ get io() { return rt; } }));
+        \\  out.badRoot = await code(api.fs.requestAsync({ io: rt, root: 42 }));
+        \\  out.escape = await code(api.fs.requestAsync({ io: rt, root: '../x' }));
+        \\  await other.close();
+        \\  out.closed = await code(api.fs.requestAsync({ io: other }));
+        \\  out.live = await code(api.fs.requestAsync({ io: rt }));
+        \\  const kind = f => { try { f().close(); return 'ok'; } catch (e) { return e instanceof TypeError ? 'T' : e.errno; } };
+        \\  out.badOpts = [undefined, null, 1, 'x'].map(o => kind(() => api.io.create(o))).join(',');
+        \\  out.badBackend = kind(() => api.io.create({ backend: 'epoll' }));
+        \\  out.badEntries = kind(() => api.io.create({ entries: -1 }));
+        \\  out.frozen = Object.isFrozen(api.io) && Object.isFrozen(rt);
+        \\  await rt.close();
+        \\}
+    , true, .{});
+    defer fx.deinit();
+    try fx.run();
+    // BadHandle 6, InvalidPath 8; create() accepts an absent option bag and throws a TypeError for malformed ones.
+    try check(fx.scope, "report.missing === 6 && report.notHandle === 6 && report.forged === 6 && report.getter === 6 && report.closed === 6");
+    try check(fx.scope, "report.badRoot === 8 && report.escape === 8 && report.live === 0 && report.frozen");
+    try check(fx.scope, "report.badOpts === 'ok,T,T,T' && report.badBackend === 'T' && report.badEntries === 'T'");
+}
+
+test "api: without a runtime ceiling there is no api.io and no async fs" {
+    var fx: Fixture = undefined;
+    try fx.setupRuntime(
+        \\import { IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  out.noIo = !('io' in api);
+        \\  out.asyncDenied = await api.fs.requestAsync({ io: undefined }).then(() => 0, e => e.errno);
+        \\  out.syncWorks = typeof api.fs.requestSync({}) === 'object';
+        \\}
+    , true, null);
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.noIo && report.asyncDenied === 6 && report.syncWorks");
 }
 
 test "api: import.meta natives reach only the embedded std modules" {
@@ -759,7 +990,7 @@ test "typescript: .ts and .tsx imports are transformed by extension" {
         \\  const shape: Shape = { kind: 'k' };
         \\  globalThis.report = { sum: sum(1, 2), color: Color[Color.Green], space: Space.value, kind: shape.kind, point: new Point(3, 4).total(), view: JSON.stringify(make()) };
         \\}
-    , false, &.{}, &m.Api.std_modules, m.Api.transformers.defaults);
+    , false, &.{}, &m.Api.std_modules, m.Api.transformers.defaults, .{});
     defer fx.deinit();
     try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "lib.ts", .data = "export enum Color { Red, Green }\nexport const sum = (a: number, b: number): number => a + b;\n" });
     try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "view.tsx", .data = "/** @jsxRuntime classic */\n/** @jsx h */\nconst h = (tag: string, props: Record<string, string> | null) => ({ tag, props });\nexport const make = () => <div id=\"a\" />;\n" });
@@ -771,7 +1002,7 @@ test "typescript: .ts and .tsx imports are transformed by extension" {
 test "typescript: syntax errors carry file:line:col and an empty map leaves .ts alone" {
     if (!m.Api.oxc.enabled) return error.SkipZigTest;
     var bad: Fixture = undefined;
-    try bad.setupFull("init.ts", "export function main() {\n  const x: number = ;\n}\n", false, &.{}, &m.Api.std_modules, m.Api.transformers.defaults);
+    try bad.setupFull("init.ts", "export function main() {\n  const x: number = ;\n}\n", false, &.{}, &m.Api.std_modules, m.Api.transformers.defaults, .{});
     defer bad.deinit();
     var error_info: m.ErrorInfo = .{};
     defer error_info.deinit();
@@ -787,7 +1018,7 @@ test "typescript: syntax errors carry file:line:col and an empty map leaves .ts 
         try t.expect(std.mem.indexOf(u8, buffer[0..length], "init.ts:2:21: error:") != null);
     }
     var off: Fixture = undefined;
-    try off.setupFull("init.ts", "export function main(): void {}\n", false, &.{}, &m.Api.std_modules, &.{});
+    try off.setupFull("init.ts", "export function main(): void {}\n", false, &.{}, &m.Api.std_modules, &.{}, .{});
     defer off.deinit();
     var off_info: m.ErrorInfo = .{};
     defer off_info.deinit();
@@ -838,4 +1069,274 @@ test "errno: the guest table is generated from Errno, not hard-coded" {
     try t.expect(served);
     try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "FileNotFound: 1") == null);
     try t.expect(std.mem.indexOf(u8, m.Api.std_io_source, "origine:@std/errno") != null);
+}
+
+test "rust native: api.io.create runs a v8-crate native on the Zig isolate" {
+    var f: Fixture = undefined;
+    try f.setup(
+        \\export async function main(api) {
+        \\  const io = api.io.create({});
+        \\  if (io.kind !== 'io' || io.backend !== 'auto' || typeof io.id !== 'number') throw new Error('bad handle');
+        \\  if (!Object.isFrozen(io)) throw new Error('not frozen');
+        \\  const second = api.io.create({ backend: 'threaded' });
+        \\  if (second.id === io.id || second.backend !== 'threaded') throw new Error('bad second');
+        \\  let threw = false;
+        \\  try { api.io.create({ backend: 'nope' }); } catch (e) { threw = e instanceof TypeError; }
+        \\  if (!threw) throw new Error('bad backend accepted');
+        \\}
+    , false, &.{});
+    defer f.deinit();
+    try f.run();
+}
+
+// ---- phase 5: zero-copy buffers (pin + detach, BYOB, host-allocated) -----------------------------
+
+const zero_copy_source =
+    \\import { Dir, IoError } from 'origine:@std/io';
+    \\import { fs as rustFs } from 'origine:@std/fs';
+    \\const bytes = s => Uint8Array.from([...s].map(c => c.charCodeAt(0)));
+    \\const text = b => String.fromCharCode(...b);
+    \\export async function main(api) {
+    \\  const out = globalThis.report = {};
+    \\  const rt = api.io.create({ backend: '@BACKEND@' });
+    \\  const fs = await api.fs.requestAsync({ io: rt, write: true });
+    \\  const sync = api.fs.requestSync({ write: true });
+    \\  const cwd = Dir.cwd();
+    \\  const read = name => cwd.readFile(fs, name);
+    \\
+    \\  // Writes detach an eligible buffer (and every view over it) and copy an ineligible one.
+    \\  const w = new Uint8Array(bytes('detached!'));
+    \\  const wView = w.subarray(2, 5);
+    \\  await cwd.writeFile(fs, { sub_path: 'w.txt', data: w });
+    \\  out.detached = w.buffer.byteLength === 0 && w.length === 0 && w.byteLength === 0 && wView.length === 0;
+    \\  out.detachedWritten = text(await read('w.txt')) === 'detached!';
+    \\  const file = await cwd.createFile(fs, 'w2.txt');
+    \\  const w2 = bytes('ab');
+    \\  const w3 = bytes('cd');
+    \\  await file.writeStreamingAll(fs, w2);
+    \\  out.writeAllDetached = w2.buffer.byteLength === 0;
+    \\  out.partial = (await file.writeStreaming(fs, w3)) <= 2 && w3.buffer.byteLength === 0;
+    \\  await file.writePositionalAll(fs, bytes('XY'), 0);
+    \\  await file.close(fs);
+    \\  out.afterWrites = text(await read('w2.txt')).startsWith('XY');
+    \\  // A failed write still consumes the buffer; a copy (slice) keeps the data.
+    \\  const keep = bytes('keep');
+    \\  await cwd.writeFile(fs, { sub_path: 'keep.txt', data: keep.slice() });
+    \\  out.sliceKeeps = text(keep) === 'keep';
+    \\  // Rust-style API: write() detaches a Uint8Array argument; copy() and strings are unaffected.
+    \\  const rs = rustFs(fs);
+    \\  const rsBuf = bytes('rust');
+    \\  await rs.write('rs.txt', rsBuf);
+    \\  out.rustDetached = rsBuf.buffer.byteLength === 0;
+    \\  out.rustString = (await rs.write('rs2.txt', 'str'), text(await read('rs2.txt'))) === 'str';
+    \\  await cwd.writeFile(fs, { sub_path: 'chunks.bin', data: new Uint8Array(200000).fill(7) });
+    \\  out.copied = (await rs.copy('chunks.bin', 'chunks2.bin')) === 200000 && (await read('chunks2.bin')).every(b => b === 7);
+    \\  out.copiedSync = rustFs(sync).copy('chunks.bin', 'chunks3.bin') === 200000 && (await read('chunks3.bin')).length === 200000;
+    \\
+    \\  // Ineligible buffers are copied at call time and stay intact.
+    \\  const sab = typeof SharedArrayBuffer === 'function' ? new Uint8Array(new SharedArrayBuffer(4)) : null;
+    \\  if (sab) sab.set(bytes('sabx'));
+    \\  const resizable = new Uint8Array(new ArrayBuffer(4, { maxByteLength: 8 }));
+    \\  resizable.set(bytes('rsiz'));
+    \\  const wasm = typeof WebAssembly === 'object' ? new Uint8Array(new WebAssembly.Memory({ initial: 1 }).buffer, 16, 4) : null;
+    \\  if (wasm) wasm.set(bytes('wasm'));
+    \\  const intact = [];
+    \\  for (const [name, view, expected] of [['sab', sab, 'sabx'], ['resizable', resizable, 'rsiz'], ['wasm', wasm, 'wasm']]) {
+    \\    if (!view) continue;
+    \\    const before = view.buffer.byteLength;
+    \\    await cwd.writeFile(fs, { sub_path: name + '.txt', data: view });
+    \\    intact.push(name + ':' + (view.buffer.byteLength === before && text(view) === expected && text(await read(name + '.txt')) === expected));
+    \\  }
+    \\  out.copyFallback = intact.join(',');
+    \\  out.copyFallbackAll = intact.every(entry => entry.endsWith(':true')) && intact.length >= 1;
+    \\
+    \\  // BYOB: the data lands in the returned view; the original buffer is dead.
+    \\  await cwd.writeFile(fs, { sub_path: 'r.txt', data: bytes('0123456789') });
+    \\  const rf = await cwd.openFile(fs, 'r.txt');
+    \\  const target = new Uint8Array(6);
+    \\  const got = await rf.readInto(fs, target);
+    \\  out.byob = got.bytes === 6 && got.buffer instanceof Uint8Array && text(got.buffer) === '012345' && Object.isFrozen(got);
+    \\  out.byobDead = target.buffer.byteLength === 0 && target.length === 0 && got.buffer.buffer !== target.buffer;
+    \\  // Subarray views keep their offset and length through the round trip; the head stays zero.
+    \\  const whole = new Uint8Array(12);
+    \\  const sub = whole.subarray(3, 9);
+    \\  const subGot = await rf.readInto(fs, sub, 2);
+    \\  out.subView = subGot.bytes === 6 && subGot.buffer.byteOffset === 3 && subGot.buffer.length === 6 && text(subGot.buffer) === '234567'
+    \\    && subGot.buffer.buffer.byteLength === 12 && new Uint8Array(subGot.buffer.buffer).slice(0, 3).every(b => b === 0);
+    \\  // Other typed arrays and DataView come back as the same kind.
+    \\  const u16 = await rf.readInto(fs, new Uint16Array(2), 0);
+    \\  out.u16 = u16.buffer instanceof Uint16Array && u16.buffer.length === 2 && u16.bytes === 4 && u16.buffer[0] === 0x3130;
+    \\  const dv = await rf.readInto(fs, new DataView(new ArrayBuffer(4)), 4);
+    \\  out.dataView = dv.buffer instanceof DataView && dv.buffer.byteLength === 4 && dv.buffer.getUint8(0) === 0x34;
+    \\  const bare = await rf.readInto(fs, new ArrayBuffer(3), 7);
+    \\  out.bareBuffer = bare.buffer instanceof ArrayBuffer && bare.bytes === 3 && text(new Uint8Array(bare.buffer)) === '789';
+    \\  // Short read at the end of the file and an empty buffer.
+    \\  const tail = await rf.readInto(fs, new Uint8Array(8), 8);
+    \\  out.shortByob = tail.bytes === 2 && tail.buffer.length === 8 && text(tail.buffer.subarray(0, 2)) === '89';
+    \\  const atEnd = await rf.readInto(fs, new Uint8Array(4), 10);
+    \\  out.eofByob = atEnd.bytes === 0 && atEnd.buffer.length === 4;
+    \\  const empty = await rf.readInto(fs, new Uint8Array(0), 0);
+    \\  out.emptyByob = empty.bytes === 0 && empty.buffer.length === 0;
+    \\  // Streaming BYOB advances the position; ineligible buffers fall back to copy-out.
+    \\  const sf = await cwd.openFile(fs, 'r.txt');
+    \\  const s1 = await sf.readInto(fs, new Uint8Array(4));
+    \\  const s2 = await sf.readInto(fs, new Uint8Array(4));
+    \\  out.streamByob = text(s1.buffer) === '0123' && text(s2.buffer) === '4567';
+    \\  const shared = sab ? new Uint8Array(new SharedArrayBuffer(4)) : new Uint8Array(new ArrayBuffer(4, { maxByteLength: 8 }));
+    \\  const sh = await rf.readInto(fs, shared, 1);
+    \\  out.byobFallback = sh.bytes === 4 && text(sh.buffer) === '1234' && text(shared) === '1234' && shared.buffer.byteLength === 4;
+    \\  await sf.close(fs);
+    \\
+    \\  // Host-allocated reads: exactly the bytes read.
+    \\  const a1 = await rf.readAlloc(fs, 4, 2);
+    \\  out.alloc = a1 instanceof Uint8Array && a1.length === 4 && text(a1) === '2345';
+    \\  const a2 = await rf.readAlloc(fs, 100, 6);
+    \\  out.allocShort = a2.length === 4 && text(a2) === '6789' && a2.buffer.byteLength >= 4;
+    \\  const a3 = await rf.readAlloc(fs, 100, 10);
+    \\  out.allocEof = a3 instanceof Uint8Array && a3.length === 0;
+    \\  const a4 = await rf.readAlloc(fs, 0, 0);
+    \\  out.allocZero = a4.length === 0;
+    \\  const sa = await cwd.openFile(fs, 'r.txt');
+    \\  out.allocStream = text(await sa.readAlloc(fs, 3)) + text(await sa.readAlloc(fs, 3)) + ':' + (await sa.readAlloc(fs, 100)).length;
+    \\  await sa.close(fs);
+    \\  // The sync arm has neither.
+    \\  const syncFile = cwd.openFile(sync, 'r.txt');
+    \\  const unsupported = f => { try { f(); return false; } catch (e) { return IoError.is(e, IoError.Unsupported); } };
+    \\  out.syncUnsupported = unsupported(() => syncFile.readInto(sync, new Uint8Array(1))) && unsupported(() => syncFile.readAlloc(sync, 1));
+    \\  syncFile.close(sync);
+    \\
+    \\  // Raw glue validation: rejects InvalidPath without touching the buffer.
+    \\  const raw = await fs.dirOpenFile(cwd, 'r.txt', 'r');
+    \\  const code = p => p.then(() => 0, e => e.errno);
+    \\  const untouched = new Uint8Array(4);
+    \\  out.validation = [
+    \\    await code(fs.fileReadInto(raw, [1, 2])),
+    \\    await code(fs.fileReadInto(raw, 'x')),
+    \\    await code(fs.fileReadInto({ kind: 'dir', fs: 0, id: 0 }, untouched)),
+    \\    await code(fs.filePreadInto(raw, untouched, -1)),
+    \\    await code(fs.filePreadInto(raw, untouched, '0')),
+    \\    await code(fs.filePreadInto(raw, untouched, 1.5)),
+    \\    await code(fs.fileReadAlloc(raw, -1)),
+    \\    await code(fs.fileReadAlloc(raw, '4')),
+    \\    await code(fs.filePreadAlloc(raw, 4, NaN)),
+    \\    await code(fs.filePreadAlloc({}, 4, 0)),
+    \\  ].join(',');
+    \\  out.validationUntouched = untouched.buffer.byteLength === 4;
+    \\  out.rawOk = (await fs.fileReadInto(raw, untouched)).bytes === 4 && untouched.buffer.byteLength === 0;
+    \\  out.rawFrozen = Object.isFrozen(await fs.filePreadInto(raw, new Uint8Array(2), 0));
+    \\  await fs.fileClose(raw);
+    \\  // Use after close rejects.
+    \\  await rf.close(fs);
+    \\  out.afterClose = await code(rf.readInto(fs, new Uint8Array(1), 0)) !== 0 && await code(rf.readAlloc(fs, 1, 0)) !== 0;
+    \\  await rt.close();
+    \\}
+;
+
+test "api: async buffers are pinned and detached, BYOB and host-allocated reads (auto and threaded backends)" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, zero_copy_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.detached && report.detachedWritten && report.writeAllDetached && report.partial && report.afterWrites && report.sliceKeeps");
+        try check(fx.scope, "report.rustDetached && report.rustString && report.copied && report.copiedSync");
+        try check(fx.scope, "report.copyFallbackAll");
+        try check(fx.scope, "report.byob && report.byobDead && report.subView && report.u16 && report.dataView && report.bareBuffer");
+        try check(fx.scope, "report.shortByob && report.eofByob && report.emptyByob && report.streamByob && report.byobFallback");
+        try check(fx.scope, "report.alloc && report.allocShort && report.allocEof && report.allocZero && report.allocStream === '012345:4'");
+        try check(fx.scope, "report.syncUnsupported && report.validation === '8,8,8,8,8,8,8,8,8,8' && report.validationUntouched && report.rawOk && report.rawFrozen && report.afterClose");
+    }
+}
+
+test "api: closing an io runtime with pinned reads and writes in flight is safe" {
+    var fx: Fixture = undefined;
+    try setupBackend(&fx,
+        \\import { Dir, IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const rt = api.io.create({ backend: '@BACKEND@' });
+        \\  const fs = await api.fs.requestAsync({ io: rt, write: true });
+        \\  const cwd = Dir.cwd();
+        \\  await cwd.writeFile(fs, { sub_path: 'big.bin', data: new Uint8Array(4 << 20).fill(65) });
+        \\  const file = await cwd.openFile(fs, 'big.bin');
+        \\  const out_file = await cwd.createFile(fs, 'out.bin');
+        \\  const views = [];
+        \\  const pending = [];
+        \\  for (let i = 0; i < 32; i++) {
+        \\    const v = new Uint8Array(1 << 20);
+        \\    views.push(v);
+        \\    pending.push(file.readInto(fs, v, i * 1024));
+        \\    pending.push(out_file.writePositionalAll(fs, new Uint8Array(1 << 18).fill(66), i << 18));
+        \\    pending.push(file.readAlloc(fs, 1 << 20, i * 4096));
+        \\  }
+        \\  const closing = rt.close();
+        \\  const settled = await Promise.allSettled(pending);
+        \\  await closing;
+        \\  out.settled = settled.length === pending.length;
+        \\  const allowed = [IoError.Canceled, IoError.StaleHandle, IoError.BadHandle];
+        \\  out.errors = settled.every(r => r.status === 'fulfilled' || allowed.includes(r.reason.errno));
+        \\  out.canceled = settled.some(r => r.status === 'rejected' && r.reason.errno === IoError.Canceled) || settled.every(r => r.status === 'fulfilled');
+        \\  // Whatever completed holds exactly what was read; nothing is resurrected into the dead buffers.
+        \\  out.results = settled.every((r, i) => r.status !== 'fulfilled' || i % 3 === 1 || (r.value instanceof Uint8Array ? r.value.every(b => b === 65) : r.value.buffer.subarray(0, r.value.bytes).every(b => b === 65)));
+        \\  out.deadViews = views.every(v => v.length === 0 || v.byteLength === 1 << 20);
+        \\  // A new runtime still works.
+        \\  const rt2 = api.io.create({});
+        \\  const fs2 = await api.fs.requestAsync({ io: rt2 });
+        \\  out.after = (await cwd.readFile(fs2, 'big.bin')).length === 4 << 20;
+        \\  await rt2.close();
+        \\  // Left in flight at Host.destroy.
+        \\  const last = api.io.create({});
+        \\  const lastFs = await api.fs.requestAsync({ io: last });
+        \\  const lastFile = await cwd.openFile(lastFs, 'big.bin');
+        \\  globalThis.dangling = [lastFile.readInto(lastFs, new Uint8Array(1 << 20), 0), lastFile.readAlloc(lastFs, 1 << 20, 0)].map(p => p.catch(() => undefined));
+        \\}
+    , "threaded", .{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.settled && report.errors && report.canceled && report.results && report.deadViews && report.after");
+}
+
+test "api: several BYOB reads over one ArrayBuffer settle cleanly and re-wrapped stores are sound" {
+    var fx: Fixture = undefined;
+    try setupBackend(&fx,
+        \\import { Dir } from 'origine:@std/io';
+        \\const text = b => String.fromCharCode(...b);
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const rt = api.io.create({ backend: '@BACKEND@' });
+        \\  const fs = await api.fs.requestAsync({ io: rt, write: true });
+        \\  const cwd = Dir.cwd();
+        \\  await cwd.writeFile(fs, { sub_path: 'd.txt', data: Uint8Array.from('abcdefghijklmnopqrstuvwx', c => c.charCodeAt(0)) });
+        \\  const file = await cwd.openFile(fs, 'd.txt');
+        \\  // Different views of ONE ArrayBuffer in flight together: the buffer can be pinned once. Every
+        \\  // call settles (no hang, no crash); the ones that win hold the right bytes.
+        \\  const one = new ArrayBuffer(24);
+        \\  const views = [new Uint8Array(one, 0, 8), new Uint8Array(one, 8, 8), new Uint8Array(one, 16, 8)];
+        \\  const settled = await Promise.allSettled(views.map((v, i) => file.readInto(fs, v, i * 8)));
+        \\  out.settled = settled.length === 3;
+        \\  out.won = settled.some(r => r.status === 'fulfilled');
+        \\  out.right = settled.every((r, i) => r.status !== 'fulfilled' || r.value.bytes === 0 || text(r.value.buffer.subarray(0, r.value.bytes)) === 'abcdefghijklmnopqrstuvwx'.slice(i * 8, i * 8 + r.value.bytes));
+        \\  out.cleanRejections = settled.every(r => r.status === 'fulfilled' || typeof r.reason.errno === 'number');
+        \\  out.bufferDetachedOnce = one.byteLength === 0;
+        \\  // Re-wrapped stores (get_backing_store -> with_backing_store under the V8 sandbox): many rounds,
+        \\  // each result is a fresh ArrayBuffer over the filled memory and the old views stay empty.
+        \\  let sound = true;
+        \\  for (let i = 0; i < 200; i++) {
+        \\    const v = new Uint8Array(24);
+        \\    const old = v.subarray(4, 8);
+        \\    const r = await file.readInto(fs, v, 0);
+        \\    sound = sound && r.bytes === 24 && text(r.buffer) === 'abcdefghijklmnopqrstuvwx' && v.length === 0 && old.length === 0
+        \\      && v.buffer.byteLength === 0 && r.buffer.buffer.byteLength === 24 && r.buffer.buffer !== v.buffer;
+        \\    // The returned buffer is itself eligible again: a round trip through a second read.
+        \\    const again = await file.readInto(fs, r.buffer, 0);
+        \\    sound = sound && again.bytes === 24 && r.buffer.length === 0 && text(again.buffer) === 'abcdefghijklmnopqrstuvwx';
+        \\  }
+        \\  out.sound = sound;
+        \\  await file.close(fs);
+        \\  await rt.close();
+        \\}
+    , "threaded", .{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.settled && report.won && report.right && report.cleanRejections && report.bufferDetachedOnce && report.sound");
 }

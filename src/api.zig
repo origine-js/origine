@@ -1,4 +1,4 @@
-//! The guest-visible `api` (env, fs, scope) and the typed binding layer behind it.
+//! The guest-visible `api` (env, fs, io, scope) and the typed binding layer behind it.
 //!
 //! - `Host` owns authority and drives the init -> `main(api)` lifecycle.
 //! - `binding` / `Call` are the DX for writing JS-native functions as ordinary typed
@@ -7,6 +7,7 @@
 pub const Host = @import("api/host.zig").Host;
 pub const Config = @import("api/host.zig").Config;
 pub const FsConfig = @import("api/host.zig").FsConfig;
+pub const RuntimeConfig = @import("api/host.zig").RuntimeConfig;
 pub const EnvPair = @import("api/env.zig").Pair;
 pub const Errno = @import("api/errno.zig").Errno;
 pub const errnoOf = @import("api/errno.zig").of;

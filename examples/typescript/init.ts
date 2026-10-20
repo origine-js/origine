@@ -3,15 +3,24 @@
 // enums, namespaces and parameter properties become runtime code.
 import { greet, type Greeting } from './greeter.ts';
 
-enum Color { Red, Green, Blue }
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
 
 namespace Palette {
   export const favourite: Color = Color.Green;
 }
 
 class Point {
-  constructor(public x: number, private y: number) {}
-  norm1(): number { return Math.abs(this.x) + Math.abs(this.y); }
+  constructor(
+    public x: number,
+    private y: number,
+  ) {}
+  norm1(): number {
+    return Math.abs(this.x) + Math.abs(this.y);
+  }
 }
 
 export function main(): void {

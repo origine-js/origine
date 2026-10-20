@@ -7,6 +7,11 @@ const m = @import("@managed");
 const eu = @import("@util");
 const Engine = @import("@engine").Engine;
 
+// The Rust library calls the `oio_*` C ABI of the I/O library; keep its exports.
+comptime {
+    _ = @import("@io").c_api;
+}
+
 pub fn main(init: std.process.Init) !void {
     const alloc = eu.alloc;
     const args = try init.minimal.args.toSlice(alloc);

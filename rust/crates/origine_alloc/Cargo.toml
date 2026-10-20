@@ -1,0 +1,11 @@
+[package]
+name = "origine_alloc"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+# Rust's global allocator on top of the mimalloc that the Zig build already links (the `mi_*`
+# symbols come from the final link; nothing is bundled here). Only `origine_native` installs it.
+
+[lints]
+workspace = true

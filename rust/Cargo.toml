@@ -18,6 +18,24 @@ oxc_semantic = "=0.155.0"
 oxc_span = "=0.155.0"
 oxc_transformer = "=0.155.0"
 origine_oxc = { path = "crates/origine_oxc" }
+origine_io = { path = "crates/origine_io" }
+origine_alloc = { path = "crates/origine_alloc" }
+origine_api_core = { path = "crates/origine_api_core" }
+origine_api_fs = { path = "crates/origine_api_fs" }
+origine_api = { path = "crates/origine_api" }
+origine_api_macros = { path = "crates/origine_api_macros" }
+
+# Enforced by `just check-rust` (clippy -D warnings). Every unsafe block needs a `// SAFETY:`
+# comment and every pub unsafe fn a `# Safety` doc section; one unsafe operation per block.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
 
 [package]
 name = "origine_native"
@@ -25,11 +43,16 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 crate-type = ["staticlib"]
 
 [dependencies]
 origine_oxc = { workspace = true, optional = true }
+origine_alloc.workspace = true
+origine_api.workspace = true
 
 [features]
 default = ["typescript"]

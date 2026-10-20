@@ -1,4 +1,10 @@
 //! Behavioral tests use the same exported modules as embedders.
+
+// The Rust library calls the `oio_*` C ABI of the I/O library; keep its exports.
+comptime {
+    _ = @import("@io").c_api;
+}
+
 test {
     _ = @import("tests/managed/ownership.zig");
     _ = @import("tests/managed/runtime.zig");

@@ -2,7 +2,7 @@
 // This is a hardening bootstrap, not a general JavaScript compartment library.
 // Borrows the host-supplied intrinsic array through initialization; retains its
 // object identities in a private WeakSet for the lifetime of the returned helpers.
-((intrinsicObjects, unsupportedObjects) => {
+(intrinsicObjects, unsupportedObjects) => {
   'use strict';
   const { freeze, getPrototypeOf, getOwnPropertyDescriptor } = Object;
   const ownKeys = Reflect.ownKeys;
@@ -33,14 +33,17 @@
       for (const key of ownKeys(value)) {
         const d = getOwnPropertyDescriptor(value, key);
         if ('value' in d) visit(d.value);
-        else { visit(d.get); visit(d.set); }
+        else {
+          visit(d.get);
+          visit(d.set);
+        }
       }
     }
     visit(root);
-    for (const value of pending) freeze(value)
+    for (const value of pending) freeze(value);
     return root;
   }
   // Borrows value through the callback; retains no resources from the argument.
   const isUnsupported = value => unsupported.has(value);
   return [harden, isUnsupported];
-})
+};

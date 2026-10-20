@@ -18,4 +18,4 @@ tables (not importable), and [bootstrap.js](../bootstrap.js) is the hardening bo
 
 Layering: `errno` ← `quansync` ← `io` ← `fs`; `text` is standalone and used by `fs`.
 Everything here is authority-free data and code: authority comes only from the `io` object
-(`api.fs.sync` / `api.fs.async`) the host hands to `main(api)`, and every native re-checks it.
+(`api.fs.requestSync(...)` / `await api.fs.requestAsync({ io, ... })`) the host hands to `main(api)`, and every native re-checks it.

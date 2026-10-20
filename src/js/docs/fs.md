@@ -7,7 +7,9 @@ an `io` and a directory.
 ```js
 import { fs } from 'origine:@std/fs';
 
-const rs = fs(api.fs.sync);                 // or fs(api.fs.async, someDir)
+const rs = fs(api.fs.requestSync({ write: true }));   // blocking, std.Io
+const io = api.io.create({});                          // an async runtime
+const ars = fs(await api.fs.requestAsync({ io, write: true }), someDir);   // every call returns a promise
 rs.write('a.txt', 'hello');
 const text = rs.read_to_string('a.txt');    // async: the same calls return promises
 const f = rs.File.open('a.txt'); f.read(buf); f.close();
@@ -18,6 +20,16 @@ rs.OpenOptions.new().write(true).create(true).open('b.txt');
 Rust's `Result` maps to **throw** (sync) / **reject** (async) with a frozen `{ errno, name }`
 value ([`IoError`](io.md#values)). `contents` arguments accept a string (UTF-8 encoded via
 [text](text.md)) or a `Uint8Array`.
+
+Async calls run on the `io` runtime the grant was requested with; closing it (`await io.close()`)
+cancels what is in flight (those promises reject with `IoError.Canceled`). Buffers move to the host:
+an async write (`write`, `File.write`/`write_all`) **detaches** the ArrayBuffer of `contents` when
+it is eligible (not shared, not resizable, not wasm memory), so it and its views are empty
+afterwards; pass `bytes.slice()` to keep it (ineligible buffers are copied and stay usable, and
+sync writes never detach). `File.read(buf)` still copies: it fills `buf` when the read completes
+(it rejects if `buf` was detached meanwhile), so `buf` must not be reused for another read until
+the promise settles. For zero-copy reads use the [Zig-style `File.readInto`/`readAlloc`](io.md)
+or `api.fs` async ops (`fileReadInto`, `fileReadAlloc`).
 
 ## Functions
 

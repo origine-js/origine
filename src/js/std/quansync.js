@@ -42,11 +42,21 @@ class Task {
   constructor(generator) {
     this.#generator = generator;
   }
-  next(value) { return this.#generator.next(value); }
-  throw(error) { return this.#generator.throw(error); }
-  return(value) { return this.#generator.return(value); }
-  [Symbol.iterator]() { return this; }
-  then(onFulfilled, onRejected) { return runAsync(this).then(onFulfilled, onRejected); }
+  next(value) {
+    return this.#generator.next(value);
+  }
+  throw(error) {
+    return this.#generator.throw(error);
+  }
+  return(value) {
+    return this.#generator.return(value);
+  }
+  [Symbol.iterator]() {
+    return this;
+  }
+  then(onFulfilled, onRejected) {
+    return runAsync(this).then(onFulfilled, onRejected);
+  }
 }
 
 const isTask = value => value instanceof Task;
@@ -73,8 +83,16 @@ function runAsync(task) {
   return new Promise((resolve, reject) => {
     const advance = (method, argument) => {
       let step;
-      try { step = task[method](argument); } catch (error) { reject(error); return; }
-      if (step.done) { resolve(step.value); return; }
+      try {
+        step = task[method](argument);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      if (step.done) {
+        resolve(step.value);
+        return;
+      }
       const yielded = step.value;
       let pending;
       try {
@@ -85,7 +103,10 @@ function runAsync(task) {
         advance('throw', error);
         return;
       }
-      Promise.resolve(pending).then(value => advance('next', value), error => advance('throw', error));
+      Promise.resolve(pending).then(
+        value => advance('next', value),
+        error => advance('throw', error),
+      );
     };
     advance('next');
   });
@@ -93,14 +114,24 @@ function runAsync(task) {
 
 export function quansync(definition, overrides) {
   if (typeof definition === 'function') return composite(definition, overrides);
-  if (definition !== null && typeof definition === 'object' && typeof definition.sync === 'function' && typeof definition.async === 'function') {
+  if (
+    definition !== null &&
+    typeof definition === 'object' &&
+    typeof definition.sync === 'function' &&
+    typeof definition.async === 'function'
+  ) {
     return leaf(definition.sync, definition.async);
   }
   throw new TypeError('quansync: expected a generator function or { sync, async }');
 }
 
 function leaf(syncImpl, asyncImpl) {
-  const task = (...args) => new Task((function* () { return yield new Effect(syncImpl, asyncImpl, args); })());
+  const task = (...args) =>
+    new Task(
+      (function* () {
+        return yield new Effect(syncImpl, asyncImpl, args);
+      })(),
+    );
   task.sync = syncImpl;
   task.async = asyncImpl;
   return freeze(task);

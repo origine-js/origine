@@ -11,8 +11,19 @@ import { Dir, File, FileKind, IoError, Limit, ops } from 'origine:@std/io';
 ## The `io` argument
 
 As in Zig, every `Dir`/`File` method takes `io` first. Here `io` is the fs object from the
-host's `api`: `api.fs.sync` (blocks; throws an `IoError` value) or `api.fs.async` (returns
-promises that reject with one). Each method dispatches on `io.kind` (`'sync' | 'async'`).
+host's `api`: `api.fs.requestSync({ root, write })` (blocks; throws an `IoError` value; failures
+go through the shared `errno` cell, `IoError.check`) or `await api.fs.requestAsync({ io, root, write })`
+(returns promises that reject with an `IoError`-shaped value; never touches the errno cell;
+operations run on the `api.io` runtime `io`). Each method dispatches on `io.kind`
+(`'sync' | 'async'`). The async arm has the same operation names and result shapes; its
+buffers are handed to the host: **an async write detaches your ArrayBuffer** (it and every view
+over it become empty, whatever the outcome) when it is eligible (not a `SharedArrayBuffer`, not
+resizable, not wasm memory), and copies it, leaving it usable, otherwise; pass `bytes.slice()` to
+keep your data. `readStreaming`/`readPositional` still copy into your buffer at completion
+(rejecting if it was detached meanwhile). `File.readInto(io, view, offset?)` is the zero-copy
+read: it detaches `view`'s buffer and resolves `{ bytes, buffer }`, `buffer` being a view like
+`view` over the filled memory (use it, not `view`). `File.readAlloc(io, len, offset?)` resolves a
+fresh `Uint8Array` of exactly the bytes read. Both are async-only (`Unsupported` on a sync io).
 
 ```js
 const dir = Dir.cwd();
@@ -53,7 +64,9 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs
 | `readPositional(buffer, offset)` | One positional read. |
 | `readPositionalAll(buffer, offset)` | Fills `buffer` until full or end; returns the count. |
 | `readAll(limit = Limit.unlimited)` | Rest of the file as `Uint8Array`. |
-| `writeStreaming(bytes)` | One write; returns the count (may be partial). |
+| `readInto(view, offset?)` | Async only. BYOB: detaches `view`'s buffer (if eligible), resolves frozen `{ bytes, buffer }` with `buffer` a view like `view` over the filled memory. |
+| `readAlloc(len, offset?)` | Async only. Resolves a `Uint8Array` of the bytes read (at most `len`; empty at end). |
+| `writeStreaming(bytes)` | One write; returns the count (may be partial). Async: detaches `bytes`' buffer when eligible. |
 | `writeStreamingAll(bytes)`, `writePositionalAll(bytes, offset)` | Write everything. |
 | `setLength(length)` | Truncate / extend. |
 
@@ -73,7 +86,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs
   (`'r' 'rw' 'r+' 'w' 'w+' 'x' 'x+' 'c' 't'`, see [glue/fs.js](../glue/fs.js)). Names: `openFile openDir
   closeDir stat access createDir createDirPath createDirPathOpen deleteFile deleteDir deleteTree
   rename readDir readFile writeFile fileClose fileStat fileLength fileRead filePread fileReadAll
-  fileWrite fileWriteAll filePwriteAll fileSetLength fileSync fileReadPositionalAll`.
+  fileReadInto filePreadInto fileReadAlloc filePreadAlloc fileWrite fileWriteAll filePwriteAll fileSetLength fileSync fileReadPositionalAll`.
 
 ## Not shipped
 

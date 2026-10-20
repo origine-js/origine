@@ -15,8 +15,7 @@ function time(name, iterations, fn) {
 }
 
 export async function main(api) {
-  const fs = await api.fs.request({ write: true, mode: { sync: true } });
-  const io = fs.sync;
+  const io = api.fs.requestSync({ write: true });
   const cwd = Dir.cwd();
   cwd.createDirPath(io, 'bench/work');
   const work = cwd.openDir(io, 'bench/work');
@@ -26,8 +25,15 @@ export async function main(api) {
   const N = 20000;
   time('raw dirStat (hit)', N, () => io.dirStat(work, 'small.txt'));
   time('Dir.statFile (hit)', N, () => work.statFile(io, 'small.txt'));
-  time('raw dirStat (miss)', N, () => { io.dirStat(work, 'ghost'); io.errno[0] = 0; });
-  time('Dir.access (miss, throws)', N, () => { try { work.access(io, 'ghost'); } catch {} });
+  time('raw dirStat (miss)', N, () => {
+    io.dirStat(work, 'ghost');
+    io.errno[0] = 0;
+  });
+  time('Dir.access (miss, throws)', N, () => {
+    try {
+      work.access(io, 'ghost');
+    } catch {}
+  });
   time('raw open+readAll+close (512 B)', N / 2, () => {
     const f = io.dirOpenFile(work, 'small.txt', 'r');
     io.fileReadAll(f, {});
@@ -45,11 +51,30 @@ export async function main(api) {
   time('Rust read_to_string (512 B)', N / 2, () => rs.read_to_string('small.txt'));
   time('Rust write (512 B)', N / 4, () => rs.write('w.txt', bytes(512)));
   time('Rust copy (512 B)', N / 4, () => rs.copy('small.txt', 'c.txt'));
-  const aio = (await api.fs.request({ write: true, mode: { async: true } })).async;
+  const runtime = api.io.create({});
+  const aio = await api.fs.requestAsync({ io: runtime, write: true });
   const ars = rustFs(aio, Dir.cwd());
   const start = Date.now();
   for (let i = 0; i < 2000; i++) await ars.read('bench/work/small.txt');
   print('Rust read async (512 B)'.padEnd(34), String(Math.round(((Date.now() - start) * 1e6) / 2000)).padStart(9), 'ns/op');
+  // Async 1 MiB reads of big.bin: copy-out (`readPositional`), BYOB (`readInto`, zero-copy) and
+  // host-allocated (`readAlloc`, zero-copy).
+  const big = await Dir.cwd().openFile(aio, 'bench/work/big.bin');
+  const asyncTime = async (name, iterations, fn) => {
+    const t0 = Date.now();
+    for (let i = 0; i < iterations; i++) await fn();
+    print(name.padEnd(34), String(Math.round(((Date.now() - t0) * 1e6) / iterations)).padStart(9), 'ns/op');
+  };
+  const MiB = 1 << 20;
+  const copyBuf = new Uint8Array(MiB);
+  await asyncTime('async pread 1 MiB (copy-out)', 200, () => big.readPositional(aio, copyBuf, 0));
+  let byob = new Uint8Array(MiB);
+  await asyncTime('async readInto 1 MiB (BYOB)', 200, async () => {
+    byob = (await big.readInto(aio, byob, 0)).buffer; // hand the buffer back each round
+  });
+  await asyncTime('async readAlloc 1 MiB', 200, () => big.readAlloc(aio, MiB, 0));
+  await big.close(aio);
+  await runtime.close();
 
   cwd.deleteTree(io, 'bench/work');
 }

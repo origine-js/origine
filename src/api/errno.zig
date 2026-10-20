@@ -16,26 +16,10 @@ const std = @import("std");
 const v8 = @import("@v8");
 const binding = @import("binding.zig");
 
-/// Names match Zig error names so errors map by name. This enum is the single source
-/// of truth: the guest-side tables are generated from it (`module_source` for
-/// `origine:@std/errno`, `table` for `native.errors`), never written by hand.
-pub const Errno = enum(u32) {
-    ok = 0,
-    FileNotFound = 1,
-    AccessDenied = 2,
-    NotDir = 3,
-    IsDir = 4,
-    PathAlreadyExists = 5,
-    BadHandle = 6,
-    StaleHandle = 7,
-    InvalidPath = 8,
-    NoSpaceLeft = 9,
-    Unsupported = 10,
-    FileTooBig = 11,
-    InvalidData = 12,
-    JavaScriptException = 13,
-    Unexpected = 255,
-};
+/// Names match Zig error names so errors map by name. The enum lives in errno_codes.zig, the
+/// single source of truth: the guest-side tables are generated from it (`module_source` for
+/// `origine:@std/errno`, `table` for `native.errors`) and so is the Rust table (docs/contracts.md).
+pub const Errno = @import("errno_codes.zig").Errno;
 
 /// The closed error set of the binding layer: one error per `Errno` (except `ok`) plus
 /// `InvalidArgument`, a missing or mistyped JS argument (reported as `InvalidPath`).
@@ -53,9 +37,31 @@ pub const Error = error{
     FileTooBig,
     InvalidData,
     JavaScriptException,
+    Canceled,
+    TimedOut,
+    WouldBlock,
+    ConnectionRefused,
+    ConnectionReset,
+    BrokenPipe,
+    AddressInUse,
+    NotConnected,
+    DirNotEmpty,
     Unexpected,
     InvalidArgument,
 };
+
+// CONTRACT (docs/contracts.md, surface D): `Error` mirrors `Errno` by hand; keep them in step.
+comptime {
+    @setEvalBranchQuota(10_000);
+    for (std.enums.values(Errno)) |tag| {
+        if (tag == .ok) continue;
+        var found = false;
+        for (@typeInfo(Error).error_set.error_names.?) |name| {
+            if (std.mem.eql(u8, name, @tagName(tag))) found = true;
+        }
+        if (!found) @compileError("errno.Error has no member for Errno." ++ @tagName(tag));
+    }
+}
 
 /// Exact `Errno` names first, then the aliases std and the binding layer use.
 fn lookup(name: []const u8) ?Errno {
@@ -64,6 +70,9 @@ fn lookup(name: []const u8) ?Errno {
     }
     if (std.mem.eql(u8, name, "InvalidArgument")) return .InvalidPath;
     if (std.mem.eql(u8, name, "PermissionDenied") or std.mem.eql(u8, name, "ReadOnlyFileSystem")) return .AccessDenied;
+    if (std.mem.eql(u8, name, "Timeout")) return .TimedOut;
+    if (std.mem.eql(u8, name, "ConnectionResetByPeer")) return .ConnectionReset;
+    if (std.mem.eql(u8, name, "SocketNotConnected")) return .NotConnected;
     return null;
 }
 

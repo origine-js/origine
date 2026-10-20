@@ -8,7 +8,9 @@ const transformer = @import("transformer.zig");
 
 pub const enabled = config.typescript;
 
-pub const abi_version = 1;
+const abi = @import("oxc_abi.zig");
+
+pub const abi_version = abi.abi_version;
 
 pub const JsxRuntime = enum(u32) { automatic = 0, classic = 1 };
 
@@ -29,30 +31,12 @@ pub const Options = struct {
 
 const CString = extern struct { ptr: ?[*]const u8, len: usize };
 
-/// Mirrors `OxcOptions` in origine_oxc.h.
-const COptions = extern struct {
-    jsx_runtime: u32,
-    flags: u32,
-    import_source: ?[*]const u8,
-    import_source_len: usize,
-    pragma: ?[*]const u8,
-    pragma_len: usize,
-    pragma_frag: ?[*]const u8,
-    pragma_frag_len: usize,
-};
-
-/// Mirrors the public prefix of `OxcResult`; the Rust side owns what the pointers refer to.
-const CResult = extern struct {
-    status: u32,
-    code: ?[*]const u8,
-    code_len: usize,
-    diagnostics: ?[*]const u8,
-    diagnostics_len: usize,
-};
-
-extern fn origine_oxc_abi_version() u32;
-extern fn origine_oxc_transform(source: ?[*]const u8, source_len: usize, filename: ?[*]const u8, filename_len: usize, options: ?*const COptions) *CResult;
-extern fn origine_oxc_result_free(result: *CResult) void;
+// CONTRACT (docs/contracts.md, surface E): the C structs and prototypes live in oxc_abi.zig.
+const COptions = abi.COptions;
+const CResult = abi.CResult;
+const origine_oxc_abi_version = abi.origine_oxc_abi_version;
+const origine_oxc_transform = abi.origine_oxc_transform;
+const origine_oxc_result_free = abi.origine_oxc_result_free;
 
 pub const Result = union(enum) {
     /// The JavaScript module text, allocated from the caller's allocator.

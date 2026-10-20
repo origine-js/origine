@@ -199,15 +199,17 @@ pub const FsGrant = struct {
     }
 };
 
-// ---- fs.request --------------------------------------------------------------
+// ---- fs.requestSync ----------------------------------------------------------
 
-/// `native.fsRequest(root?, write)`: opens a grant over the host directory (or a
+/// `native.fsRequest(root?, write)`: opens a sync grant over the host directory (or a
 /// subdirectory of it) and returns its ops object. The host config is the ceiling:
-/// a read-only host never yields a writable grant.
+/// a read-only host never yields a writable grant, and `sync = false` denies the request.
+/// (Async grants live in the Rust runtime: `native.fsAsync`.)
 pub fn request(state: *ScopeState, call: *Call, root: ?Path, write: bool) !v8.Object {
     const host = state.host;
     const alloc = host.allocator;
     const config = host.fs orelse return error.AccessDenied;
+    if (!config.sync) return error.AccessDenied;
     const sub = if (root) |path| path.bytes else "";
     const opened = try config.root.openDir(host.io, if (sub.len == 0) "." else sub, .{ .iterate = true });
     errdefer opened.close(host.io);
@@ -240,7 +242,6 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, write: bool) !v8.Ob
         .fileSync = func(fileSync, .{ .side_effect = .any }),
     });
     try call.set(ops, "id", grant.id);
-    try call.set(ops, "sync", config.sync);
     return ops;
 }
 

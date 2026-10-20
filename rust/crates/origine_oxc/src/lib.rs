@@ -47,6 +47,76 @@ pub struct OxcResult {
     owned: Box<Owned>,
 }
 
+// CONTRACT (docs/contracts.md, surface E): include/origine_oxc.h is the source of truth.
+// `header_abi.rs` is generated from it (`just gen-contracts`, checked by `just check-contracts`)
+// and the block below makes this file fail to compile when the hand-written `#[repr(C)]` structs,
+// constants or `extern "C"` functions drift from the header. Field lists must be complete: they
+// are struct literals of the header's structs.
+#[rustfmt::skip]
+#[allow(dead_code, non_camel_case_types, clashing_extern_declarations, improper_ctypes, unsafe_op_in_unsafe_fn)]
+mod header_abi;
+
+mod abi_check {
+    use super::{ABI_VERSION, OxcOptions, OxcResult, STATUS_INTERNAL_ERROR, STATUS_OK, STATUS_SYNTAX_ERROR, header_abi as h};
+    use std::mem::{offset_of, size_of};
+
+    const _: () = {
+        assert!(ABI_VERSION == h::ORIGINE_OXC_ABI_VERSION);
+        assert!(STATUS_OK == h::ORIGINE_OXC_OK);
+        assert!(STATUS_SYNTAX_ERROR == h::ORIGINE_OXC_SYNTAX_ERROR);
+        assert!(STATUS_INTERNAL_ERROR == h::ORIGINE_OXC_INTERNAL_ERROR);
+        assert!(super::FLAG_JSX_DEVELOPMENT == h::ORIGINE_OXC_JSX_DEVELOPMENT);
+        assert!(super::FLAG_VERBATIM_IMPORTS == h::ORIGINE_OXC_VERBATIM_IMPORTS);
+        assert!(super::FLAG_INLINE_SOURCE_MAP == h::ORIGINE_OXC_INLINE_SOURCE_MAP);
+        // OxcOptions is the whole C struct.
+        assert!(size_of::<OxcOptions>() == size_of::<h::c_view::OxcOptions>());
+        // OxcResult has private fields after the ones the header declares.
+        assert!(size_of::<OxcResult>() >= size_of::<h::c_view::OxcResult>());
+    };
+
+    /// Same field names and types as `OxcOptions` in the header (a struct literal must name every field).
+    #[allow(dead_code)]
+    fn options_fields(o: OxcOptions) -> h::c_view::OxcOptions {
+        h::c_view::OxcOptions {
+            jsx_runtime: o.jsx_runtime,
+            flags: o.flags,
+            import_source: o.import_source,
+            import_source_len: o.import_source_len,
+            pragma: o.pragma,
+            pragma_len: o.pragma_len,
+            pragma_frag: o.pragma_frag,
+            pragma_frag_len: o.pragma_frag_len,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn result_fields(r: &OxcResult) -> h::c_view::OxcResult {
+        h::c_view::OxcResult {
+            status: r.status,
+            code: r.code,
+            code_len: r.code_len,
+            diagnostics: r.diagnostics,
+            diagnostics_len: r.diagnostics_len,
+        }
+    }
+
+    macro_rules! same_offsets {
+        ($rust:ident: $($field:ident),*) => {
+            const _: () = { $( assert!(offset_of!($rust, $field) == offset_of!(h::c_view::$rust, $field)); )* };
+        };
+    }
+    same_offsets!(OxcOptions: jsx_runtime, flags, import_source, import_source_len, pragma, pragma_len, pragma_frag, pragma_frag_len);
+    same_offsets!(OxcResult: status, code, code_len, diagnostics, diagnostics_len);
+
+    /// The array only type-checks when both fn items coerce to one fn pointer type.
+    #[allow(dead_code)]
+    fn signatures() {
+        let _ = [h::origine_oxc_abi_version, super::origine_oxc_abi_version];
+        let _ = [h::origine_oxc_transform, super::origine_oxc_transform];
+        let _ = [h::origine_oxc_result_free, super::origine_oxc_result_free];
+    }
+}
+
 struct Owned {
     code: Vec<u8>,
     diagnostics: Vec<u8>,
@@ -83,8 +153,11 @@ pub unsafe extern "C" fn origine_oxc_transform(
     options: *const OxcOptions,
 ) -> *mut OxcResult {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the caller guarantees the pointers and lengths (see above).
-        let (source, filename) = unsafe { (bytes(source, source_len), bytes(filename, filename_len)) };
+        // SAFETY: the caller guarantees `source` is valid for `source_len` bytes (see above).
+        let source = unsafe { bytes(source, source_len) };
+        // SAFETY: the caller guarantees `filename` is valid for `filename_len` bytes.
+        let filename = unsafe { bytes(filename, filename_len) };
+        // SAFETY: the caller guarantees `options` is null or points to a valid `OxcOptions`.
         let options = unsafe { options.as_ref() };
         match (std::str::from_utf8(source), std::str::from_utf8(filename)) {
             (Ok(source), Ok(filename)) => transform(source, filename, options),
@@ -111,7 +184,11 @@ pub unsafe extern "C" fn origine_oxc_result_free(result: *mut OxcResult) {
 /// # Safety
 /// `ptr` must be valid for `len` bytes when `len > 0`.
 unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
-    if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len) } }
+    if len == 0 {
+        return &[];
+    }
+    // SAFETY: `len > 0`, so the caller guarantees `ptr` is valid for `len` bytes.
+    unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
 fn text(ptr: *const u8, len: usize) -> Option<String> {
@@ -136,11 +213,7 @@ fn transform(source: &str, filename: &str, options: Option<&OxcOptions>) -> Resu
     }
     let mut program = parsed.program;
 
-    let semantic = SemanticBuilder::new()
-        .with_check_syntax_error(true)
-        .with_excess_capacity(2.0)
-        .with_enum_eval(true)
-        .build(&program);
+    let semantic = SemanticBuilder::new().with_check_syntax_error(true).with_excess_capacity(2.0).with_enum_eval(true).build(&program);
     if !semantic.diagnostics.is_empty() {
         return Err(render(filename, source, semantic.diagnostics.into_iter()));
     }

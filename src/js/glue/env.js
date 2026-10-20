@@ -5,7 +5,7 @@
     const visible = name => allow === null || allow.has(name);
     return freeze({
       args: () => freeze(native.env.args()),
-      get: name => (typeof name === 'string' && visible(name)) ? native.env.get(name) : undefined,
+      get: name => (typeof name === 'string' && visible(name) ? native.env.get(name) : undefined),
       list: () => freeze(native.env.list().filter(visible)),
       narrow(next) {
         const list = own(next, 'allow');
@@ -17,4 +17,4 @@
   }
 
   return makeEnvCap;
-}
+};

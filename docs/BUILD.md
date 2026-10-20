@@ -150,8 +150,9 @@ builds a single `staticlib` (ThinLTO, `opt-level = "z"`, with the hot crates at 
 
 Symbol collisions: the archive embeds Rust's std, and V8's archive embeds Chromium's.
 Both define `rust_eh_personality` and friends. In macOS non-debug builds (V8's `ld64.lld`
-external link) `build.zig` first runs `clang -r -exported_symbols_list rust/exports.macos.txt`
-so only `_origine_*` stays global. Debug builds and tests link the plain archive (a
+external link) `build.zig` first runs `clang -r -exported_symbols_list <generated list>`
+so only the prefixes in `kept_symbol_prefixes` (`build.zig`: `origine_*`, `crdtp__*`, `v8_inspector__*`) stay global
+(docs/contracts.md, surface F). Debug builds and tests link the plain archive (a
 pre-linked object breaks Mach-O thread-locals there). Linux has an `ld -r` + `objcopy`
 equivalent in `build.zig` that is not exercised yet.
 

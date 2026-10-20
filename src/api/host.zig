@@ -28,19 +28,69 @@ const Scope = @import("../managed/scope.zig").Scope;
 const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
 
 const glue_script = @import("glue.zig");
+const io_lib = @import("@io");
 
-/// What the host grants to `fs.request`. `root` is borrowed and must outlive the Host.
+// Rust natives (rust/crates/origine_api), linked from liborigine_native. CONTRACT (docs/contracts.md,
+// surfaces B and C): the C ABI is rust/crates/origine_api/include/origine_api.h; api_abi.zig holds
+// the Zig declarations, checked against it by `just check-contracts`. The semantics are in
+// docs/async-host-contract.md.
+const abi = @import("api_abi.zig");
+const OriginCfg = abi.OriginCfg;
+const origine_api_attach_isolate = abi.origine_api_attach_isolate;
+const origine_api_detach_isolate = abi.origine_api_detach_isolate;
+const origine_api_configure = abi.origine_api_configure;
+const origine_api_poll = abi.origine_api_poll;
+const origine_api_has_work = abi.origine_api_has_work;
+const origine_api_pollable = abi.origine_api_pollable;
+const origine_api_wake = abi.origine_api_wake;
+
+/// What the host grants to `fs.requestSync` / `fs.requestAsync`. `root` is borrowed and must
+/// outlive the Host.
 pub const FsConfig = struct {
     root: std.Io.Dir,
     write: bool = true,
     sync: bool = true,
+    /// Async fs also needs `Config.runtime` (the guest creates its runtimes through `api.io`).
+    async: bool = true,
 };
+
+/// The ceiling for what `api.io.create` may do. Without it (`Config.runtime == null`) the guest has
+/// no `api.io` and no async fs. The Host owns and drives every runtime the guest creates.
+pub const RuntimeConfig = struct {
+    /// I/O backends `create` may pick (`auto` is always allowed and resolves among these).
+    backends: Backends = .all,
+    max_runtimes: u32 = 4,
+    default_entries: u32 = 256,
+
+    pub const Backends = struct {
+        uring: bool = true,
+        kqueue: bool = true,
+        threaded: bool = true,
+
+        pub const all: Backends = .{};
+
+        /// One bit per `io.Kind` value (1 uring, 2 kqueue, 4 threaded).
+        fn mask(self: Backends) u32 {
+            var out: u32 = 0;
+            if (self.uring) out |= 1 << @backingInt(io_lib.backend.Kind.uring);
+            if (self.kqueue) out |= 1 << @backingInt(io_lib.backend.Kind.kqueue_gcd);
+            if (self.threaded) out |= 1 << @backingInt(io_lib.backend.Kind.threaded);
+            return out;
+        }
+    };
+};
+
+/// How long `settle` blocks in one poll when only native work is pending. V8's default platform
+/// cannot report its next delayed-task deadline, so the wait is capped and the platform pumped again.
+const platform_poll_ns: i64 = 100 * std.time.ns_per_ms;
 
 pub const Config = struct {
     io: std.Io,
     args: []const []const u8 = &.{},
     env: []const env_api.Pair = &.{},
     fs: ?FsConfig = null,
+    /// Ceiling for `api.io` (async runtimes); null removes `api.io` and the async fs.
+    runtime: ?RuntimeConfig = null,
     /// Embedded `origine:` modules the init scope serves. Static storage, borrowed until
     /// `destroy`. Tests substitute their own to exercise module-owned state.
     modules: []const module_api.Module = &origine_modules.all,
@@ -95,6 +145,7 @@ pub const Host = struct {
     args: []const []const u8,
     env: []const env_api.Pair,
     fs: ?FsConfig,
+    runtime: ?RuntimeConfig,
     modules: []const module_api.Module,
     transformers: transformer_api.Registry,
     grants: std.ArrayList(*fs_api.FsGrant) = .empty,
@@ -103,6 +154,8 @@ pub const Host = struct {
     loaders: std.ArrayList(*JsLoader) = .empty,
     runs: std.ArrayList(*scope_api.RunState) = .empty,
     next_fs_id: u32 = 1,
+    /// The isolate the Rust API is attached to (first `install`); detached by `destroy`.
+    rust_isolate: ?v8.Isolate = null,
     /// True while a JS loader callback runs inside Runtime.pump's scope iteration;
     /// creating a scope then would invalidate that iteration.
     in_loader: bool = false,
@@ -111,7 +164,7 @@ pub const Host = struct {
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
     pub fn create(allocator: std.mem.Allocator, config: Config) !*Host {
         const host = try allocator.create(Host);
-        host.* = .{ .allocator = allocator, .io = config.io, .args = config.args, .env = config.env, .fs = config.fs, .modules = config.modules, .transformers = .{ .entries = config.transformers } };
+        host.* = .{ .allocator = allocator, .io = config.io, .args = config.args, .env = config.env, .fs = config.fs, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers } };
         return host;
     }
 
@@ -119,6 +172,7 @@ pub const Host = struct {
     /// `Runtime.destroy` (it releases V8 persistent handles).
     pub fn destroy(self: *Host) void {
         const alloc = self.allocator;
+        if (self.rust_isolate) |isolate| origine_api_detach_isolate(isolate.handle);
         for (self.grants.items) |grant| {
             grant.deinit();
             alloc.destroy(grant);
@@ -150,6 +204,63 @@ pub const Host = struct {
         alloc.destroy(self);
     }
 
+    /// Installs the natives of the Rust registry (`origine_api_natives_*`) whose requirements the
+    /// embedder's configuration meets, as `native.<namespace>.<name>` (the registry's `path`s).
+    /// Nothing about the natives is written on the Zig side: names, callbacks and side effects all
+    /// come from the `#[native(...)]` attributes in rust/crates/origine_api.
+    fn installRustNatives(self: *Host, env: binding.Env, native: v8.Object, state: *ScopeState) !void {
+        const has_runtime = self.runtime != null;
+        const has_async_fs = has_runtime and self.fs != null and self.fs.?.async;
+        const Namespace = struct { name: []const u8, object: v8.Object };
+        var namespaces: std.ArrayList(Namespace) = .empty;
+        defer namespaces.deinit(self.allocator);
+        var index: usize = 0;
+        const count = abi.origine_api_natives_count();
+        while (index < count) : (index += 1) {
+            var entry: abi.Native = undefined;
+            if (abi.origine_api_natives_get(index, &entry) != 0) return error.BadNativeRegistry;
+            const needs = std.enums.fromInt(abi.Needs, entry.needs) orelse return error.BadNativeRegistry;
+            const side_effect: binding.SideEffect = switch (std.enums.fromInt(abi.SideEffect, entry.side_effect) orelse return error.BadNativeRegistry) {
+                .none => .none,
+                .receiver => .receiver,
+                .any => .any,
+            };
+            const available = switch (needs) {
+                .none => true,
+                .runtime => has_runtime,
+                .async_fs => has_async_fs,
+            };
+            if (!available) continue;
+            const path = std.mem.span(entry.path);
+            const dot = std.mem.indexOfScalar(u8, path, '.') orelse return error.BadNativeRegistry;
+            const namespace = path[0..dot];
+            const object = for (namespaces.items) |known| {
+                if (std.mem.eql(u8, known.name, namespace)) break known.object;
+            } else blk: {
+                const created = v8.Object.init(env.isolate);
+                try namespaces.append(self.allocator, .{ .name = namespace, .object = created });
+                try binding.set(env, native, namespace, created);
+                break :blk created;
+            };
+            const function = binding.rawDynamic(env, state, @ptrCast(entry.callback), side_effect);
+            try binding.set(env, object, path[dot + 1 ..], function.object.value);
+        }
+    }
+
+    /// Hands the embedder's ceiling to the Rust side (right after attach).
+    fn configureRust(self: *Host, isolate: v8.Isolate) void {
+        const runtime = self.runtime orelse RuntimeConfig{ .max_runtimes = 0 };
+        const cfg: OriginCfg = .{
+            .max_runtimes = runtime.max_runtimes,
+            .backends_mask = runtime.backends.mask(),
+            .default_entries = runtime.default_entries,
+            .fs_root_fd = if (self.fs) |config| @intCast(config.root.handle) else -1,
+            .fs_write = if (self.fs) |config| @intFromBool(config.write) else 0,
+            .fs_async = if (self.fs != null and self.runtime != null and self.fs.?.async) 1 else 0,
+        };
+        origine_api_configure(isolate.handle, &cfg);
+    }
+
     /// Resolver and loader for the init scope: serves the `origine:@std/*` modules and
     /// reads other modules from the process working directory. Borrows self.
     pub fn initOptions(self: *Host) Scope.Options {
@@ -177,6 +288,11 @@ pub const Host = struct {
         const isolate = session.isolate();
         const ctx = session.ctx;
         const env: binding.Env = .{ .isolate = isolate, .ctx = ctx };
+        if (self.rust_isolate == null) {
+            _ = origine_api_attach_isolate(isolate.handle);
+            self.rust_isolate = isolate;
+            self.configureRust(isolate);
+        }
         // The whole native surface in one table: typed Zig functions, nested objects.
         const native = try binding.object(env, ScopeState, state, .{
             .env = .{
@@ -192,6 +308,7 @@ pub const Host = struct {
                 .close = func(scope_api.close, .{ .side_effect = .any }),
             },
         });
+        try self.installRustNatives(env, native, state);
         try binding.set(env, native, "errno", try errnoArray(isolate, state));
         try binding.set(env, native, "errors", (try errno_api.table(env)).value);
         const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, glue_script.source), scope.scriptOrigin(glue_script.origin, false)) orelse return error.JavaScriptException;
@@ -211,7 +328,7 @@ pub const Host = struct {
         defer api.deinit();
         const loading = try scope.importModule(init_specifier, error_info);
         defer loading.deinit();
-        try settle(rt, platform, loading);
+        try self.settle(rt, platform, loading);
         const main_result = blk: {
             var session: Scope.Session = undefined;
             session.init(scope);
@@ -241,7 +358,7 @@ pub const Host = struct {
             if (value.isPromise()) wrapper = .new(session.isolate(), v8.Promise.from_opaque(value.data.handle).?);
         }
         if (wrapper) |promise| {
-            try settle(rt, platform, promise);
+            try self.settle(rt, platform, promise);
             var session: Scope.Session = undefined;
             session.init(scope);
             defer session.deinit();
@@ -254,16 +371,66 @@ pub const Host = struct {
         } else rt.pumpPlatform(platform);
     }
 
-    fn settle(rt: *Runtime, platform: v8.Platform, promise: v8.Global.Of(v8.Promise)) !void {
+    /// Drives the platform, the microtask queue and every I/O runtime until `promise` settles.
+    /// Fails with `Stalled` when it is pending and nothing can still make progress.
+    fn settle(self: *Host, rt: *Runtime, platform: v8.Platform, promise: v8.Global.Of(v8.Promise)) !void {
         while (true) {
             rt.pumpPlatform(platform);
+            {
+                var session: Runtime.Session = undefined;
+                session.init(rt);
+                defer session.deinit();
+                if (promise.deref().state() != .Pending) return;
+            }
+            if (!self.hasWork()) {
+                // Nothing native is pending: only a platform task can still settle the promise.
+                var session: Runtime.Session = undefined;
+                session.init(rt);
+                defer session.deinit();
+                if (!platform.pumpMessageLoop(rt.isolate, false)) return error.Stalled;
+                continue;
+            }
+            _ = try self.pollNative(rt, true, platform_poll_ns);
+        }
+    }
+
+    /// True while any runtime has live tasks or operations.
+    pub fn hasWork(self: *Host) bool {
+        const isolate = self.rust_isolate orelse return false;
+        return origine_api_has_work(isolate.handle) != 0;
+    }
+
+    /// For embedders with their own event loop: one fd that becomes readable when `poll` would make
+    /// progress, or null (no runtime yet). Register it with your loop and call `poll` when it fires.
+    pub fn pollable(self: *Host) ?std.posix.fd_t {
+        const isolate = self.rust_isolate orelse return null;
+        const fd = origine_api_pollable(isolate.handle);
+        return if (fd < 0) null else @intCast(fd);
+    }
+
+    /// Ticks the ready runtimes once without waiting (completions settle their promises, then
+    /// microtasks run). Returns the number of live tasks and operations left.
+    pub fn poll(self: *Host, rt: *Runtime) !usize {
+        return self.pollNative(rt, false, 0);
+    }
+
+    /// Thread-safe: interrupts a blocking poll (for example a platform task or the embedder
+    /// has new work).
+    pub fn wake(self: *Host) void {
+        if (self.rust_isolate) |isolate| origine_api_wake(isolate.handle);
+    }
+
+    fn pollNative(self: *Host, rt: *Runtime, block: bool, timeout_ns: i64) !usize {
+        const isolate = self.rust_isolate orelse return 0;
+        const live = blk: {
             var session: Runtime.Session = undefined;
             session.init(rt);
             defer session.deinit();
-            if (promise.deref().state() != .Pending) return;
-            // pump returned with nothing left to run: the promise can never settle.
-            if (!platform.pumpMessageLoop(rt.isolate, false)) return error.Stalled;
-        }
+            break :blk origine_api_poll(isolate.handle, @intFromBool(block), timeout_ns);
+        };
+        rt.pump();
+        if (live < 0) return error.IoPollFailed;
+        return @intCast(live);
     }
 };
 

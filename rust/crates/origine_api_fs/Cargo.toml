@@ -1,0 +1,17 @@
+[package]
+name = "origine_api_fs"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+build = "build.rs"
+
+# The async fs grant logic behind `native.fsAsync.*`, with no V8 dependency so Miri can run it on
+# `origine_io`'s mock. Tests outside Miri need the Zig-built C library: set ORIGINE_IO_LIB to the
+# directory holding liborigine_io.a (see build.rs).
+
+[dependencies]
+origine_api_core.workspace = true
+origine_io.workspace = true
+
+[lints]
+workspace = true

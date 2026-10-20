@@ -1,6 +1,6 @@
 # Origine `api` design draft
 
-Draft. Supersedes `API_PLAN_DRAFT_OLD.md`, which I leave untouched for you to delete. No Zig code changes are part of this step.
+Draft. Supersedes `API_PLAN_DRAFT_OLD.md`, which I leave untouched for you to delete.
 
 ## Draft-1 implementation status
 
@@ -9,13 +9,14 @@ Implemented on branch `draft-1`: host in `src/api/` (re-exported by `src/api.zig
 | Area | State |
 |---|---|
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. **No snapshot yet**: the init is re-evaluated every start. |
-| `origine:@std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`. `Dir`/`File` descriptors carry Zig's method names and take the `io` first (`fs.sync` blocks and throws; `fs.async` returns promises): `Dir`: `openFile`, `createFile`, `openDir`, `close`, `createDir`, `createDirPath`, `createDirPathOpen`, `deleteFile`, `deleteDir`, `deleteTree`, `rename`, `stat`, `statFile`, `access`, `iterate`, `readFile`, `writeFile`; `File`: `close`, `stat`, `length`, `readStreaming`, `readPositional`, `readPositionalAll`, `readAll`, `writeStreaming`, `writeStreamingAll`, `writePositionalAll`, `setLength`, `sync`. Not shipped: symlink/readlink/realpath/copyFile/permissions. |
+| `origine:@std/io` | `Dir`, `File`, `Limit`, `IoError`, `FileKind`. `Dir`/`File` descriptors carry Zig's method names and take the `io` first (the sync cap from `requestSync` blocks and throws; the async cap from `requestAsync` returns promises): `Dir`: `openFile`, `createFile`, `openDir`, `close`, `createDir`, `createDirPath`, `createDirPathOpen`, `deleteFile`, `deleteDir`, `deleteTree`, `rename`, `stat`, `statFile`, `access`, `iterate`, `readFile`, `writeFile`; `File`: `close`, `stat`, `length`, `readStreaming`, `readPositional`, `readPositionalAll`, `readAll`, `writeStreaming`, `writeStreamingAll`, `writePositionalAll`, `setLength`, `sync`. Not shipped: symlink/readlink/realpath/copyFile/permissions. |
 | `origine:@std/quansync` | Write once, run sync or async (after [quansync](https://github.com/quansync-dev/quansync)). `quansync({ sync, async })` is a zero-overhead leaf; `quansync(function* () { yield* other(...) }, { sync? })` is a composite with optional hand-written fast paths. Functions expose `.sync`, `.async`, are awaitable, and are indexable by mode (`f[io.kind](...)`). `origine:@std/io` and `origine:@std/fs` are built on it. |
 | `origine:@std/fs` | Rust `std::fs`-style API bound to an `io` and a directory: `fs(io, dir = Dir.cwd())` returns `read`, `read_to_string`, `write`, `read_dir`, `metadata`, `try_exists`, `exists`, `copy`, `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `remove_dir_all`, `rename`, `File` (`open`, `create`, `create_new`, `options`; instances: `read`, `read_exact`, `read_to_end`, `read_to_string`, `write`, `write_all`, `flush`, `set_len`, `sync_all`, `metadata`, `close`) and `OpenOptions.new()`. Errors are thrown/rejected `IoError` values. Not shipped: canonicalize, read_link, symlink, set_permissions, seek, append, lazy `ReadDir`. |
 | `origine:@std/text` | `encodeUtf8`, `decodeUtf8` (returns `undefined` for invalid UTF-8), `utf8Js` (the plain JS reference implementation); the context has no TextEncoder/TextDecoder. Native versions (V8 string conversion, simdutf) reach the module through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. Scopes only see `origine:*` when created with `enable_origine_namespace` (the init scope has it; child scopes never do). |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. |
-| `api.fs` | `request({root, write, mode: {async, sync}})`, `narrow(...)`. Real backend only (no memory/overlay). Ops: `dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirDeleteFile`, `dirRead`, `fileReadAll`, `fileWriteAll`, `fileClose`. |
-| Errors | Errno in a native-backed `Uint32Array` (one per scope, `fs.errno`; the glue fetches it once as `native.errno`) for `fs.sync`; `fs.async` rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |
+| `api.fs` | `requestSync({root, write})` (blocking, Zig natives, errno cell), `await requestAsync({io, root, write})` (genuinely asynchronous on an `api.io` runtime; Rust natives), `narrow({root, write, mode: {sync, async}})`. `api.fs.request` is gone. Real backend only (no memory/overlay). The two variants have the same op names (`dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirCreateDirPath`, `dirDeleteFile`, `dirDeleteDir`, `dirDeleteTree`, `dirRename`, `dirRead`, `fileStat`, `fileReadAll`, `fileRead`, `filePread`, `fileWrite`, `fileWriteAll`, `filePwriteAll`, `fileSetLength`, `fileSync`, `fileClose`). |
+| `api.io` | Only when the embedder sets `Config.runtime` (the ceiling: backends, `max_runtimes`, `default_entries`). `create({backend?: 'auto'\|'uring'\|'kqueue'\|'threaded', entries?})` (sync) returns a frozen `{kind: 'io', id, backend, close()}`; `await io.close()` cancels in-flight operations and destroys the runtime; `narrow({backends, maxRuntimes})` only lowers the ceiling. Handles are not transferable across scopes. See 4.5. |
+| Errors | Errno in a native-backed `Uint32Array` (one per scope, `sync.errno`; the glue fetches it once as `native.errno`) for the sync cap; the async cap never uses it and rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. cppgc out-parameter not implemented. |
 | `api.scope` | `create({main, importMap, loader, preload})`, `narrow({count})`; handle has `run()` and `close()`. |
 | Intrinsics snapshot | Done (engine level, not the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the 397 KB result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. |
 | `net`, `isolate` | Absent. |
@@ -41,7 +42,7 @@ const ops = try call.object(FsGrant, grant, .{ .openFile = openFile, .stat = sta
 - **Tables.** `binding.object` builds a whole native surface from one comptime table: function fields become natives, named structs become nested objects, other fields are plain values.
 
 Known draft-1 limitations:
-- **Async fs is inline.** `fs.async` calls the native op on the isolate thread and returns an already-settled promise. There is no work queue.
+- **Async fs is real** (since phase 4): `requestAsync` operations run on an `io` runtime (Zig `src/io` loop + Rust runtime, see 4.5). Buffers are copied; pin/detach (BYOB) is phase 5.
 - **Path checks are lexical.** NUL, absolute paths and `..` are rejected; a symlink inside the root can still point outside it.
 - **Option bags** are read from own data properties, but Proxies are not detected.
 - **`scope.close()`** revokes the handle and clears the import cache. The V8 context stays alive until `Runtime.destroy`, since `Runtime` cannot destroy a single scope.
@@ -107,18 +108,42 @@ interface Api {
 ### 4.1 Request, then grant (`fs`)
 
 ```ts
-const fs: Fs = await api.fs.request({ root?, write?, mode?: { async?, sync? } });   // hint only; mode omitted = async only
-interface Fs { errno: Uint32Array; sync?: FsOps<sync>; async?: FsOps<Promise> }   // only requested, permitted variants are present
+const sync: SyncFs = api.fs.requestSync({ root?, write? });                       // hint only; throws {errno, name} when denied
+const async: AsyncFs = await api.fs.requestAsync({ io, root?, write? });         // hint only; rejects BadHandle / AccessDenied / ...
+interface SyncFs  { kind: 'sync';  id: number; errno: Uint32Array; /* FsOps<sync> */ }
+interface AsyncFs { kind: 'async'; id: number;                      /* FsOps<Promise> */ }
 ```
 
 - The guest sends a **hint**. The **host's provider decides** and returns one of: the real fs (rooted), a virtual (memory) fs, an overlay (lower read-only plus upper writable), or a denial. The guest cannot tell which one it got and cannot choose.
-- `sync` and `async` expose the **same operation names** (`dirOpenFile`, `fileRead`, `fileWrite`, `dirCreateDir`, `stat`, `dirIterate`, `fileClose`, ...). Sync blocks the isolate thread. It exists only if the grant allows it, and the runtime must have `allow_explicit_blocking_api` set (already in `Runtime.Options`).
+- The sync and async variants expose the **same operation names** (`dirOpenFile`, `fileRead`, `fileWrite`, `dirCreateDir`, `stat`, `dirIterate`, `fileClose`, ...). Sync blocks the isolate thread. `requestSync` throws `AccessDenied` unless the grant allows it (host `FsConfig.sync`, not narrowed away), and the runtime must have `allow_explicit_blocking_api` set (already in `Runtime.Options`). `requestAsync` additionally needs `FsConfig.async`, `Config.runtime`, and an `io` handle of the same scope that is still open.
 - An fs object is the whole authority for its backend. Sub-directory grants are made with `narrow`.
 
 ### 4.2 `net`, `env`
 
 - `net` is **tbd** (fetch, tcp, udp, and whether it follows the request/grant shape). Policy ideas (SSRF/IP checks, redirect revalidation) in the old draft are not committed to.
 - `env` gives `args`, `get(name)`, `list()` and, if granted, `set`. Narrowing can filter the visible variable names or replace the values with a fixed table (useful for a hermetic child).
+
+### 4.5 `io`: async runtimes (phase 4)
+
+```ts
+const io = api.io.create({ backend?: 'auto' | 'uring' | 'kqueue' | 'threaded', entries?: number });   // sync
+const fs = await api.fs.requestAsync({ io, root, write });   // the grant's operations run on `io`
+await io.close();                                             // cancels in-flight operations, destroys the runtime
+```
+
+- **The Host owns every runtime.** `api.io.create` creates a Zig `io.Loop` plus a Rust runtime inside the Host (registered against `Config.runtime.max_runtimes`; the embedder never creates loops). All runtimes are driven by the isolate thread: `Host.run`/`settle` loops `origine_api_poll` (waits on every runtime's pollable fd and a wake fd, ticks the ready ones, settles completed promises) followed by `Runtime.pump` (microtasks). `Stalled` is reported only when no runtime has live tasks or operations and no platform task remains. V8's default platform cannot report delayed-task deadlines, so a blocking wait is capped at 100 ms and the platform pumped again. Embedders with their own event loop use `Host.pollable()` (one fd) and `Host.poll(rt)` instead of `run`; `Host.wake()` interrupts a blocking poll from another thread.
+- **Ceiling and narrowing.** `Config.runtime` (null: no `api.io`, no async fs) is the embedder's ceiling; `api.io.narrow({ backends, maxRuntimes })` only lowers it. `create` throws a frozen `{errno, name}`: `InvalidPath` for malformed options, `Unsupported` when the backend or count is not allowed or available.
+- **Handles** are frozen data (`{kind: 'io', id, backend}` plus `close`), not transferable across scopes; `requestAsync` rejects `BadHandle` for a missing, forged, closed or foreign `io`. Using a grant after its runtime closed rejects (`Canceled` for work that was in flight, a stale/bad handle error afterwards).
+- **Errors.** The open point of section 6 is resolved: async operations never touch the shared errno cell; they reject with the frozen `{errno, name}` value. New errno members for the async/network world: `Canceled` 14, `TimedOut` 15, `WouldBlock` 16, `ConnectionRefused` 17, `ConnectionReset` 18, `BrokenPipe` 19, `AddressInUse` 20, `NotConnected` 21 (single source of truth `Errno` in `src/api/errno.zig`; the Rust mapper in `origine_api_core::errno` must match).
+- **Buffer semantics (phase 5: pin + detach, BYOB, host-allocated).** Phase 4 copied everything; phase 5 moves guest memory to the host for the duration of an operation instead (details in [async-host-contract.md](async-host-contract.md)).
+  - *Eligibility.* A guest ArrayBuffer can be pinned only if it is not shared (`SharedArrayBuffer`), not resizable, not WebAssembly memory (not detachable) and detaching it succeeds. Anything else falls back to the phase 4 copy behavior, with the buffer left usable. The decision is the host's and is not observable except through the detach, so guests must treat both outcomes as valid.
+  - *Writes* (`fileWrite`, `filePwriteAll`, `fileWriteAll`, and everything built on them: `File.writeStreaming*`, `Dir.writeFile`, Rust-style `write`/`write_all`): an eligible buffer is **detached** (transferred) and written from directly. Afterwards the buffer reads `byteLength === 0` and every view over it has length 0, whether the write succeeds, fails or is canceled. Pass `bytes.slice()` to keep the data; never write one buffer twice or in a loop (a partial `fileWrite` remainder must come from a copy). Non-eligible buffers are copied at call time, as in phase 4.
+  - *BYOB reads* (`fileReadInto(file, view)`, `filePreadInto(file, view, offset)`; `File.readInto(io, view, offset?)`): `view` is an ArrayBuffer or any view; its buffer is pinned and detached, the read lands in it, and the promise resolves a frozen `{ bytes, buffer }` where `buffer` is a view of the same kind, byteOffset and length as `view` over the filled memory. Use `buffer`, not `view` (detached when pinned; in the copy fallback `view` also holds the data). A buffer can be handed to one operation at a time: a second operation on an already-detached buffer is a zero-length request or a rejection, never a use of freed memory.
+  - *Host-allocated reads* (`fileReadAlloc(file, len)`, `filePreadAlloc(file, len, offset)`; `File.readAlloc(io, len, offset?)`): the host allocates the buffer, reads once and resolves a `Uint8Array` of exactly the bytes read (shorter than `len` near the end, empty at the end). No guest buffer is involved, so there is nothing to detach.
+  - *Unchanged.* `fileRead`/`filePread` still copy into the caller's buffer at completion and resolve a count (rejecting if the buffer was detached meanwhile); `readAll` returns a host-provided `Uint8Array`. The sync variants never detach and have no `*Into`/`*Alloc` operations (`File.readInto`/`readAlloc` throw `Unsupported` on a sync io).
+  - *Cancellation.* `io.close()` with a pinned operation in flight rejects it with `Canceled`; the host keeps the memory alive until the runtime has finished with it and nothing is handed back to the guest.
+- **Linking.** The Rust runtime calls the `oio_*` C ABI of `src/io/c_api.zig`; `build.zig` compiles the `@io` module into the executable, the test binary and the snapshot tool, and each root references `@import("@io").c_api` in a `comptime` block so the exports are kept.
+- Contract between the Zig/JS side and the Rust side: [async-host-contract.md](async-host-contract.md).
 
 ### 4.3 `scope`: child scopes
 
@@ -189,7 +214,7 @@ Node-style string codes are cryptic and per-failure `Error` objects with capture
 - **No host details.** The errno is the whole default payload. Paths and Zig internals go to the audit hook.
 
 Open points:
-- **Async.** A single shared array is racy with concurrent in-flight ops. Candidates: async ops take their own state array or cppgc out object, or they reject with the errno number. Not decided.
+- **Async (resolved in phase 4).** A single shared array would be racy with concurrent in-flight ops, so async operations do not use it: they reject with a frozen `{errno, name}` (section 4.5).
 - **Hardener.** `supportedExport` rejects `ArrayBufferView`, so the state array cannot cross a scope boundary through `values`. It must stay in the init-side closure (the node layer), which matches the intended design, but a narrowed fs handed to a child cannot carry the array.
 - **cppgc.** Confirm `lib/v8_zig` exposes cppgc objects; I did not check.
 
@@ -203,7 +228,7 @@ import { makeNodeFs }   from "./node/fs.js";    // factories take `api` slices
 import { makeProcess }  from "./node/process.js";
 
 export async function main(api) {
-  const fs = await api.fs.request({ root: "/", write: true, mode: { async: true, sync: true } });
+  const fs = { sync: api.fs.requestSync({ root: "/", write: true }) };   // async: await api.fs.requestAsync({ io, root: "/", write: true })
 
   const nodeFs  = makeNodeFs(fs, Dir);
   const process = makeProcess(api.env.narrow({ allow: ["HOME", "PATH"] }));
@@ -269,7 +294,7 @@ Layout (as built): `src/api/{host,glue,fs,env,scope,js_loader,init_loader,errno,
   - ES module graphs in a snapshot: I did not verify that V8 serializes `Module` records and the module map. The init may need to be evaluated as a script/bundle, or the module map rebuilt after restore.
   - Snapshots must be rebuilt after any hardening patch change (`build-tools/README.md`).
 - **Snapshot cache:** where the cache lives, eviction, and exactly which inputs go into the key.
-- **Error representation (decided):** errno in a `Uint32Array` plus optional cppgc out object (section 6). Async and cppgc availability open.
+- **Error representation (decided):** errno in a `Uint32Array` plus optional cppgc out object (section 6); async operations reject with `{errno, name}` instead (resolved, 4.5). cppgc availability open.
 - **Snapshot contents (decided):** the evaluated `init.js` is snapshotted. `main` is **not called** during snapshotting; it is only exported and called after restore.
 - **`Dir.cwd()` (decided):** for the real backend it is the real process cwd. Virtual and overlay backends define their own.
 - **Sync (decided):** the init decides whether `sync` is exposed to others (section 5).

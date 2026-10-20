@@ -1,0 +1,18 @@
+[package]
+name = "origine_api"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+origine_api_core.workspace = true
+origine_api_macros.workspace = true
+origine_api_fs.workspace = true
+origine_io.workspace = true
+# The vendored fork built against the same V8 archive Zig links (see rust/scripts/cargo-v8.sh).
+# The inspector feature compiles the Rust side of the inspector/CRDTP glue that rusty.cc (in libv8_zig.a)
+# references; without it those symbols are undefined at the final link. Its build script does not bundle libv8/mimalloc into this crate's rlib/staticlib.
+v8 = { path = "../../../lib/v8_zig/rusty_v8", features = ["inspector"] }
+
+[lints]
+workspace = true

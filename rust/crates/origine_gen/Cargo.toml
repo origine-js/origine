@@ -1,0 +1,12 @@
+[package]
+name = "origine_gen"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "Generators for the cross-language contracts (docs/contracts.md). A separate crate so it can run while the crates it generates for do not compile."
+
+[dependencies]
+bindgen = "0.72.1"
+
+[lints]
+workspace = true

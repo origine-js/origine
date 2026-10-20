@@ -8,6 +8,11 @@ const Engine = @import("@engine").Engine;
 const build_options = @import("build_options");
 var io_runtime: std.Io.Threaded = undefined;
 
+// The Rust library calls the `oio_*` C ABI of the I/O library; keep its exports.
+comptime {
+    _ = @import("@io").c_api;
+}
+
 /// Borrows format/arguments through buffered output; retains no resources.
 /// The global host I/O runtime must remain live through return, including I/O errors.
 fn print(comptime format: []const u8, args: anytype) void {
@@ -109,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
 
 /// Runs `args[1]` as the init module: evaluates it, then calls its exported
 /// `main(api)` with every permission granted (the CLI grants the working directory
-/// read/write with sync access, all arguments after the init path, and the whole
+/// read/write with sync and async access (async runtimes through `api.io`), all arguments after the init path, and the whole
 /// environment). Borrows everything through return.
 fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, engine: Engine, args: []const [:0]const u8) !void {
     const user_args = try alloc.alloc([]const u8, args.len - 1);
@@ -122,7 +127,7 @@ fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, eng
     for (keys, values, env) |key, value, *out| out.* = .{ .name = key, .value = value };
     var cwd = try std.Io.Dir.cwd().openDir(io_runtime.io(), ".", .{ .iterate = true });
     defer cwd.close(io_runtime.io());
-    const host = try m.Api.Host.create(alloc, .{ .io = io_runtime.io(), .args = user_args, .env = env, .fs = .{ .root = cwd } });
+    const host = try m.Api.Host.create(alloc, .{ .io = io_runtime.io(), .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{} });
     defer host.destroy();
     const scope = try rt.createScope(host.initOptions());
     var error_info: m.ErrorInfo = .{};

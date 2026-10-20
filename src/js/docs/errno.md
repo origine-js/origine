@@ -26,6 +26,15 @@ ERRNO.FileNotFound // 1
 | `FileTooBig` | 11 |
 | `InvalidData` | 12 |
 | `JavaScriptException` | 13 |
+| `Canceled` | 14 (an async operation was canceled: its io runtime closed) |
+| `TimedOut` | 15 |
+| `WouldBlock` | 16 |
+| `ConnectionRefused` | 17 |
+| `ConnectionReset` | 18 |
+| `BrokenPipe` | 19 |
+| `AddressInUse` | 20 |
+| `NotConnected` | 21 |
+| `DirNotEmpty` | 22 (removing a non-empty directory) |
 | `Unexpected` | 255 |
 
 Use it through [`IoError`](io.md#ioerror), which adds `name`/`is`/`of`/`check`.

@@ -1,0 +1,6 @@
+{
+  "singleQuote": true,
+  "arrowParens": "avoid",
+  "printWidth": 140,
+  "ignorePatterns": ["lib/**", "zig-pkg/**", "zig-out/**", "rust/target/**", ".zig-cache/**", "**/*.md"]
+}

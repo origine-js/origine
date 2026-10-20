@@ -1,0 +1,17 @@
+{
+  "categories": { "correctness": "error" },
+  "env": { "es2024": true },
+  "ignorePatterns": ["lib/**", "zig-pkg/**", "zig-out/**", "rust/target/**", ".zig-cache/**"],
+  "overrides": [
+    {
+      // Glue scripts are evaluated as scripts; their completion value (a function) is the result.
+      "files": ["src/js/bootstrap.js", "src/js/glue/*.js"],
+      "rules": { "no-unused-expressions": "off" }
+    },
+    {
+      // quansync values are intentionally awaitable.
+      "files": ["src/js/std/quansync.js"],
+      "rules": { "unicorn/no-thenable": "off" }
+    }
+  ]
+}

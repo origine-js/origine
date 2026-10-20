@@ -376,6 +376,39 @@ pub fn func(comptime callee: anytype, comptime options: FuncOptions) Wrapped(@Ty
     return .{ .callee = &callee, .options = options };
 }
 
+/// A raw V8 callback (for example a Rust `extern "C"` native) plus its options; build one with
+/// `raw`. Comptime-only, like `Wrapped`.
+pub const Raw = struct {
+    callback: v8.FunctionCallback,
+    options: FuncOptions,
+
+    pub const is_raw_native = true;
+};
+
+/// Marks `callback`, a V8 function callback implemented outside Zig, as a native of an `object`
+/// table. The callback receives the table's `state` pointer as the function's External data
+/// (`info.data()`), reads its arguments itself and does its own error reporting (it never uses
+/// the errno cell unless it knows the state type). It must not unwind: foreign callbacks catch
+/// their own panics. `side_effect` is required like for `func`; `constructor` defaults to
+/// `.throw`; the fast path never applies. Comptime only; retains nothing.
+pub fn raw(comptime callback: v8.FunctionCallback, comptime options: FuncOptions) Raw {
+    return .{ .callback = callback, .options = options };
+}
+
+/// `raw` for a callback known only at run time (the Rust natives registry, host.zig): a JS function
+/// bound to `state`, local to the current handle scope; `state` must outlive it.
+pub fn rawDynamic(env: Env, state: *anyopaque, callback: v8.FunctionCallback, side_effect: SideEffect) v8.Function {
+    const data = v8.External.init(env.isolate, state).value.data;
+    return v8.Function.init(env.ctx, callback, data, 0, Constructor.throw.toV8(), side_effect.toV8());
+}
+
+/// A JS function for the raw `callback` bound to `state` (see `raw`). The handle is local to the
+/// current handle scope; `state` must outlive the function.
+fn rawFunction(env: Env, state: *anyopaque, comptime native_raw: Raw) v8.Function {
+    const data = v8.External.init(env.isolate, state).value.data;
+    return v8.Function.init(env.ctx, native_raw.callback, data, 0, native_raw.options.constructor.toV8(), native_raw.options.side_effect.?.toV8());
+}
+
 /// A JS function for `callee` bound to `state`. Uses a function template with a fast API
 /// entry when `isFast` allows it (and `options` do not forbid it), else a plain function.
 /// The returned handle is local to the current handle scope; `state` must outlive the function.
@@ -520,7 +553,7 @@ fn encodeList(env: Env, items: anytype) !v8.Value {
 /// types with their own `encode`).
 fn isTable(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct" => |info| !info.is_tuple and !@hasDecl(T, "encode") and !isHandle(T) and !isWrapped(T),
+        .@"struct" => |info| !info.is_tuple and !@hasDecl(T, "encode") and !isHandle(T) and !isWrapped(T) and !isRaw(T),
         else => false,
     };
 }
@@ -528,6 +561,11 @@ fn isTable(comptime T: type) bool {
 /// True for the result of `func`.
 fn isWrapped(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_wrapped_native");
+}
+
+/// True for the result of `raw`.
+fn isRaw(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_raw_native");
 }
 
 /// V8 handle types encode to themselves rather than as tables or plain structs.
@@ -542,7 +580,7 @@ pub fn set(env: Env, target: v8.Object, name: []const u8, x: anytype) !void {
 }
 
 /// Builds an object from a comptime table. `func(...)` fields become natives bound to
-/// `state` (see `native`; bare functions are rejected); named-struct fields become nested objects; everything else
+/// `state` (see `native`; bare functions are rejected); `raw(...)` fields are foreign callbacks bound to `state` the same way; named-struct fields become nested objects; everything else
 /// is encoded as a plain value.
 ///
 /// ```zig
@@ -560,6 +598,11 @@ pub fn object(env: Env, comptime State: type, state: *State, comptime table: any
         if (comptime isWrapped(F)) {
             if (comptime field.options.side_effect == null) @compileError("native `" ++ name ++ "` needs an explicit side_effect: func(f, .{ .side_effect = .none })");
             try set(env, target, name, function(env, State, state, field.callee.*, field.options).object.value);
+            continue;
+        }
+        if (comptime isRaw(F)) {
+            if (comptime field.options.side_effect == null) @compileError("native `" ++ name ++ "` needs an explicit side_effect: raw(f, .{ .side_effect = .any })");
+            try set(env, target, name, rawFunction(env, state, field).object.value);
             continue;
         }
         switch (@typeInfo(F)) {

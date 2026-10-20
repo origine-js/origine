@@ -52,25 +52,35 @@ export const FileKind = freeze({ file: 1, directory: 2, sym_link: 3, other: 4 })
 // are read/write natively, so write_only and read_write coincide.
 const MODES = { read_only: 'r', write_only: 'rw', read_write: 'rw' };
 const UNLIMITED = freeze({ limit: Infinity });
-const openFlags = options => options === undefined ? 'r' : (MODES[options.mode ?? 'read_only'] ?? 'r');
+const openFlags = options => (options === undefined ? 'r' : (MODES[options.mode ?? 'read_only'] ?? 'r'));
 // Zig `createFile`: exclusive -> `x`, truncate (default) -> `w`, else create-and-keep `c`.
-const createFlags = (options = {}) => options.exclusive ? 'x' : (options.truncate ?? true) ? 'w' : 'c';
+const createFlags = (options = {}) => (options.exclusive ? 'x' : (options.truncate ?? true) ? 'w' : 'c');
 const wrapDir = d => new DirImpl(d.fs, d.id);
 const wrapFile = f => new FileImpl(f.fs, f.id);
 const dropResult = () => undefined;
 const sizeOf = stat => stat.size;
 
 // One fs call as a quansync leaf. Natives take at most four arguments after errno.
-const op = (name, wrap) => quansync({
-  sync: (io, a, b, c, d) => {
-    const value = IoError.check(io, io[name](a, b, c, d));
-    return wrap === undefined ? value : wrap(value);
-  },
-  async: (io, a, b, c, d) => {
-    const pending = io[name](a, b, c, d);
-    return wrap === undefined ? pending : pending.then(wrap);
-  },
-});
+const op = (name, wrap) =>
+  quansync({
+    sync: (io, a, b, c, d) => {
+      const value = IoError.check(io, io[name](a, b, c, d));
+      return wrap === undefined ? value : wrap(value);
+    },
+    async: (io, a, b, c, d) => {
+      const pending = io[name](a, b, c, d);
+      return wrap === undefined ? pending : pending.then(wrap);
+    },
+  });
+
+// An op that exists only on async caps (the zero-copy reads): the sync arm fails with Unsupported.
+const asyncOnly = name =>
+  quansync({
+    sync: () => {
+      throw IoError.of(IoError.Unsupported);
+    },
+    async: (io, a, b, c) => io[name](a, b, c),
+  });
 
 const dirOpenFile = op('dirOpenFile', wrapFile);
 const dirOpenDir = op('dirOpenDir', wrapDir);
@@ -90,6 +100,10 @@ const fileLength = op('fileStat', sizeOf);
 const fileRead = op('fileRead');
 const filePread = op('filePread');
 const fileReadAll = op('fileReadAll');
+const fileReadInto = asyncOnly('fileReadInto');
+const filePreadInto = asyncOnly('filePreadInto');
+const fileReadAlloc = asyncOnly('fileReadAlloc');
+const filePreadAlloc = asyncOnly('filePreadAlloc');
 const fileWrite = op('fileWrite');
 const fileWriteAll = op('fileWriteAll');
 const filePwriteAll = op('filePwriteAll');
@@ -101,34 +115,48 @@ const dirCreateDirPathOpen = quansync(function* (io, dir, path) {
   return yield* dirOpenDir(io, dir, path);
 });
 
-const dirReadFile = quansync(function* (io, dir, path, limit) {
-  const file = yield* dirOpenFile(io, dir, path, 'r');
-  try {
-    return yield* fileReadAll(io, file, limit === Infinity ? UNLIMITED : { limit });
-  } finally {
-    yield* fileClose(io, file);
-  }
-}, {
-  // Hand-written sync path: no generator, no task objects.
-  sync(io, dir, path, limit) {
-    const file = dirOpenFile.sync(io, dir, path, 'r');
-    try { return fileReadAll.sync(io, file, limit === Infinity ? UNLIMITED : { limit }); } finally { fileClose.sync(io, file); }
+const dirReadFile = quansync(
+  function* (io, dir, path, limit) {
+    const file = yield* dirOpenFile(io, dir, path, 'r');
+    try {
+      return yield* fileReadAll(io, file, limit === Infinity ? UNLIMITED : { limit });
+    } finally {
+      yield* fileClose(io, file);
+    }
   },
-});
+  {
+    // Hand-written sync path: no generator, no task objects.
+    sync(io, dir, path, limit) {
+      const file = dirOpenFile.sync(io, dir, path, 'r');
+      try {
+        return fileReadAll.sync(io, file, limit === Infinity ? UNLIMITED : { limit });
+      } finally {
+        fileClose.sync(io, file);
+      }
+    },
+  },
+);
 
-const dirWriteFile = quansync(function* (io, dir, path, data, flags) {
-  const file = yield* dirOpenFile(io, dir, path, createFlags(flags));
-  try {
-    yield* fileWriteAll(io, file, data);
-  } finally {
-    yield* fileClose(io, file);
-  }
-}, {
-  sync(io, dir, path, data, flags) {
-    const file = dirOpenFile.sync(io, dir, path, createFlags(flags));
-    try { fileWriteAll.sync(io, file, data); } finally { fileClose.sync(io, file); }
+const dirWriteFile = quansync(
+  function* (io, dir, path, data, flags) {
+    const file = yield* dirOpenFile(io, dir, path, createFlags(flags));
+    try {
+      yield* fileWriteAll(io, file, data);
+    } finally {
+      yield* fileClose(io, file);
+    }
   },
-});
+  {
+    sync(io, dir, path, data, flags) {
+      const file = dirOpenFile.sync(io, dir, path, createFlags(flags));
+      try {
+        fileWriteAll.sync(io, file, data);
+      } finally {
+        fileClose.sync(io, file);
+      }
+    },
+  },
+);
 
 const fileReadPositionalAll = quansync(function* (io, file, buffer, offset) {
   let total = 0;
@@ -148,32 +176,66 @@ class DirImpl {
     freeze(this);
   }
   /// Zig `Dir.openFile`. options: `{ mode: 'read_only' | 'write_only' | 'read_write' }`.
-  openFile(io, path, options) { return dirOpenFile[io.kind](io, this, path, openFlags(options)); }
+  openFile(io, path, options) {
+    return dirOpenFile[io.kind](io, this, path, openFlags(options));
+  }
   /// Zig `Dir.createFile`. options: `{ read = false, truncate = true, exclusive = false }`.
-  createFile(io, path, options) { return dirOpenFile[io.kind](io, this, path, createFlags(options)); }
-  openDir(io, path) { return dirOpenDir[io.kind](io, this, path); }
-  close(io) { return dirClose[io.kind](io, this); }
-  createDir(io, path) { return dirCreateDir[io.kind](io, this, path); }
-  createDirPath(io, path) { return dirCreateDirPath[io.kind](io, this, path); }
+  createFile(io, path, options) {
+    return dirOpenFile[io.kind](io, this, path, createFlags(options));
+  }
+  openDir(io, path) {
+    return dirOpenDir[io.kind](io, this, path);
+  }
+  close(io) {
+    return dirClose[io.kind](io, this);
+  }
+  createDir(io, path) {
+    return dirCreateDir[io.kind](io, this, path);
+  }
+  createDirPath(io, path) {
+    return dirCreateDirPath[io.kind](io, this, path);
+  }
   /// Zig `Dir.createDirPathOpen`.
-  createDirPathOpen(io, path) { return dirCreateDirPathOpen[io.kind](io, this, path); }
-  deleteFile(io, path) { return dirDeleteFile[io.kind](io, this, path); }
-  deleteDir(io, path) { return dirDeleteDir[io.kind](io, this, path); }
-  deleteTree(io, path) { return dirDeleteTree[io.kind](io, this, path); }
+  createDirPathOpen(io, path) {
+    return dirCreateDirPathOpen[io.kind](io, this, path);
+  }
+  deleteFile(io, path) {
+    return dirDeleteFile[io.kind](io, this, path);
+  }
+  deleteDir(io, path) {
+    return dirDeleteDir[io.kind](io, this, path);
+  }
+  deleteTree(io, path) {
+    return dirDeleteTree[io.kind](io, this, path);
+  }
   /// Zig `Dir.rename(old_dir, old_sub_path, new_dir, new_sub_path, io)`, here `oldDir.rename(io, old, newDir, new)`.
-  rename(io, oldPath, newDir, newPath) { return dirRename[io.kind](io, this, oldPath, newDir, newPath); }
+  rename(io, oldPath, newDir, newPath) {
+    return dirRename[io.kind](io, this, oldPath, newDir, newPath);
+  }
   /// Zig `Dir.stat`: metadata of this directory.
-  stat(io) { return dirStat[io.kind](io, this, ''); }
+  stat(io) {
+    return dirStat[io.kind](io, this, '');
+  }
   /// Zig `Dir.statFile`: symlinks are not followed.
-  statFile(io, path) { return dirStat[io.kind](io, this, path); }
+  statFile(io, path) {
+    return dirStat[io.kind](io, this, path);
+  }
   /// Zig `Dir.access`: fails with FileNotFound (etc.) when the path is not reachable.
-  access(io, path) { return dirAccess[io.kind](io, this, path); }
+  access(io, path) {
+    return dirAccess[io.kind](io, this, path);
+  }
   /// Zig `Dir.iterate` collected into an array of `{ name, kind }` (iterable).
-  iterate(io) { return dirRead[io.kind](io, this); }
+  iterate(io) {
+    return dirRead[io.kind](io, this);
+  }
   /// Zig `Dir.readFileAlloc`: whole file as a Uint8Array, at most `limit` bytes.
-  readFile(io, path, limit = Limit.unlimited) { return dirReadFile[io.kind](io, this, path, limit); }
+  readFile(io, path, limit = Limit.unlimited) {
+    return dirReadFile[io.kind](io, this, path, limit);
+  }
   /// Zig `Dir.writeFile(io, { sub_path, data, flags })`.
-  writeFile(io, { sub_path, data, flags } = {}) { return dirWriteFile[io.kind](io, this, sub_path, data, flags); }
+  writeFile(io, { sub_path, data, flags } = {}) {
+    return dirWriteFile[io.kind](io, this, sub_path, data, flags);
+  }
 }
 
 class FileImpl {
@@ -183,22 +245,63 @@ class FileImpl {
     this.id = id;
     freeze(this);
   }
-  close(io) { return fileClose[io.kind](io, this); }
-  stat(io) { return fileStat[io.kind](io, this); }
-  length(io) { return fileLength[io.kind](io, this); }
+  close(io) {
+    return fileClose[io.kind](io, this);
+  }
+  stat(io) {
+    return fileStat[io.kind](io, this);
+  }
+  length(io) {
+    return fileLength[io.kind](io, this);
+  }
   /// Zig `File.readStreaming` into one buffer: returns the byte count, 0 at end.
-  readStreaming(io, buffer) { return fileRead[io.kind](io, this, buffer); }
-  readPositional(io, buffer, offset) { return filePread[io.kind](io, this, buffer, offset); }
+  readStreaming(io, buffer) {
+    return fileRead[io.kind](io, this, buffer);
+  }
+  readPositional(io, buffer, offset) {
+    return filePread[io.kind](io, this, buffer, offset);
+  }
   /// Zig `File.readPositionalAll`: fills `buffer` from `offset` until full or end; returns the count.
-  readPositionalAll(io, buffer, offset) { return fileReadPositionalAll[io.kind](io, this, buffer, offset); }
+  readPositionalAll(io, buffer, offset) {
+    return fileReadPositionalAll[io.kind](io, this, buffer, offset);
+  }
+  /// Async only (the sync arm throws Unsupported). BYOB read into `view` (an ArrayBuffer or any view)
+  /// from the current position, or from `offset` when given. Zero-copy: the guest's buffer is
+  /// detached (when eligible: not shared, not resizable) and the result is the only live handle on
+  /// that memory. Resolves a frozen `{ bytes, buffer }`, `buffer` being a view of the same kind,
+  /// byteOffset and length as `view` over the filled memory; read it from there and not from `view`.
+  readInto(io, view, offset) {
+    return offset === undefined ? fileReadInto[io.kind](io, this, view) : filePreadInto[io.kind](io, this, view, offset);
+  }
+  /// Async only (the sync arm throws Unsupported). Reads at most `len` bytes (from the current
+  /// position, or from `offset`) into host-allocated memory and resolves a Uint8Array of exactly the
+  /// bytes read: shorter than `len` near the end, empty at the end.
+  readAlloc(io, len, offset) {
+    return offset === undefined ? fileReadAlloc[io.kind](io, this, len) : filePreadAlloc[io.kind](io, this, len, offset);
+  }
   /// Everything from the current position, at most `limit` bytes (`Limit` semantics).
-  readAll(io, limit = Limit.unlimited) { return fileReadAll[io.kind](io, this, limit === Infinity ? UNLIMITED : { limit }); }
-  /// Zig `File.writeStreaming` of one slice: returns the byte count (may be partial).
-  writeStreaming(io, bytes) { return fileWrite[io.kind](io, this, bytes); }
-  writeStreamingAll(io, bytes) { return fileWriteAll[io.kind](io, this, bytes); }
-  writePositionalAll(io, bytes, offset) { return filePwriteAll[io.kind](io, this, bytes, offset); }
-  setLength(io, length) { return fileSetLength[io.kind](io, this, length); }
-  sync(io) { return fileSync[io.kind](io, this); }
+  readAll(io, limit = Limit.unlimited) {
+    return fileReadAll[io.kind](io, this, limit === Infinity ? UNLIMITED : { limit });
+  }
+  /// Zig `File.writeStreaming` of one slice: returns the byte count (may be partial). On an async
+  /// io the guest's ArrayBuffer is detached when eligible (see `readInto`), so pass a copy
+  /// (`bytes.slice()`) to keep using `bytes`, and rewrite a partial remainder from a fresh buffer.
+  writeStreaming(io, bytes) {
+    return fileWrite[io.kind](io, this, bytes);
+  }
+  /// Async io: detaches `bytes`' ArrayBuffer when eligible (also `writePositionalAll`).
+  writeStreamingAll(io, bytes) {
+    return fileWriteAll[io.kind](io, this, bytes);
+  }
+  writePositionalAll(io, bytes, offset) {
+    return filePwriteAll[io.kind](io, this, bytes, offset);
+  }
+  setLength(io, length) {
+    return fileSetLength[io.kind](io, this, length);
+  }
+  sync(io) {
+    return fileSync[io.kind](io, this);
+  }
 }
 freeze(DirImpl.prototype);
 freeze(FileImpl.prototype);
@@ -225,10 +328,35 @@ export const File = freeze({
 /// `ops.openFile[io.kind](io, dir, path, flags)` directly. `flags` is the raw
 /// glue open mode string (`'r' | 'rw' | 'r+' | 'w' | 'w+' | 'x' | 'x+' | 'c' | 't'`).
 export const ops = freeze({
-  openFile: dirOpenFile, openDir: dirOpenDir, closeDir: dirClose, stat: dirStat, access: dirAccess,
-  createDir: dirCreateDir, createDirPath: dirCreateDirPath, createDirPathOpen: dirCreateDirPathOpen,
-  deleteFile: dirDeleteFile, deleteDir: dirDeleteDir, deleteTree: dirDeleteTree, rename: dirRename,
-  readDir: dirRead, readFile: dirReadFile, writeFile: dirWriteFile,
-  fileClose, fileStat, fileLength, fileRead, filePread, fileReadAll, fileWrite, fileWriteAll,
-  filePwriteAll, fileSetLength, fileSync, fileReadPositionalAll,
+  openFile: dirOpenFile,
+  openDir: dirOpenDir,
+  closeDir: dirClose,
+  stat: dirStat,
+  access: dirAccess,
+  createDir: dirCreateDir,
+  createDirPath: dirCreateDirPath,
+  createDirPathOpen: dirCreateDirPathOpen,
+  deleteFile: dirDeleteFile,
+  deleteDir: dirDeleteDir,
+  deleteTree: dirDeleteTree,
+  rename: dirRename,
+  readDir: dirRead,
+  readFile: dirReadFile,
+  writeFile: dirWriteFile,
+  fileClose,
+  fileStat,
+  fileLength,
+  fileRead,
+  filePread,
+  fileReadAll,
+  fileReadInto,
+  filePreadInto,
+  fileReadAlloc,
+  filePreadAlloc,
+  fileWrite,
+  fileWriteAll,
+  filePwriteAll,
+  fileSetLength,
+  fileSync,
+  fileReadPositionalAll,
 });

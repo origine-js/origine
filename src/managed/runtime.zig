@@ -3,6 +3,7 @@ const v8 = @import("@v8");
 const modules = @import("module_map.zig");
 const module_types = @import("module_types.zig");
 const Scope = @import("scope.zig").Scope;
+const init_snapshot = @import("init_snapshot.zig");
 /// Smaller than any real V8 startup snapshot header; guards V8's fatal size CHECK.
 const min_snapshot_bytes = 512;
 pub const supported_v8_version = "15.2.124.1";
@@ -35,6 +36,10 @@ pub const Runtime = struct {
         /// life). Contexts then restore finalized instead of re-freezing the
         /// intrinsics. Null uses V8's built-in unfrozen seed.
         snapshot: ?[]align(16) const u8 = null,
+        /// Native callbacks that live in `snapshot`'s heap, as `init_snapshot.referenceTable`
+        /// builds them; must be the table the snapshot was created with. Borrowed until
+        /// `destroy` returns. Null: managed's own (the default, fine for engine snapshots).
+        external_references: ?*const isize = null,
         array_buffer_allocator: union(enum) {
             default,
             zig: std.mem.Allocator,
@@ -77,6 +82,8 @@ pub const Runtime = struct {
     next_load_token: module_types.LoadToken = 1,
     /// Snapshot descriptor the isolate points at; must keep a stable address.
     startup: v8.StartupData = .{ .data = null, .raw_size = 0 },
+    /// False for the isolate of a `v8.SnapshotCreator`, which disposes it itself.
+    owns_isolate: bool = true,
 
     /// Borrows alloc (and its state) until `destroy` returns; options are copied.
     /// Returns a heap-allocated, owning Runtime at a stable address; release it with
@@ -98,6 +105,7 @@ pub const Runtime = struct {
         var params = v8.Isolate.CreateParams.init();
         params.array_buffer_allocator = aba;
         params.allow_explicit_blocking_api = options.allow_explicit_blocking_api;
+        params.external_references = options.external_references orelse init_snapshot.externalReferences();
         // The isolate keeps the descriptor pointer for its whole life (it is read on
         // every context creation), so it lives in the Runtime, not on this stack.
         var startup: v8.StartupData = .{ .data = null, .raw_size = 0 };
@@ -112,19 +120,47 @@ pub const Runtime = struct {
         const isolate = v8.Isolate.init(&params);
         isolate.enter();
         defer isolate.exit();
-        isolate.setMicrotasksPolicy(.Explicit);
-        isolate.setHostImportModuleDynamicallyCallback(modules.dynamic);
-        isolate.setHostImportModuleWithPhaseDynamicallyCallback(modules.dynamicPhase);
-        isolate.setHostInitializeImportMetaObjectCallback(modules.importMeta);
         rt.* = .{
             .isolate = isolate,
             .array_buffer_allocator = aba,
             .owns_array_buffer_allocator = options.array_buffer_allocator != .borrowed,
             .allocator = alloc,
-            .queue = .init(isolate, .Explicit),
+            .queue = undefined,
             .startup = startup,
         };
+        rt.configure();
         return rt;
+    }
+
+    /// A Runtime on the isolate of a `v8.SnapshotCreator`, for `init_snapshot.create`.
+    /// Borrows alloc, the isolate and the array-buffer allocator; the creator keeps
+    /// owning the isolate, so `destroy` leaves it alone and must run before the creator
+    /// is destroyed or its blob is created. Errors retain nothing.
+    pub fn createInCreator(alloc: std.mem.Allocator, isolate: v8.Isolate, aba: v8.ArrayBuffer.Allocator) !*Runtime {
+        try checkV8Version();
+        const rt = try alloc.create(Runtime);
+        rt.* = .{
+            .isolate = isolate,
+            .array_buffer_allocator = aba,
+            .owns_array_buffer_allocator = false,
+            .allocator = alloc,
+            .queue = undefined,
+            .owns_isolate = false,
+        };
+        isolate.enter();
+        defer isolate.exit();
+        rt.configure();
+        return rt;
+    }
+
+    /// Installs the module callbacks and the microtask queue; the isolate must be entered.
+    fn configure(self: *Runtime) void {
+        const isolate = self.isolate;
+        isolate.setMicrotasksPolicy(.Explicit);
+        isolate.setHostImportModuleDynamicallyCallback(modules.dynamic);
+        isolate.setHostImportModuleWithPhaseDynamicallyCallback(modules.dynamicPhase);
+        isolate.setHostInitializeImportMetaObjectCallback(modules.importMeta);
+        self.queue = .init(isolate, .Explicit);
     }
 
     /// Consumes and frees the Runtime and every Scope it owns; self is invalid after.
@@ -143,7 +179,7 @@ pub const Runtime = struct {
             self.scopes.deinit(alloc);
             self.queue.deinit();
         }
-        self.isolate.deinit();
+        if (self.owns_isolate) self.isolate.deinit();
         if (self.owns_array_buffer_allocator) self.array_buffer_allocator.deinit();
         alloc.destroy(self);
     }

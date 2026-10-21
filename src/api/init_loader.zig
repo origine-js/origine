@@ -72,13 +72,15 @@ pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!modul
 /// falls back to its JS implementation. Borrows `request` for the call.
 pub fn meta(data: ?*anyopaque, request: module_types.MetaRequest) void {
     const host: *Host = @ptrCast(@alignCast(data.?));
-    for (host.modules) |module| {
+    for (host.modules, 0..) |module, index| {
         const bindings = module.bindings orelse continue;
         if (!std.mem.eql(u8, request.module_id, module.id)) continue;
         const state: *ScopeState = for (host.states.items) |candidate| {
             if (candidate.scope.id == request.scope_id) break candidate;
         } else return;
-        const env: binding.Env = .{ .isolate = state.scope.runtime.isolate, .ctx = request.context };
+        // For a snapshot the natives carry a marker and find their state again after restore.
+        if (state.snapshotting and index >= binding.max_rebind) return;
+        const env: binding.Env = .{ .isolate = state.scope.runtime.isolate, .ctx = request.context, .rebind = if (state.snapshotting) index else null };
         const owned = state.moduleState(module) catch return;
         const natives = bindings.build(env, state, owned) catch return;
         state.scope.hardenLocal(natives.value) catch return;

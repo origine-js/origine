@@ -16,7 +16,7 @@ pub fn install(isolate: v8.Isolate, ctx: v8.Context) !void {
 /// Borrows callback handles through return, allocates conversion buffers from the
 /// process page allocator, and releases them before returning. A failed conversion
 /// propagates its JavaScript exception; allocation failures discard the call.
-fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
+pub fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
     const alloc = std.heap.page_allocator;

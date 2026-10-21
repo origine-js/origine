@@ -77,13 +77,10 @@ pub fn main(init: std.process.Init) !void {
     // are limited to builds without it.
     const buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator") =
         if (v8.V8.isSandboxEnabled()) .default else .{ .zig = alloc };
+    if (args.len > 1) return runInit(alloc, init, engine, args, &trace, buffer_allocator, snapshot);
     const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = buffer_allocator, .snapshot = snapshot });
     trace.mark("runtime_isolate");
     defer rt.destroy();
-    if (args.len > 1) {
-        trace.report();
-        return runInit(alloc, init, rt, engine, args);
-    }
     const scope = try rt.createScope(.{});
     trace.mark("scope_create");
     trace.report();
@@ -115,8 +112,18 @@ pub fn main(init: std.process.Init) !void {
 /// Runs `args[1]` as the init module: evaluates it, then calls its exported
 /// `main(api)` with every permission granted (the CLI grants the working directory
 /// read/write with sync and async access (async runtimes through `api.io`), all arguments after the init path, and the whole
-/// environment). Borrows everything through return.
-fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, engine: Engine, args: []const [:0]const u8) !void {
+/// environment). The evaluated init graph is cached as a snapshot in `__oricache__` next to
+/// the init file: the first run creates it, later runs restore it instead of evaluating the
+/// init again. Borrows everything through return.
+fn runInit(
+    alloc: std.mem.Allocator,
+    init: std.process.Init,
+    engine: Engine,
+    args: []const [:0]const u8,
+    trace: *StartupTrace,
+    buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator"),
+    engine_snapshot: ?[]align(16) const u8,
+) !void {
     const user_args = try alloc.alloc([]const u8, args.len - 1);
     defer alloc.free(user_args);
     for (args[1..], user_args) |arg, *out| out.* = arg;
@@ -128,8 +135,34 @@ fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, eng
     var cwd = try std.Io.Dir.cwd().openDir(io_runtime.io(), ".", .{ .iterate = true });
     defer cwd.close(io_runtime.io());
     const host = try m.Api.Host.create(alloc, .{ .io = io_runtime.io(), .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{} });
-    defer host.destroy();
-    const scope = try rt.createScope(host.initOptions());
+    // The host releases V8 handles, so it goes before the runtime; the snapshot image backs
+    // the runtime's heap, so it goes after.
+    var image: ?m.init_snapshot.Image = null;
+    var rt: ?*m.Runtime = null;
+    const caching = init.environ_map.get("ORIGINE_NO_SNAPSHOT") == null;
+    var code_cache = m.Api.init_cache.CodeCacheState.init(io_runtime.io(), host, std.Io.Dir.cwd());
+    defer {
+        host.destroy();
+        if (rt) |runtime| runtime.destroy();
+        if (image) |*cached| cached.deinit();
+    }
+    // The callbacks that may live in a snapshot's heap: the same table must be given to the
+    // isolate that makes it and to the one that restores it.
+    const references = try host.externalReferences(alloc);
+    defer alloc.free(references);
+    if (caching) image = initSnapshot(alloc, init.environ_map, host, references, args[1], engine_snapshot);
+    trace.mark("init_snapshot");
+    rt = try m.Runtime.create(alloc, .{
+        .array_buffer_allocator = buffer_allocator,
+        .snapshot = if (image) |*cached| cached.blob else engine_snapshot,
+        .external_references = m.init_snapshot.referenceTable(references),
+    });
+    trace.mark("runtime_isolate");
+    trace.report();
+    var options = host.initOptions();
+    if (image) |*cached| options.init_snapshot = &cached.table;
+    if (caching) options.code_cache = code_cache.hook();
+    const scope = try rt.?.createScope(options);
     var error_info: m.ErrorInfo = .{};
     defer error_info.deinit();
     host.run(scope, engine.platform, args[1], &error_info) catch |err| {
@@ -137,6 +170,55 @@ fn runInit(alloc: std.mem.Allocator, init: std.process.Init, rt: *m.Runtime, eng
         if (error_info.exception) |value| show(scope, value);
         return err;
     };
+    // Modules that compiled without a V8 code cache (not in the snapshot) get one now that
+    // their code has run, so lazily compiled functions are in it.
+    if (caching) _ = scope.flushCodeCache();
+}
+
+/// The cached snapshot of the init graph at `specifier`, created and stored on a miss. Null
+/// means "run without": no cache directory, an init that cannot be snapshotted (it throws,
+/// waits on I/O or imports a host module) or any other failure; the normal path then reports
+/// whatever is wrong with the init. With ORIGINE_SNAPSHOT_LOG set, says why on stderr.
+/// Borrows everything through return.
+fn initSnapshot(
+    alloc: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+    host: *m.Api.Host,
+    references: []const ?*const anyopaque,
+    specifier: []const u8,
+    engine_snapshot: ?[]align(16) const u8,
+) ?m.init_snapshot.Image {
+    const verbose = environ.get("ORIGINE_SNAPSHOT_LOG") != null;
+    const io = io_runtime.io();
+    var entry = m.Api.init_cache.entryFor(alloc, io, host, specifier) catch return null;
+    defer entry.deinit();
+    var miss: m.Api.init_cache.Miss = undefined;
+    if (m.Api.init_cache.load(alloc, io, std.Io.Dir.cwd(), &entry, m.Api.init_cache.sourceHasher(host), &miss)) |hit| {
+        if (verbose) std.debug.print("init snapshot: reused {s}\n", .{entry.path});
+        return hit;
+    }
+    if (verbose) std.debug.print("init snapshot: cache miss ({s})\n", .{@tagName(miss)});
+    var label: [128]u8 = undefined;
+    const options = host.initOptions();
+    const created = m.init_snapshot.create(alloc, .{
+        .key = entry.key,
+        .identity = m.Api.init_cache.identity(&label),
+        .scope = options,
+        .specifier = specifier,
+        .source_hasher = m.Api.init_cache.sourceHasher(host),
+        .hooks = host.snapshotHooks(),
+        .external_references = m.init_snapshot.referenceTable(references),
+        .base_snapshot = engine_snapshot,
+    }) catch |err| {
+        if (verbose) std.debug.print("init snapshot: not created ({s})\n", .{@errorName(err)});
+        return null;
+    };
+    m.Api.init_cache.store(alloc, io, std.Io.Dir.cwd(), &entry, &created) catch |err| {
+        if (verbose) std.debug.print("init snapshot: not stored ({s})\n", .{@errorName(err)});
+        return created;
+    };
+    if (verbose) std.debug.print("init snapshot: created {s}\n", .{entry.path});
+    return created;
 }
 
 /// The frozen-intrinsics startup snapshot generated at build time (see build.zig and

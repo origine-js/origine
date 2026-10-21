@@ -25,6 +25,7 @@ const transformers = @import("transform/transformers.zig");
 const JsLoader = @import("js_loader.zig").JsLoader;
 const Runtime = @import("../managed/runtime.zig").Runtime;
 const Scope = @import("../managed/scope.zig").Scope;
+const init_snapshot = @import("../managed/init_snapshot.zig");
 const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
 
 const glue_script = @import("glue.zig");
@@ -114,6 +115,12 @@ pub const ScopeState = struct {
     /// Per-scope state of modules with `bindings`, created on first use; torn down by
     /// `Host.destroy` in reverse creation order.
     module_states: std.ArrayList(ModuleState) = .empty,
+    /// How natives built for a snapshot find this record again (embedder-data slot
+    /// `binding.rebinder_slot` of the scope's context points here).
+    rebinder: binding.Rebinder = undefined,
+    /// While the scope is being evaluated for a snapshot: module natives are built over
+    /// static markers, not over this record's address.
+    snapshotting: bool = false,
 
     // Binding State protocol (see binding.zig).
     pub fn errnoCell(self: *ScopeState) *u32 {
@@ -178,16 +185,7 @@ pub const Host = struct {
             alloc.destroy(grant);
         }
         self.grants.deinit(alloc);
-        for (self.states.items) |state| {
-            var remaining = state.module_states.items.len;
-            while (remaining > 0) : (remaining -= 1) {
-                const owned = state.module_states.items[remaining - 1];
-                owned.bindings.destroy(state, owned.ptr);
-            }
-            state.module_states.deinit(alloc);
-            if (state.errno_buffer) |buffer| buffer.deinit();
-            alloc.destroy(state);
-        }
+        for (self.states.items) |state| self.releaseState(state);
         self.states.deinit(alloc);
         for (self.children.items) |child| alloc.free(child.main);
         self.children.deinit(alloc);
@@ -272,15 +270,103 @@ pub const Host = struct {
         };
     }
 
-    /// Builds the frozen `api` object in `scope`'s realm. Returns a caller-owned
-    /// persistent handle (release before Runtime.destroy). Error details follow
-    /// ErrorInfo ownership.
-    pub fn install(self: *Host, scope: *Scope, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
+    /// Creates `scope`'s native-state record and makes it reachable from the scope's context
+    /// (module natives built for a snapshot resolve their state through it). Owned by the
+    /// Host until `detach` or `destroy`. Borrows scope, which must outlive the record.
+    pub fn attach(self: *Host, scope: *Scope) !*ScopeState {
         const state = try self.allocator.create(ScopeState);
         errdefer self.allocator.destroy(state);
         state.* = .{ .host = self, .scope = scope };
         state.errno_cell = &state.errno_local;
+        state.rebinder = .{ .owner = state, .resolve = resolveModuleState };
         try self.states.append(self.allocator, state);
+        var session: Scope.Session = undefined;
+        session.init(scope);
+        defer session.deinit();
+        session.ctx.setAlignedPointerInEmbedderData(binding.rebinder_slot, &state.rebinder);
+        return state;
+    }
+
+    /// Releases `scope`'s record: tears down its module states, clears the context slot (it is
+    /// process memory, which a snapshot must not capture) and frees it. No-op for a scope that
+    /// was never attached. Call with the scope's isolate alive, before `Runtime.destroy`.
+    pub fn detach(self: *Host, scope: *Scope) void {
+        for (self.states.items, 0..) |state, index| {
+            if (state.scope != scope) continue;
+            var session: Scope.Session = undefined;
+            session.init(scope);
+            defer session.deinit();
+            session.ctx.setAlignedPointerInEmbedderData(binding.rebinder_slot, null);
+            self.releaseState(state);
+            _ = self.states.swapRemove(index);
+            return;
+        }
+    }
+
+    /// Tears down one record: module states in reverse creation order, then its handles.
+    fn releaseState(self: *Host, state: *ScopeState) void {
+        const alloc = self.allocator;
+        var remaining = state.module_states.items.len;
+        while (remaining > 0) : (remaining -= 1) {
+            const owned = state.module_states.items[remaining - 1];
+            owned.bindings.destroy(state, owned.ptr);
+        }
+        state.module_states.deinit(alloc);
+        if (state.errno_buffer) |buffer| buffer.deinit();
+        alloc.destroy(state);
+    }
+
+    /// `Rebinder.resolve` for `ScopeState`: the state object module `index`'s natives take.
+    fn resolveModuleState(owner: *anyopaque, index: usize) ?*anyopaque {
+        const state: *ScopeState = @ptrCast(@alignCast(owner));
+        if (index >= state.host.modules.len or state.host.modules[index].bindings == null) return null;
+        return state.moduleState(state.host.modules[index]) catch null;
+    }
+
+    /// The external-reference table a startup snapshot with this host's module natives needs, at
+    /// creation and again when restoring: managed's own references, the rebind markers, then the
+    /// callbacks of every module with bindings. Null-terminated, for
+    /// `CreateParams.external_references`. Caller owns the slice (free with `alloc`) and must keep
+    /// it alive as long as any isolate made with it.
+    pub fn externalReferences(self: *const Host, alloc: std.mem.Allocator) ![]?*const anyopaque {
+        var list: std.ArrayList(?*const anyopaque) = .empty;
+        errdefer list.deinit(alloc);
+        try list.appendSlice(alloc, &init_snapshot.base_references);
+        const markers = binding.rebindMarkers();
+        for (markers) |marker| try list.append(alloc, marker);
+        for (self.modules) |module| {
+            const bindings = module.bindings orelse continue;
+            for (bindings.callbacks) |callback| {
+                const address: *const anyopaque = @ptrCast(callback);
+                if (std.mem.indexOfScalar(?*const anyopaque, list.items, address) == null) try list.append(alloc, address);
+            }
+        }
+        try list.append(alloc, null);
+        return list.toOwnedSlice(alloc);
+    }
+
+    /// `init_snapshot.CreateOptions.hooks` for this host: the evaluation scope gets a record
+    /// (module natives work while the init runs, built over markers) and loses it again before
+    /// the heap is serialized. Borrows self.
+    pub fn snapshotHooks(self: *Host) init_snapshot.Hooks {
+        return .{ .data = self, .attach = snapshotAttach, .detach = snapshotDetach };
+    }
+
+    fn snapshotAttach(data: ?*anyopaque, scope: *Scope) anyerror!void {
+        const self: *Host = @ptrCast(@alignCast(data.?));
+        (try self.attach(scope)).snapshotting = true;
+    }
+
+    fn snapshotDetach(data: ?*anyopaque, scope: *Scope) void {
+        const self: *Host = @ptrCast(@alignCast(data.?));
+        self.detach(scope);
+    }
+
+    /// Builds the frozen `api` object in `scope`'s realm. Returns a caller-owned
+    /// persistent handle (release before Runtime.destroy). Error details follow
+    /// ErrorInfo ownership.
+    pub fn install(self: *Host, scope: *Scope, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
+        const state = try self.attach(scope);
         var session: Scope.Session = undefined;
         session.init(scope);
         defer session.deinit();

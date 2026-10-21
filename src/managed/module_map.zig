@@ -17,7 +17,9 @@ const LoadRequest = @import("module_types.zig").LoadRequest;
 const LoadResult = @import("module_types.zig").LoadResult;
 const Completion = @import("module_types.zig").Completion;
 const Loader = @import("module_types.zig").Loader;
+const CodeCacheRequest = @import("module_types.zig").CodeCacheRequest;
 const origine_prefix = @import("module_types.zig").origine_prefix;
+const init_snapshot = @import("init_snapshot.zig");
 
 const Dependency = struct { specifier: []const u8, attributes: []const ImportAttribute, entry: *Entry };
 const Entry = struct {
@@ -33,6 +35,9 @@ const Entry = struct {
     preparing: bool = true,
     visited: bool = false,
     pending: ?LoadToken = null,
+    /// Source copy kept until `flushCodeCache` for a module compiled without a usable code
+    /// cache. Null once flushed, for modules that consumed a cache, and without a hook.
+    cache_source: ?[]const u8 = null,
 };
 const Task = struct {
     root: *Entry,
@@ -286,9 +291,15 @@ pub const ModuleMap = struct {
             .source => |text| {
                 var source: v8.ScriptCompiler.Source = undefined;
                 var origin = self.scope.scriptOrigin(entry.id, true);
-                source.init(v8.String.initUtf8(iso, text), &origin, null);
+                const cache_request: CodeCacheRequest = .{ .allocator = self.arenaAllocator(), .module_id = entry.id, .source = text };
+                const cached = if (self.scope.options.code_cache) |hook| hook.load(hook.data, cache_request) else null;
+                // The Source owns the cache object it is given, so it is not released here.
+                const cache_object = if (cached) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
+                source.init(v8.String.initUtf8(iso, text), &origin, cache_object);
                 defer source.deinit();
-                const module = v8.ScriptCompiler.compileModule(iso, &source, 0, 0) orelse return error.JavaScriptException;
+                const module = v8.ScriptCompiler.compileModule(iso, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
+                const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
+                if (self.scope.options.code_cache != null and !accepted) entry.cache_source = try self.arenaAllocator().dupe(u8, text);
                 entry.module = .new(iso, module);
                 const requests = module.getModuleRequests().?;
                 try entry.dependencies.ensureTotalCapacity(self.scope.runtime.allocator, @intCast(requests.len()));
@@ -323,6 +334,98 @@ pub const ModuleMap = struct {
             },
         }
         entry.preparing = false;
+    }
+
+    /// Hands the code cache of every module that compiled without a usable one to the scope's
+    /// `code_cache.store`, then forgets it, so each is stored once. Call after the code ran
+    /// (lazily compiled functions are only in the cache by then). Requires the entered
+    /// context and a live HandleScope; borrows the hook. Returns how many modules it stored.
+    pub fn flushCodeCache(self: *ModuleMap) usize {
+        const hook = self.scope.options.code_cache orelse return 0;
+        var stored: usize = 0;
+        for (self.all_entries.items) |entry| {
+            const source = entry.cache_source orelse continue;
+            entry.cache_source = null;
+            const module = (entry.module orelse continue).deref();
+            const unbound = module.getUnboundModuleScript() orelse continue;
+            const cache = unbound.createCodeCache() orelse continue;
+            defer cache.deinit();
+            const bytes = v8.ScriptCompiler.CachedData.bytes(cache.handle);
+            if (bytes.len == 0) continue;
+            hook.store(hook.data, .{ .allocator = self.arenaAllocator(), .module_id = entry.id, .source = source }, bytes);
+            stored += 1;
+        }
+        return stored;
+    }
+
+    /// Registers every active module with `creator` as data of the current context and
+    /// describes the graph. The map must be idle and hold only settled source modules:
+    /// failures, pending loads, synthetic modules and unfinished imports fail with
+    /// error.NotSnapshottable. Requires the entered context and a live HandleScope. Result
+    /// slices and strings are copied into `alloc`, which the caller owns; source hashes are
+    /// left for the host to fill in.
+    pub fn snapshotModules(self: *ModuleMap, alloc: std.mem.Allocator, creator: *v8.SnapshotCreator) ![]init_snapshot.Module {
+        if (self.tasks.items.len != 0 or self.driving or self.preparing_depth != 0) return error.NotSnapshottable;
+        var active: std.ArrayList(*Entry) = .empty;
+        defer active.deinit(alloc);
+        for (self.all_entries.items) |entry| {
+            if (!entry.cached) continue;
+            const module = entry.module orelse return error.NotSnapshottable;
+            if (entry.failure != null or entry.pending != null or entry.preparing or entry.exports.len != 0) return error.NotSnapshottable;
+            if (!module.deref().isSourceTextModule()) return error.NotSnapshottable;
+            try active.append(alloc, entry);
+        }
+        const modules = try alloc.alloc(init_snapshot.Module, active.items.len);
+        for (active.items, modules) |entry, *out| {
+            const attributes = try alloc.alloc(ImportAttribute, entry.attributes.len);
+            for (entry.attributes, attributes) |attribute, *copy| copy.* = .{ .key = try alloc.dupe(u8, attribute.key), .value = try alloc.dupe(u8, attribute.value) };
+            const dependencies = try alloc.alloc(init_snapshot.Dependency, entry.dependencies.items.len);
+            for (entry.dependencies.items, dependencies) |dependency, *copy| {
+                const target = for (active.items, 0..) |candidate, index| {
+                    if (candidate == dependency.entry) break index;
+                } else return error.NotSnapshottable;
+                copy.* = .{ .specifier = try alloc.dupe(u8, dependency.specifier), .module = @intCast(target) };
+            }
+            out.* = .{
+                .id = try alloc.dupe(u8, entry.id),
+                .attributes = attributes,
+                .data_index = creator.addDataToContext(self.ctx(), entry.module.?.deref().data),
+                .dependencies = dependencies,
+            };
+        }
+        return modules;
+    }
+
+    /// Rebuilds the map of a context restored from a snapshot: one settled entry per
+    /// described module, backed by the snapshotted `v8.Module`. Imports of those modules
+    /// then resolve from the map and evaluate nothing. Call once, on an empty map, with
+    /// the restored context entered and a HandleScope live. Borrows `modules` through
+    /// return; everything kept is copied. On error the map is partially filled and must
+    /// be discarded with its scope.
+    pub fn restoreModules(self: *ModuleMap, modules: []const init_snapshot.Module) !void {
+        if (self.all_entries.items.len != 0) return error.ImportCacheBusy;
+        const alloc = self.scope.runtime.allocator;
+        var scratch = std.heap.ArenaAllocator.init(alloc);
+        defer scratch.deinit();
+        const entries = try scratch.allocator().alloc(*Entry, modules.len);
+        for (modules, entries) |module, *entry| {
+            const key = try cacheKey(scratch.allocator(), module.id, module.attributes);
+            entry.* = try self.allocEntry(module.id, module.attributes, key);
+            self.entries.putAssumeCapacity(entry.*.cache_key, entry.*);
+            const data = self.ctx().getDataFromSnapshotOnce(module.data_index) orelse return error.InvalidSnapshot;
+            const restored = v8.Module.from_opaque(data.handle) orelse return error.InvalidSnapshot;
+            if (!restored.isSourceTextModule()) return error.InvalidSnapshot;
+            entry.*.module = .new(self.isolate(), restored);
+            entry.*.preparing = false;
+        }
+        for (modules, entries) |module, entry| {
+            try entry.dependencies.ensureTotalCapacity(alloc, module.dependencies.len);
+            for (module.dependencies) |dependency| {
+                if (dependency.module >= entries.len) return error.InvalidSnapshot;
+                const target = entries[dependency.module];
+                entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, dependency.specifier), .attributes = target.attributes, .entry = target });
+            }
+        }
     }
 
     /// Borrows self/module through lookup; returns a map-owned entry valid until

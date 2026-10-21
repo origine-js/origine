@@ -3,3 +3,4 @@
 /zig-out/
 /.lp-cache/
 .DS_Store
+__oricache__/

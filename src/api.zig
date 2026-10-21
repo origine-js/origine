@@ -26,3 +26,4 @@ pub const module = @import("api/module.zig");
 pub const transformer = @import("api/transform/transformer.zig");
 pub const oxc = @import("api/transform/oxc.zig");
 pub const transformers = @import("api/transform/transformers.zig");
+pub const init_cache = @import("api/init_cache.zig");

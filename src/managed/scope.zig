@@ -7,6 +7,7 @@ const import_map = @import("import_map.zig");
 const print_binding = @import("print.zig");
 const ErrorInfo = @import("errors.zig").ErrorInfo;
 const captureException = @import("errors.zig").captureException;
+const init_snapshot = @import("init_snapshot.zig");
 const startup_trace = @import("@diagnostics").scope;
 
 /// One isolated JS context (global object, module map, capabilities) in a Runtime.
@@ -28,7 +29,12 @@ pub const Scope = struct {
         const isolate = rt.isolate;
         const scope = try rt.allocator.create(Scope);
         errdefer rt.allocator.destroy(scope);
-        const ctx = v8.Context.init(isolate, null, null, rt.queue);
+        // A restored init context comes from the runtime's own snapshot blob, which must be the
+        // one the table was created for; `Context.fromSnapshot` cannot check that.
+        const ctx = if (options.init_snapshot) |table|
+            v8.Context.fromSnapshot(isolate, table.context_index, null, rt.queue) orelse return error.InvalidSnapshot
+        else
+            v8.Context.init(isolate, null, null, rt.queue);
         startup_trace.mark(&timing, "context_create");
         scope.* = .{ .runtime = rt, .id = rt.scopes.items.len, .context = .new(isolate, ctx), .options = options };
         errdefer scope.context.deinit();
@@ -57,8 +63,12 @@ pub const Scope = struct {
         tc_scope.init(isolate);
         defer tc_scope.deinit();
         startup_trace.mark(&timing, "scope_host_setup");
-        try print_binding.install(isolate, ctx);
-        const helpers = try scope.bootstrap(ctx, &timing);
+        // A restored context already has `print` and the bootstrap helpers; only the helpers'
+        // handles and the module map are per-scope Zig state.
+        const helpers = if (options.init_snapshot) |table| try scope.restore(ctx, table) else blk: {
+            try print_binding.install(isolate, ctx);
+            break :blk try scope.bootstrap(ctx, &timing);
+        };
         scope.hardener = helpers.hardener;
         errdefer scope.hardener.deinit();
         scope.unsupported_prototype = helpers.unsupported_prototype;
@@ -85,6 +95,19 @@ pub const Scope = struct {
         session.init(self);
         defer session.deinit();
         session.ctx.setStackTraceLimit(limit);
+    }
+
+    /// Picks the bootstrap helpers and the module graph out of a restored context. Requires
+    /// ctx entered and a live HandleScope. On error nothing is retained (the module map is
+    /// discarded with the scope). Borrows table through return.
+    fn restore(self: *Scope, ctx: v8.Context, table: *const init_snapshot.Table) !Helpers {
+        const isolate = self.runtime.isolate;
+        const hardener = ctx.getDataFromSnapshotOnce(table.hardener_index) orelse return error.InvalidSnapshot;
+        const unsupported = ctx.getDataFromSnapshotOnce(table.unsupported_index) orelse return error.InvalidSnapshot;
+        const hardener_fn = v8.Function.from_opaque(hardener.handle) orelse return error.InvalidSnapshot;
+        const unsupported_fn = v8.Function.from_opaque(unsupported.handle) orelse return error.InvalidSnapshot;
+        try self.module_map.restoreModules(table.modules);
+        return .{ .hardener = .new(isolate, hardener_fn), .unsupported_prototype = .new(isolate, unsupported_fn) };
     }
 
     const Helpers = struct {
@@ -141,6 +164,17 @@ pub const Scope = struct {
         /// Caller may reuse/deinit it afterward. URLNormalizer.data remains host-owned
         /// and must stay alive through Runtime.destroy. Do not mutate a scope's copy.
         import_map: ?*const import_map.ImportMap = null,
+        /// Restores the init scope of an `init_snapshot` instead of creating a fresh context.
+        /// The Runtime must have been created from that snapshot's blob. Borrowed through
+        /// createScope; module IDs, attributes and strings are copied.
+        init_snapshot: ?*const init_snapshot.Table = null,
+        /// Optional persistence of V8 code caches for this scope's source modules; see
+        /// `module_types.CodeCache` and `flushCodeCache`. Callback data is host-owned and must
+        /// stay alive until Runtime.destroy returns. V8 only accepts a cache in an isolate
+        /// booted from the same startup blob as the one that produced it, so a host that
+        /// changes blobs (a rebuilt init snapshot) sees one round of rejected caches, which
+        /// are then replaced.
+        code_cache: ?module_types.CodeCache = null,
     };
 
     /// RAII guard that makes a Scope's context current: enters the isolate, opens a
@@ -243,6 +277,17 @@ pub const Scope = struct {
         const options = v8.PrimitiveArray.init(iso, 1);
         options.set(iso, 0, v8.Number.initUInt(iso, @intCast(self.id)).numeric.primitive);
         return .init(v8.String.initUtf8(iso, origin).name.primitive.value, 0, 0, false, -1, null, false, false, module, options.data);
+    }
+
+    /// Stores the V8 code cache of every module that compiled without one through
+    /// `Options.code_cache.store`. Call once the scope's code has run, so lazily compiled
+    /// functions are included. Enters the context itself; returns the number stored and
+    /// retains nothing.
+    pub fn flushCodeCache(self: *Scope) usize {
+        var session: Session = undefined;
+        session.init(self);
+        defer session.deinit();
+        return self.module_map.flushCodeCache();
     }
 
     /// Borrows specifier through return, even for pending loads; retained IDs are

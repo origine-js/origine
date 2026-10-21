@@ -38,6 +38,8 @@ pub const Bindings = struct {
     /// Builds the natives object in the entered context. Needs a live HandleScope; returns
     /// a local handle. `state` is `create`'s result for this scope.
     build: *const fn (env: binding.Env, scope: *ScopeState, state: *anyopaque) anyerror!v8.Object,
+    /// Every V8 callback `build` can create, for a snapshot's external-reference list. Static.
+    callbacks: []const v8.FunctionCallback = &.{},
 };
 
 /// A module's per-scope state `S` plus the scope it belongs to; the `State` natives of a
@@ -59,7 +61,9 @@ pub fn Cell(comptime S: type) type {
 /// Natives that need no state of their own: `table` is a `binding.object` table whose
 /// functions are wrapped with `binding.func` and take `*ScopeState` first.
 pub fn stateless(comptime table: anytype) Bindings {
+    const callbacks = comptime binding.callbacksOf(ScopeState, table);
     return .{
+        .callbacks = callbacks,
         .create = struct {
             fn create(scope: *ScopeState) anyerror!*anyopaque {
                 return scope;
@@ -79,7 +83,9 @@ pub fn stateless(comptime table: anytype) Bindings {
 /// Natives with per-scope state `S`: `table`'s functions (wrapped with `binding.func`) take `*Cell(S)` first.
 pub fn stateful(comptime S: type, comptime table: anytype) Bindings {
     const C = Cell(S);
+    const callbacks = comptime binding.callbacksOf(C, table);
     return .{
+        .callbacks = callbacks,
         .create = struct {
             fn create(scope: *ScopeState) anyerror!*anyopaque {
                 const alloc = scope.allocator();

@@ -12,6 +12,10 @@ const binding = @import("binding.zig");
 pub const Env = struct {
     isolate: v8.Isolate,
     ctx: v8.Context,
+    /// Set while building natives for a startup snapshot: the module index their state is
+    /// resolved by at call time (see `binding.Rebinder`). Natives then carry a static marker
+    /// instead of a state pointer, so the heap holds no process addresses.
+    rebind: ?usize = null,
 };
 
 /// Writes the `Errno` for `err` into `cell` (mapped as `Call.fail` documents). Borrows

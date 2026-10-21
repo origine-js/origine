@@ -25,3 +25,6 @@ pub const URLNormalizer = @import("managed/import_map.zig").URLNormalizer;
 pub const virtual_urls = @import("managed/import_map.zig").virtual_urls;
 pub const Api = @import("api.zig");
 pub const snapshot = @import("managed/snapshot.zig");
+pub const init_snapshot = @import("managed/init_snapshot.zig");
+pub const CodeCache = @import("managed/module_types.zig").CodeCache;
+pub const CodeCacheRequest = @import("managed/module_types.zig").CodeCacheRequest;

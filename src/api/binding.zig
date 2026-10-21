@@ -88,6 +88,49 @@ pub fn statePointer(comptime T: type, data: v8.Value) *T {
     return @ptrCast(@alignCast(v8.External.from_opaque(data.data.handle).?.pointer().?));
 }
 
+// ---- rebindable natives (startup snapshots) --------------------------------
+
+/// Modules whose natives can be built for a snapshot.
+pub const max_rebind = 16;
+/// Only the addresses matter: a native built for a snapshot carries `&rebind_markers[i]` as its
+/// External data (static, so snapshot-safe and registered as an external reference) in place of
+/// a state pointer.
+var rebind_markers: [max_rebind]u8 = @splat(0);
+
+/// The marker addresses, to register as external references (in this order).
+pub fn rebindMarkers() [max_rebind]*const anyopaque {
+    var out: [max_rebind]*const anyopaque = undefined;
+    for (&out, 0..) |*slot, index| slot.* = &rebind_markers[index];
+    return out;
+}
+
+/// Embedder-data slot of a context that holds its `Rebinder` (slot 1 is the managed Scope).
+pub const rebinder_slot = 2;
+
+/// How a native built for a snapshot finds its state after the snapshot is restored: the
+/// context it runs in points at the owner that knows, by module index. The owner must set the
+/// slot (and clear it before a snapshot is taken: it is process memory).
+pub const Rebinder = struct {
+    owner: *anyopaque,
+    /// The state object module `index`'s natives take as their first argument, or null.
+    resolve: *const fn (owner: *anyopaque, index: usize) ?*anyopaque,
+};
+
+/// The state a native callback was bound to, resolving a snapshot marker through the running
+/// context's `Rebinder`. Null when the marker cannot be resolved (no host attached yet).
+fn nativeState(comptime T: type, info: v8.FunctionCallbackInfo) ?*T {
+    const data = v8.Value.from_opaque(info.data().?.handle).?;
+    if (!data.isNumber()) {
+        const pointer = v8.External.from_opaque(data.data.handle).?.pointer().?;
+        const offset = @intFromPtr(pointer) -% @intFromPtr(&rebind_markers);
+        if (offset < max_rebind) {
+            const owner: *Rebinder = @ptrCast(@alignCast(info.isolate().getCurrentContext().getAlignedPointerFromEmbedderData(rebinder_slot) orelse return null));
+            return @ptrCast(@alignCast(owner.resolve(owner.owner, offset) orelse return null));
+        }
+    }
+    return statePointer(T, data);
+}
+
 /// The state pointer a native was bound to (stored as the function's data).
 pub fn externalPointer(comptime T: type, info: v8.FunctionCallbackInfo) *T {
     return statePointer(T, v8.Value.from_opaque(info.data().?.handle).?);
@@ -108,7 +151,10 @@ pub fn bytesValue(env: Env, data: []const u8) !v8.Value {
 pub fn native(comptime State: type, comptime callee: anytype) v8.FunctionCallback {
     return struct {
         fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
-            const state = externalPointer(State, info);
+            const state = nativeState(State, info) orelse {
+                _ = info.isolate().throwException(v8.Exception.@"error"(v8.String.initUtf8(info.isolate(), "native called before its host scope was attached")).?);
+                return;
+            };
             var arena = std.heap.ArenaAllocator.init(state.allocator());
             defer arena.deinit();
             var call = Call.init(info, state.errnoCell(), arena.allocator());
@@ -414,6 +460,11 @@ fn rawFunction(env: Env, state: *anyopaque, comptime native_raw: Raw) v8.Functio
 /// The returned handle is local to the current handle scope; `state` must outlive the function.
 fn function(env: Env, comptime State: type, state: *State, comptime callee: anytype, comptime options: FuncOptions) v8.Function {
     const side_effect = options.side_effect.?.toV8();
+    // Natives for a snapshot are always plain callbacks over a static marker.
+    if (env.rebind) |index| {
+        const data = v8.External.init(env.isolate, &rebind_markers[index]).value.data;
+        return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
+    }
     if (comptime options.nofast or options.constructor == .allow or !isFast(State, callee)) {
         const data = v8.External.init(env.isolate, state).value.data;
         return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
@@ -602,6 +653,8 @@ pub fn object(env: Env, comptime State: type, state: *State, comptime table: any
         }
         if (comptime isRaw(F)) {
             if (comptime field.options.side_effect == null) @compileError("native `" ++ name ++ "` needs an explicit side_effect: raw(f, .{ .side_effect = .any })");
+            // Foreign callbacks read the state pointer themselves, which a snapshot cannot hold.
+            if (env.rebind != null) return error.NotSnapshottable;
             try set(env, target, name, rawFunction(env, state, field).object.value);
             continue;
         }
@@ -615,4 +668,23 @@ pub fn object(env: Env, comptime State: type, state: *State, comptime table: any
         }
     }
     return target;
+}
+
+/// The V8 callback of every `func` native in `table` (nested tables included), in table order:
+/// what a snapshot's external-reference list needs. Raw natives are not snapshottable and are
+/// left out. Comptime only.
+pub fn callbacksOf(comptime State: type, comptime table: anytype) []const v8.FunctionCallback {
+    comptime {
+        var out: []const v8.FunctionCallback = &.{};
+        for (@typeInfo(@TypeOf(table)).@"struct".field_names) |name| {
+            const field = @field(table, name);
+            const F = @TypeOf(field);
+            if (isWrapped(F)) {
+                out = out ++ [_]v8.FunctionCallback{native(State, field.callee.*)};
+            } else if (isTable(F)) {
+                out = out ++ callbacksOf(State, field);
+            }
+        }
+        return out;
+    }
 }

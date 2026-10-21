@@ -112,3 +112,29 @@ pub const MetaInitializer = struct {
     /// Must not retain `request` or any handle in it after returning.
     init: *const fn (data: ?*anyopaque, request: MetaRequest) void,
 };
+
+/// What a `CodeCache` hook is asked about: one module's compile.
+pub const CodeCacheRequest = struct {
+    /// Runtime-owned arena for the returned bytes of `load`; valid until Runtime.destroy
+    /// begins. Not used by `store`.
+    allocator: std.mem.Allocator,
+    module_id: ModuleId,
+    /// Exactly the text V8 compiles (after any transformation). Borrowed for the call.
+    source: []const u8,
+};
+/// Optional persistence of V8 code caches, keyed by module ID and exact source text. The
+/// runtime asks `load` before compiling a source module and, when `Scope.flushCodeCache`
+/// runs, hands every module that compiled without a usable cache to `store`. V8 rejects
+/// caches from another build or flag set by itself; whether the cache matches `source`
+/// is the hook's job (V8 only compares the length).
+pub const CodeCache = struct {
+    /// Host-owned state, borrowed without destruction; must outlive Runtime.destroy.
+    data: ?*anyopaque = null,
+    /// Cached bytes for this module or null. Synchronous, on the isolate thread. Bytes must
+    /// be 8-byte aligned and live in request.allocator (they are borrowed until the compile
+    /// returns).
+    load: *const fn (data: ?*anyopaque, request: CodeCacheRequest) ?[]const u8,
+    /// Persists freshly produced bytes (borrowed for the call). Best effort: failures are
+    /// the hook's to swallow.
+    store: *const fn (data: ?*anyopaque, request: CodeCacheRequest, bytes: []const u8) void,
+};

@@ -17,4 +17,8 @@ test {
     _ = @import("tests/managed/cache.zig");
     _ = @import("tests/managed/api.zig");
     _ = @import("tests/managed/snapshot.zig");
+    _ = @import("tests/managed/init_snapshot.zig");
+    _ = @import("tests/managed/init_cache.zig");
+    _ = @import("tests/managed/code_cache.zig");
+    _ = @import("tests/managed/native_snapshot.zig");
 }

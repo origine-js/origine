@@ -222,6 +222,11 @@ const Kq = struct {
         if (k.nchanges == 0) return;
         var errs: [change_batch]c.Kevent = undefined;
         const zero: c.timespec = .{ .sec = 0, .nsec = 0 };
+        // `EV_RECEIPT` makes this call return only the receipts of the changes (an `EV_ERROR` entry
+        // each, `data` 0 on success) and leave pending events in the queue. Without it the event
+        // list would also dequeue ready events, and a disabled `EV_DISPATCH` filter never reports
+        // them again.
+        for (k.changes[0..k.nchanges]) |*change| change.flags |= c.EV.RECEIPT;
         const n = c.kevent(k.kq, &k.changes, @intCast(k.nchanges), &errs, errs.len, &zero);
         k.nchanges = 0;
         if (n <= 0) return;

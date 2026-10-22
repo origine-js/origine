@@ -79,3 +79,14 @@ Note: the Rust bench bundles `liborigine_io.a` into the `origine_io` rlib, so af
 | 64 KiB | 64 | 34,551 rt/s<br>p50 1.82 ms / p99 2.42 ms | 10,813 rt/s<br>mean 5.92 ms | 33,907 rt/s<br>p50 1.86 ms / p99 2.33 ms | 32,448 rt/s<br>p50 1.92 ms / p99 2.41 ms | 31,354 rt/s<br>p50 2.02 ms / p99 2.41 ms | 30,556 rt/s<br>p50 2.02 ms / p99 3.31 ms |
 
 The JS path is 30-65% below Bun at small messages: per-operation promise, completion and `Uint8Array` machinery costs about 8 us per round trip on top of the same four syscalls (see the profile notes in the commit history); origine's Rust runtime matches Bun.
+
+## 1 KiB only, 2 runs per cell, macOS efficiency mode off
+
+After the wait-table and pending-slab changes (`bun run.js <out_dir> 1 3 2`; the driver now runs only 1 KiB messages and 2 repetitions). Numbers are higher than the tables above because the earlier runs were taken with efficiency mode on.
+
+| size | conns | origine rt | origine JS | Bun native | Bun node:net | Deno native | Deno node:net |
+|---|---|---|---|---|---|---|---|
+| 1 KiB | 1 | 47,723 rt/s<br>p50 20.3 us / p99 39.3 us | 29,314 rt/s<br>mean 34.1 us | 45,430 rt/s<br>p50 21.2 us / p99 37.3 us | 45,071 rt/s<br>p50 22.0 us / p99 30.5 us | 41,768 rt/s<br>p50 23.3 us / p99 30.1 us | 41,440 rt/s<br>p50 23.8 us / p99 30.0 us |
+| 1 KiB | 64 | 153,856 rt/s<br>p50 415.5 us / p99 449.0 us | 86,804 rt/s<br>mean 737.3 us | 164,032 rt/s<br>p50 386.4 us / p99 534.7 us | 149,163 rt/s<br>p50 425.0 us / p99 611.2 us | 119,889 rt/s<br>p50 533.2 us / p99 613.4 us | 104,728 rt/s<br>p50 604.8 us / p99 682.2 us |
+
+Where the JS path's time goes at 1 connection (in-tree counters, one half round trip, about 19 us): kevent/recv/send syscalls about 11.6 us (the same as the Rust-only bench), Rust task/runtime overhead about 3.6 us, JS microtasks and native calls about 2.9 us, completion settling about 0.9 us. The host settle loop itself costs under 0.5 us per iteration. An *empty* zero-timeout `kevent` costs about 12 us on this macOS, so avoiding empty polls matters.

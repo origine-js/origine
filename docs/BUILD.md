@@ -22,9 +22,11 @@ with `zig build build-v8` after changing V8 or its patches.
 
 Release desktop V8 builds use Google's exact-version builtin PGO baseline.
 The downloader verifies its source revision and records a SHA-256 receipt. V8
-checks graph hashes and discards incompatible entries with warnings. Sixteen
-profiles are explicitly excluded even if their hashes match; see the
-[exclusion list and acceptance report](../lib/v8_zig/docs/builtin-pgo.md).
+checks graph hashes. macOS aarch64 uses a separately merged overlay containing
+measured profiles for 16 configuration-specific builtins, with strict rejection
+of hash mismatches. Other targets retain Google's baseline, explicitly exclude
+those 16 names, and discard other incompatible entries with warnings. See the
+[profile policy and acceptance report](../lib/v8_zig/docs/builtin-pgo.md).
 Matching entries still guide branch optimization. Use `-Dbuiltin_pgo=false` for an
 unprofiled comparison build. This is builtin PGO, not C++ compiler PGO.
 

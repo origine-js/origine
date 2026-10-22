@@ -1566,7 +1566,7 @@ const events_source =
     \\  });
     \\
     \\  let text = '', total = 0, position = 0, ordered = true, countBytes = false;
-    \\  let count = 0, ready = 0, retained = null, keptEvent = null, sameLease = false, extra = 0;
+    \\  let leak = false, count = 0, ready = 0, retained = null, keptEvent = null, sameLease = false, extra = 0;
     \\  const errors = [];
     \\  client.register('error', e => { errors.push(e); poke(); });
     \\  client.register('ready', () => { ready++; poke(); });
@@ -1582,7 +1582,7 @@ const events_source =
     \\      text += String.fromCharCode(...buf);
     \\    }
     \\    if (text === 'ping-pong' && retained === null) retained = buf; // kept past the callback
-    \\    else buf.unref();
+    \\    else if (!leak) buf.unref();
     \\    poke();
     \\  });
     \\  // A throwing handler is routed to the error handlers; the other handlers still run.
@@ -1612,6 +1612,20 @@ const events_source =
     \\    pooled &&= text === message;
     \\  }
     \\  out.pooled = pooled;
+    \\
+    \\  // Leases that are never released (left to the garbage collector) neither leak nor starve the pump:
+    \\  // the pool is refilled with fresh stores.
+    \\  leak = true;
+    \\  let leaky = true;
+    \\  for (let i = 0; i < 60; i++) {
+    \\    const message = `leak-${i}`;
+    \\    text = '';
+    \\    client.send(enc(message));
+    \\    await until(() => text === message);
+    \\    leaky &&= text === message;
+    \\  }
+    \\  leak = false;
+    \\  out.leaky = leaky;
     \\
     \\  // Symbol.dispose releases like unref.
     \\  if (typeof Symbol.dispose === 'symbol') {
@@ -1686,7 +1700,7 @@ test "api: net events with pooled leases, backpressure and io.run (auto and thre
         try setupBackend(&fx, events_source, backend, .{});
         defer fx.deinit();
         try fx.run();
-        try check(fx.scope, "report.sendTrue && report.echo && report.eventValid && report.retained && report.released && report.eventOver && report.pooled && report.dispose");
+        try check(fx.scope, "report.sendTrue && report.echo && report.eventValid && report.retained && report.released && report.eventOver && report.pooled && report.leaky && report.dispose");
         try check(fx.scope, "report.thrown && report.unregistered && report.backpressure && report.big && report.closed && report.unreg");
         try check(fx.scope, "report.runWaits && report.run && report.runAfterClose");
     }

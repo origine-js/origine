@@ -12,11 +12,13 @@
 //!   undelivered, so a slow handler backpressures the peer through TCP.
 //! * [`crate::host::poll`] drains the queue on the isolate thread (`deliver`): it calls the
 //!   dispatcher inside the socket's context and runs a microtask checkpoint after each event.
-//! * A chunk is copied into the guest only when the handler asks (`take`): into a **pooled** V8
-//!   store wrapped in a new `ArrayBuffer` (a *lease*). `release` detaches that `ArrayBuffer` (a
-//!   retained view becomes empty, never aliasing the next chunk) and returns the store to the
-//!   pool. V8 sandbox mode cannot alias host memory as a store, so the receive buffer itself is
-//!   native and the lease is one `memcpy`; a handler that does not call `take` costs no copy.
+//! * The pump receives straight into a **pooled** V8 backing store (pinned like `readInto`: no
+//!   guest object wraps it while the loop owns it). `take` wraps that same store in a new
+//!   `ArrayBuffer` (a *lease*): no copy anywhere. `release` detaches the `ArrayBuffer` (a retained
+//!   view becomes empty, never aliasing the next chunk) and returns the store to the pool. A
+//!   handler that does not take the chunk gives the store back when it returns. The pool is topped
+//!   up on the isolate thread ([`refill`]) because only it can allocate stores; the pump waits
+//!   when the pool is empty.
 //! * `send` writes synchronously (a plain non-blocking `write(2)` on the isolate thread, no loop
 //!   op). What the kernel does not take goes to an outbox flushed by a writer task; `send`
 //!   answers `false` above [`HIGH_WATER`] bytes queued and a `Ready` event follows when the outbox
@@ -31,7 +33,7 @@
 //! calling their handlers.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
 use std::io::Write;
 use std::net::TcpStream;
@@ -49,6 +51,7 @@ use crate::host::Task;
 use crate::native;
 use crate::native::{ScopeKey, host_mut, host_ref};
 use crate::net::{ADDR_CAP, SEND_FLAGS, Socket, prepare, stream_of};
+use crate::pinned;
 
 /// Bytes of one pooled lease store and of one native receive buffer.
 pub(crate) const CHUNK: usize = 16 * 1024;
@@ -56,10 +59,10 @@ pub(crate) const CHUNK: usize = 16 * 1024;
 const MAX_QUEUED: usize = 8;
 /// Outbox bytes above which `send` answers `false`.
 const HIGH_WATER: usize = 64 * 1024;
+/// Stores a socket's pool is topped up to.
+const POOL_TARGET: usize = 4;
 /// Stores kept per socket for reuse.
 const POOL_MAX: usize = 32;
-/// Recycled native receive buffers kept per socket.
-const FREE_MAX: usize = MAX_QUEUED + 2;
 
 /// `dispatch(kind, a, b)` kinds; `glue/net.js` uses the same numbers.
 const KIND_DATA: u32 = 0;
@@ -70,9 +73,9 @@ const KIND_CONNECTION: u32 = 4;
 const KIND_CLOSE: u32 = 5;
 
 pub(crate) enum EventKind {
-    /// `n` bytes at the start of `buf` (whose length stays [`CHUNK`]).
+    /// `n` bytes at the start of `store`.
     Data {
-        buf: Vec<u8>,
+        store: v8::SharedRef<v8::BackingStore>,
         n: usize,
     },
     End,
@@ -152,7 +155,12 @@ pub(crate) struct Shared {
     socket: u32,
     events: Events,
     idle: Rc<Idle>,
-    free: RefCell<Vec<Vec<u8>>>,
+    /// Empty stores the pump may receive into (topped up by [`refill`]).
+    stores: RefCell<Vec<v8::SharedRef<v8::BackingStore>>>,
+    /// The pump waits here for a store.
+    need: Signal,
+    /// Sockets whose pool ran low; the host refills them (shared with `HostState`).
+    refill: Rc<RefCell<Vec<u32>>>,
     queued: Cell<usize>,
     space: Signal,
     out: RefCell<Outbox>,
@@ -193,12 +201,11 @@ impl Shared {
     }
 }
 
-/// The leases of a subscription.
-#[derive(Default)]
-struct Pool {
-    free: Vec<v8::SharedRef<v8::BackingStore>>,
-    /// Data addresses of the stores currently wrapped by a live lease.
-    leased: BTreeSet<usize>,
+/// The chunk being delivered.
+struct Current {
+    store: v8::SharedRef<v8::BackingStore>,
+    /// `take` moved the store into a lease.
+    taken: bool,
 }
 
 /// A subscribed socket.
@@ -206,14 +213,12 @@ pub(crate) struct Sub {
     dispatch: v8::Global<v8::Function>,
     context: v8::Global<v8::Context>,
     shared: Rc<Shared>,
-    pool: Pool,
     pub(crate) runtime: u32,
     owner: ScopeKey,
     /// Counted in `Idle::live`.
     counted: bool,
     started: bool,
-    /// The chunk being delivered (`take` copies from it).
-    current: Option<(Vec<u8>, usize)>,
+    current: Option<Current>,
 }
 
 impl HostState {
@@ -241,7 +246,25 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
         if shared.stop.get() {
             return;
         }
-        let buf = shared.free.borrow_mut().pop().unwrap_or_else(|| vec![0; CHUNK]);
+        let store = poll_fn(|cx| {
+            let spare = shared.stores.borrow_mut().pop();
+            match spare {
+                Some(store) => Poll::Ready(store),
+                None => {
+                    shared.refill.borrow_mut().push(shared.socket);
+                    shared.need.set(cx);
+                    Poll::Pending
+                }
+            }
+        })
+        .await;
+        if shared.stop.get() {
+            return;
+        }
+        let Ok(buf) = pinned::region_over_store(store, CHUNK) else {
+            shared.fail(errno::UNEXPECTED);
+            return;
+        };
         let recving = Count::new(&idle.recving);
         let (read, buf) = lp.recv(socket.fd(), buf, 0).await;
         drop(recving);
@@ -251,7 +274,13 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
                 shared.push_closed();
                 return;
             }
-            Ok(n) => shared.push(EventKind::Data { buf, n }),
+            Ok(n) => match buf.into_store() {
+                Some(store) => shared.push(EventKind::Data { store, n }),
+                None => {
+                    shared.fail(errno::UNEXPECTED);
+                    return;
+                }
+            },
             Err(error) => {
                 shared.fail(errno::errno_of(&error));
                 return;
@@ -369,7 +398,9 @@ fn net_subscribe<'s>(
         socket: id,
         events: Rc::clone(&host.events),
         idle,
-        free: RefCell::default(),
+        stores: RefCell::default(),
+        need: Signal::default(),
+        refill: Rc::clone(&host.refill),
         queued: Cell::new(0),
         space: Signal::default(),
         out: RefCell::default(),
@@ -377,17 +408,38 @@ fn net_subscribe<'s>(
         closed: Cell::new(false),
         aborts: RefCell::default(),
     });
-    host.subs.insert(
-        id,
-        Sub { dispatch, context, shared, pool: Pool::default(), runtime, owner: key, counted: false, started: false, current: None },
-    );
+    host.subs.insert(id, Sub { dispatch, context, shared, runtime, owner: key, counted: false, started: false, current: None });
     Ok(())
+}
+
+/// Tops `shared`'s pool up to [`POOL_TARGET`] fresh stores (isolate thread only).
+fn top_up(isolate: &mut v8::Isolate, shared: &Shared) {
+    while shared.stores.borrow().len() < POOL_TARGET {
+        let store = v8::ArrayBuffer::new_backing_store(isolate, CHUNK).make_shared();
+        shared.stores.borrow_mut().push(store);
+    }
+}
+
+/// Refills the pools of the sockets whose pump found its pool empty, and wakes the pumps.
+pub(crate) fn refill(scope: &mut v8::PinScope<'_, '_, ()>) {
+    let Some(host) = scope.get_slot::<HostState>() else { return };
+    let ids = std::mem::take(&mut *host.refill.borrow_mut());
+    if ids.is_empty() {
+        return;
+    }
+    let pools: Vec<Rc<Shared>> = ids.iter().filter_map(|id| host.subs.get(id).map(|sub| Rc::clone(&sub.shared))).collect();
+    let isolate: &mut v8::Isolate = scope;
+    for shared in pools {
+        top_up(isolate, &shared);
+        shared.need.wake();
+    }
 }
 
 /// `native.net.resume(id)`: starts reading a stream (`data`, `end`, `error`) or accepting on a
 /// listener (`connection`). Idempotent.
 #[native(side_effect = "any", path = "net.resume", needs = "runtime")]
-fn net_resume(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+fn net_resume(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+    let host = host_mut(scope)?;
     let (socket, lp) = host.socket(key, id)?;
     let sub = host.subs.get_mut(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
     if sub.started {
@@ -398,52 +450,37 @@ fn net_resume(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), Native
     let shared = Rc::clone(&sub.shared);
     let runtime = sub.runtime;
     shared.idle.live.set(shared.idle.live.get() + 1);
+    if !socket.is_listener() {
+        let isolate: &mut v8::Isolate = scope;
+        top_up(isolate, &shared);
+    }
     let task: Task = if socket.is_listener() {
         Box::pin(accept_pump(socket, lp, Rc::clone(&shared)))
     } else {
         Box::pin(read_pump(socket, lp, Rc::clone(&shared)))
     };
-    host.spawn_pump(runtime, &shared, task)
+    host_mut(scope)?.spawn_pump(runtime, &shared, task)
 }
 
-/// `native.net.take(id)`: an `ArrayBuffer` holding a copy of the chunk being delivered (the
-/// `data` event's bytes at its start), from the socket's pool. Only valid inside the `data`
-/// dispatch (`StaleHandle` otherwise). Give it back with `release`.
+/// `native.net.take(id)`: an `ArrayBuffer` over the very store the chunk was received into (no
+/// copy; the chunk is at its start, `length` bytes as the `data` dispatch said). Only valid inside
+/// the `data` dispatch, once per event (`StaleHandle` otherwise). Give it back with `release`.
 #[native(side_effect = "any", path = "net.take", needs = "runtime")]
 fn net_take<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32) -> Result<v8::Local<'s, v8::ArrayBuffer>, NativeError> {
-    let spare = {
-        let host = host_mut(scope)?;
-        let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-        if sub.current.is_none() {
-            return Err(NativeError::Errno(errno::STALE_HANDLE));
-        }
-        sub.pool.free.pop()
-    };
-    let store = match spare {
-        Some(store) => store,
-        None => {
-            let isolate: &mut v8::Isolate = scope;
-            v8::ArrayBuffer::new_backing_store(isolate, CHUNK).make_shared()
-        }
-    };
-    let base = store.data().filter(|_| store.byte_length() >= CHUNK).ok_or(NativeError::Errno(errno::INVALID_DATA))?;
-    {
-        let host = host_mut(scope)?;
-        let sub = host.subs.get_mut(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-        let (chunk, n) = sub.current.as_ref().ok_or(NativeError::Errno(errno::STALE_HANDLE))?;
-        // SAFETY: `base` is the start of the store's writable allocation of at least `CHUNK >= n`
-        // bytes. The store came out of the pool or is fresh, so every `ArrayBuffer` that ever wrapped
-        // it was detached (`release`) and no guest object or other thread aliases it; `chunk` is
-        // Rust memory, so the ranges cannot overlap.
-        unsafe { std::ptr::copy_nonoverlapping(chunk.as_ptr(), base.as_ptr().cast::<u8>(), *n) };
-        sub.pool.leased.insert(base.as_ptr() as usize);
-    }
+    let host = host_mut(scope)?;
+    let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    let current = sub.current.as_mut().filter(|current| !current.taken).ok_or(NativeError::Errno(errno::STALE_HANDLE))?;
+    current.taken = true;
+    let store = current.store.clone();
     Ok(v8::ArrayBuffer::with_backing_store(scope, &store))
 }
 
 /// `native.net.release(id, buffer)`: detaches a lease from `take` and returns its store to the
-/// pool. Idempotent for a detached buffer; `BadHandle` for a buffer that is not a live lease of
-/// this socket.
+/// pool. Idempotent for a detached buffer. Nothing is remembered per lease (an unreleased lease
+/// that is garbage collected leaves no trace): any plain `CHUNK`-sized `ArrayBuffer` that detaches
+/// is a sound pool member, because a detached, unshared store has no guest alias left, so the
+/// pump may fill it. `Unsupported` for a buffer that is shared, undetachable or not a chunk-sized
+/// store; for a socket that is gone or not the caller's the buffer is only detached.
 #[native(side_effect = "any", path = "net.release", needs = "runtime")]
 fn net_release<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
     let buffer = v8::Local::<v8::ArrayBuffer>::try_from(buffer).map_err(|_| NativeError::type_error("buffer must be an ArrayBuffer"))?;
@@ -451,25 +488,19 @@ fn net_release<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buf
         return Ok(());
     }
     let store = buffer.get_backing_store();
-    let address = store.data().map(|ptr| ptr.as_ptr() as usize).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let host = host_mut(scope)?;
-    match host.subs.get_mut(&id).filter(|sub| sub.owner == key) {
-        Some(sub) => {
-            if !sub.pool.leased.contains(&address) {
-                return Err(NativeError::Errno(errno::BAD_HANDLE));
-            }
-            if buffer.detach(None) != Some(true) || !buffer.was_detached() {
-                return Err(NativeError::Errno(errno::UNEXPECTED));
-            }
-            sub.pool.leased.remove(&address);
-            if sub.pool.free.len() < POOL_MAX {
-                sub.pool.free.push(store);
-            }
-        }
-        // The socket is gone: the lease only has to stop aliasing anything.
-        None => {
-            buffer.detach(None);
-        }
+    if store.is_shared() || store.is_resizable_by_user_javascript() || !buffer.is_detachable() || store.byte_length() != CHUNK {
+        return Err(NativeError::Errno(errno::UNSUPPORTED));
+    }
+    let shared = host_ref(scope)?.subs.get(&id).filter(|sub| sub.owner == key).map(|sub| Rc::clone(&sub.shared));
+    if buffer.detach(None) != Some(true) || !buffer.was_detached() {
+        return Err(NativeError::Errno(errno::UNEXPECTED));
+    }
+    // The socket may be gone: the lease then only had to stop aliasing anything.
+    if let Some(shared) = shared
+        && shared.stores.borrow().len() < POOL_MAX
+    {
+        shared.stores.borrow_mut().push(store);
+        shared.need.wake();
     }
     Ok(())
 }
@@ -562,11 +593,11 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
     let Some(sub) = host.subs.get(&id) else { return };
     let (shared, owner, runtime) = (Rc::clone(&sub.shared), sub.owner, sub.runtime);
     let (kind, a, b) = match event.kind {
-        EventKind::Data { buf, n } => {
+        EventKind::Data { store, n } => {
             shared.queued.set(shared.queued.get() - 1);
             shared.space.wake();
             if let Some(sub) = host.subs.get_mut(&id) {
-                sub.current = Some((buf, n));
+                sub.current = Some(Current { store, taken: false });
             }
             (KIND_DATA, n as u32, 0)
         }
@@ -596,11 +627,12 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
 
     let Some(host) = scope.get_slot_mut::<HostState>() else { return };
     if kind == KIND_DATA {
-        if let Some((buf, _)) = host.subs.get_mut(&id).and_then(|sub| sub.current.take()) {
-            let mut free = shared.free.borrow_mut();
-            if free.len() < FREE_MAX {
-                free.push(buf);
-            }
+        // A chunk the handler did not take goes straight back to the pump.
+        if let Some(current) = host.subs.get_mut(&id).and_then(|sub| sub.current.take())
+            && !current.taken
+        {
+            shared.stores.borrow_mut().push(current.store);
+            shared.need.wake();
         }
     } else if kind == KIND_CLOSE
         && let Some(sub) = host.subs.remove(&id)

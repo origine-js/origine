@@ -114,3 +114,5 @@ At 64 connections about 34% of the JS thread is in `sendto` (loopback sends do t
 | --- | --- | --- |
 | 1 | 31.8k, 33.8k rt/s | 38.4k, 38.3k rt/s |
 | 64 | 82.2k, 81.6k rt/s | 96.0k, 96.5k rt/s |
+
+After receiving straight into the pooled stores (`ev.buffer()` no longer copies; same session, copy path re-measured 33.6k/31.7k and 76.9k/75.3k): events 37.3k, 36.8k (1 conn) and 98.0k, 101.6k (64 conns). A 1 KiB memcpy is not the bottleneck, so the gain is small there; it matters for large chunks.

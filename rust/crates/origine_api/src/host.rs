@@ -116,6 +116,7 @@ pub struct HostState {
     next_socket: u32,
     pub(crate) subs: BTreeMap<u32, Sub>,
     pub(crate) events: Events,
+    pub(crate) refill: Rc<RefCell<Vec<u32>>>,
     idle: BTreeMap<u32, Rc<Idle>>,
     pending: Slab<Pending>,
     completions: CompletionQueue,
@@ -136,6 +137,7 @@ impl HostState {
             next_socket: 1,
             subs: BTreeMap::new(),
             events: Rc::default(),
+            refill: Rc::default(),
             idle: BTreeMap::new(),
             pending: Slab::default(),
             completions: Rc::default(),
@@ -480,6 +482,7 @@ fn turn(scope: &mut v8::PinScope<'_, '_, ()>) -> usize {
     let closed = host.step_draining();
     let completions = host.take_completions();
     let mut settled = closed.len() + completions.len();
+    crate::sub::refill(scope);
     settled += crate::sub::deliver_all(scope);
     for pending in closed {
         finish(scope, pending, Ok(()));

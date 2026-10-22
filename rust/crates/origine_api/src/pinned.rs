@@ -202,3 +202,16 @@ pub fn alloc_for_read(isolate: &mut v8::Isolate, len: usize) -> Result<GuestBuf,
     let region = unsafe { RawRegion::new_uninit(base.cast::<u8>(), len, owner) };
     Ok(GuestBuf::Pinned(region))
 }
+
+/// A sink over the first `len` bytes of an existing V8 store with no guest object attached (a
+/// pooled store: it was fresh, or its `ArrayBuffer` was detached when it was given back).
+pub fn region_over_store(store: v8::SharedRef<v8::BackingStore>, len: usize) -> Result<GuestBuf, NativeError> {
+    let base = store.data().filter(|_| store.byte_length() >= len && len > 0).ok_or(NativeError::Errno(errno::INVALID_DATA))?;
+    let start = base.cast::<u8>();
+    let owner: Box<dyn Any> = Box::new(PinnedStore(store));
+    // SAFETY: `start` is the start of the store's writable allocation of at least `len` bytes, kept
+    // alive by `owner`; its address is stable; no `ArrayBuffer` wraps the store while it sits in the
+    // pool (a lease is detached before the store comes back), so the loop is its only accessor.
+    let region = unsafe { RawRegion::new_uninit(start, len, owner) };
+    Ok(GuestBuf::Pinned(region))
+}

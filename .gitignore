@@ -4,3 +4,4 @@
 /.lp-cache/
 .DS_Store
 __oricache__/
+/.zig-global-cache

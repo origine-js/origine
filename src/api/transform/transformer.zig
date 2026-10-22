@@ -4,6 +4,7 @@
 //! transformer is any `run` function (see oxc.zig for the TypeScript/JSX one).
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 
 /// One transform call. Everything is borrowed for the call only.
 pub const Request = struct {
@@ -32,10 +33,10 @@ pub const Outcome = union(enum) {
 pub fn syntaxError(diagnostics: []const u8) v8.Value {
     const isolate = v8.Isolate.getCurrent();
     const ctx = isolate.getCurrentContext();
-    const message = v8.String.initUtf8(isolate, std.mem.trimEnd(u8, diagnostics, "\n"));
-    const exception = v8.Exception.syntaxError(message).?;
+    const message = eu.v.str_utf8(isolate, std.mem.trimEnd(u8, diagnostics, "\n"));
+    const exception = eu.v.syntax_error(message).?;
     if (exception.toObject(ctx)) |object| {
-        _ = object.createDataProperty(ctx, v8.String.initUtf8(isolate, "stack").name, message.name.primitive.value);
+        _ = object.createDataProperty(ctx, eu.v.str_utf8(isolate, "stack").name, message.name.primitive.value);
     }
     return exception;
 }

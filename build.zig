@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     const external_link = target.result.os.tag == .macos and optimize != .debug;
     // Release V8 by default; a debug V8 compiles faster and is for working on V8 patches.
     const v8_debug = b.option(bool, "v8_debug", "Build V8 in debug mode for quick iteration on V8 patches (default: release V8)") orelse false;
+    const builtin_pgo = b.option(bool, "builtin_pgo", "Use Google's exact-version builtin PGO baseline (default: release desktop V8)") orelse (!v8_debug and target.result.os.tag != .ios);
     // V8 builds from source only on the first build and for `zig build build-v8` (patches apply
     // automatically, ninja makes it incremental); other builds reuse the last archive. An
     // explicit archive skips that.
@@ -21,7 +22,7 @@ pub fn build(b: *std.Build) void {
     const cargo_offline = b.option(bool, "cargo-offline", "Run cargo with --offline") orelse false;
     const config = b.addOptions();
     config.addOption(bool, "typescript", typescript);
-    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
+    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .builtin_pgo = builtin_pgo, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
     const v8 = v8Dependency(b, options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
     const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
@@ -126,6 +127,7 @@ pub fn build(b: *std.Build) void {
 const V8Options = struct {
     target: std.Build.ResolvedTarget,
     v8_debug: bool,
+    builtin_pgo: bool,
     prebuilt: ?[]const u8,
     clang_bin: []const u8,
     cache_root: []const u8,
@@ -147,6 +149,7 @@ fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build
         .v8_debug = options.v8_debug,
         .link_native = link_native,
         .cache_root = options.cache_root,
+        .builtin_pgo = options.builtin_pgo,
         .v8_clang_dir = options.clang_bin,
     });
 }
@@ -169,6 +172,8 @@ fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std
         module.addImport("@v8", dependency.module("@v8"));
         module.addImport("@diagnostics", dependency.module("@diagnostics"));
     }
+    // Embedding helpers (`eu.v` constructors, the process allocator) for the managed runtime and API.
+    managed.addImport("@util", dependency.module("@util"));
     managed.addImport("@io", io_module);
     managed.addOptions("origine_config", config);
     return .{ .engine = engine, .managed = managed };

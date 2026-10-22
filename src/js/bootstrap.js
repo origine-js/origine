@@ -1,4 +1,4 @@
-// Intrinsic inventory: V8 15.2.124.1. Executed only in a pristine context.
+// Intrinsic inventory: V8 15.8.30. Executed only in a pristine context.
 // This is a hardening bootstrap, not a general JavaScript compartment library.
 // Borrows the host-supplied intrinsic array through initialization; retains its
 // object identities in a private WeakSet for the lifetime of the returned helpers.

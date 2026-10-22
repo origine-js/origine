@@ -299,10 +299,13 @@ where
     Ok(promise.into())
 }
 
-/// Copies `cell`'s bytes into the guest buffer, which must still be attached and large enough.
-pub(crate) fn copy_into(buffer: v8::Local<'_, v8::ArrayBuffer>, offset: usize, len: usize, data: &[u8]) -> Result<(), NativeError> {
+/// Borrows data through return and copies it into the live guest window, using atomic
+/// stores for shared memory. Retains no Rust storage; rejects detached or undersized buffers.
+pub(crate) fn copy_into(buffer: v8::Local<'_, v8::ArrayBufferBase>, offset: usize, len: usize, data: &[u8]) -> Result<(), NativeError> {
     let stale = || NativeError::Errno(errno::STALE_HANDLE);
-    if buffer.was_detached() || offset.checked_add(len).is_none_or(|end| end > buffer.byte_length()) {
+    if v8::Local::<v8::ArrayBuffer>::try_from(buffer).is_ok_and(|buffer| buffer.was_detached())
+        || offset.checked_add(len).is_none_or(|end| end > buffer.byte_length())
+    {
         return Err(stale());
     }
     if data.len() > len {

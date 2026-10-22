@@ -62,6 +62,8 @@ const c = std.c;
 const event_batch = 256;
 /// Registrations buffered between polls; at most `event_batch` so errors fit the event list.
 const change_batch = 64;
+/// Largest descriptor number the wait table indexes (1M); above it socket waits fail ENOMEM.
+const max_fd = 1 << 20;
 
 // libSystem dispatch, no blocks needed.
 const dispatch = struct {
@@ -180,9 +182,10 @@ const Kq = struct {
     /// Timeout ops, ordered by deadline (heap index in priv[4]). No kernel timer per op: `poll`
     /// blocks in kevent with the earliest deadline as its timeout.
     timers: tm.Timers = .{ .slot = 4 },
-    /// Ops parked on socket readiness, per descriptor and direction (FIFO each). Entries are
-    /// dropped when both queues empty.
-    fds: std.AutoHashMapUnmanaged(c_int, Waiters) = .empty,
+    /// Ops parked on socket readiness, per descriptor and direction (FIFO each), indexed by
+    /// descriptor number: descriptors are small dense integers, so this is a plain array lookup
+    /// instead of a hash.
+    waiters: std.ArrayList(Waiters) = .empty,
     /// Filter registrations not yet handed to the kernel; `poll` passes them in its own `kevent`
     /// call, so arming a wait costs no syscall of its own.
     changes: [change_batch]c.Kevent = undefined,
@@ -228,15 +231,22 @@ const Kq = struct {
     /// If `ev` reports a failed registration (`EV_ERROR`), completes that descriptor's waiters.
     fn failWaiters(k: *Kq, ev: c.Kevent) void {
         if (ev.flags & c.EV.ERROR == 0 or ev.data == 0) return;
-        const w = k.fds.getPtr(@intCast(ev.ident)) orelse return;
+        const w = k.waitersOf(@intCast(ev.ident)) orelse return;
         const q = w.queue(ev.filter == c.EVFILT.WRITE);
         while (q.pop()) |op| finishLocal(k, op, -@as(i64, ev.data));
-        k.dropIfIdle(@intCast(ev.ident));
     }
 
-    fn dropIfIdle(k: *Kq, fd: c_int) void {
-        const w = k.fds.getPtr(fd) orelse return;
-        if (w.read.isEmpty() and w.write.isEmpty()) _ = k.fds.remove(fd);
+    fn waitersOf(k: *Kq, fd: c_int) ?*Waiters {
+        if (fd < 0 or fd >= k.waiters.items.len) return null;
+        return &k.waiters.items[@intCast(fd)];
+    }
+
+    /// The (possibly new) queues of `fd`; null when out of memory or `fd` is absurdly large.
+    fn waitersFor(k: *Kq, fd: c_int) ?*Waiters {
+        if (fd < 0 or fd > max_fd) return null;
+        const need: usize = @as(usize, @intCast(fd)) + 1;
+        if (need > k.waiters.items.len) k.waiters.appendNTimes(k.allocator, .{}, need - k.waiters.items.len) catch return null;
+        return &k.waiters.items[@intCast(fd)];
     }
 
     fn trigger(k: *Kq) void {
@@ -742,10 +752,9 @@ fn waitsForWrite(kind: op_mod.Kind) bool {
 /// direction). Returns an error result (-errno) if it cannot be queued.
 fn armWait(k: *Kq, op: *Op) ?i64 {
     const fd: c_int = @intCast(op.fd);
-    const entry = k.fds.getOrPut(k.allocator, fd) catch return errno(.NOMEM);
-    if (!entry.found_existing) entry.value_ptr.* = .{};
+    const w = k.waitersFor(fd) orelse return errno(.NOMEM);
     const write = waitsForWrite(op.kind);
-    entry.value_ptr.queue(write).push(op);
+    w.queue(write).push(op);
     setState(op, .waiting);
     k.watch(fd, write);
     return null;
@@ -754,8 +763,7 @@ fn armWait(k: *Kq, op: *Op) ?i64 {
 /// Removes a parked op from its descriptor's queue.
 fn unwait(k: *Kq, op: *Op) void {
     const fd: c_int = @intCast(op.fd);
-    if (k.fds.getPtr(fd)) |w| _ = w.queue(waitsForWrite(op.kind)).remove(op);
-    k.dropIfIdle(fd);
+    if (k.waitersOf(fd)) |w| _ = w.queue(waitsForWrite(op.kind)).remove(op);
 }
 
 /// Tries a non-blocking socket op on the loop thread. Returns null if it must wait for readiness.
@@ -908,7 +916,7 @@ fn poll(ctx: *anyopaque, block: bool, out: *Drained) void {
 /// A descriptor became ready: runs the first op waiting on it. The filter was disabled by the
 /// delivery (`EV_DISPATCH`); it is re-armed only while someone still waits.
 fn serviceReady(k: *Kq, fd: c_int, write: bool, out: *Drained) void {
-    const w = k.fds.getPtr(fd) orelse return;
+    const w = k.waitersOf(fd) orelse return;
     const q = w.queue(write);
     const op = q.head orelse return;
     if (attemptSocket(op)) |res| {
@@ -917,7 +925,6 @@ fn serviceReady(k: *Kq, fd: c_int, write: bool, out: *Drained) void {
         handOut(op, out);
     }
     if (!q.isEmpty()) k.watch(fd, write);
-    k.dropIfIdle(fd);
 }
 
 fn wake(ctx: *anyopaque) void {
@@ -948,16 +955,15 @@ fn destroy(ctx: *anyopaque, out: *Drained) void {
         op.result = ecanceled();
         handOut(op, out);
     }
-    var wit = k.fds.iterator();
-    while (wit.next()) |entry| {
-        inline for (.{ &entry.value_ptr.read, &entry.value_ptr.write }) |q| {
+    for (k.waiters.items) |*entry| {
+        inline for (.{ &entry.read, &entry.write }) |q| {
             while (q.pop()) |op| {
                 op.result = ecanceled();
                 handOut(op, out);
             }
         }
     }
-    k.fds.deinit(k.allocator);
+    k.waiters.deinit(k.allocator);
     k.lock();
     var it = k.gcd_head;
     while (it) |op| : (it = gcdNext(op)) {

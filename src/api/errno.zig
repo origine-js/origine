@@ -14,6 +14,7 @@
 //! compile time (`requireBinding`).
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const binding = @import("binding.zig");
 
 /// Names match Zig error names so errors map by name. The enum lives in errno_codes.zig, the
@@ -160,7 +161,7 @@ pub const module_source: []const u8 = blk: {
 /// A new JS object `{ FileNotFound: 1, ... }` generated from `Errno`, for the glue
 /// (`native.errors`). Needs an entered context and live handle scope.
 pub fn table(env: binding.Env) !v8.Object {
-    const target = v8.Object.init(env.isolate);
+    const target = eu.v.object(env.isolate);
     inline for (std.enums.values(Errno)) |tag| {
         if (tag != .ok) try binding.set(env, target, @tagName(tag), @intFromEnum(tag));
     }

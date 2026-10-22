@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 const v8 = @import("@v8");
+const eu = @import("@util");
 const m = @import("@managed");
 const mimalloc = @import("@mimalloc");
 const ensureV8 = @import("../support.zig").ensureV8;
@@ -62,7 +63,7 @@ test "runtime allocators: borrowed adapter survives runtime with retained backin
         const ctx = scope.context.deref();
         ctx.enter();
         defer ctx.exit();
-        const buffer = v8.ArrayBuffer.newWithByteLength(rt.isolate, 256).?;
+        const buffer = eu.v.array_buffer(rt.isolate, 256).?;
         try t.expectEqual(@as(usize, 0), @intFromPtr(buffer.data().?) % 16);
         bytes = @as([*]u8, @ptrCast(buffer.data().?))[0..256];
         const zeroes: [256]u8 = @splat(0);
@@ -249,7 +250,7 @@ test "managed allocations: replacement OOM preserves old cache and pending impor
                 const ctx = scope.context.deref();
                 ctx.enter();
                 defer ctx.exit();
-                const actual = imported.deref().result().toObject(ctx).?.get(ctx, v8.String.initUtf8(rt.isolate, "value").name.primitive.value).?.i32Value(ctx).?;
+                const actual = imported.deref().result().toObject(ctx).?.get(ctx, eu.v.str_utf8(rt.isolate, "value").name.primitive.value).?.i32Value(ctx).?;
                 try t.expectEqual(@as(i32, if (accounting.has_induced_failure) 1 else 99), actual);
             }
             try expectState(rt, pending, .Pending);

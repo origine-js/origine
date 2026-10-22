@@ -6,7 +6,7 @@ const Scope = @import("scope.zig").Scope;
 const init_snapshot = @import("init_snapshot.zig");
 /// Smaller than any real V8 startup snapshot header; guards V8's fatal size CHECK.
 const min_snapshot_bytes = 512;
-pub const supported_v8_version = "15.2.124.1";
+pub const supported_v8_version = "15.8.30";
 
 /// Embedder-side isolate host owning zero or more `Scope`s (isolated contexts).
 ///

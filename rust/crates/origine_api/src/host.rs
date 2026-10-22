@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
+use origine_api_core::slab::Slab;
 use origine_api_core::{Backend, Ceiling, NativeError, errno};
 use origine_api_fs::Grant;
 use origine_io::fs::Dir;
@@ -112,8 +113,7 @@ pub struct HostState {
     next_grant: u32,
     sockets: BTreeMap<u32, Rc<Socket>>,
     next_socket: u32,
-    pending: BTreeMap<u64, Pending>,
-    next_op: u64,
+    pending: Slab<Pending>,
     completions: CompletionQueue,
     wake: WakeRx,
 }
@@ -130,8 +130,7 @@ impl HostState {
             next_grant: 1,
             sockets: BTreeMap::new(),
             next_socket: 1,
-            pending: BTreeMap::new(),
-            next_op: 1,
+            pending: Slab::default(),
             completions: Rc::default(),
             wake,
         }
@@ -147,7 +146,7 @@ impl HostState {
     }
 
     pub(crate) fn take_pending(&mut self, id: u64) -> Option<Pending> {
-        self.pending.remove(&id)
+        self.pending.take(id)
     }
 
     // ---- runtimes ----------------------------------------------------------------------
@@ -188,9 +187,7 @@ impl HostState {
             _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
         };
         let handle = entry.rt.as_ref().ok_or(NativeError::Errno(errno::BAD_HANDLE))?.handle();
-        let id = self.next_op;
-        self.next_op += 1;
-        self.pending.insert(id, pending);
+        let id = self.pending.insert(pending);
         drop(handle.spawn(make(id))); // detached: it reports through the completion queue
         Ok(())
     }
@@ -201,9 +198,7 @@ impl HostState {
     pub(crate) fn begin_close(&mut self, owner: ScopeKey, id: u32, close: Pending) -> Result<Vec<Pending>, NativeError> {
         self.open_runtime(owner, id)?;
         let canceled = self.cancel_runtime(id);
-        let op = self.next_op;
-        self.next_op += 1;
-        self.pending.insert(op, close);
+        let op = self.pending.insert(close);
         if let Some(entry) = self.runtimes.get_mut(&id) {
             entry.state = RtState::Draining { close_op: Some(op), grants_released: false };
         }
@@ -214,8 +209,7 @@ impl HostState {
     fn cancel_runtime(&mut self, id: u32) -> Vec<Pending> {
         let rt = self.runtimes.get_mut(&id).and_then(|entry| entry.rt.take());
         drop(rt); // cancels every task; the loop runs once to deliver the cancellations
-        let ids: Vec<u64> = self.pending.iter().filter(|(_, pending)| pending.runtime == id).map(|(op, _)| *op).collect();
-        let canceled = ids.into_iter().filter_map(|op| self.pending.remove(&op)).collect();
+        let canceled = self.pending.take_where(|pending| pending.runtime == id);
         self.sockets.retain(|_, socket| socket.runtime() != id);
         let grant_ids: Vec<u32> = self.grants.iter().filter(|(_, record)| record.runtime == id).map(|(grant, _)| *grant).collect();
         if let Some(entry) = self.runtimes.get_mut(&id) {
@@ -247,7 +241,7 @@ impl HostState {
         let mut finished = Vec::new();
         for (id, close_op) in done {
             self.runtimes.remove(&id); // destroys the loop
-            if let Some(pending) = close_op.and_then(|op| self.pending.remove(&op)) {
+            if let Some(pending) = close_op.and_then(|op| self.pending.take(op)) {
                 finished.push(pending);
             }
         }

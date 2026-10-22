@@ -246,38 +246,38 @@ test "typescript: child scopes get only the transformers the init passes" {
     if (!m.Api.oxc.enabled) return error.SkipZigTest;
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { typescript } from 'origine:@std/transformer/typescript';
+        \\import { ts } from 'origine:@std/transformer/oxc';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const ts = typescript();
+        \\  const transform = ts();
         \\  const sources = id => id === 'app:/main.ts' ? "import { n } from 'dep'; const x: number = n + 1; globalThis.seen = x;" : 'export const n: number = 41;';
         \\  const spec = { main: 'app:/main.ts', importMap: { imports: { dep: 'app:/dep.ts' } } };
         \\  // 1: a host transformer with a synchronous loader; 2: the same with an asynchronous one.
-        \\  await (await api.scope.create({ ...spec, loader: sources, transformers: { '.ts': ts } })).run();
-        \\  await (await api.scope.create({ ...spec, loader: async id => sources(id), transformers: { '.ts': ts } })).run();
+        \\  await (await api.scope.create({ ...spec, loader: sources, transformers: { '.ts': transform } })).run();
+        \\  await (await api.scope.create({ ...spec, loader: async id => sources(id), transformers: { '.ts': transform } })).run();
         \\  // 3: a guest function as transformer (parent realm, synchronous).
         \\  const ids = [];
         \\  await (await api.scope.create({ main: 'app:/note.txt', loader: () => 'hello', transformers: { '.txt': (source, id) => { ids.push(id); return 'globalThis.seen = ' + JSON.stringify(source.toUpperCase()); } } })).run();
         \\  out.ids = ids.join(',');
         \\  // Failures reach the importer as a ModuleError whose message holds the diagnostics.
-        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: () => 'const x: number = ;', transformers: { '.ts': ts } })).run().catch(e => { out.hostError = e.message; });
-        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: async () => 'const x: number = ;', transformers: { '.ts': ts } })).run().catch(e => { out.asyncError = e.message; });
+        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: () => 'const x: number = ;', transformers: { '.ts': transform } })).run().catch(e => { out.hostError = e.message; });
+        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: async () => 'const x: number = ;', transformers: { '.ts': transform } })).run().catch(e => { out.asyncError = e.message; });
         \\  await (await api.scope.create({ main: 'app:/x.txt', loader: () => 'x', transformers: { '.txt': () => { throw new Error('boom'); } } })).run().catch(e => { out.jsError = e.message; });
         \\  // Without a map the TypeScript source reaches V8 as it is.
         \\  await (await api.scope.create({ main: 'app:/plain.ts', loader: () => 'const x: number = 1;' })).run().catch(e => { out.plain = e.message; });
         \\  // Malformed maps are rejected: bad extension syntax, non-functions, no loader.
         \\  const rejects = options => api.scope.create({ main: 'app:/m.ts', ...options }).then(() => false, () => true);
         \\  out.rejected = [
-        \\    await rejects({ loader: () => '', transformers: { ts } }),
-        \\    await rejects({ loader: () => '', transformers: { '.a/b': ts } }),
-        \\    await rejects({ loader: () => '', transformers: { '.': ts } }),
+        \\    await rejects({ loader: () => '', transformers: { transform } }),
+        \\    await rejects({ loader: () => '', transformers: { '.a/b': transform } }),
+        \\    await rejects({ loader: () => '', transformers: { '.': transform } }),
         \\    await rejects({ loader: () => '', transformers: { '.ts': 1 } }),
-        \\    await rejects({ transformers: { '.ts': ts } }),
+        \\    await rejects({ transformers: { '.ts': transform } }),
         \\    await rejects({ loader: () => '', transformers: 'nope' }),
         \\  ].join(',');
         \\  // A host transformer is also a plain function (source, id) => string.
-        \\  out.direct = ts('const a: number = 1; export { a }', 'x.ts').includes('const a = 1');
-        \\  out.options = typeof typescript({ jsx: 'classic', pragma: 'h' }) === 'function' && (() => { try { typescript({ jsx: 'bogus' }); return false; } catch (e) { return e instanceof TypeError; } })();
+        \\  out.direct = transform('const a: number = 1; export { a }', 'x.ts').includes('const a = 1');
+        \\  out.options = typeof ts({ jsx: 'classic', pragma: 'h' }) === 'function' && (() => { try { ts({ jsx: 'bogus' }); return false; } catch (e) { return e instanceof TypeError; } })();
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -289,6 +289,88 @@ test "typescript: child scopes get only the transformers the init passes" {
     try check(fx.scope, "report.hostError.includes('app:/bad.ts:1:') && report.asyncError.includes('app:/bad.ts:1:')");
     try check(fx.scope, "report.jsError.includes('boom') && report.plain.includes('SyntaxError') ");
     try check(fx.scope, "report.rejected === 'true,true,true,true,true,true' && report.direct && report.options");
+}
+
+test "leaks: oxc transformers free options, diagnostics and instances on every path" {
+    if (!m.Api.oxc.enabled) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ts } from 'origine:@std/transformer/oxc';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  // Instances with owned strings, kept until Host.destroy.
+        \\  const kept = [];
+        \\  for (let i = 0; i < 8; i++) kept.push(ts({ jsx: 'classic', importSource: 'preact' + i, pragma: 'h', pragmaFrag: 'Fragment' }));
+        \\  // Strings allocated, then a later option is invalid: the half-built instance is released.
+        \\  let bad = 0;
+        \\  for (let i = 0; i < 4; i++) {
+        \\    try { ts({ importSource: 'x', pragma: 'y', pragmaFrag: 'z', development: 'nope' }); } catch (e) { if (e instanceof TypeError) bad++; }
+        \\    try { ts({ importSource: 'x', pragma: 1 }); } catch (e) { if (e instanceof TypeError) bad++; }
+        \\    try { ts({ importSource: 'x', jsx: 'bogus' }); } catch (e) { if (e instanceof TypeError) bad++; }
+        \\  }
+        \\  out.bad = bad;
+        \\  // Direct calls: success and failure (the failure string is copied, thrown and freed).
+        \\  let failures = 0;
+        \\  for (let i = 0; i < 4; i++) {
+        \\    if (!kept[i].call(undefined, 'const a: number = 1; export { a }', 'a.ts').includes('const a = 1')) throw new Error('transform');
+        \\    try { kept[i].call(undefined, 'const x: number = ;', 'bad.ts'); } catch (e) { if (e instanceof SyntaxError) failures++; }
+        \\  }
+        \\  out.failures = failures;
+        \\  // Through child scopes, sync and async, ok and failing.
+        \\  const transform = ts();
+        \\  for (const source of ['export const n: number = 1', 'const x: number = ;']) {
+        \\    for (const loader of [() => source, async () => source]) {
+        \\      const child = await api.scope.create({ main: 'app:/m.ts', loader, transformers: { '.ts': transform } });
+        \\      await child.run().catch(() => { out.childFailed = (out.childFailed ?? 0) + 1; });
+        \\      child.close();
+        \\    }
+        \\  }
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.bad === 12 && report.failures === 4 && report.childFailed === 2");
+}
+
+test "leaks: a rejecting child settles the parent's run promise, repeatedly" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\export async function main(api) {
+        \\  const names = [];
+        \\  for (let i = 0; i < 5; i++) {
+        \\    const child = await api.scope.create({ main: 'app:/m.js', loader: () => 'throw new Error("boom")' });
+        \\    await child.run().catch(e => { names.push(e.name + ':' + e.message.includes('boom')); });
+        \\    child.close();
+        \\  }
+        \\  // A child whose module graph fails to load rejects through the same path.
+        \\  const missing = await api.scope.create({ main: 'app:/m.js', loader: async () => { throw new Error('nope'); } });
+        \\  await missing.run().catch(e => { names.push(e.name); });
+        \\  globalThis.names = names.join(',');
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "names.startsWith('ModuleError:true,ModuleError:true,ModuleError:true,ModuleError:true,ModuleError:true,ModuleError')");
+}
+
+test "leaks: loads that never settle are freed with the host" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\export async function main(api) {
+        \\  // Never-settling loader promises; their runs are deliberately not awaited.
+        \\  for (let i = 0; i < 3; i++) {
+        \\    const child = await api.scope.create({ main: 'app:/m' + i + '.js', importMap: { imports: { dep: 'app:/dep.js' } }, loader: () => new Promise(() => {}) });
+        \\    child.run().catch(() => {});
+        \\  }
+        \\  // One load that settles (released from `pendings`) next to one that does not.
+        \\  const mixed = await api.scope.create({ main: 'app:/main.js', loader: id => id === 'app:/main.js' ? Promise.resolve("import 'app:/hang.js'") : new Promise(() => {}) });
+        \\  mixed.run().catch(() => {});
+        \\  globalThis.started = true;
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "started === true");
 }
 
 test "api: child scopes inherit no authority and no scope capability" {
@@ -477,7 +559,7 @@ test "api: Rust-style fs over sync and async io" {
         \\  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
         \\  out.utf8Encode = strings.every(t => same(encodeUtf8(t), utf8Js.encode(t)));
         \\  const blobs = [[], [0x61], [0xc3, 0xa9], [0xc0, 0x80], [0xc3], [0xe2, 0x9c], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xf0, 0x9f, 0x98, 0x80], [0xff], [0x61, 0x80], [0xe0, 0x80, 0x80], [0xf0, 0x80, 0x80, 0x80]].map(b => Uint8Array.from(b)).concat(strings.map(t => utf8Js.encode(t)));
-        \\  out.utf8Decode = blobs.every(b => decodeUtf8(b) === utf8Js.decode(b)) && decodeUtf8(new Uint8Array(0)) === '' && decodeUtf8(encodeUtf8('x\ud83d\ude00y').subarray(1, 5)) === '\u{1F600}';
+        \\  out.utf8Decode = blobs.every(b => decodeUtf8(b) === utf8Js.decode(b)) && decodeUtf8(new Uint8Array(0)) === '' && decodeUtf8(new Uint8Array(new SharedArrayBuffer(4)).fill(97)) === 'aaaa' && decodeUtf8(encodeUtf8('x\ud83d\ude00y').subarray(1, 5)) === '\u{1F600}';
         \\  out.utf8 = decodeUtf8(encodeUtf8('aé✓\u{1F600}')) === 'aé✓\u{1F600}' && decodeUtf8(Uint8Array.from([0xc0, 0x80])) === undefined && decodeUtf8(Uint8Array.from([0xed, 0xa0, 0x80])) === undefined && encodeUtf8('\ud800').length === 3;
         \\}
     , true, &.{});
@@ -872,7 +954,7 @@ test "binding: typed natives decode arguments, encode results and report errors"
     try t.expectEqual(@backingInt(m.Api.Errno.FileNotFound), state.cell);
     // Mistyped or missing arguments fail before the function runs (InvalidArgument -> InvalidPath).
     const before = state.total;
-    for ([_][]const u8{ "native.add('x', 1)", "native.add(1)", "native.greet(5)", "native.sum([1, 2])", "native.greet('x', 5)", "native.maybe(1)" }) |call_source| {
+    for ([_][]const u8{ "native.add('x', 1)", "native.add(1)", "native.greet(5)", "native.sum([1, 2])", "native.sum(new Uint8Array(new SharedArrayBuffer(4)))", "native.greet('x', 5)", "native.maybe(1)" }) |call_source| {
         const source = try std.fmt.allocPrint(t.allocator, "{s} === undefined", .{call_source});
         defer t.allocator.free(source);
         try check(scope, source);
@@ -1192,6 +1274,8 @@ const zero_copy_source =
     \\  out.alloc = a1 instanceof Uint8Array && a1.length === 4 && text(a1) === '2345';
     \\  const a2 = await rf.readAlloc(fs, 100, 6);
     \\  out.allocShort = a2.length === 4 && text(a2) === '6789' && a2.buffer.byteLength >= 4;
+    \\  const big = await rf.readAlloc(fs, 1 << 20, 6);
+    \\  out.allocCompact = big.length === 4 && text(big) === '6789' && big.buffer.byteLength === 4;
     \\  const a3 = await rf.readAlloc(fs, 100, 10);
     \\  out.allocEof = a3 instanceof Uint8Array && a3.length === 0;
     \\  const a4 = await rf.readAlloc(fs, 0, 0);
@@ -1274,8 +1358,6 @@ test "api: closing an io runtime with pinned reads and writes in flight is safe"
         \\  await closing;
         \\  out.settled = settled.length === pending.length;
         \\  const allowed = [IoError.Canceled, IoError.StaleHandle, IoError.BadHandle];
-    \\  const big = await rf.readAlloc(fs, 1 << 20, 6);
-    \\  out.allocCompact = big.length === 4 && text(big) === '6789' && big.buffer.byteLength === 4;
         \\  out.errors = settled.every(r => r.status === 'fulfilled' || allowed.includes(r.reason.errno));
         \\  out.canceled = settled.some(r => r.status === 'rejected' && r.reason.errno === IoError.Canceled) || settled.every(r => r.status === 'fulfilled');
         \\  // Whatever completed holds exactly what was read; nothing is resurrected into the dead buffers.

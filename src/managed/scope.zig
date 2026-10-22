@@ -1,5 +1,6 @@
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const Runtime = @import("runtime.zig").Runtime;
 const modules = @import("module_map.zig");
 const module_types = @import("module_types.zig");
@@ -39,7 +40,12 @@ pub const Scope = struct {
         scope.* = .{ .runtime = rt, .id = rt.scopes.items.len, .context = .new(isolate, ctx), .options = options };
         errdefer scope.context.deinit();
         scope.module_map = .init(scope);
-        errdefer scope.module_map.deinit();
+        // Entered like Scope.destroy: the map's teardown may reject pending tasks in this context.
+        errdefer {
+            ctx.enter();
+            scope.module_map.deinit();
+            ctx.exit();
+        }
         if (options.import_map) |provided| {
             if (options.resolver != null) return error.ConflictingResolvers;
             const map = try rt.allocator.create(import_map.ImportMap);
@@ -54,7 +60,7 @@ pub const Scope = struct {
         };
         // Retain only our independent copy, not the caller's map pointer.
         scope.options.import_map = null;
-        ctx.setSecurityToken(v8.Symbol.init(isolate, null).name.primitive.value);
+        ctx.setSecurityToken(eu.v.symbol(isolate, null).name.primitive.value);
         ctx.setAlignedPointerInEmbedderData(1, scope);
         ctx.enter();
         defer ctx.exit();
@@ -121,18 +127,18 @@ pub const Scope = struct {
     /// helper functions; on error (BootstrapFailed) nothing is retained.
     fn bootstrap(self: *Scope, ctx: v8.Context, timing: *?i64) !Helpers {
         const isolate = self.runtime.isolate;
-        const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, @embedFile("../js/bootstrap.js")), null) orelse return error.BootstrapFailed;
+        const script = v8.Script.compile(ctx, eu.v.str_utf8(isolate, @embedFile("../js/bootstrap.js")), null) orelse return error.BootstrapFailed;
         startup_trace.mark(timing, "bootstrap_compile");
         const initializer_value = script.run(ctx) orelse return error.BootstrapFailed;
         const initializer = v8.Function.from_opaque(initializer_value.data.handle) orelse return error.BootstrapFailed;
         const intrinsic_objects = v8.Intrinsics.getObjects(ctx) orelse return error.BootstrapFailed;
         if (intrinsic_objects.len() == 0) return error.BootstrapFailed;
-        const unsupported_objects = v8.Array.init(isolate, 5);
+        const unsupported_objects = eu.v.array(isolate, 5);
         inline for (.{ .array_iterator, .string_iterator, .regexp_string_iterator, .iterator_helper, .iterator_wrapper }, 0..) |prototype, index| {
             const object = v8.Intrinsics.getPrototype(ctx, prototype) orelse return error.BootstrapFailed;
             if (!(unsupported_objects.object.setIndex(ctx, index, object.value) orelse return error.BootstrapFailed)) return error.BootstrapFailed;
         }
-        const helper_value = initializer.call(ctx, v8.Primitive.initUndefined(isolate).value, &.{ intrinsic_objects.object.value, unsupported_objects.object.value }) orelse return error.BootstrapFailed;
+        const helper_value = initializer.call(ctx, eu.v.undefined_value(isolate).value, &.{ intrinsic_objects.object.value, unsupported_objects.object.value }) orelse return error.BootstrapFailed;
         const helper = helper_value.toObject(ctx) orelse return error.BootstrapFailed;
         startup_trace.mark(timing, "bootstrap_run_harden");
         const hardener = helper.getIndex(ctx, 0) orelse return error.BootstrapFailed;
@@ -265,8 +271,8 @@ pub const Scope = struct {
     pub fn hardenLocal(self: *Scope, value: v8.Value) !void {
         const isolate = self.runtime.isolate;
         const ctx = self.context.deref();
-        const validator = v8.Function.init(ctx, supportedExport, v8.External.init(isolate, self.runtime).value.data, 1, .Throw, .HasNoSideEffect);
-        _ = self.hardener.deref().call(ctx, v8.Primitive.initUndefined(isolate).value, &.{ value, validator.object.value }) orelse return error.UnsupportedExport;
+        const validator = v8.Function.init(ctx, supportedExport, eu.v.external(isolate, self.runtime).value.data, 1, .Throw, .HasNoSideEffect);
+        _ = self.hardener.deref().call(ctx, eu.v.undefined_value(isolate).value, &.{ value, validator.object.value }) orelse return error.UnsupportedExport;
     }
 
     /// Borrows origin through this call; V8 copies the UTF-8 bytes. Result uses local
@@ -275,8 +281,8 @@ pub const Scope = struct {
     pub fn scriptOrigin(self: *Scope, origin: []const u8, module: bool) v8.ScriptOrigin {
         const iso = self.runtime.isolate;
         const options = v8.PrimitiveArray.init(iso, 1);
-        options.set(iso, 0, v8.Number.initUInt(iso, @intCast(self.id)).numeric.primitive);
-        return .init(v8.String.initUtf8(iso, origin).name.primitive.value, 0, 0, false, -1, null, false, false, module, options.data);
+        options.set(iso, 0, eu.v.num_u32(iso, @intCast(self.id)).numeric.primitive);
+        return .init(eu.v.str_utf8(iso, origin).name.primitive.value, 0, 0, false, -1, null, false, false, module, options.data);
     }
 
     /// Stores the V8 code cache of every module that compiled without one through
@@ -375,7 +381,7 @@ pub const Scope = struct {
         defer session.deinit();
         errdefer session.retainException(error_info);
         const isolate = session.isolate();
-        const ok = session.ctx.getGlobal().defineOwnProperty(session.ctx, v8.String.initUtf8(isolate, name).name, value.deref(), .{ .ReadOnly = true, .DontDelete = true }) orelse return error.JavaScriptException;
+        const ok = session.ctx.getGlobal().defineOwnProperty(session.ctx, eu.v.str_utf8(isolate, name).name, value.deref(), .{ .ReadOnly = true, .DontDelete = true }) orelse return error.JavaScriptException;
         if (!ok) return error.CapabilityInstallationFailed;
     }
 
@@ -393,7 +399,7 @@ pub const Scope = struct {
         errdefer session.retainException(error_info);
         const isolate = session.isolate();
         const script_origin = self.scriptOrigin(origin, false);
-        const script = v8.Script.compile(session.ctx, v8.String.initUtf8(isolate, source), script_origin) orelse return error.JavaScriptException;
+        const script = v8.Script.compile(session.ctx, eu.v.str_utf8(isolate, source), script_origin) orelse return error.JavaScriptException;
         const result = script.run(session.ctx) orelse return error.JavaScriptException;
         return .new(isolate, result);
     }
@@ -422,7 +428,7 @@ fn supportedExport(info: v8.FunctionCallbackInfo) callconv(.c) void {
             const ctx = scope.context.deref();
             if (ctx.getGlobal().value.strictEquals(value)) return;
             if (ctx.eq(origin)) managed = true;
-            const unsupported = scope.unsupported_prototype.deref().call(ctx, v8.Primitive.initUndefined(rt.isolate).value, &.{value}) orelse return;
+            const unsupported = scope.unsupported_prototype.deref().call(ctx, eu.v.undefined_value(rt.isolate).value, &.{value}) orelse return;
             if (unsupported.isTrue()) return;
         }
         if (!managed) return;

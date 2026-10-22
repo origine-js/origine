@@ -1,6 +1,7 @@
 //! Backend-independent ESM graphs. All callbacks and completions run on the isolate thread.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const Scope = @import("scope.zig").Scope;
 const ErrorInfo = @import("errors.zig").ErrorInfo;
 
@@ -175,17 +176,17 @@ pub const ModuleMap = struct {
     /// Accepts a copied error and borrows self through return. Returns a local
     /// exception in the current HandleScope; requires the isolate entered.
     fn errorValue(self: *ModuleMap, err: anyerror) v8.Value {
-        return v8.Exception.@"error"(v8.String.initUtf8(self.isolate(), @errorName(err))).?;
+        return eu.v.err(eu.v.str_utf8(self.isolate(), @errorName(err))).?;
     }
 
     /// A `SyntaxError` whose message and stack are `text` (borrowed for the call). Returns a
     /// local value in the current HandleScope; requires the isolate and this scope's context
     /// entered.
     fn syntaxErrorValue(self: *ModuleMap, text: []const u8) v8.Value {
-        const message = v8.String.initUtf8(self.isolate(), std.mem.trimEnd(u8, text, "\n"));
-        const exception = v8.Exception.syntaxError(message).?;
+        const message = eu.v.str_utf8(self.isolate(), std.mem.trimEnd(u8, text, "\n"));
+        const exception = eu.v.syntax_error(message).?;
         if (exception.toObject(self.ctx())) |object| {
-            _ = object.createDataProperty(self.ctx(), v8.String.initUtf8(self.isolate(), "stack").name, message.name.primitive.value);
+            _ = object.createDataProperty(self.ctx(), eu.v.str_utf8(self.isolate(), "stack").name, message.name.primitive.value);
         }
         return exception;
     }
@@ -295,7 +296,7 @@ pub const ModuleMap = struct {
                 const cached = if (self.scope.options.code_cache) |hook| hook.load(hook.data, cache_request) else null;
                 // The Source owns the cache object it is given, so it is not released here.
                 const cache_object = if (cached) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
-                source.init(v8.String.initUtf8(iso, text), &origin, cache_object);
+                source.init(eu.v.str_utf8(iso, text), &origin, cache_object);
                 defer source.deinit();
                 const module = v8.ScriptCompiler.compileModule(iso, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
                 const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
@@ -327,9 +328,9 @@ pub const ModuleMap = struct {
                     for (exports[0..i]) |prior| if (std.mem.eql(u8, exp.name, prior.name)) return error.DuplicateExport;
                     owned[i] = .{ .name = try self.arenaAllocator().dupe(u8, exp.name), .value = .new(iso, exp.value.deref()) };
                     entry.exports = owned[0 .. i + 1];
-                    names[i] = v8.String.initUtf8(iso, exp.name);
+                    names[i] = eu.v.str_utf8(iso, exp.name);
                 }
-                const module = v8.Module.createSyntheticModule(iso, v8.String.initUtf8(iso, entry.id), names.len, @ptrCast(names.ptr), synthetic) orelse return error.JavaScriptException;
+                const module = v8.Module.createSyntheticModule(iso, eu.v.str_utf8(iso, entry.id), names.len, @ptrCast(names.ptr), synthetic) orelse return error.JavaScriptException;
                 entry.module = .new(iso, module);
             },
         }
@@ -454,7 +455,7 @@ pub const ModuleMap = struct {
     /// the current HandleScope. Requires entered isolate/context; failure retains
     /// no host resources. V8 retains the rejection value with the promise.
     fn rejected(self: *ModuleMap, exception: v8.Value) !v8.Promise {
-        const resolver = v8.Promise.Resolver.init(self.ctx()) orelse return error.JavaScriptException;
+        const resolver = eu.v.promise_resolver(self.ctx()) orelse return error.JavaScriptException;
         _ = resolver.reject(self.ctx(), exception);
         return resolver.getPromise();
     }
@@ -464,7 +465,7 @@ pub const ModuleMap = struct {
     fn startNormalized(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) !v8.Promise {
         self.preparing_depth += 1;
         defer self.preparing_depth -= 1;
-        const resolver = v8.Promise.Resolver.init(self.ctx()) orelse return error.JavaScriptException;
+        const resolver = eu.v.promise_resolver(self.ctx()) orelse return error.JavaScriptException;
         const promise = resolver.getPromise();
         var tc_scope: v8.TryCatch = undefined;
         tc_scope.init(self.isolate());
@@ -709,7 +710,7 @@ pub fn fromContext(ctx: v8.Context) *Scope {
 pub fn importMeta(ctx: v8.Context, module: v8.Module, meta: v8.Object) callconv(.c) void {
     const scope = fromContext(ctx);
     const entry = scope.module_map.find(module) orelse return;
-    _ = meta.createDataProperty(ctx, v8.String.initUtf8(scope.runtime.isolate, "url").name, v8.String.initUtf8(scope.runtime.isolate, entry.id).name.primitive.value);
+    _ = meta.createDataProperty(ctx, eu.v.str_utf8(scope.runtime.isolate, "url").name, eu.v.str_utf8(scope.runtime.isolate, entry.id).name.primitive.value);
     if (scope.options.meta) |hook| hook.init(hook.data, .{ .context = ctx, .scope_id = scope.id, .module_id = entry.id, .meta = meta });
 }
 /// Borrows callback locals in the entered context through return; scratch
@@ -735,10 +736,10 @@ fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle {
     const scope = fromContext(ctx);
     const entry = scope.module_map.find(module) orelse return null;
     for (entry.exports) |exp| {
-        if (!(module.setSyntheticModuleExport(scope.runtime.isolate, v8.String.initUtf8(scope.runtime.isolate, exp.name), exp.value.deref()) orelse false)) return null;
+        if (!(module.setSyntheticModuleExport(scope.runtime.isolate, eu.v.str_utf8(scope.runtime.isolate, exp.name), exp.value.deref()) orelse false)) return null;
     }
-    const resolver = v8.Promise.Resolver.init(ctx) orelse return null;
-    _ = resolver.resolve(ctx, v8.Primitive.initUndefined(scope.runtime.isolate).value);
+    const resolver = eu.v.promise_resolver(ctx) orelse return null;
+    _ = resolver.resolve(ctx, eu.v.undefined_value(scope.runtime.isolate).value);
     return resolver.getPromise().object.value.data.handle;
 }
 /// Borrows callback locals through synchronous import setup; scratch storage

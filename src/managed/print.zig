@@ -2,12 +2,13 @@
 //! module and its Scope.create call when the debugging hook is no longer needed.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 
 /// Installs a read-only global `print` in ctx. Borrows ctx through return and
 /// retains no host resources; reports JavaScript property installation failures.
 pub fn install(isolate: v8.Isolate, ctx: v8.Context) !void {
     const function = v8.Function.init(ctx, callback, null, 0, .Throw, .HasSideEffect);
-    const key = v8.String.initUtf8(isolate, "print").name;
+    const key = eu.v.str_utf8(isolate, "print").name;
     const installed = ctx.getGlobal().defineOwnProperty(ctx, key, function.object.value, .{ .ReadOnly = true, .DontDelete = true }) orelse return error.JavaScriptException;
     if (!installed) return error.PrintInstallationFailed;
 }

@@ -4,6 +4,7 @@
 //! the creating scope can use. A closed child's id goes stale.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const binding = @import("binding.zig");
 const Call = binding.Call;
 const errno = @import("errno.zig");
@@ -107,9 +108,9 @@ fn preloadImpl(state: *ScopeState, id: u32, source: []const u8, origin: []const 
     session.init(child.scope);
     defer session.deinit();
     const isolate = session.isolate();
-    const script = v8.Script.compile(session.ctx, v8.String.initUtf8(isolate, source), child.scope.scriptOrigin(origin, false)) orelse return error.InvalidPath;
+    const script = v8.Script.compile(session.ctx, eu.v.str_utf8(isolate, source), child.scope.scriptOrigin(origin, false)) orelse return error.InvalidPath;
     const function = v8.Function.from_opaque((script.run(session.ctx) orelse return error.Unexpected).data.handle) orelse return error.InvalidPath;
-    _ = function.call(session.ctx, v8.Primitive.initUndefined(isolate).value, &.{values}) orelse return error.Unexpected;
+    _ = function.call(session.ctx, eu.v.undefined_value(isolate).value, &.{values}) orelse return error.Unexpected;
 }
 
 /// `run(id)`: imports the child's main module; returns a parent-realm promise that
@@ -122,7 +123,7 @@ fn runImpl(state: *ScopeState, call: *Call, id: u32) !v8.Promise {
     const host = state.host;
     const alloc = host.allocator;
     const child = try childFor(state, id);
-    const resolver = v8.Promise.Resolver.init(call.ctx) orelse return error.Unexpected;
+    const resolver = eu.v.promise_resolver(call.ctx) orelse return error.Unexpected;
     const pending = try alloc.create(RunState);
     errdefer alloc.destroy(pending);
     pending.* = .{ .host = host, .resolver = .new(call.isolate, resolver) };
@@ -131,7 +132,7 @@ fn runImpl(state: *ScopeState, call: *Call, id: u32) !v8.Promise {
     errdefer _ = host.runs.pop();
     const loading = try child.scope.importModule(child.main, null);
     defer loading.deinit();
-    const data = v8.External.init(call.isolate, pending).value.data;
+    const data = eu.v.external(call.isolate, pending).value.data;
     const on_fulfilled = v8.Function.init(call.ctx, runFulfilled, data, 1, .Throw, .HasSideEffect);
     const on_rejected = v8.Function.init(call.ctx, runRejected, data, 1, .Throw, .HasSideEffect);
     var session: Scope.Session = undefined;
@@ -154,7 +155,7 @@ fn runFulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
     if (pending.done) return;
     pending.done = true;
     const isolate = info.isolate();
-    _ = pending.resolver.deref().resolve(isolate.getCurrentContext(), v8.Primitive.initUndefined(isolate).value);
+    _ = pending.resolver.deref().resolve(isolate.getCurrentContext(), eu.v.undefined_value(isolate).value);
     pending.resolver.deinit();
 }
 
@@ -167,11 +168,17 @@ fn runRejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const env: binding.Env = .{ .isolate = isolate, .ctx = ctx };
     // Child-realm errors never cross; the parent gets a fresh description.
     const message = if (info.get_arg(0).toDetailString(ctx)) |text| text.name.primitive.value else binding.string(isolate, "module evaluation failed");
+    // Released on every path, including the encode failure below, so the parent's promise
+    // always settles and the persistent resolver is never leaked.
+    defer pending.resolver.deinit();
     const failure = binding.encode(env, {}, .{
         .errno = @intFromEnum(errno.Errno.Unexpected),
         .name = "ModuleError",
         .message = message,
-    }) catch return;
+    }) catch {
+        // Could not build the error object: reject with the bare message instead.
+        _ = pending.resolver.deref().reject(ctx, message);
+        return;
+    };
     _ = pending.resolver.deref().reject(ctx, failure);
-    pending.resolver.deinit();
 }

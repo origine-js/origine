@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 const v8 = @import("@v8");
+const eu = @import("@util");
 const m = @import("@managed");
 const ensureV8 = @import("../support.zig").ensureV8;
 const support = @import("support.zig");
@@ -93,10 +94,10 @@ test "managed step 1: scopes, strict evaluation, persistent handles and context 
     try t.expect(rt.isolate.getCurrentContext().eq(ac));
     const bc = b.context.deref();
     try t.expect(!ac.getSecurityToken().?.strictEquals(bc.getSecurityToken().?));
-    try t.expect(bc.getGlobal().set(bc, v8.String.initUtf8(rt.isolate, "foreign").name.primitive.value, ac.getGlobal().value).?);
+    try t.expect(bc.getGlobal().set(bc, eu.v.str_utf8(rt.isolate, "foreign").name.primitive.value, ac.getGlobal().value).?);
     try t.expectError(error.JavaScriptException, b.eval("foreign.local", "test:foreign", null));
     const obj = retained.deref().toObject(ac).?;
-    try t.expectEqual(@as(i32, 42), obj.get(ac, v8.String.initUtf8(rt.isolate, "answer").name.primitive.value).?.i32Value(ac).?);
+    try t.expectEqual(@as(i32, 42), obj.get(ac, eu.v.str_utf8(rt.isolate, "answer").name.primitive.value).?.i32Value(ac).?);
 }
 
 test "strict mode is mandatory by default for scripts, hashbangs and ESM" {
@@ -135,7 +136,7 @@ test "scope session: enters context and captures exceptions through the guard" {
     defer session.deinit();
     try t.expect(session.isolate().getCurrentContext().eq(scope.context.deref()));
     try t.expectEqual(@as(i32, 7), value.deref().i32Value(session.ctx).?);
-    _ = v8.Script.compile(session.ctx, v8.String.initUtf8(session.isolate(), "throw 1"), null).?.run(session.ctx);
+    _ = v8.Script.compile(session.ctx, eu.v.str_utf8(session.isolate(), "throw 1"), null).?.run(session.ctx);
     var info: m.ErrorInfo = .{};
     defer info.deinit();
     session.retainException(&info);

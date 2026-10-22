@@ -1,12 +1,12 @@
 // Driver: runs every cell REPS times per implementation (fresh process each), takes the median
 // run by rounds/sec, writes raw JSON lines + a markdown table.
-//   bun run.js [out_dir] [warmup_s] [measure_s] [reps]
+//   bun run.js [out_dir] [warmup_s] [measure_s] [reps=2]
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 const out = process.argv[2] ?? '.';
 const warm = process.argv[3] ?? '1',
   meas = process.argv[4] ?? '3',
-  REPS = Number(process.argv[5] ?? 3);
+  REPS = Number(process.argv[5] ?? 2);
 const here = import.meta.dir;
 const impls = [
   ['origine rt', (s, c) => [`${here}/rust/target/release/tcp_bench`, String(s), String(c), warm, meas]],
@@ -16,7 +16,7 @@ const impls = [
   ['Deno native', (s, c) => ['deno', 'run', '-A', `${here}/bench.js`, 'native', String(s), String(c), warm, meas]],
   ['Deno node:net', (s, c) => ['deno', 'run', '-A', `${here}/bench.js`, 'node', String(s), String(c), warm, meas]],
 ];
-const sizes = [16, 1024, 65536],
+const sizes = [1024],
   conns = [1, 64];
 const fmtNs = n => (n >= 1e6 ? (n / 1e6).toFixed(2) + ' ms' : (n / 1e3).toFixed(1) + ' us');
 const raw = [],

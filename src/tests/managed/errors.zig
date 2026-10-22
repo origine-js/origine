@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 const v8 = @import("@v8");
+const eu = @import("@util");
 const m = @import("@managed");
 const ensureV8 = @import("../support.zig").ensureV8;
 const support = @import("support.zig");
@@ -36,7 +37,7 @@ test "error info: eval retains thrown identity, syntax errors and undefined" {
     ctx.enter();
     defer ctx.exit();
     try t.expect(error_info.exception.?.deref().isNativeError());
-    try t.expect(ctx.getGlobal().set(ctx, v8.String.initUtf8(rt.isolate, "syntaxError").name.primitive.value, error_info.exception.?.deref()).?);
+    try t.expect(ctx.getGlobal().set(ctx, eu.v.str_utf8(rt.isolate, "syntaxError").name.primitive.value, error_info.exception.?.deref()).?);
     try check(scope, "syntaxError.name === 'SyntaxError'");
 }
 

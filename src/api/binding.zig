@@ -45,6 +45,7 @@
 //!   errno cell, and the call returns undefined. The guest reads the cell.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const call_mod = @import("call.zig");
 
 pub const Call = call_mod.Call;
@@ -61,11 +62,12 @@ pub fn oom() noreturn {
 
 /// A JS string for UTF-8 `text`.
 pub fn string(isolate: v8.Isolate, text: []const u8) v8.Value {
-    return v8.String.initUtf8(isolate, text).name.primitive.value;
+    return eu.v.str_utf8(isolate, text).name.primitive.value;
 }
 
-/// The bytes a typed array or DataView views, aliasing its backing store. Null for
-/// anything else.
+/// Borrows an unshared typed-array/DataView handle and returns bytes aliasing its
+/// backing store until detachment, resizing, or handle-scope closure. Shared
+/// memory is rejected because callers perform non-atomic byte access; retains nothing.
 pub fn viewBytes(value: v8.Value) ?[]u8 {
     // from_opaque only wraps the handle; reading a non-view crashes, so check first.
     if (!value.isArrayBufferView()) return null;
@@ -73,6 +75,7 @@ pub fn viewBytes(value: v8.Value) ?[]u8 {
     const length = view.byteLength();
     if (length == 0) return &.{};
     const buffer = view.buffer() orelse return null;
+    if (buffer.object.value.isSharedArrayBuffer()) return null;
     const base: [*]u8 = @ptrCast(buffer.data() orelse return null);
     return base[view.byteOffset()..][0..length];
 }
@@ -138,7 +141,7 @@ pub fn externalPointer(comptime T: type, info: v8.FunctionCallbackInfo) *T {
 
 /// A new Uint8Array holding a copy of `data`.
 pub fn bytesValue(env: Env, data: []const u8) !v8.Value {
-    const store = v8.ArrayBuffer.newWithByteLength(env.isolate, data.len) orelse oom();
+    const store = eu.v.array_buffer(env.isolate, data.len) orelse oom();
     if (data.len != 0) @memcpy(@as([*]u8, @ptrCast(store.data().?))[0..data.len], data);
     const array = v8.Uint8Array.init(store, 0, data.len) orelse oom();
     return array.typedArray.arrayBufferView.object.value;
@@ -152,7 +155,7 @@ pub fn native(comptime State: type, comptime callee: anytype) v8.FunctionCallbac
     return struct {
         fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
             const state = nativeState(State, info) orelse {
-                _ = info.isolate().throwException(v8.Exception.@"error"(v8.String.initUtf8(info.isolate(), "native called before its host scope was attached")).?);
+                _ = info.isolate().throwException(eu.v.err(eu.v.str_utf8(info.isolate(), "native called before its host scope was attached")).?);
                 return;
             };
             var arena = std.heap.ArenaAllocator.init(state.allocator());
@@ -444,14 +447,14 @@ pub fn raw(comptime callback: v8.FunctionCallback, comptime options: FuncOptions
 /// `raw` for a callback known only at run time (the Rust natives registry, host.zig): a JS function
 /// bound to `state`, local to the current handle scope; `state` must outlive it.
 pub fn rawDynamic(env: Env, state: *anyopaque, callback: v8.FunctionCallback, side_effect: SideEffect) v8.Function {
-    const data = v8.External.init(env.isolate, state).value.data;
+    const data = eu.v.external(env.isolate, state).value.data;
     return v8.Function.init(env.ctx, callback, data, 0, Constructor.throw.toV8(), side_effect.toV8());
 }
 
 /// A JS function for the raw `callback` bound to `state` (see `raw`). The handle is local to the
 /// current handle scope; `state` must outlive the function.
 fn rawFunction(env: Env, state: *anyopaque, comptime native_raw: Raw) v8.Function {
-    const data = v8.External.init(env.isolate, state).value.data;
+    const data = eu.v.external(env.isolate, state).value.data;
     return v8.Function.init(env.ctx, native_raw.callback, data, 0, native_raw.options.constructor.toV8(), native_raw.options.side_effect.?.toV8());
 }
 
@@ -462,14 +465,14 @@ fn function(env: Env, comptime State: type, state: *State, comptime callee: anyt
     const side_effect = options.side_effect.?.toV8();
     // Natives for a snapshot are always plain callbacks over a static marker.
     if (env.rebind) |index| {
-        const data = v8.External.init(env.isolate, &rebind_markers[index]).value.data;
+        const data = eu.v.external(env.isolate, &rebind_markers[index]).value.data;
         return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
     }
     if (comptime options.nofast or options.constructor == .allow or !isFast(State, callee)) {
-        const data = v8.External.init(env.isolate, state).value.data;
+        const data = eu.v.external(env.isolate, state).value.data;
         return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
     }
-    const data = v8.Number.init(env.isolate, @floatFromInt(@intFromPtr(state))).numeric.primitive.value.data;
+    const data = eu.v.num_f64(env.isolate, @floatFromInt(@intFromPtr(state))).numeric.primitive.value.data;
     var builder: v8.FunctionTemplate.Builder = .{};
     const template = builder.data(data).constructor_behavior(.Throw).side_effect_type(side_effect).build(env.isolate, native(State, callee), @constCast(&Fast(State, callee).overloads));
     return template.getFunction(env.ctx).?;
@@ -547,15 +550,15 @@ pub fn encode(env: Env, state: anytype, x: anytype) !v8.Value {
     const T = @TypeOf(x);
     if (T == v8.Value) return x;
     switch (@typeInfo(T)) {
-        .void => return v8.Primitive.initUndefined(env.isolate).value,
-        .null => return v8.Primitive.initNull(env.isolate).value,
-        .bool => return v8.Boolean.init(env.isolate, x).primitive.value,
+        .void => return eu.v.undefined_value(env.isolate).value,
+        .null => return eu.v.null_value(env.isolate).value,
+        .bool => return eu.v.boolean(env.isolate, x).primitive.value,
         .comptime_int, .int => {
-            if (x >= 0 and x <= std.math.maxInt(i32)) return v8.Number.initInt(env.isolate, @intCast(x)).numeric.primitive.value;
-            return v8.Number.init(env.isolate, @floatFromInt(x)).numeric.primitive.value;
+            if (x >= 0 and x <= std.math.maxInt(i32)) return eu.v.num_i32(env.isolate, @intCast(x)).numeric.primitive.value;
+            return eu.v.num_f64(env.isolate, @floatFromInt(x)).numeric.primitive.value;
         },
-        .comptime_float, .float => return v8.Number.init(env.isolate, x).numeric.primitive.value,
-        .optional => return if (x) |inner| encode(env, {}, inner) else v8.Primitive.initUndefined(env.isolate).value,
+        .comptime_float, .float => return eu.v.num_f64(env.isolate, x).numeric.primitive.value,
+        .optional => return if (x) |inner| encode(env, {}, inner) else eu.v.undefined_value(env.isolate).value,
         .pointer => |pointer| {
             if (pointer.size == .slice) {
                 if (pointer.child == u8) return string(env.isolate, x);
@@ -575,7 +578,7 @@ pub fn encode(env: Env, state: anytype, x: anytype) !v8.Value {
             if (@hasField(T, "object")) return x.object.value;
             if (T == v8.Object) return x.value;
             if (info.is_tuple) return encodeList(env, x);
-            const target = v8.Object.init(env.isolate);
+            const target = eu.v.object(env.isolate);
             inline for (info.field_names) |name| try set(env, target, name, @field(x, name));
             return target.value;
         },
@@ -585,7 +588,7 @@ pub fn encode(env: Env, state: anytype, x: anytype) !v8.Value {
 }
 
 fn encodeList(env: Env, items: anytype) !v8.Value {
-    const array = v8.Array.init(env.isolate, 0);
+    const array = eu.v.array(env.isolate, 0);
     var index: u32 = 0;
     switch (@typeInfo(@TypeOf(items))) {
         .@"struct" => inline for (items) |item| {
@@ -626,7 +629,7 @@ fn isHandle(comptime T: type) bool {
 
 /// Sets an own data property `name` on `target` to the encoded `x`.
 pub fn set(env: Env, target: v8.Object, name: []const u8, x: anytype) !void {
-    const ok = target.createDataProperty(env.ctx, v8.String.initUtf8(env.isolate, name).name, try encode(env, {}, x)) orelse return error.JavaScriptException;
+    const ok = target.createDataProperty(env.ctx, eu.v.str_utf8(env.isolate, name).name, try encode(env, {}, x)) orelse return error.JavaScriptException;
     if (!ok) return error.JavaScriptException;
 }
 
@@ -642,7 +645,7 @@ pub fn set(env: Env, target: v8.Object, name: []const u8, x: anytype) !void {
 /// });
 /// ```
 pub fn object(env: Env, comptime State: type, state: *State, comptime table: anytype) !v8.Object {
-    const target = v8.Object.init(env.isolate);
+    const target = eu.v.object(env.isolate);
     inline for (@typeInfo(@TypeOf(table)).@"struct".field_names) |name| {
         const field = @field(table, name);
         const F = @TypeOf(field);

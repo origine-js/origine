@@ -16,9 +16,17 @@
   `-Dcargo-offline`.
 - Optional: [just](https://github.com/casey/just) for the shortcuts below.
 
-The first build downloads depot_tools and V8 15.2.124.1 into `lib/v8_zig/.lp-cache/`
+The first build downloads depot_tools and V8 15.8.30 into `lib/v8_zig/.lp-cache/`
 and compiles V8: expect 20+ minutes. Later builds reuse that V8 archive; rebuild it
 with `zig build build-v8` after changing V8 or its patches.
+
+Release desktop V8 builds use Google's exact-version builtin PGO baseline.
+The downloader verifies its source revision and records a SHA-256 receipt. V8
+checks graph hashes and discards incompatible entries with warnings. Sixteen
+profiles are explicitly excluded even if their hashes match; see the
+[exclusion list and acceptance report](../lib/v8_zig/docs/builtin-pgo.md).
+Matching entries still guide branch optimization. Use `-Dbuiltin_pgo=false` for an
+unprofiled comparison build. This is builtin PGO, not C++ compiler PGO.
 
 ## Everyday commands
 
@@ -77,7 +85,7 @@ Editing loop:
 
 ```sh
 zig build patch-v8                # fetch V8 and apply patches, no compile (just patch-v8)
-# edit files in lib/v8_zig/.lp-cache/v8-15.2.124.1/
+# edit files in lib/v8_zig/.lp-cache/v8-15.8.30/
 cd lib/v8_zig
 just new-patch v8 my-change       # diff against the patched baseline -> next numbered patch
 cd ../.. && zig build run -Dv8_debug=true

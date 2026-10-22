@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 const v8 = @import("@v8");
+const eu = @import("@util");
 const m = @import("@managed");
 const mimalloc = @import("@mimalloc");
 const ensureV8 = @import("../support.zig").ensureV8;
@@ -87,7 +88,7 @@ pub fn exposeModule(scope: *m.Scope, id: []const u8, name: []const u8) !void {
     ctx.enter();
     defer ctx.exit();
     // Test-only raw namespace installation. Public capabilities reject namespaces.
-    try t.expect(ctx.getGlobal().set(ctx, v8.String.initUtf8(iso, name).name.primitive.value, p.result()).?);
+    try t.expect(ctx.getGlobal().set(ctx, eu.v.str_utf8(iso, name).name.primitive.value, p.result()).?);
 }
 
 pub const Deferred = struct {
@@ -139,16 +140,16 @@ pub const NativeCounter = struct {
         const ctx = iso.getCurrentContext();
         const receiver = info.this();
         if (!(receiver.hasPrivate(ctx, self.key.deref()) orelse false) or info.length() != 1 or !info.get_arg(0).isInt32()) {
-            _ = iso.throwException(v8.Exception.typeError(v8.String.initUtf8(iso, "Invalid counter receiver or argument")).?);
+            _ = iso.throwException(eu.v.type_error(eu.v.str_utf8(iso, "Invalid counter receiver or argument")).?);
             return;
         }
         const prior = receiver.getPrivate(ctx, self.key.deref()).?.i32Value(ctx).?;
         const delta = info.get_arg(0).i32Value(ctx).?;
         const next = std.math.add(i32, prior, delta) catch {
-            _ = iso.throwException(v8.Exception.rangeError(v8.String.initUtf8(iso, "Counter overflow")).?);
+            _ = iso.throwException(eu.v.range_error(eu.v.str_utf8(iso, "Counter overflow")).?);
             return;
         };
-        _ = receiver.setPrivate(ctx, self.key.deref(), v8.Number.initInt(iso, next).numeric.primitive.value);
+        _ = receiver.setPrivate(ctx, self.key.deref(), eu.v.num_i32(iso, next).numeric.primitive.value);
         var result = info.retval();
         result.setInt32(next);
     }
@@ -165,7 +166,7 @@ pub const AttributeBackend = struct {
     pub fn resolve(_: ?*anyopaque, request: m.ResolveRequest) !m.ModuleId {
         try t.expect(request.context.eq(v8.Isolate.getCurrent().getCurrentContext()));
         if (std.mem.eql(u8, request.specifier, "resolve-error")) {
-            _ = v8.Isolate.getCurrent().throwException(v8.Exception.typeError(v8.String.initUtf8(v8.Isolate.getCurrent(), "custom resolver error")).?);
+            _ = v8.Isolate.getCurrent().throwException(eu.v.type_error(eu.v.str_utf8(v8.Isolate.getCurrent(), "custom resolver error")).?);
             return error.ResolverDenied;
         }
         return request.allocator.dupe(u8, request.specifier);
@@ -196,8 +197,8 @@ pub const AttributeBackend = struct {
             return .{ .source = if (std.mem.eql(u8, request.import_attributes[0].value, "one")) "export const value = 1" else "export const value = 2" };
         }
         if (std.mem.eql(u8, request.module_id, "denied") or std.mem.eql(u8, request.module_id, "thrown")) {
-            const exception = v8.Exception.typeError(v8.String.initUtf8(iso, "custom loader error")).?;
-            try t.expect(exception.toObject(request.context).?.createDataProperty(request.context, v8.String.initUtf8(iso, "code").name, v8.String.initUtf8(iso, "DENIED").name.primitive.value).?);
+            const exception = eu.v.type_error(eu.v.str_utf8(iso, "custom loader error")).?;
+            try t.expect(exception.toObject(request.context).?.createDataProperty(request.context, eu.v.str_utf8(iso, "code").name, eu.v.str_utf8(iso, "DENIED").name.primitive.value).?);
             if (self.custom_error) |prior| prior.deinit();
             self.custom_error = .new(iso, exception);
             if (std.mem.eql(u8, request.module_id, "thrown")) {

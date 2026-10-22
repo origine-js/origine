@@ -5,6 +5,7 @@
 //! callback info, the entered context, the scope's errno cell and a per-call arena.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const errno = @import("errno.zig");
 const binding = @import("binding.zig");
 
@@ -91,7 +92,7 @@ pub const Call = struct {
 
     /// Starts a JS array that grows with `push`.
     pub fn array(self: *Call) ArrayBuilder {
-        return .{ .env = self.env(), .array = v8.Array.init(self.isolate, 0) };
+        return .{ .env = self.env(), .array = eu.v.array(self.isolate, 0) };
     }
 };
 

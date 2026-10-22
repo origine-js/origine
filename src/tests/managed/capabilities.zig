@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 const v8 = @import("@v8");
+const eu = @import("@util");
 const m = @import("@managed");
 const ensureV8 = @import("../support.zig").ensureV8;
 const support = @import("support.zig");
@@ -75,10 +76,10 @@ test "managed step 7: native private capabilities validate receivers without coe
     defer ctx.exit();
     var native: NativeCounter = .{ .key = .new(rt.isolate, v8.Private.init(rt.isolate, null)) };
     defer native.key.deinit();
-    const object = v8.Object.init(rt.isolate);
-    try t.expect(object.setPrivate(ctx, native.key.deref(), v8.Number.initInt(rt.isolate, 0).numeric.primitive.value).?);
-    const function = v8.Function.init(ctx, NativeCounter.increment, v8.External.init(rt.isolate, &native).value.data, 1, .Throw, .HasSideEffect);
-    try t.expect(object.createDataProperty(ctx, v8.String.initUtf8(rt.isolate, "inc").name, function.object.value).?);
+    const object = eu.v.object(rt.isolate);
+    try t.expect(object.setPrivate(ctx, native.key.deref(), eu.v.num_i32(rt.isolate, 0).numeric.primitive.value).?);
+    const function = v8.Function.init(ctx, NativeCounter.increment, eu.v.external(rt.isolate, &native).value.data, 1, .Throw, .HasSideEffect);
+    try t.expect(object.createDataProperty(ctx, eu.v.str_utf8(rt.isolate, "inc").name, function.object.value).?);
     const cap = v8.Global.Of(v8.Value).new(rt.isolate, object.value);
     defer cap.deinit();
     try b.installCapability("native", cap, null);

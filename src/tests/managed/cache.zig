@@ -1,6 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 const v8 = @import("@v8");
+const eu = @import("@util");
 const m = @import("@managed");
 const ensureV8 = @import("../support.zig").ensureV8;
 const support = @import("support.zig");
@@ -86,8 +87,8 @@ test "cache updates preserve pending imports and retired synthetic metadata" {
     const ctx = scope.context.deref();
     ctx.enter();
     defer ctx.exit();
-    try t.expectEqual(@as(i32, 7), old.deref().result().toObject(ctx).?.get(ctx, v8.String.initUtf8(rt.isolate, "value").name.primitive.value).?.i32Value(ctx).?);
-    try t.expectEqual(@as(i32, 3), fresh.deref().result().toObject(ctx).?.get(ctx, v8.String.initUtf8(rt.isolate, "value").name.primitive.value).?.i32Value(ctx).?);
+    try t.expectEqual(@as(i32, 7), old.deref().result().toObject(ctx).?.get(ctx, eu.v.str_utf8(rt.isolate, "value").name.primitive.value).?.i32Value(ctx).?);
+    try t.expectEqual(@as(i32, 3), fresh.deref().result().toObject(ctx).?.get(ctx, eu.v.str_utf8(rt.isolate, "value").name.primitive.value).?.i32Value(ctx).?);
     const deleted = try scope.importModule("pending-delete", null);
     defer deleted.deinit();
     try t.expectEqual(@as(usize, 1), try scope.deleteImportCache(.{ .module_id = "pending-delete" }));

@@ -11,6 +11,7 @@
 //! and returns undefined; every native clears it on entry.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const binding = @import("binding.zig");
 const func = binding.func;
 const errno_api = @import("errno.zig");
@@ -235,7 +236,7 @@ pub const Host = struct {
             const object = for (namespaces.items) |known| {
                 if (std.mem.eql(u8, known.name, namespace)) break known.object;
             } else blk: {
-                const created = v8.Object.init(env.isolate);
+                const created = eu.v.object(env.isolate);
                 try namespaces.append(self.allocator, .{ .name = namespace, .object = created });
                 try binding.set(env, native, namespace, created);
                 break :blk created;
@@ -397,9 +398,9 @@ pub const Host = struct {
         try self.installRustNatives(env, native, state);
         try binding.set(env, native, "errno", try errnoArray(isolate, state));
         try binding.set(env, native, "errors", (try errno_api.table(env)).value);
-        const script = v8.Script.compile(ctx, v8.String.initUtf8(isolate, glue_script.source), scope.scriptOrigin(glue_script.origin, false)) orelse return error.JavaScriptException;
+        const script = v8.Script.compile(ctx, eu.v.str_utf8(isolate, glue_script.source), scope.scriptOrigin(glue_script.origin, false)) orelse return error.JavaScriptException;
         const glue = v8.Function.from_opaque((script.run(ctx) orelse return error.JavaScriptException).data.handle) orelse return error.BootstrapFailed;
-        const api = glue.call(ctx, v8.Primitive.initUndefined(isolate).value, &.{native.value}) orelse return error.JavaScriptException;
+        const api = glue.call(ctx, eu.v.undefined_value(isolate).value, &.{native.value}) orelse return error.JavaScriptException;
         try scope.hardenLocal(api);
         return .new(isolate, api);
     }
@@ -430,7 +431,7 @@ pub const Host = struct {
             const main_value = namespace.get(session.ctx, binding.string(session.isolate(), "main")) orelse return error.InitFailed;
             const main_fn = v8.Function.from_opaque(main_value.data.handle) orelse return error.MainMissing;
             errdefer session.retainException(error_info);
-            const result = main_fn.call(session.ctx, v8.Primitive.initUndefined(session.isolate()).value, &.{api.deref()}) orelse return error.MainFailed;
+            const result = main_fn.call(session.ctx, eu.v.undefined_value(session.isolate()).value, &.{api.deref()}) orelse return error.MainFailed;
             break :blk v8.Global.Of(v8.Value).new(session.isolate(), result);
         };
         defer main_result.deinit();
@@ -527,12 +528,12 @@ pub const Host = struct {
 /// buffer is non-detachable (its detach key is a private object). Seeds the cell with
 /// the value already written to `errno_local`.
 fn errnoArray(isolate: v8.Isolate, state: *ScopeState) !v8.Value {
-    const buffer = v8.ArrayBuffer.newWithByteLength(isolate, @sizeOf(u32)) orelse binding.oom();
+    const buffer = eu.v.array_buffer(isolate, @sizeOf(u32)) orelse binding.oom();
     const cell: *u32 = @ptrCast(@alignCast(buffer.data() orelse binding.oom()));
     cell.* = state.errno_local;
     state.errno_cell = cell;
     state.errno_buffer = .new(isolate, buffer);
-    buffer.setDetachKey(v8.Object.init(isolate).value);
+    buffer.setDetachKey(eu.v.object(isolate).value);
     const array = v8.Uint32Array.init(buffer, 0, 1) orelse binding.oom();
     return array.typedArray.arrayBufferView.object.value;
 }

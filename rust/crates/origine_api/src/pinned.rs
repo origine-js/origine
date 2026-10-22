@@ -116,8 +116,12 @@ enum Taken {
 
 /// Decides and, for [`Plan::Pin`], performs the pin of `arg`'s window. `init` says whether the
 /// bytes are meaningful (a write source) or only room to fill (a read sink).
+/// Borrows arg through return; a returned region owns its backing-store reference.
+/// Shared buffers stay attached and select the copy path; failure retains no resources.
 fn take(arg: &ArrayBufferArg<'_>, init: bool) -> Result<Taken, NativeError> {
-    let buffer = arg.buffer();
+    let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(arg.buffer()) else {
+        return Ok(Taken::Copy);
+    };
     if buffer.was_detached() {
         return Err(NativeError::Errno(errno::STALE_HANDLE));
     }

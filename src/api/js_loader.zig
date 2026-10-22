@@ -4,6 +4,7 @@
 //! transformers (api.scope.create `transformers`) have run on it.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const binding = @import("binding.zig");
 const Runtime = @import("../managed/runtime.zig").Runtime;
 const Scope = @import("../managed/scope.zig").Scope;
@@ -33,17 +34,36 @@ pub const JsLoader = struct {
     entries: []transformer.Entry = &.{},
     exts: [][]u8 = &.{},
     js: []JsTransformer = &.{},
+    /// Loads whose promise has not settled yet. Freed by `fulfilled`/`rejected` as they run,
+    /// or by `deinit` for any that never will.
+    pendings: std.ArrayList(*Pending) = .empty,
 
-    /// Releases the loader function, the transformer functions and all storage. Call once,
-    /// before `Runtime.destroy`.
+    /// Releases the loader function, the transformer functions, unsettled loads and all
+    /// storage. Call once, before `Runtime.destroy`.
     pub fn deinit(self: *JsLoader) void {
         const alloc = self.host.allocator;
         self.function.deinit();
         for (self.js) |*entry| entry.function.deinit();
+        for (self.pendings.items) |pending| {
+            alloc.free(pending.module_id);
+            alloc.destroy(pending);
+        }
+        self.pendings.deinit(alloc);
         alloc.free(self.js);
         for (self.exts) |ext| alloc.free(ext);
         alloc.free(self.exts);
         alloc.free(self.entries);
+    }
+
+    /// Drops a settled load from `pendings` and frees it.
+    fn release(self: *JsLoader, pending: *Pending) void {
+        for (self.pendings.items, 0..) |item, index| {
+            if (item != pending) continue;
+            _ = self.pendings.swapRemove(index);
+            break;
+        }
+        self.host.allocator.free(pending.module_id);
+        self.host.allocator.destroy(pending);
     }
 
     /// The transformers a source read by this loader passes through.
@@ -146,7 +166,7 @@ fn runJs(data: ?*anyopaque, request: transformer.Request) anyerror!transformer.O
     tc.init(isolate);
     defer tc.deinit();
     const args = [_]v8.Value{ binding.string(isolate, request.source), binding.string(isolate, request.module_id) };
-    const result = self.function.deref().call(parent_ctx, v8.Primitive.initUndefined(isolate).value, &args) orelse {
+    const result = self.function.deref().call(parent_ctx, eu.v.undefined_value(isolate).value, &args) orelse {
         const thrown = if (tc.getException()) |exception| exception.toDetailString(parent_ctx) else null;
         const detail = if (thrown) |text| blk: {
             const buffer = try request.allocator.alloc(u8, text.lenUtf8(isolate));
@@ -169,7 +189,7 @@ fn sourceOf(ctx: v8.Context, isolate: v8.Isolate, value: v8.Value, allocator: st
     var source = value;
     if (!value.isString()) {
         const object = value.toObject(ctx) orelse return error.LoaderFailed;
-        const descriptor = object.getOwnPropertyDescriptor(ctx, v8.String.initUtf8(isolate, "source").name) orelse return error.LoaderFailed;
+        const descriptor = object.getOwnPropertyDescriptor(ctx, eu.v.str_utf8(isolate, "source").name) orelse return error.LoaderFailed;
         if (!descriptor.isObject()) return error.LoaderFailed;
         source = (descriptor.toObject(ctx) orelse return error.LoaderFailed).get(ctx, binding.string(isolate, "value")) orelse return error.LoaderFailed;
     }
@@ -206,16 +226,20 @@ fn callLoader(self: *JsLoader, request: module_types.LoadRequest) anyerror!Fetch
     var tc: v8.TryCatch = undefined;
     tc.init(isolate);
     defer tc.deinit();
-    const result = self.function.deref().call(parent_ctx, v8.Primitive.initUndefined(isolate).value, &.{binding.string(isolate, request.module_id)}) orelse return error.LoaderFailed;
+    const result = self.function.deref().call(parent_ctx, eu.v.undefined_value(isolate).value, &.{binding.string(isolate, request.module_id)}) orelse return error.LoaderFailed;
     if (result.isPromise()) {
         const pending = host.allocator.create(Pending) catch binding.oom();
         const module_id = host.allocator.dupe(u8, request.module_id) catch binding.oom();
         pending.* = .{ .host = host, .loader = self, .token = request.token, .module_id = module_id };
-        const external = v8.External.init(isolate, pending).value.data;
+        self.pendings.append(host.allocator, pending) catch binding.oom();
+        const external = eu.v.external(isolate, pending).value.data;
         const on_fulfilled = v8.Function.init(parent_ctx, fulfilled, external, 1, .Throw, .HasSideEffect);
         const on_rejected = v8.Function.init(parent_ctx, rejected, external, 1, .Throw, .HasSideEffect);
         const promise = v8.Promise.from_opaque(result.data.handle).?;
-        _ = promise.then2(parent_ctx, on_fulfilled, on_rejected) orelse return error.LoaderFailed;
+        _ = promise.then2(parent_ctx, on_fulfilled, on_rejected) orelse {
+            self.release(pending);
+            return error.LoaderFailed;
+        };
         return .pending;
     }
     return .{ .source = try sourceOf(parent_ctx, isolate, result, request.allocator) };
@@ -224,10 +248,7 @@ fn callLoader(self: *JsLoader, request: module_types.LoadRequest) anyerror!Fetch
 fn fulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(Pending, info);
     const host = pending.host;
-    defer {
-        host.allocator.free(pending.module_id);
-        host.allocator.destroy(pending);
-    }
+    defer pending.loader.release(pending);
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
     const rt: *Runtime = runtimeOf(ctx) orelse return;
@@ -255,10 +276,7 @@ fn fulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
 
 fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(Pending, info);
-    defer {
-        pending.host.allocator.free(pending.module_id);
-        pending.host.allocator.destroy(pending);
-    }
+    defer pending.loader.release(pending);
     const ctx = info.isolate().getCurrentContext();
     const rt: *Runtime = runtimeOf(ctx) orelse return;
     rt.completeLoad(pending.token, .{ .failure = error.LoaderRejected }) catch {};

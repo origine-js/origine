@@ -306,7 +306,7 @@ impl<'s> IntoJs<'s> for ReadInto {
             ReadInto::Pinned { bytes, store } => {
                 // Re-attaches the store the guest's buffer was detached from (see `pinned`).
                 let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
-                read_result(scope, bytes, buffer)
+                read_result(scope, bytes, buffer.into())
             }
             ReadInto::Copied { bytes } => bytes.into_js(scope),
         }
@@ -316,7 +316,7 @@ impl<'s> IntoJs<'s> for ReadInto {
 fn read_result<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     bytes: usize,
-    buffer: v8::Local<'s, v8::ArrayBuffer>,
+    buffer: v8::Local<'s, v8::ArrayBufferBase>,
 ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
     let object = crate::encode::new_object(scope);
     crate::encode::set(scope, object, "bytes", bytes)?;

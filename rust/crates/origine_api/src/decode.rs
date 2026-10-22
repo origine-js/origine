@@ -1,6 +1,7 @@
 //! Decoding JS arguments into Rust values (the counterpart of `decode` in `src/api/binding.zig`).
 
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use origine_api_core::Backend;
 use origine_api_core::arg::{self, ArgError};
@@ -122,15 +123,17 @@ impl<'s, T: FromJs<'s>> FromJs<'s> for Option<T> {
 /// keep the memory alive across an async operation.
 #[derive(Clone, Copy)]
 pub struct ArrayBufferArg<'s> {
-    buffer: v8::Local<'s, v8::ArrayBuffer>,
+    buffer: v8::Local<'s, v8::ArrayBufferBase>,
     offset: usize,
     len: usize,
 }
 
 impl<'s> FromJs<'s> for ArrayBufferArg<'s> {
+    /// Borrows local handles during decoding and returns a view valid for this
+    /// call's handle scope. Shared buffers use atomic byte copying; failure retains nothing.
     fn from_js(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, index: usize) -> Result<Self, ArgError> {
         const EXPECTED: &str = "an ArrayBuffer or typed array";
-        if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
+        if let Ok(buffer) = v8::Local::<v8::ArrayBufferBase>::try_from(value) {
             return Ok(ArrayBufferArg { buffer, offset: 0, len: buffer.byte_length() });
         }
         let view = v8::Local::<v8::ArrayBufferView>::try_from(value).map_err(|_| ArgError::new(index, EXPECTED))?;
@@ -140,13 +143,13 @@ impl<'s> FromJs<'s> for ArrayBufferArg<'s> {
 }
 
 impl<'s> ArrayBufferArg<'s> {
-    /// The argument for `len` bytes at `offset` of `buffer`.
-    pub(crate) fn from_parts(buffer: v8::Local<'s, v8::ArrayBuffer>, offset: usize, len: usize) -> ArrayBufferArg<'s> {
+    /// Borrows a live buffer local and its valid byte window until the call's handle scope closes.
+    pub(crate) fn from_parts(buffer: v8::Local<'s, v8::ArrayBufferBase>, offset: usize, len: usize) -> ArrayBufferArg<'s> {
         ArrayBufferArg { buffer, offset, len }
     }
 
-    /// The underlying `ArrayBuffer`.
-    pub fn buffer(&self) -> v8::Local<'s, v8::ArrayBuffer> {
+    /// Returns an ordinary/shared buffer local borrowed until this handle scope closes.
+    pub fn buffer(&self) -> v8::Local<'s, v8::ArrayBufferBase> {
         self.buffer
     }
 }
@@ -172,8 +175,22 @@ impl ArrayBufferArg<'_> {
         Some(unsafe { base.add(self.offset) })
     }
 
-    /// Copies the covered bytes out.
+    /// Borrows the live buffer during copying and returns a caller-owned Vec. Shared
+    /// memory uses relaxed atomic bytes; the result need not be a coherent snapshot.
     pub fn to_vec(&self) -> Vec<u8> {
+        if self.buffer.is_shared_array_buffer() {
+            return match self.start() {
+                Some(start) => (0..self.len)
+                    .map(|index| {
+                        // SAFETY: index is inside the live shared backing-store window.
+                        let byte = unsafe { start.as_ptr().add(index) };
+                        // SAFETY: every byte is aligned for AtomicU8; no non-atomic Rust alias is formed.
+                        unsafe { AtomicU8::from_ptr(byte) }.load(Ordering::Relaxed)
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+        }
         match self.start() {
             // SAFETY: `start` points at `len` initialized bytes of a live backing store, and
             // nothing mutates it while this single-threaded call copies.
@@ -182,10 +199,20 @@ impl ArrayBufferArg<'_> {
         }
     }
 
-    /// Overwrites the start of the covered bytes with `src` (at most `len()` bytes); returns the count.
+    /// Borrows src through return and copies into the live guest window, using atomic
+    /// bytes for shared memory. Returns the copied count; retains no Rust storage.
     pub fn copy_from_slice(&self, src: &[u8]) -> usize {
         let count = src.len().min(self.len);
         if let (Some(start), true) = (self.start(), count > 0) {
+            if self.buffer.is_shared_array_buffer() {
+                for (index, value) in src[..count].iter().copied().enumerate() {
+                    // SAFETY: index is inside the live shared backing-store window.
+                    let byte = unsafe { start.as_ptr().add(index) };
+                    // SAFETY: every byte is aligned for AtomicU8; no non-atomic Rust alias is formed.
+                    unsafe { AtomicU8::from_ptr(byte) }.store(value, Ordering::Relaxed);
+                }
+                return count;
+            }
             // SAFETY: `start` points at `len >= count` writable bytes of a live backing store, and
             // `src` is Rust memory, so the ranges cannot overlap.
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), start.as_ptr(), count) };
@@ -203,14 +230,17 @@ impl ArrayBufferArg<'_> {
         self.offset
     }
 
-    /// True when the guest can hand the memory over (`ArrayBuffer.prototype.transfer`-style).
+    /// Borrows the local through return; reports whether the guest can transfer its
+    /// memory. Shared buffers cannot transfer. Retains no resources.
     pub fn is_detachable(&self) -> bool {
-        self.buffer.is_detachable()
+        v8::Local::<v8::ArrayBuffer>::try_from(self.buffer).is_ok_and(|buffer| buffer.is_detachable())
     }
 
-    /// Stub for the pin+detach buffer path: detaches the whole buffer; `false` when it cannot be.
+    /// Borrows the local through return and detaches an ordinary buffer when allowed.
+    /// Returns false for shared/non-detachable buffers; retains no resources.
     pub fn detach(&self) -> bool {
-        self.is_detachable() && self.buffer.detach(None).unwrap_or(false)
+        v8::Local::<v8::ArrayBuffer>::try_from(self.buffer)
+            .is_ok_and(|buffer| buffer.is_detachable() && buffer.detach(None).unwrap_or(false))
     }
 }
 

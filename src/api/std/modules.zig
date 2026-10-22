@@ -9,11 +9,11 @@ const modules = std_io.modules() ++
     std_quansync.modules() ++
     std_fs.modules() ++
     std_text.modules() ++
-    std_transformer_typescript.modules();
+    std_transformer_oxc.modules();
 
 const std_io = @import("io.zig");
 const std_errno = @import("errno.zig");
 const std_quansync = @import("quansync.zig");
 const std_fs = @import("fs.zig");
 const std_text = @import("text.zig");
-const std_transformer_typescript = @import("transformer/typescript.zig");
+const std_transformer_oxc = @import("transformer/oxc.zig");

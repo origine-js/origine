@@ -1,4 +1,4 @@
-//! `origine:@std/transformer/typescript`: factories for host transformers (see src/js/std/transformer/typescript.js).
+//! `origine:@std/transformer/oxc`: factories for host transformers (see src/js/std/transformer/oxc.js).
 //! Each `make` call creates a native function `(source, id) => string` backed by an `Instance`
 //! with its own oxc options, branded (transform_handle.zig) so `api.scope.create` can run it
 //! directly. Instances live in the module's per-scope state until `Host.destroy`.
@@ -125,18 +125,20 @@ fn make(cell: *module.Cell(Factory), c: *Call, options: ?v8.Object) !?v8.Value {
             entry.field.* = value.booleanValue(c.isolate);
         };
     }
-    try cell.data.instances.append(alloc, instance);
     const data = v8.External.init(c.isolate, instance).value.data;
     const function = v8.Function.init(c.ctx, binding.native(Instance, Instance.call), data, 2, .Throw, .HasNoSideEffect);
     try transform_handle.mark(c.ctx, c.isolate, function, &instance.handle);
+    // Last fallible step: once the instance is listed, `errdefer instance.deinit()` above no
+    // longer runs, so Factory.deinit is the only owner and frees it exactly once.
+    try cell.data.instances.append(alloc, instance);
     return function.object.value;
 }
 
 pub fn modules() [if (oxc.enabled) 1 else 0]module.Module {
     if (!oxc.enabled) return .{};
     return .{.{
-        .id = "origine:@std/transformer/typescript",
-        .source = @embedFile("../../../js/std/transformer/typescript.js"),
+        .id = "origine:@std/transformer/oxc",
+        .source = @embedFile("../../../js/std/transformer/oxc.js"),
         .bindings = module.stateful(Factory, .{ .make = func(make, .{ .side_effect = .any }) }),
     }};
 }

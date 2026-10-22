@@ -5,6 +5,7 @@ pub mod arg;
 pub mod errno;
 pub mod error;
 pub mod pin;
+pub mod slab;
 pub mod table;
 
 pub use arg::ArgError;

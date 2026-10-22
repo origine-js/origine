@@ -49,6 +49,7 @@ pub(crate) static NATIVES: &[RawNative] = &[
     net::NATIVE_NET_ACCEPT,
     net::NATIVE_NET_CONNECT,
     net::NATIVE_NET_READ,
+    net::NATIVE_NET_READ_INTO,
     net::NATIVE_NET_WRITE,
     net::NATIVE_NET_CLOSE,
 ];

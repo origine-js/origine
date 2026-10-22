@@ -93,6 +93,7 @@ Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, boun
 | `net.accept` | `id` | Promise `{ id, port }` (port = the peer's) |
 | `net.connect` | `io, host, port` | Promise `{ id, port }` |
 | `net.read` | `id, len` | Promise `Uint8Array` of 1..=`len` bytes (empty at end of stream); host-allocated like `fileReadAlloc` (same compaction of short reads, 256 MiB cap) |
+| `net.readInto` | `id, buffer` | Promise byte count (0 = end of stream) read once into the guest's buffer via a native scratch `Vec` copied at completion: nothing is detached or allocated in V8, so one buffer can be reused for every read |
 | `net.write` | `id, data` | Promise byte count; copies `data` and sends all of it |
 | `net.close` | `id` | sync; streams are shut down so pending reads finish with 0 bytes |
 

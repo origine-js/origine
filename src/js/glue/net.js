@@ -99,6 +99,18 @@
         return Promise.reject(e);
       }
     }
+    /**
+     * Reads once into `buffer` (an ArrayBuffer or view): resolves the byte count, 0 at end of
+     * stream. The buffer is not detached, so one buffer can serve every read.
+     */
+    readInto(buffer) {
+      try {
+        if (!(buffer instanceof ArrayBuffer) && !ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer or a view');
+        return native.net.readInto(live(this), buffer);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
     /** Writes all of `data` (an ArrayBuffer or a view; it is copied). Resolves the byte count. */
     write(data) {
       try {

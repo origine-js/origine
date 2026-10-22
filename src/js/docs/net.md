@@ -21,7 +21,7 @@ Handles are instances of classes the guest cannot construct (`TypeError`), whose
 |---|---|
 | `Handle` | base: `io`, `closed`, `close()` (idempotent, `Promise<void>`), `[Symbol.asyncDispose]()` when the engine has it |
 | `Server extends Handle` | `port`, `accept(): Promise<Socket>` |
-| `Socket extends Handle` | `remotePort`, `read(length): Promise<Uint8Array>` (1 to 2^28 bytes), `write(data): Promise<number>` (ArrayBuffer or view; copied) |
+| `Socket extends Handle` | `remotePort`, `read(length): Promise<Uint8Array>` (1 to 2^28 bytes), `readInto(buffer): Promise<number>` (reads into your ArrayBuffer/view without detaching it; 0 = end of stream; the allocation-free way to read), `write(data): Promise<number>` (ArrayBuffer or view; copied) |
 | `api.net.listen(io, { host?, port? })` | `Server`; throws `{ errno, name }` (`AddressInUse`, `AccessDenied`, `BadHandle`, ...) |
 | `api.net.connect(io, { host?, port })` | `Promise<Socket>`; rejects `ConnectionRefused`, ... |
 

@@ -206,6 +206,35 @@ fn net_read(
     }))
 }
 
+/// `native.net.readInto(id, buffer)`: Promise of the byte count (0 = end of stream) read once
+/// into the guest's `buffer` (an ArrayBuffer or view). The read goes to a native scratch `Vec`
+/// and is copied into the buffer at completion, so nothing is detached and the guest can reuse
+/// the same buffer for every read; no V8 object is created per read. `StaleHandle` if the buffer
+/// was detached meanwhile.
+#[native(side_effect = "any", path = "net.readInto", needs = "runtime", promise)]
+fn net_read_into<'s>(
+    host: &mut HostState,
+    key: ScopeKey,
+    id: u32,
+    buffer: ArrayBufferArg<'s>,
+) -> Result<Op<'s, impl Future<Output = Result<usize, NativeError>> + 'static + use<>>, NativeError> {
+    let (socket, lp) = stream_of(host, key, id)?;
+    let runtime = socket.runtime();
+    let len = buffer.len();
+    Ok(Op::reading(
+        runtime,
+        async move {
+            if len == 0 {
+                return Ok(Vec::new());
+            }
+            let (read, mut data) = lp.recv(socket.fd(), vec![0u8; len], 0).await;
+            data.truncate(read?);
+            Ok(data)
+        },
+        buffer,
+    ))
+}
+
 /// `native.net.write(id, data)`: Promise of the byte count; copies `data` and sends all of it.
 #[native(side_effect = "any", path = "net.write", needs = "runtime", promise)]
 fn net_write(

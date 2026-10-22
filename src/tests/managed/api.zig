@@ -1471,6 +1471,15 @@ const net_source =
     \\  }
     \\  out.reply = reply === 'ping-pong;ping-pong;ping-pong;';
     \\
+    \\  // readInto: a reusable guest buffer, nothing detached, partial windows, end of stream.
+    \\  await client.write(message);
+    \\  const reuse = new Uint8Array(32);
+    \\  let have = 0;
+    \\  while (have < message.length) have += await client.readInto(reuse.subarray(have));
+    \\  out.readInto = have === message.length && String.fromCharCode(...reuse.subarray(0, have)) === 'ping-pong' && reuse.buffer.byteLength === 32 &&
+    \\    (await client.readInto(new Uint8Array(0))) === 0 &&
+    \\    (await client.readInto({}).then(() => false, e => e instanceof TypeError));
+    \\
     \\  // A large write is sent whole and echoed back in order.
     \\  const big = new Uint8Array(1 << 20).map((_, i) => i & 255);
     \\  const sending = client.write(big);
@@ -1511,7 +1520,7 @@ test "api: net echo over loopback with Handle classes (auto and threaded backend
         try setupBackend(&fx, net_source, backend, .{});
         defer fx.deinit();
         try fx.run();
-        try check(fx.scope, "report.server && report.client && report.wrote && report.reply && report.big && report.echoTotal && report.closed");
+        try check(fx.scope, "report.server && report.client && report.wrote && report.reply && report.readInto && report.big && report.echoTotal && report.closed");
         try check(fx.scope, "report.refused && report.denied && report.badIo && report.badArgs && report.noForge && report.afterIoClose");
     }
 }

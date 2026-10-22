@@ -19,11 +19,13 @@ export async function main(api) {
 
   const echo = async () => {
     const conn = await server.accept();
+    // One reusable buffer per connection (readInto does not detach it), like the Deno variant.
+    const buf = new Uint8Array(Math.max(SIZE, 1024));
     try {
       for (;;) {
-        const chunk = await conn.read(Math.max(SIZE, 1024));
-        if (chunk.length === 0) break;
-        await conn.write(chunk);
+        const n = await conn.readInto(buf);
+        if (n === 0) break;
+        await conn.write(n === buf.length ? buf : buf.subarray(0, n));
       }
     } catch {
       // the client closed first
@@ -43,6 +45,7 @@ export async function main(api) {
     const msg = new Uint8Array(SIZE);
     for (let i = 8; i < SIZE; i++) msg[i] = pat(i);
     const view = new DataView(msg.buffer);
+    const rbuf = new Uint8Array(SIZE);
     for (let seq = 1; ; seq++) {
       const t0 = Date.now();
       if (t0 >= end) return;
@@ -50,11 +53,11 @@ export async function main(api) {
       await sock.write(msg);
       let got = 0;
       while (got < SIZE) {
-        const chunk = await sock.read(SIZE - got);
-        if (chunk.length === 0) throw new Error('unexpected end of stream');
-        if (chunk[0] !== expect(seq, got) || chunk[chunk.length - 1] !== expect(seq, got + chunk.length - 1))
-          throw new Error('echo content mismatch');
-        got += chunk.length;
+        const n = await sock.readInto(got === 0 ? rbuf : rbuf.subarray(got));
+        if (n === 0) throw new Error('unexpected end of stream');
+        const at = got === 0 ? 0 : got;
+        if (rbuf[at] !== expect(seq, got) || rbuf[at + n - 1] !== expect(seq, got + n - 1)) throw new Error('echo content mismatch');
+        got += n;
       }
       if (t0 >= warmEnd) rounds++;
     }

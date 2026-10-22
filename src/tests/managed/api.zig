@@ -1493,7 +1493,7 @@ const net_source =
     \\
     \\  // Closing the client ends the echo loop; reads after close reject.
     \\  await client.close();
-    \\  out.echoTotal = (await echoed) === 27 + (1 << 20);
+    \\  out.echoTotal = (await echoed) === 27 + 9 + (1 << 20);
     \\  out.closed = client.closed && (await client.read(1).then(() => false, e => e.name === 'BadHandle'));
     \\
     \\  // Errors and validation.

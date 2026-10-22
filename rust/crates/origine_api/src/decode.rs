@@ -199,6 +199,20 @@ impl ArrayBufferArg<'_> {
         }
     }
 
+    /// Runs `f` on the covered bytes without copying them (a copy for shared memory, which has no
+    /// stable non-atomic view). `f` must not run guest code or touch the buffer.
+    pub fn with_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        if self.buffer.is_shared_array_buffer() {
+            return f(&self.to_vec());
+        }
+        match self.start() {
+            // SAFETY: `start` points at `len` initialized bytes of a live backing store; the guest
+            // cannot run while `f` does (single isolate thread, no re-entry), so nothing mutates them.
+            Some(start) => f(unsafe { std::slice::from_raw_parts(start.as_ptr(), self.len) }),
+            None => f(&[]),
+        }
+    }
+
     /// Borrows src through return and copies into the live guest window, using atomic
     /// bytes for shared memory. Returns the copied count; retains no Rust storage.
     pub fn copy_from_slice(&self, src: &[u8]) -> usize {

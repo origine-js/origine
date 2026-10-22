@@ -105,3 +105,12 @@ Where the JS path's time goes at 1 connection (in-tree counters, one half round 
 | 1 KiB | 64 | 150,580 rt/s<br>p50 420.5 us / p99 500.3 us | 85,813 rt/s<br>mean 745.8 us | 154,744 rt/s<br>p50 404.9 us / p99 568.0 us | 137,954 rt/s<br>p50 453.6 us / p99 667.0 us | 115,174 rt/s<br>p50 547.4 us / p99 674.9 us | 100,568 rt/s<br>p50 624.0 us / p99 762.0 us |
 
 At 64 connections about 34% of the JS thread is in `sendto` (loopback sends do the receiver-side work synchronously; Bun pays this too), about 16% in the JS bodies and 11% in native glue.
+
+## Event API (`socket.register('data')`), 1 KiB x 2 runs, macOS efficiency mode off
+
+`bench.origine.js ... <backend> events`: the echo server and the clients use `register('data')` with pooled leases and synchronous `send`, no promise per message.
+
+| conns | `readCopy` (promises) | events |
+| --- | --- | --- |
+| 1 | 31.8k, 33.8k rt/s | 38.4k, 38.3k rt/s |
+| 64 | 82.2k, 81.6k rt/s | 96.0k, 96.5k rt/s |

@@ -28,9 +28,9 @@ use crate::native::{Op, ScopeKey, host_mut};
 use crate::pinned;
 
 /// `MSG_NOSIGNAL` on Linux; macOS has none (the socket gets `SO_NOSIGPIPE` instead).
-const SEND_FLAGS: u32 = if cfg!(target_os = "linux") { 0x4000 } else { 0 };
+pub(crate) const SEND_FLAGS: u32 = if cfg!(target_os = "linux") { 0x4000 } else { 0 };
 /// Pending-connection queue and peer-address capacity for `accept`.
-const ADDR_CAP: usize = 128;
+pub(crate) const ADDR_CAP: usize = 128;
 
 enum Endpoint {
     Listener(TcpListener),
@@ -53,15 +53,28 @@ impl Socket {
         self.runtime
     }
 
-    fn fd(&self) -> isize {
+    pub(crate) fn fd(&self) -> isize {
         match &self.endpoint {
             Endpoint::Listener(l) => l.as_raw_fd() as isize,
             Endpoint::Stream(s) => s.as_raw_fd() as isize,
         }
     }
 
-    fn is_listener(&self) -> bool {
+    pub(crate) fn is_listener(&self) -> bool {
         matches!(self.endpoint, Endpoint::Listener(_))
+    }
+
+    /// The stream of a stream socket.
+    pub(crate) fn stream(&self) -> Option<&TcpStream> {
+        match &self.endpoint {
+            Endpoint::Stream(stream) => Some(stream),
+            Endpoint::Listener(_) => None,
+        }
+    }
+
+    /// A stream socket (accepted by a subscription's pump) of `owner` on `runtime`.
+    pub(crate) fn accepted(owner: ScopeKey, runtime: u32, stream: TcpStream) -> Socket {
+        Socket { owner, runtime, endpoint: Endpoint::Stream(stream) }
     }
 
     /// Wakes pending reads (they complete with 0 bytes) when the guest closes the socket.
@@ -96,7 +109,7 @@ fn no_sigpipe(stream: &TcpStream) {
 fn no_sigpipe(_: &TcpStream) {}
 
 /// Non-blocking, no-delay, no SIGPIPE.
-fn prepare(stream: &TcpStream) -> Result<(), NativeError> {
+pub(crate) fn prepare(stream: &TcpStream) -> Result<(), NativeError> {
     stream.set_nonblocking(true)?;
     stream.set_nodelay(true)?;
     no_sigpipe(stream);
@@ -115,7 +128,7 @@ fn loopback(host: &str, port: u32) -> Result<SocketAddr, NativeError> {
 }
 
 /// A stream socket of the table (not a listener) with its loop; `BadHandle` otherwise.
-fn stream_of(host: &HostState, key: ScopeKey, id: u32) -> Result<(Rc<Socket>, Rc<origine_io::Loop>), NativeError> {
+pub(crate) fn stream_of(host: &HostState, key: ScopeKey, id: u32) -> Result<(Rc<Socket>, Rc<origine_io::Loop>), NativeError> {
     let (socket, lp) = host.socket(key, id)?;
     if socket.is_listener() { Err(NativeError::Errno(errno::BAD_HANDLE)) } else { Ok((socket, lp)) }
 }
@@ -295,5 +308,6 @@ fn net_write(
 #[native(side_effect = "any", path = "net.close", needs = "runtime")]
 fn net_close(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
     host.remove_socket(key, id)?.shutdown();
+    host.sub_closed(id);
     Ok(())
 }

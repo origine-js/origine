@@ -6,7 +6,8 @@
 // round-trip latency (conns / rps) but not p50/p99.
 export async function main(api) {
   const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto', mode = 'copy'] = api.env.args();
-  // mode: 'copy' = readCopy (copy into a reused buffer), 'into' = readInto (detach and get the buffer back)
+  // mode: 'copy' = readCopy (copy into a reused buffer), 'into' = readInto (detach and get the buffer back),
+  // 'events' = socket.register('data') with pooled leases and synchronous send (no promise per message)
   const pinnedReads = mode === 'into';
   const SIZE = Number(sizeArg);
   const CONNS = Number(connsArg);
@@ -14,10 +15,75 @@ export async function main(api) {
   const MEAS = Number(measArg ?? 3) * 1000;
   if (!(SIZE >= 16) || !(CONNS >= 1)) throw new Error('bad args');
 
+  const eventsMode = mode === 'events';
   const pat = i => (i * 7 + 13) & 255;
   const expect = (seq, i) => (i < 4 ? (seq >>> (8 * i)) & 255 : i < 8 ? 0 : pat(i));
   const io = api.io.create({ backend });
   const server = api.net.listen(io, { port: 0 });
+
+  if (eventsMode) {
+    // Echo over events: lease the chunk, send it back, give the lease back.
+    server.register('connection', conn => {
+      conn.register('data', ev => {
+        const buf = ev.buffer();
+        conn.send(buf);
+        buf.unref();
+      });
+    });
+    const running = io.run(); // handlers alone do not keep the program alive
+    const clients = [];
+    for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port }));
+    const start = Date.now();
+    const warmEnd = start + WARM;
+    const end = warmEnd + MEAS;
+    let rounds = 0;
+    const drive = sock =>
+      new Promise((resolve, reject) => {
+        const msg = new Uint8Array(SIZE);
+        for (let i = 8; i < SIZE; i++) msg[i] = pat(i);
+        const view = new DataView(msg.buffer);
+        let seq = 1;
+        let got = 0;
+        sock.register('error', reject);
+        sock.register('data', ev => {
+          const buf = ev.buffer();
+          const n = buf.length;
+          const bad = buf[0] !== expect(seq, got) || buf[n - 1] !== expect(seq, got + n - 1);
+          buf.unref();
+          if (bad) return reject(new Error('echo content mismatch'));
+          got += n;
+          if (got < SIZE) return;
+          got = 0;
+          const now = Date.now();
+          if (now >= warmEnd) rounds++;
+          if (now >= end) return resolve();
+          view.setUint32(0, ++seq, true);
+          sock.send(msg);
+        });
+        view.setUint32(0, seq, true);
+        sock.send(msg);
+      });
+    await Promise.all(clients.map(drive));
+    const rps = Math.round(rounds / (MEAS / 1000));
+    print(
+      JSON.stringify({
+        impl: 'origine-js',
+        backend,
+        mode,
+        size: SIZE,
+        conns: CONNS,
+        rounds,
+        rps,
+        mean_ns: Math.round((CONNS / rps) * 1e9),
+        secs: MEAS / 1000,
+      }),
+    );
+    for (const sock of clients) sock.close();
+    await server.close();
+    await running;
+    await io.close();
+    return;
+  }
 
   // A reusable read buffer per connection. 'copy' keeps one Uint8Array (readCopy copies into it);
   // 'into' gets the detached buffer back from readInto each time and wraps it in a new view.

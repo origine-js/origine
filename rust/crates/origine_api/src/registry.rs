@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use crate::abi_gen::{self, origine_api_native};
 use crate::native::{Needs, RawNative, SideEffect};
-use crate::{fs, io, net};
+use crate::{fs, io, net, sub};
 
 /// Every native, in registration order.
 pub(crate) static NATIVES: &[RawNative] = &[
@@ -53,6 +53,12 @@ pub(crate) static NATIVES: &[RawNative] = &[
     net::NATIVE_NET_READ_INTO,
     net::NATIVE_NET_WRITE,
     net::NATIVE_NET_CLOSE,
+    sub::NATIVE_NET_SUBSCRIBE,
+    sub::NATIVE_NET_RESUME,
+    sub::NATIVE_NET_TAKE,
+    sub::NATIVE_NET_RELEASE,
+    sub::NATIVE_NET_SEND,
+    sub::NATIVE_IO_RUN,
 ];
 
 // The Rust enums are written out in the header's numbers.
@@ -129,7 +135,9 @@ mod tests {
     fn every_native_fn_is_registered_once() {
         let registry = include_str!("registry.rs");
         let mut found = 0;
-        for (module, source) in [("io", include_str!("io.rs")), ("fs", include_str!("fs.rs")), ("net", include_str!("net.rs"))] {
+        for (module, source) in
+            [("io", include_str!("io.rs")), ("fs", include_str!("fs.rs")), ("net", include_str!("net.rs")), ("sub", include_str!("sub.rs"))]
+        {
             for name in native_fns(source) {
                 let entry = format!("{module}::NATIVE_{},", name.to_uppercase());
                 assert_eq!(registry.matches(&entry).count(), 1, "{name} must be listed exactly once in NATIVES");

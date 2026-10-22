@@ -97,6 +97,12 @@ Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, boun
 | `net.readInto` | `id, buffer` | Promise `{ bytes, buffer }`: reads straight into the guest's buffer, which is detached meanwhile (pin protocol) and handed back as a new ArrayBuffer; `Unsupported` for a buffer that cannot be detached (checked before touching it); zero-copy, wins for large reads |
 | `net.write` | `id, data` | Promise byte count; copies `data` and sends all of it |
 | `net.close` | `id` | sync; streams are shut down so pending reads finish with 0 bytes |
+| `net.subscribe` | `id, dispatch` | sync; routes the socket's events to `dispatch(kind, a, b)` (0 data/length, 1 end, 2 error/errno, 3 ready, 4 connection/new id, port, 5 close); nothing is read yet |
+| `net.resume` | `id` | sync; starts the read (accept) pump task of a subscribed socket; it and its receive are not counted by `live_items` |
+| `net.take` | `id` | sync; ArrayBuffer lease holding a copy of the chunk being delivered, from the socket's pool (only inside the `data` dispatch) |
+| `net.release` | `id, buffer` | sync; detaches a lease and returns its store to the pool |
+| `net.send` | `id, data` | sync boolean; non-blocking write on the isolate thread, remainder to an outbox flushed by a writer task; `false` above 64 KiB queued (`ready` follows) |
+| `io.run` | `io` | Promise<void> resolving once every resumed subscription of the runtime has delivered `close` |
 
 An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. A pending `accept` keeps its listener open until the runtime closes. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
 

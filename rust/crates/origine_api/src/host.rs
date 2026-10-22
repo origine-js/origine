@@ -23,6 +23,7 @@ use origine_io::{Loop, Mode, Options};
 
 use crate::native::{Hook, ScopeKey, Wrap, finish};
 use crate::net::Socket;
+use crate::sub::{Events, Idle, Sub};
 use crate::sys::{self, WakeRx};
 
 /// Settles a promise on the isolate thread: finished async natives queue one of these.
@@ -113,6 +114,9 @@ pub struct HostState {
     next_grant: u32,
     sockets: BTreeMap<u32, Rc<Socket>>,
     next_socket: u32,
+    pub(crate) subs: BTreeMap<u32, Sub>,
+    pub(crate) events: Events,
+    idle: BTreeMap<u32, Rc<Idle>>,
     pending: Slab<Pending>,
     completions: CompletionQueue,
     wake: WakeRx,
@@ -130,6 +134,9 @@ impl HostState {
             next_grant: 1,
             sockets: BTreeMap::new(),
             next_socket: 1,
+            subs: BTreeMap::new(),
+            events: Rc::default(),
+            idle: BTreeMap::new(),
             pending: Slab::default(),
             completions: Rc::default(),
             wake,
@@ -211,6 +218,7 @@ impl HostState {
         drop(rt); // cancels every task; the loop runs once to deliver the cancellations
         let canceled = self.pending.take_where(|pending| pending.runtime == id);
         self.sockets.retain(|_, socket| socket.runtime() != id);
+        self.subs.retain(|_, sub| sub.runtime != id);
         let grant_ids: Vec<u32> = self.grants.iter().filter(|(_, record)| record.runtime == id).map(|(grant, _)| *grant).collect();
         if let Some(entry) = self.runtimes.get_mut(&id) {
             entry.state = RtState::Draining { close_op: None, grants_released: false };
@@ -241,6 +249,7 @@ impl HostState {
         let mut finished = Vec::new();
         for (id, close_op) in done {
             self.runtimes.remove(&id); // destroys the loop
+            self.idle.remove(&id);
             if let Some(pending) = close_op.and_then(|op| self.pending.take(op)) {
                 finished.push(pending);
             }
@@ -264,20 +273,24 @@ impl HostState {
     /// Tasks and active ops across runtimes, plus the close promises being waited for.
     pub fn live_items(&self) -> i64 {
         let mut live = 0usize;
-        for entry in self.runtimes.values() {
-            live += entry.lp.active() as usize;
+        for (id, entry) in &self.runtimes {
+            // Subscription pumps and their in-flight receives only listen; they never keep the host alive.
+            let (pumps, recving) = self.idle.get(id).map_or((0, 0), |idle| (idle.pumps.get(), idle.recving.get()));
+            live += (entry.lp.active() as usize).saturating_sub(recving);
             if let Some(rt) = &entry.rt {
-                live += rt.task_count();
+                live += rt.task_count().saturating_sub(pumps);
             }
             if matches!(entry.state, RtState::Draining { .. }) {
                 live += 1;
             }
         }
-        live as i64 + self.completions.borrow().len() as i64
+        live as i64 + (self.completions.borrow().len() + self.events.borrow().len()) as i64
     }
 
     fn any_ready(&self) -> bool {
-        !self.completions.borrow().is_empty() || self.runtimes.values().any(|entry| entry.rt.as_ref().is_some_and(Runtime::has_ready))
+        !self.completions.borrow().is_empty()
+            || !self.events.borrow().is_empty()
+            || self.runtimes.values().any(|entry| entry.rt.as_ref().is_some_and(Runtime::has_ready))
     }
 
     /// Blocks until a runtime's loop, the wake channel or the timeout (`None` = forever) fires.
@@ -382,6 +395,26 @@ impl HostState {
     }
 
     /// Takes socket `id` out of the table; operations in flight keep the descriptor alive.
+    /// Drops socket `id` from the table without an owner check (a subscription ending).
+    pub(crate) fn sockets_remove(&mut self, id: u32) -> Option<Rc<Socket>> {
+        self.sockets.remove(&id)
+    }
+
+    /// The idle counters of runtime `runtime`.
+    pub(crate) fn idle_of(&mut self, runtime: u32) -> Rc<Idle> {
+        Rc::clone(self.idle.entry(runtime).or_default())
+    }
+
+    /// Spawns `task` on the open runtime `runtime`, detached; the handle aborts it.
+    pub(crate) fn spawn_detached(&self, runtime: u32, task: Task) -> Result<origine_io::rt::AbortHandle, NativeError> {
+        let entry = match self.runtimes.get(&runtime) {
+            Some(entry) if entry.is_open() => entry,
+            _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
+        };
+        let handle = entry.rt.as_ref().ok_or(NativeError::Errno(errno::BAD_HANDLE))?.handle();
+        Ok(handle.spawn_eager(task).abort_handle())
+    }
+
     pub(crate) fn remove_socket(&mut self, owner: ScopeKey, id: u32) -> Result<Rc<Socket>, NativeError> {
         match self.sockets.get(&id) {
             Some(socket) if socket.owner() == owner => Ok(self.sockets.remove(&id).expect("just found")),
@@ -395,6 +428,8 @@ impl HostState {
     /// released while the isolate is alive), cancels every runtime and runs the loops until quiet
     /// (bounded). Idempotent. The detach function calls it before `Runtime.destroy`.
     pub fn drop_all(&mut self) {
+        self.subs.clear();
+        self.events.borrow_mut().clear();
         self.pending.clear();
         self.completions.borrow_mut().clear();
         let ids: Vec<u32> = self.runtimes.keys().copied().collect();
@@ -412,6 +447,8 @@ impl HostState {
         self.runtimes.clear();
         self.grants.clear();
         self.sockets.clear();
+        self.subs.clear();
+        self.idle.clear();
         self.pending.clear();
     }
 }
@@ -443,6 +480,7 @@ fn turn(scope: &mut v8::PinScope<'_, '_, ()>) -> usize {
     let closed = host.step_draining();
     let completions = host.take_completions();
     let mut settled = closed.len() + completions.len();
+    settled += crate::sub::deliver_all(scope);
     for pending in closed {
         finish(scope, pending, Ok(()));
     }

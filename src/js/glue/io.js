@@ -4,7 +4,7 @@
 // `Config.runtime`); the glue only adds the narrowing the init asked for. A handle is frozen
 // data `{ kind: 'io', id, backend }` plus `close()`; it is not transferable across scopes
 // and `api.fs.requestAsync` takes it as `io`.
-(native, { freeze, own, failure, ioHandles, closedIo, errors: { Unsupported } }) => {
+(native, { freeze, own, failure, ioHandles, closedIo, errors: { Unsupported, BadHandle } }) => {
   const BACKENDS = freeze(['auto', 'uring', 'kqueue', 'threaded']);
 
   // `state` = { parent, backends: string[] | undefined, max, live }: one record per narrowing.
@@ -24,7 +24,13 @@
         for (const s of chain) s.live--;
         return native.io.close === undefined ? Promise.reject(failure(Unsupported)) : native.io.close(made.id);
       };
-      handle = freeze({ kind: 'io', id: made.id, backend: made.backend, close });
+      // Resolves once every flowing socket or server of this runtime has closed (immediately when
+      // none is): `await io.run()` keeps the program alive for event-style handlers.
+      const run = () => {
+        if (closedIo.has(handle)) return Promise.reject(failure(BadHandle));
+        return native.io.run === undefined ? Promise.reject(failure(Unsupported)) : native.io.run(made.id);
+      };
+      handle = freeze({ kind: 'io', id: made.id, backend: made.backend, close, run });
       ioHandles.add(handle);
       for (const s of chain) s.live++;
       return handle;

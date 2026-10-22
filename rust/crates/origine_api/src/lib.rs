@@ -25,6 +25,7 @@ pub mod native;
 mod net;
 pub mod pinned;
 mod registry;
+mod sub;
 mod sys;
 
 // CONTRACT (docs/contracts.md, surfaces B and C): `include/origine_api.h` is the source of truth;

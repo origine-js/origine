@@ -1525,6 +1525,183 @@ const net_source =
     \\}
 ;
 
+const events_source =
+    \\export async function main(api) {
+    \\  try {
+    \\    await body(api);
+    \\  } catch (e) {
+    \\    throw new Error('events test failed: ' + (e instanceof Error ? e.stack : JSON.stringify(e)));
+    \\  }
+    \\}
+    \\async function body(api) {
+    \\  const out = globalThis.report = {};
+    \\  const io = api.io.create({ backend: '@BACKEND@' });
+    \\  const server = api.net.listen(io, { port: 0 });
+    \\  const enc = s => Uint8Array.from(s, c => c.charCodeAt(0));
+    \\  let serverEnded = false, serverClosed = false, serverEvent = false, accepted = 0;
+    \\
+    \\  // Echo server over events: lease the chunk, send it back, give the lease back.
+    \\  const reg = server.register('connection', conn => {
+    \\    accepted++;
+    \\    conn.register('data', ev => {
+    \\      const buf = ev.buffer();
+    \\      conn.send(buf);
+    \\      buf.unref();
+    \\    });
+    \\    conn.register('end', () => { serverEnded = true; poke(); });
+    \\    conn.register('close', () => { serverClosed = true; poke(); });
+    \\  });
+    \\  server.register('close', () => { serverEvent = true; });
+    \\  // Handlers do not keep the program alive; a pending `io.run()` does (until every flowing handle closed).
+    \\  const running = io.run();
+    \\  let settled = false;
+    \\  running.then(() => { settled = true; });
+    \\
+    \\  const client = await api.net.connect(io, { host: '127.0.0.1', port: server.port });
+    \\  const waiters = [];
+    \\  const poke = () => { for (const w of waiters.splice(0)) w(); };
+    \\  const until = pred => new Promise(resolve => {
+    \\    const check = () => (pred() ? resolve() : waiters.push(check));
+    \\    check();
+    \\  });
+    \\
+    \\  let text = '', total = 0, position = 0, ordered = true, countBytes = false;
+    \\  let count = 0, ready = 0, retained = null, keptEvent = null, sameLease = false, extra = 0;
+    \\  const errors = [];
+    \\  client.register('error', e => { errors.push(e); poke(); });
+    \\  client.register('ready', () => { ready++; poke(); });
+    \\  client.register('data', ev => {
+    \\    keptEvent = ev;
+    \\    const buf = ev.buffer();
+    \\    sameLease = ev.buffer() === buf && ev.length === buf.length && buf.buffer.byteLength >= buf.length;
+    \\    total += buf.length;
+    \\    if (countBytes) {
+    \\      for (let i = 0; i < buf.length; i++) ordered &&= buf[i] === ((position + i) & 255);
+    \\      position += buf.length;
+    \\    } else {
+    \\      text += String.fromCharCode(...buf);
+    \\    }
+    \\    if (text === 'ping-pong' && retained === null) retained = buf; // kept past the callback
+    \\    else buf.unref();
+    \\    poke();
+    \\  });
+    \\  // A throwing handler is routed to the error handlers; the other handlers still run.
+    \\  client.register('data', ev => { if (ev.length === 4) throw new Error('boom'); });
+    \\  // unregister stops delivery to that handler only.
+    \\  const counted = client.register('data', () => { count++; });
+    \\
+    \\  out.sendTrue = client.send(enc('ping-pong')) === true;
+    \\  await until(() => text === 'ping-pong');
+    \\  out.echo = true;
+    \\  out.eventValid = sameLease;
+    \\
+    \\  // A retained lease stays valid until it is given back, then it is empty.
+    \\  out.retained = retained.length === 9 && String.fromCharCode(...retained) === 'ping-pong' && !retained.released;
+    \\  retained.unref();
+    \\  retained.unref();
+    \\  out.released = retained.released && retained.length === 0 && retained.buffer.byteLength === 0;
+    \\  out.eventOver = keptEvent.length === 0 && (() => { try { keptEvent.buffer(); return false; } catch (e) { return e instanceof TypeError; } })();
+    \\
+    \\  // Pooled stores are reused across many chunks without mixing them up.
+    \\  let pooled = true;
+    \\  for (let i = 0; i < 200; i++) {
+    \\    const message = `msg-${i}-${'x'.repeat(i % 37)}`;
+    \\    text = '';
+    \\    client.send(enc(message));
+    \\    await until(() => text.length >= message.length);
+    \\    pooled &&= text === message;
+    \\  }
+    \\  out.pooled = pooled;
+    \\
+    \\  // Symbol.dispose releases like unref.
+    \\  if (typeof Symbol.dispose === 'symbol') {
+    \\    const lease = (() => { let got; const r = client.register('data', ev => { got ??= ev.buffer(); }); return { r, get: () => got }; })();
+    \\    text = '';
+    \\    client.send(enc('dispose'));
+    \\    await until(() => text === 'dispose');
+    \\    lease.r.unregister();
+    \\    const buf = lease.get();
+    \\    buf[Symbol.dispose]();
+    \\    out.dispose = buf.released && buf.length === 0;
+    \\  } else {
+    \\    out.dispose = true;
+    \\  }
+    \\
+    \\  // A handler that throws reaches the error handlers.
+    \\  text = '';
+    \\  client.send(enc('boom'));
+    \\  await until(() => errors.length === 1);
+    \\  out.thrown = errors[0] instanceof Error && errors[0].message === 'boom' && text === 'boom';
+    \\
+    \\  const before = count;
+    \\  counted.unregister();
+    \\  text = '';
+    \\  client.send(enc('after'));
+    \\  await until(() => text === 'after');
+    \\  out.unregistered = count === before && count > 0 && counted.unregister() === false;
+    \\
+    \\  // A large send answers false, `ready` follows, and everything comes back in order.
+    \\  const big = new Uint8Array(4 << 20).map((_, i) => i & 255);
+    \\  countBytes = true;
+    \\  total = 0;
+    \\  const wrote = client.send(big);
+    \\  out.backpressure = wrote === false;
+    \\  await until(() => ready > 0);
+    \\  await until(() => total === big.length);
+    \\  out.big = total === big.length && ordered;
+    \\
+    \\  // Closing: the peer sees the end and closes; a closed handle refuses everything.
+    \\  const closing = new Promise(resolve => client.register('close', resolve));
+    \\  await client.close();
+    \\  await closing;
+    \\  await until(() => serverEnded && serverClosed);
+    \\  out.closed = client.closed && accepted === 1 &&
+    \\    (() => { try { client.register('data', () => {}); return false; } catch (e) { return e.name === 'BadHandle'; } })() &&
+    \\    (() => { try { client.send(enc('x')); return false; } catch (e) { return e.name === 'BadHandle'; } })();
+    \\
+    \\  // Unregistering the connection handler stops new deliveries; `io.run()` resolves once the server closes.
+    \\  out.unreg = reg.unregister() === true;
+    \\  for (let i = 0; i < 5; i++) await null;
+    \\  out.runWaits = settled === false;
+    \\  await server.close();
+    \\  await running;
+    \\  out.run = settled && serverEvent && server.closed && (await io.run().then(() => true, () => false));
+    \\  await io.close();
+    \\  out.runAfterClose = await io.run().then(() => false, e => e.name === 'BadHandle');
+    \\}
+;
+
+const events_idle_source =
+    \\export async function main(api) {
+    \\  const io = api.io.create({ backend: '@BACKEND@' });
+    \\  const server = api.net.listen(io, { port: 0 });
+    \\  server.register('connection', () => {});
+    \\  globalThis.report = { registered: true, port: server.port > 0 };
+    \\}
+;
+
+test "api: net events with pooled leases, backpressure and io.run (auto and threaded backends)" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, events_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.sendTrue && report.echo && report.eventValid && report.retained && report.released && report.eventOver && report.pooled && report.dispose");
+        try check(fx.scope, "report.thrown && report.unregistered && report.backpressure && report.big && report.closed && report.unreg");
+        try check(fx.scope, "report.runWaits && report.run && report.runAfterClose");
+    }
+}
+
+test "api: registered handlers alone do not keep the program alive" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, events_idle_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.registered && report.port");
+    }
+}
+
 test "api: net echo over loopback with Handle classes (auto and threaded backends)" {
     inline for (.{ "auto", "threaded" }) |backend| {
         var fx: Fixture = undefined;

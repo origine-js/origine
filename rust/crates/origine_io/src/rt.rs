@@ -138,11 +138,74 @@ struct Slot {
     abort: bool,
 }
 
+/// Live tasks, addressed by ids made of a slot index (low 32 bits) and a generation (high 32 bits,
+/// starting at 1 so no id equals [`ROOT`]). Freeing a slot bumps its generation, so a stale wake
+/// or abort for a finished task can never reach the task that reused the slot. O(1) and
+/// allocation-free once warm, unlike an ordered map.
+#[derive(Default)]
+struct Tasks {
+    slots: Vec<(u32, Option<Slot>)>,
+    free: Vec<u32>,
+    live: usize,
+}
+
+impl Tasks {
+    fn insert(&mut self, slot: Slot) -> u64 {
+        let index = match self.free.pop() {
+            Some(index) => index as usize,
+            None => {
+                self.slots.push((1, None));
+                self.slots.len() - 1
+            }
+        };
+        assert!(u32::try_from(index).is_ok(), "fewer than 2^32 live tasks");
+        let entry = &mut self.slots[index];
+        entry.1 = Some(slot);
+        self.live += 1;
+        (u64::from(entry.0) << 32) | index as u64
+    }
+
+    fn entry(&mut self, id: u64) -> Option<&mut (u32, Option<Slot>)> {
+        let (generation, index) = ((id >> 32) as u32, (id & 0xffff_ffff) as usize);
+        self.slots.get_mut(index).filter(|entry| entry.0 == generation && entry.1.is_some())
+    }
+
+    fn get_mut(&mut self, id: u64) -> Option<&mut Slot> {
+        self.entry(id).and_then(|entry| entry.1.as_mut())
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        let (generation, index) = ((id >> 32) as u32, (id & 0xffff_ffff) as usize);
+        self.slots.get(index).is_some_and(|entry| entry.0 == generation && entry.1.is_some())
+    }
+
+    fn remove(&mut self, id: u64) -> Option<Slot> {
+        let index = (id & 0xffff_ffff) as usize;
+        let entry = self.entry(id)?;
+        let slot = entry.1.take();
+        // Generation 0 is skipped on wrap-around so ids stay non-zero.
+        entry.0 = entry.0.wrapping_add(1).max(1);
+        self.free.push(index as u32);
+        self.live -= 1;
+        slot
+    }
+
+    /// Removes the live task in the lowest slot (teardown order).
+    fn pop_any(&mut self) -> Option<Slot> {
+        let index = self.slots.iter().position(|entry| entry.1.is_some())?;
+        let id = (u64::from(self.slots[index].0) << 32) | index as u64;
+        self.remove(id)
+    }
+
+    fn len(&self) -> usize {
+        self.live
+    }
+}
+
 struct RtInner {
     lp: Rc<Loop>,
     shared: Arc<Shared>,
-    tasks: RefCell<BTreeMap<u64, Slot>>,
-    next_id: Cell<u64>,
+    tasks: RefCell<Tasks>,
     closed: Cell<bool>,
 }
 
@@ -173,9 +236,7 @@ impl RtInner {
             drop(wrapped); // delivers `Cancelled`
             return AbortHandle { rt: Weak::new(), id: 0 };
         }
-        let id = self.next_id.get() + 1;
-        self.next_id.set(id);
-        self.tasks.borrow_mut().insert(id, Slot { fut: Some(Box::pin(wrapped)), abort: false });
+        let id = self.tasks.borrow_mut().insert(Slot { fut: Some(Box::pin(wrapped)), abort: false });
         let task = Arc::new(Task { id, queued: AtomicBool::new(false), shared: Arc::downgrade(&self.shared) });
         task.wake_by_ref();
         AbortHandle { rt: Rc::downgrade(self), id }
@@ -184,11 +245,11 @@ impl RtInner {
     fn abort(&self, id: u64) {
         let fut = {
             let mut tasks = self.tasks.borrow_mut();
-            match tasks.get_mut(&id) {
+            match tasks.get_mut(id) {
                 None => return,
                 Some(slot) if slot.fut.is_some() => {
                     let f = slot.fut.take();
-                    tasks.remove(&id);
+                    tasks.remove(id);
                     f
                 }
                 Some(slot) => {
@@ -203,7 +264,7 @@ impl RtInner {
     fn poll_task(&self, task: &Arc<Task>) -> bool {
         let fut = {
             let mut tasks = self.tasks.borrow_mut();
-            tasks.get_mut(&task.id).and_then(|s| s.fut.take())
+            tasks.get_mut(task.id).and_then(|s| s.fut.take())
         };
         let Some(mut fut) = fut else { return false };
         let waker = Waker::from(task.clone());
@@ -212,13 +273,13 @@ impl RtInner {
         let poll = fut.as_mut().poll(&mut cx);
         let keep = {
             let mut tasks = self.tasks.borrow_mut();
-            match (poll, tasks.get_mut(&task.id)) {
+            match (poll, tasks.get_mut(task.id)) {
                 (Poll::Pending, Some(slot)) if !slot.abort => {
                     slot.fut = Some(fut);
                     None
                 }
                 (_, Some(_)) => {
-                    tasks.remove(&task.id);
+                    tasks.remove(task.id);
                     Some(fut)
                 }
                 (_, None) => Some(fut),
@@ -266,9 +327,7 @@ impl Runtime {
     /// Create a runtime on the calling thread (the loop thread).
     pub fn new(lp: Rc<Loop>) -> Runtime {
         let shared = Arc::new(Shared { ready: Mutex::new(VecDeque::new()), handle: lp.handle(), thread: thread::current().id() });
-        Runtime {
-            inner: Rc::new(RtInner { lp, shared, tasks: RefCell::new(BTreeMap::new()), next_id: Cell::new(0), closed: Cell::new(false) }),
-        }
+        Runtime { inner: Rc::new(RtInner { lp, shared, tasks: RefCell::new(Tasks::default()), closed: Cell::new(false) }) }
     }
 
     /// A weak, cloneable handle for spawning from anywhere on this thread (tasks included).
@@ -357,9 +416,9 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         self.inner.closed.set(true);
         loop {
-            let slot = self.inner.tasks.borrow_mut().pop_first();
+            let slot = self.inner.tasks.borrow_mut().pop_any();
             match slot {
-                Some((_, slot)) => drop_quiet(slot),
+                Some(slot) => drop_quiet(slot),
                 None => break,
             }
         }
@@ -548,7 +607,7 @@ impl AbortHandle {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.rt.upgrade().is_none_or(|rt| !rt.tasks.borrow().contains_key(&self.id))
+        self.rt.upgrade().is_none_or(|rt| !rt.tasks.borrow().contains(self.id))
     }
 }
 
@@ -887,5 +946,31 @@ impl Future for Sleep {
         }
         let op = this.op.as_mut().expect("just set");
         Pin::new(op).poll(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot() -> Slot {
+        Slot { fut: None, abort: false }
+    }
+
+    #[test]
+    fn ids_are_never_root_and_stale_ids_miss_reused_slots() {
+        let mut tasks = Tasks::default();
+        let a = tasks.insert(slot());
+        assert_ne!(a, ROOT);
+        assert!(tasks.contains(a) && tasks.get_mut(a).is_some());
+        assert!(tasks.remove(a).is_some());
+        assert!(tasks.remove(a).is_none(), "removed once");
+        let b = tasks.insert(slot()); // reuses a's slot
+        assert_ne!(a, b);
+        assert!(!tasks.contains(a) && tasks.get_mut(a).is_none() && tasks.remove(a).is_none());
+        assert!(tasks.contains(b));
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks.pop_any().is_some() && tasks.pop_any().is_none());
+        assert_eq!(tasks.len(), 0);
     }
 }

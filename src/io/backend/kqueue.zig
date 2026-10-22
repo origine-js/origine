@@ -60,6 +60,8 @@ const c = std.c;
 
 /// Events fetched per kevent call (uSockets uses 1024; 256 keeps the stack frame at 8 KiB).
 const event_batch = 256;
+/// Registrations buffered between polls; at most `event_batch` so errors fit the event list.
+const change_batch = 64;
 
 // libSystem dispatch, no blocks needed.
 const dispatch = struct {
@@ -77,7 +79,6 @@ const O_NONBLOCK: c_int = 0x4;
 const AT_SYMLINK_NOFOLLOW: c_int = 0x20;
 const F_GETFL: c_int = 3;
 const F_SETFD: c_int = 2;
-const F_DUPFD_CLOEXEC: c_int = 67;
 const F_FULLFSYNC: c_int = 51;
 const F_PREALLOCATE: c_int = 42;
 const F_ALLOCATECONTIG: c_uint = 2;
@@ -134,8 +135,8 @@ const os_sync = struct {
     }
 };
 
-// Op scratch: priv[0] queue link, priv[1] state, priv[2] owning Kq, priv[3] dup'd fd + 1 while
-// waiting on a filter, priv[4]/priv[5] prev/next in the Kq's GCD op list, priv[6] connect-in-progress.
+// Op scratch: priv[0] queue link, priv[1] state, priv[2] owning Kq, priv[3] unused,
+// priv[4] timer heap index, or priv[4]/priv[5] prev/next in the Kq's GCD op list, priv[6] connect-in-progress.
 const State = enum(usize) { idle = 0, queued, running, cancelled, timer, waiting, done };
 
 fn getState(op: *Op) State {
@@ -151,6 +152,16 @@ fn gcdPrev(op: *Op) ?*Op {
 fn gcdNext(op: *Op) ?*Op {
     return @ptrCast(@alignCast(op.priv[5]));
 }
+
+/// Ops waiting for readiness of one descriptor.
+const Waiters = struct {
+    read: Queue = .{},
+    write: Queue = .{},
+
+    fn queue(w: *Waiters, write: bool) *Queue {
+        return if (write) &w.write else &w.read;
+    }
+};
 
 const Kq = struct {
     allocator: std.mem.Allocator,
@@ -169,7 +180,13 @@ const Kq = struct {
     /// Timeout ops, ordered by deadline (heap index in priv[4]). No kernel timer per op: `poll`
     /// blocks in kevent with the earliest deadline as its timeout.
     timers: tm.Timers = .{ .slot = 4 },
-    waits: Queue = .{},
+    /// Ops parked on socket readiness, per descriptor and direction (FIFO each). Entries are
+    /// dropped when both queues empty.
+    fds: std.AutoHashMapUnmanaged(c_int, Waiters) = .empty,
+    /// Filter registrations not yet handed to the kernel; `poll` passes them in its own `kevent`
+    /// call, so arming a wait costs no syscall of its own.
+    changes: [change_batch]c.Kevent = undefined,
+    nchanges: usize = 0,
     /// Every op handed to GCD and not yet reported (doubly linked through priv[4]/priv[5]).
     gcd_head: ?*Op = null,
 
@@ -178,6 +195,48 @@ const Kq = struct {
     }
     fn unlock(k: *Kq) void {
         _ = c.pthread_mutex_unlock(&k.mutex);
+    }
+
+    /// Registers interest in `fd` for the next `poll`. `EV_DISPATCH` makes the filter level
+    /// triggered but disables it after each delivery; adding it again (with `EV_ENABLE`, which an existing disabled filter needs) re-enables it, so there is
+    /// no one-shot re-registration per op, no `dup`, and no `close`.
+    fn watch(k: *Kq, fd: c_int, write: bool) void {
+        if (k.nchanges == change_batch) k.flushChanges();
+        k.changes[k.nchanges] = .{
+            .ident = @intCast(fd),
+            .filter = if (write) c.EVFILT.WRITE else c.EVFILT.READ,
+            .flags = c.EV.ADD | c.EV.ENABLE | c.EV.DISPATCH,
+            .fflags = 0,
+            .data = 0,
+            .udata = 0,
+        };
+        k.nchanges += 1;
+    }
+
+    /// Hands queued registrations to the kernel now (only when the batch is full or on destroy).
+    /// A failed registration fails the ops waiting on it.
+    fn flushChanges(k: *Kq) void {
+        if (k.nchanges == 0) return;
+        var errs: [change_batch]c.Kevent = undefined;
+        const zero: c.timespec = .{ .sec = 0, .nsec = 0 };
+        const n = c.kevent(k.kq, &k.changes, @intCast(k.nchanges), &errs, errs.len, &zero);
+        k.nchanges = 0;
+        if (n <= 0) return;
+        for (errs[0..@intCast(n)]) |ev| k.failWaiters(ev);
+    }
+
+    /// If `ev` reports a failed registration (`EV_ERROR`), completes that descriptor's waiters.
+    fn failWaiters(k: *Kq, ev: c.Kevent) void {
+        if (ev.flags & c.EV.ERROR == 0 or ev.data == 0) return;
+        const w = k.fds.getPtr(@intCast(ev.ident)) orelse return;
+        const q = w.queue(ev.filter == c.EVFILT.WRITE);
+        while (q.pop()) |op| finishLocal(k, op, -@as(i64, ev.data));
+        k.dropIfIdle(@intCast(ev.ident));
+    }
+
+    fn dropIfIdle(k: *Kq, fd: c_int) void {
+        const w = k.fds.getPtr(fd) orelse return;
+        if (w.read.isEmpty() and w.write.isEmpty()) _ = k.fds.remove(fd);
     }
 
     fn trigger(k: *Kq) void {
@@ -679,41 +738,24 @@ fn waitsForWrite(kind: op_mod.Kind) bool {
     return kind == .send or kind == .sendmsg or kind == .connect;
 }
 
-/// Registers a one-shot readiness wait for `op` on a private dup of its fd. Returns an error
-/// result (-errno) on failure.
+/// Parks `op` until its descriptor is ready (FIFO among ops of the same descriptor and
+/// direction). Returns an error result (-errno) if it cannot be queued.
 fn armWait(k: *Kq, op: *Op) ?i64 {
-    var dfd: c_int = undefined;
-    if (op.priv[3]) |p| {
-        dfd = @intCast(@intFromPtr(p) - 1);
-    } else {
-        dfd = sc.fcntl(@intCast(op.fd), F_DUPFD_CLOEXEC, @as(c_int, 0));
-        if (dfd < 0) return negErrno();
-        op.priv[3] = @ptrFromInt(@as(usize, @intCast(dfd)) + 1);
-    }
-    const ev = [1]c.Kevent{.{
-        .ident = @intCast(dfd),
-        .filter = if (waitsForWrite(op.kind)) c.EVFILT.WRITE else c.EVFILT.READ,
-        .flags = c.EV.ADD | c.EV.ONESHOT,
-        .fflags = 0,
-        .data = 0,
-        .udata = @intFromPtr(op),
-    }};
-    var out: [1]c.Kevent = undefined;
-    if (c.kevent(k.kq, &ev, 1, &out, 0, null) < 0) {
-        releaseWait(op);
-        return negErrno();
-    }
+    const fd: c_int = @intCast(op.fd);
+    const entry = k.fds.getOrPut(k.allocator, fd) catch return errno(.NOMEM);
+    if (!entry.found_existing) entry.value_ptr.* = .{};
+    const write = waitsForWrite(op.kind);
+    entry.value_ptr.queue(write).push(op);
     setState(op, .waiting);
-    k.waits.push(op);
+    k.watch(fd, write);
     return null;
 }
 
-/// Closes the private dup (which also drops any registered filter).
-fn releaseWait(op: *Op) void {
-    if (op.priv[3]) |p| {
-        _ = c.close(@intCast(@intFromPtr(p) - 1));
-        op.priv[3] = null;
-    }
+/// Removes a parked op from its descriptor's queue.
+fn unwait(k: *Kq, op: *Op) void {
+    const fd: c_int = @intCast(op.fd);
+    if (k.fds.getPtr(fd)) |w| _ = w.queue(waitsForWrite(op.kind)).remove(op);
+    k.dropIfIdle(fd);
 }
 
 /// Tries a non-blocking socket op on the loop thread. Returns null if it must wait for readiness.
@@ -748,6 +790,13 @@ fn submit(ctx: *anyopaque, op: *Op) anyerror!void {
         .futex_wake => finishLocal(k, op, doFutexWake(op)),
         .send, .recv, .sendmsg, .recvmsg, .accept, .connect => {
             if (!isNonblocking(op.fd)) return toGcd(k, op);
+            // Receiving ops usually find nothing yet: park first (readiness is level triggered,
+            // so data that is already there is reported at the next poll) instead of paying
+            // for a syscall that returns EAGAIN. Sending ops and connect try right away.
+            if (!waitsForWrite(op.kind)) {
+                if (armWait(k, op)) |err| finishLocal(k, op, err);
+                return;
+            }
             if (attemptSocket(op)) |res| return finishLocal(k, op, res);
             if (armWait(k, op)) |err| finishLocal(k, op, err);
         },
@@ -757,7 +806,6 @@ fn submit(ctx: *anyopaque, op: *Op) anyerror!void {
 
 /// Completes `op` on the loop thread at the next poll.
 fn finishLocal(k: *Kq, op: *Op, res: i64) void {
-    releaseWait(op);
     op.result = res;
     setState(op, .done);
     k.ready.push(op);
@@ -773,8 +821,8 @@ fn cancel(ctx: *anyopaque, op: *Op) bool {
             return true;
         },
         .waiting => {
-            _ = k.waits.remove(op);
-            finishLocal(k, op, ecanceled()); // closes the dup, dropping the filter
+            unwait(k, op);
+            finishLocal(k, op, ecanceled());
             return true;
         },
         .queued => {
@@ -788,7 +836,6 @@ fn cancel(ctx: *anyopaque, op: *Op) bool {
 }
 
 fn handOut(op: *Op, out: *Drained) void {
-    releaseWait(op);
     setState(op, .idle);
     out.done.push(op);
 }
@@ -832,23 +879,20 @@ fn poll(ctx: *anyopaque, block: bool, out: *Drained) void {
     }
     const bounded = nonblocking or !k.timers.isEmpty();
     var events: [event_batch]c.Kevent = undefined;
-    const none: [0]c.Kevent = .{};
-    const n = c.kevent(k.kq, &none, 0, &events, events.len, if (bounded) &timeout else null);
+    // The pending registrations ride along on this call (event_batch >= change_batch, so their
+    // failures always fit in the event list).
+    const nchanges = k.nchanges;
+    const n = c.kevent(k.kq, &k.changes, @intCast(nchanges), &events, events.len, if (bounded) &timeout else null);
+    if (n >= 0 or c.errno(@as(isize, -1)) != .INTR) k.nchanges = 0;
     if (n > 0) {
         for (events[0..@intCast(n)]) |ev| {
             // EVFILT_USER is the wake: the shared lists are drained below.
-            if (ev.filter == c.EVFILT.READ or ev.filter == c.EVFILT.WRITE) {
-                const op: *Op = @ptrFromInt(ev.udata);
-                if (getState(op) != .waiting) continue;
-                _ = k.waits.remove(op);
-                if (attemptSocket(op)) |res| {
-                    op.result = res;
-                    handOut(op, out);
-                } else if (armWait(k, op)) |err| {
-                    op.result = err;
-                    handOut(op, out);
-                }
+            if (ev.filter != c.EVFILT.READ and ev.filter != c.EVFILT.WRITE) continue;
+            if (ev.flags & c.EV.ERROR != 0) {
+                k.failWaiters(ev);
+                continue;
             }
+            serviceReady(k, @intCast(ev.ident), ev.filter == c.EVFILT.WRITE, out);
         }
     }
     if (!k.timers.isEmpty()) {
@@ -859,6 +903,21 @@ fn poll(ctx: *anyopaque, block: bool, out: *Drained) void {
         }
     }
     drainShared(k, out);
+}
+
+/// A descriptor became ready: runs the first op waiting on it. The filter was disabled by the
+/// delivery (`EV_DISPATCH`); it is re-armed only while someone still waits.
+fn serviceReady(k: *Kq, fd: c_int, write: bool, out: *Drained) void {
+    const w = k.fds.getPtr(fd) orelse return;
+    const q = w.queue(write);
+    const op = q.head orelse return;
+    if (attemptSocket(op)) |res| {
+        _ = q.pop();
+        op.result = res;
+        handOut(op, out);
+    }
+    if (!q.isEmpty()) k.watch(fd, write);
+    k.dropIfIdle(fd);
 }
 
 fn wake(ctx: *anyopaque) void {
@@ -889,10 +948,16 @@ fn destroy(ctx: *anyopaque, out: *Drained) void {
         op.result = ecanceled();
         handOut(op, out);
     }
-    while (k.waits.pop()) |op| {
-        op.result = ecanceled();
-        handOut(op, out);
+    var wit = k.fds.iterator();
+    while (wit.next()) |entry| {
+        inline for (.{ &entry.value_ptr.read, &entry.value_ptr.write }) |q| {
+            while (q.pop()) |op| {
+                op.result = ecanceled();
+                handOut(op, out);
+            }
+        }
     }
+    k.fds.deinit(k.allocator);
     k.lock();
     var it = k.gcd_head;
     while (it) |op| : (it = gcdNext(op)) {

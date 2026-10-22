@@ -90,3 +90,14 @@ After the wait-table and pending-slab changes (`bun run.js <out_dir> 1 3 2`; the
 | 1 KiB | 64 | 153,856 rt/s<br>p50 415.5 us / p99 449.0 us | 86,804 rt/s<br>mean 737.3 us | 164,032 rt/s<br>p50 386.4 us / p99 534.7 us | 149,163 rt/s<br>p50 425.0 us / p99 611.2 us | 119,889 rt/s<br>p50 533.2 us / p99 613.4 us | 104,728 rt/s<br>p50 604.8 us / p99 682.2 us |
 
 Where the JS path's time goes at 1 connection (in-tree counters, one half round trip, about 19 us): kevent/recv/send syscalls about 11.6 us (the same as the Rust-only bench), Rust task/runtime overhead about 3.6 us, JS microtasks and native calls about 2.9 us, completion settling about 0.9 us. The host settle loop itself costs under 0.5 us per iteration. An *empty* zero-timeout `kevent` costs about 12 us on this macOS, so avoiding empty polls matters.
+
+## Latest: 1 KiB x 2 runs, after eager first poll and `Socket.readInto`
+
+`origine JS` now polls native-started ops once at spawn (`Handle::spawn_eager`) and the bench reuses one buffer per connection with `readInto` (like the Deno variant). Tried and rejected because they measured no better or worse: a leaner spawn path without join handle, a native scratch buffer + copy for `read(len)` (about 8% slower), and a pooled/uninitialised backing store from the isolate's allocator (the raw allocation is a small part of the 405 ns `new_backing_store` cost).
+
+| size | conns | origine rt | origine JS | Bun native | Bun node:net | Deno native | Deno node:net |
+|---|---|---|---|---|---|---|---|
+| 1 KiB | 1 | 48,781 rt/s<br>p50 20.2 us / p99 29.2 us | 40,182 rt/s<br>mean 24.9 us | 46,999 rt/s<br>p50 20.6 us / p99 30.7 us | 45,603 rt/s<br>p50 21.8 us / p99 31.0 us | 41,305 rt/s<br>p50 23.4 us / p99 34.9 us | 40,587 rt/s<br>p50 23.9 us / p99 34.8 us |
+| 1 KiB | 64 | 150,580 rt/s<br>p50 420.5 us / p99 500.3 us | 85,813 rt/s<br>mean 745.8 us | 154,744 rt/s<br>p50 404.9 us / p99 568.0 us | 137,954 rt/s<br>p50 453.6 us / p99 667.0 us | 115,174 rt/s<br>p50 547.4 us / p99 674.9 us | 100,568 rt/s<br>p50 624.0 us / p99 762.0 us |
+
+At 64 connections about 34% of the JS thread is in `sendto` (loopback sends do the receiver-side work synchronously; Bun pays this too), about 16% in the JS bodies and 11% in native glue.

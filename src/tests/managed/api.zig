@@ -1475,9 +1475,20 @@ const net_source =
     \\  await client.write(message);
     \\  const reuse = new Uint8Array(32);
     \\  let have = 0;
-    \\  while (have < message.length) have += await client.readInto(reuse.subarray(have));
-    \\  out.readInto = have === message.length && String.fromCharCode(...reuse.subarray(0, have)) === 'ping-pong' && reuse.buffer.byteLength === 32 &&
-    \\    (await client.readInto(new Uint8Array(0))) === 0 &&
+    \\  while (have < message.length) have += await client.readCopy(reuse.subarray(have));
+    \\  out.readCopy = have === message.length && String.fromCharCode(...reuse.subarray(0, have)) === 'ping-pong' && reuse.buffer.byteLength === 32 &&
+    \\    (await client.readCopy(new Uint8Array(0))) === 0 &&
+    \\    (await client.readCopy({}).then(() => false, e => e instanceof TypeError));
+    \\
+    \\  // readInto: the buffer is detached and handed back as a new ArrayBuffer; undetachable buffers are refused untouched.
+    \\  await client.write(message);
+    \\  const pinned = new Uint8Array(32);
+    \\  const got = await client.readInto(pinned);
+    \\  out.readInto = got.bytes === message.length && got.buffer instanceof ArrayBuffer && got.buffer.byteLength === 32 && pinned.length === 0 &&
+    \\    String.fromCharCode(...new Uint8Array(got.buffer, 0, got.bytes)) === 'ping-pong';
+    \\  const sab = new Uint8Array(new SharedArrayBuffer(8));
+    \\  out.readIntoRefused = (await client.readInto(sab).then(() => false, e => e.name === 'Unsupported')) && sab.length === 8 &&
+    \\    (await client.readInto(new Uint8Array(0)).then(() => false, e => e instanceof TypeError)) &&
     \\    (await client.readInto({}).then(() => false, e => e instanceof TypeError));
     \\
     \\  // A large write is sent whole and echoed back in order.
@@ -1493,7 +1504,7 @@ const net_source =
     \\
     \\  // Closing the client ends the echo loop; reads after close reject.
     \\  await client.close();
-    \\  out.echoTotal = (await echoed) === 27 + 9 + (1 << 20);
+    \\  out.echoTotal = (await echoed) === 27 + 9 + 9 + (1 << 20);
     \\  out.closed = client.closed && (await client.read(1).then(() => false, e => e.name === 'BadHandle'));
     \\
     \\  // Errors and validation.
@@ -1520,7 +1531,7 @@ test "api: net echo over loopback with Handle classes (auto and threaded backend
         try setupBackend(&fx, net_source, backend, .{});
         defer fx.deinit();
         try fx.run();
-        try check(fx.scope, "report.server && report.client && report.wrote && report.reply && report.readInto && report.big && report.echoTotal && report.closed");
+        try check(fx.scope, "report.server && report.client && report.wrote && report.reply && report.readCopy && report.readInto && report.readIntoRefused && report.big && report.echoTotal && report.closed");
         try check(fx.scope, "report.refused && report.denied && report.badIo && report.badArgs && report.noForge && report.afterIoClose");
     }
 }

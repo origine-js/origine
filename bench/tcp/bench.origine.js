@@ -5,7 +5,9 @@
 // The guest has no high-resolution clock (only `Date.now()`), so this prints throughput and mean
 // round-trip latency (conns / rps) but not p50/p99.
 export async function main(api) {
-  const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto'] = api.env.args();
+  const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto', mode = 'copy'] = api.env.args();
+  // mode: 'copy' = readCopy (copy into a reused buffer), 'into' = readInto (detach and get the buffer back)
+  const pinnedReads = mode === 'into';
   const SIZE = Number(sizeArg);
   const CONNS = Number(connsArg);
   const WARM = Number(warmArg ?? 1) * 1000;
@@ -17,14 +19,31 @@ export async function main(api) {
   const io = api.io.create({ backend });
   const server = api.net.listen(io, { port: 0 });
 
+  // A reusable read buffer per connection. 'copy' keeps one Uint8Array (readCopy copies into it);
+  // 'into' gets the detached buffer back from readInto each time and wraps it in a new view.
+  const makeReader = size => {
+    let u8 = new Uint8Array(size);
+    return {
+      get u8() {
+        return u8;
+      },
+      async read(sock, at) {
+        if (!pinnedReads) return sock.readCopy(at === 0 ? u8 : u8.subarray(at));
+        const r = await sock.readInto(at === 0 ? u8 : new Uint8Array(u8.buffer, at));
+        u8 = new Uint8Array(r.buffer);
+        return r.bytes;
+      },
+    };
+  };
+
   const echo = async () => {
     const conn = await server.accept();
-    // One reusable buffer per connection (readInto does not detach it), like the Deno variant.
-    const buf = new Uint8Array(Math.max(SIZE, 1024));
+    const reader = makeReader(Math.max(SIZE, 1024));
     try {
       for (;;) {
-        const n = await conn.readInto(buf);
+        const n = await reader.read(conn, 0);
         if (n === 0) break;
+        const buf = reader.u8;
         await conn.write(n === buf.length ? buf : buf.subarray(0, n));
       }
     } catch {
@@ -45,7 +64,7 @@ export async function main(api) {
     const msg = new Uint8Array(SIZE);
     for (let i = 8; i < SIZE; i++) msg[i] = pat(i);
     const view = new DataView(msg.buffer);
-    const rbuf = new Uint8Array(SIZE);
+    const reader = makeReader(SIZE);
     for (let seq = 1; ; seq++) {
       const t0 = Date.now();
       if (t0 >= end) return;
@@ -53,10 +72,10 @@ export async function main(api) {
       await sock.write(msg);
       let got = 0;
       while (got < SIZE) {
-        const n = await sock.readInto(got === 0 ? rbuf : rbuf.subarray(got));
+        const n = await reader.read(sock, got);
         if (n === 0) throw new Error('unexpected end of stream');
-        const at = got === 0 ? 0 : got;
-        if (rbuf[at] !== expect(seq, got) || rbuf[at + n - 1] !== expect(seq, got + n - 1)) throw new Error('echo content mismatch');
+        const rbuf = reader.u8;
+        if (rbuf[got] !== expect(seq, got) || rbuf[got + n - 1] !== expect(seq, got + n - 1)) throw new Error('echo content mismatch');
         got += n;
       }
       if (t0 >= warmEnd) rounds++;
@@ -68,6 +87,7 @@ export async function main(api) {
     JSON.stringify({
       impl: 'origine-js',
       backend,
+      mode,
       size: SIZE,
       conns: CONNS,
       rounds,

@@ -91,6 +91,10 @@ After the wait-table and pending-slab changes (`bun run.js <out_dir> 1 3 2`; the
 
 Where the JS path's time goes at 1 connection (in-tree counters, one half round trip, about 19 us): kevent/recv/send syscalls about 11.6 us (the same as the Rust-only bench), Rust task/runtime overhead about 3.6 us, JS microtasks and native calls about 2.9 us, completion settling about 0.9 us. The host settle loop itself costs under 0.5 us per iteration. An *empty* zero-timeout `kevent` costs about 12 us on this macOS, so avoiding empty polls matters.
 
+## Read modes of the origine JS bench
+
+`bench.origine.js ... <backend> <mode>`: `copy` (default) uses `readCopy`, `into` uses the detaching `readInto`. 1 KiB: copy 38.9k / 87k rt/s vs into 35.1k / 84k (1 / 64 connections); 64 KiB x 1 connection: copy 16.5k vs into 17.9k. Zero-copy wins only when the copy is large.
+
 ## Latest: 1 KiB x 2 runs, after eager first poll and `Socket.readInto`
 
 `origine JS` now polls native-started ops once at spawn (`Handle::spawn_eager`) and the bench reuses one buffer per connection with `readInto` (like the Deno variant). Tried and rejected because they measured no better or worse: a leaner spawn path without join handle, a native scratch buffer + copy for `read(len)` (about 8% slower), and a pooled/uninitialised backing store from the isolate's allocator (the raw allocation is a small part of the 405 ns `new_backing_store` cost).

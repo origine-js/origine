@@ -100,13 +100,28 @@
       }
     }
     /**
-     * Reads once into `buffer` (an ArrayBuffer or view): resolves the byte count, 0 at end of
-     * stream. The buffer is not detached, so one buffer can serve every read.
+     * Reads once straight into `buffer` (an ArrayBuffer or view, at least one byte): the buffer is
+     * detached while the read is in flight and resolves `{ bytes, buffer }` with `buffer` a new
+     * ArrayBuffer over the same memory (`bytes` 0 at end of stream). Rejects `Unsupported` for a
+     * buffer that cannot be detached (shared, resizable).
      */
     readInto(buffer) {
       try {
         if (!(buffer instanceof ArrayBuffer) && !ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer or a view');
+        if (buffer.byteLength === 0) throw new TypeError('buffer must not be empty');
         return native.net.readInto(live(this), buffer);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    /**
+     * Reads once into `buffer` by copy: resolves the byte count, 0 at end of stream. The buffer is
+     * not detached, so one buffer can serve every read, but the bytes are copied.
+     */
+    readCopy(buffer) {
+      try {
+        if (!(buffer instanceof ArrayBuffer) && !ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer or a view');
+        return native.net.readCopy(live(this), buffer);
       } catch (e) {
         return Promise.reject(e);
       }

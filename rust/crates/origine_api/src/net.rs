@@ -22,7 +22,7 @@ use origine_api_core::{NativeError, errno, pin};
 
 use crate::HostState;
 use crate::decode::ArrayBufferArg;
-use crate::fs::AllocRead;
+use crate::fs::{AllocRead, ReadInto};
 use crate::native;
 use crate::native::{Op, ScopeKey, host_mut};
 use crate::pinned;
@@ -206,13 +206,13 @@ fn net_read(
     }))
 }
 
-/// `native.net.readInto(id, buffer)`: Promise of the byte count (0 = end of stream) read once
+/// `native.net.readCopy(id, buffer)`: Promise of the byte count (0 = end of stream) read once
 /// into the guest's `buffer` (an ArrayBuffer or view). The read goes to a native scratch `Vec`
 /// and is copied into the buffer at completion, so nothing is detached and the guest can reuse
 /// the same buffer for every read; no V8 object is created per read. `StaleHandle` if the buffer
 /// was detached meanwhile.
-#[native(side_effect = "any", path = "net.readInto", needs = "runtime", promise)]
-fn net_read_into<'s>(
+#[native(side_effect = "any", path = "net.readCopy", needs = "runtime", promise)]
+fn net_read_copy<'s>(
     host: &mut HostState,
     key: ScopeKey,
     id: u32,
@@ -233,6 +233,33 @@ fn net_read_into<'s>(
         },
         buffer,
     ))
+}
+
+/// `native.net.readInto(id, buffer)`: reads once straight into the guest's `buffer` (an
+/// ArrayBuffer or view): the buffer is detached for the duration (the loop owns its bytes, no
+/// copy) and the promise resolves `{ bytes, buffer }` with `buffer` a new ArrayBuffer over the
+/// same memory; `bytes` is 0 at end of stream. A buffer that cannot be detached (shared,
+/// resizable, WebAssembly memory) is refused with `Unsupported` before anything is touched.
+/// After a failed read the buffer stays detached (see `pinned`).
+#[native(side_effect = "any", path = "net.readInto", needs = "runtime", promise)]
+fn net_read_into<'s>(
+    host: &mut HostState,
+    key: ScopeKey,
+    id: u32,
+    buffer: ArrayBufferArg<'s>,
+) -> Result<Op<'s, impl Future<Output = Result<ReadInto, NativeError>> + 'static + use<>>, NativeError> {
+    let (socket, lp) = stream_of(host, key, id)?;
+    let runtime = socket.runtime();
+    let (buf, copied) = pinned::pin_for_read(&buffer)?;
+    if copied {
+        return Err(NativeError::Errno(errno::UNSUPPORTED));
+    }
+    Ok(Op::new(runtime, async move {
+        let (read, buf) = lp.recv(socket.fd(), buf, 0).await;
+        let bytes = read?;
+        let store = buf.into_store().ok_or(NativeError::Errno(errno::UNEXPECTED))?;
+        Ok(ReadInto::Pinned { bytes, store })
+    }))
 }
 
 /// `native.net.write(id, data)`: Promise of the byte count; copies `data` and sends all of it.

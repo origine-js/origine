@@ -30,7 +30,7 @@ const scratch = "/tmp";
 
 test "write then read through a loop" {
     for (backends) |kind| {
-        const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @intFromEnum(kind) });
+        const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @backingInt(kind) });
         defer loop.destroy();
 
         var open: Probe = .{};
@@ -70,12 +70,12 @@ test "missing file reports -ENOENT" {
     var open: Probe = .{};
     try loop.open(&open.op, io.fd_cwd, scratch ++ "/definitely/missing", io.O.RDONLY, 0, onDone, null);
     _ = loop.run(.until_idle);
-    try std.testing.expectEqual(-@as(i64, @intFromEnum(std.c.E.NOENT)), open.result);
+    try std.testing.expectEqual(-@as(i64, @backingInt(std.c.E.NOENT)), open.result);
 }
 
 test "short timeout completes before a long one" {
     for (backends) |kind| {
-        const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @intFromEnum(kind) });
+        const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @backingInt(kind) });
         defer loop.destroy();
         var order: Order = .{};
         var slow: Probe = .{ .order = &order, .tag = 'S' };
@@ -94,7 +94,7 @@ test "cancel reports -ECANCELED" {
     try loop.timeout(&t.op, 10 * std.time.ns_per_s, onDone, null);
     try std.testing.expect(loop.cancel(&t.op));
     _ = loop.run(.until_idle);
-    try std.testing.expectEqual(-@as(i64, @intFromEnum(std.c.E.CANCELED)), t.result);
+    try std.testing.expectEqual(-@as(i64, @backingInt(std.c.E.CANCELED)), t.result);
 }
 
 test "post from another thread wakes a blocked run" {
@@ -123,7 +123,7 @@ test "destroy with ops in flight cancels them" {
     var t: Probe = .{};
     try loop.timeout(&t.op, 10 * std.time.ns_per_s, onDone, null);
     loop.destroy();
-    try std.testing.expectEqual(-@as(i64, @intFromEnum(std.c.E.CANCELED)), t.result);
+    try std.testing.expectEqual(-@as(i64, @backingInt(std.c.E.CANCELED)), t.result);
 }
 
 test "independent loops do not share state" {
@@ -137,4 +137,41 @@ test "independent loops do not share state" {
     try std.testing.expectEqual(@as(u32, 1), a.active);
     _ = a.run(.until_idle);
     try std.testing.expect(t.result >= 0);
+}
+
+test "many timeouts fire in deadline order and cancels remove only their own" {
+    for (backends) |kind| {
+        const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @backingInt(kind) });
+        defer loop.destroy();
+        const n = 100;
+        const Fired = struct {
+            var seq: [n]u16 = undefined;
+            var len: usize = 0;
+            fn cb(op: *io.Op, result: i64) callconv(.c) void {
+                if (result != 0) return;
+                seq[len] = @intCast(@intFromPtr(op.user));
+                len += 1;
+            }
+        };
+        Fired.len = 0;
+        const probes = try std.testing.allocator.alloc(Probe, n);
+        defer std.testing.allocator.free(probes);
+        // Deadlines are scrambled, distinct and 2 ms apart (wider than the submit loop's own skew): i * 37 mod 100 is a permutation.
+        for (probes, 0..) |*p, i| {
+            p.* = .{};
+            const slot: u64 = (i * 37) % n;
+            try loop.timeout(&p.op, (1 + slot * 2) * std.time.ns_per_ms, Fired.cb, @ptrFromInt(slot));
+        }
+        // Cancel every third op; its callback reports -ECANCELED and is skipped by `cb`.
+        var cancelled: usize = 0;
+        for (probes, 0..) |*p, i| {
+            if (i % 3 != 0) continue;
+            try std.testing.expect(loop.cancel(&p.op));
+            cancelled += 1;
+        }
+        try std.testing.expectEqual(@as(u32, 0), loop.run(.until_idle));
+        try std.testing.expectEqual(n - cancelled, Fired.len);
+        var i: usize = 1;
+        while (i < Fired.len) : (i += 1) try std.testing.expect(Fired.seq[i - 1] < Fired.seq[i]);
+    }
 }

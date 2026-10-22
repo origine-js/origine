@@ -9,6 +9,19 @@ use crate::{NativeError, errno};
 /// the same 256 MiB as `readAll`. Larger requests fail `FileTooBig` before anything is allocated.
 pub const MAX_ALLOC_READ: usize = 256 << 20;
 
+/// Host-provided reads below this capacity are never compacted: the copy would cost more than
+/// the memory it saves.
+pub const COMPACT_MIN_CAPACITY: usize = 4096;
+
+/// Whether a host-provided read that got `bytes` of a `capacity`-byte store should be copied into
+/// an exact-size buffer (so a 16 MiB request that found 10 bytes does not keep 16 MiB alive for as
+/// long as the `Uint8Array` lives). Bounded cost: only when at most half the store was used, so
+/// the copy is never larger than the memory it frees. uSockets does the same with its shared
+/// receive buffer: read into scratch, hand out an exact-size copy.
+pub fn should_compact(bytes: usize, capacity: usize) -> bool {
+    capacity >= COMPACT_MIN_CAPACITY && bytes <= capacity / 2
+}
+
 /// What V8 says about the store behind a guest buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreTraits {
@@ -96,6 +109,16 @@ mod tests {
         assert!(!window_fits(9, 0, 8));
         assert!(!window_fits(usize::MAX, 2, usize::MAX));
         assert!(!window_fits(1, usize::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn short_alloc_reads_are_compacted() {
+        assert!(!should_compact(0, COMPACT_MIN_CAPACITY - 1));
+        assert!(should_compact(0, COMPACT_MIN_CAPACITY));
+        assert!(should_compact(2048, 4096));
+        assert!(!should_compact(2049, 4096));
+        assert!(!should_compact(MAX_ALLOC_READ, MAX_ALLOC_READ));
+        assert!(should_compact(10, MAX_ALLOC_READ));
     }
 
     #[test]

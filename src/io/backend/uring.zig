@@ -137,7 +137,12 @@ const Impl = if (supported) struct {
         const s = try allocator.create(State);
         errdefer allocator.destroy(s);
 
-        var ring = try IoUring.init(entries, 0);
+        // COOP_TASKRUN (5.19): completions run as task_work the next time this thread enters the
+        // kernel instead of interrupting it with an IPI (uSockets' io_uring loop sets the same
+        // flags). TASKRUN_FLAG makes the kernel flag pending work so `reap` can ask for it.
+        // Older kernels reject the flags with EINVAL: fall back to a plain ring.
+        const coop = linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_TASKRUN_FLAG;
+        var ring = IoUring.init(entries, coop) catch try IoUring.init(entries, 0);
         errdefer ring.deinit();
 
         const r = linux.eventfd(0, linux.EFD.CLOEXEC);
@@ -794,6 +799,11 @@ const Impl = if (supported) struct {
     /// Reaps every CQE currently available. Returns true if the wake CQE was among them.
     fn reap(s: *State, out: *backend.Drained, rearm: bool) void {
         var cqes: [64]linux.io_uring_cqe = undefined;
+        // With COOP_TASKRUN, completions are only posted when we enter the kernel; do so when the
+        // kernel says some are waiting (no-op, and no syscall, on a plain ring).
+        if (@atomicLoad(u32, s.ring.sq.flags, .unordered) & linux.IORING_SQ_TASKRUN != 0) {
+            _ = linux.io_uring_enter(s.ring.fd, 0, 0, linux.IORING_ENTER_GETEVENTS, null);
+        }
         var woke = false;
         while (true) {
             const n = s.ring.copy_cqes(&cqes, 0) catch break;

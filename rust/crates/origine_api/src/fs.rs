@@ -334,11 +334,25 @@ pub struct AllocRead {
 impl<'s> IntoJs<'s> for AllocRead {
     fn into_js(self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
         let buffer = match &self.store {
+            Some(store) if pin::should_compact(self.bytes, store.byte_length()) => compact(scope, store, self.bytes),
             Some(store) => v8::ArrayBuffer::with_backing_store(scope, store),
             None => v8::ArrayBuffer::new(scope, 0),
         };
         v8::Uint8Array::new(scope, buffer, 0, self.bytes).map(Into::into).ok_or_else(|| NativeError::range_error("buffer too large"))
     }
+}
+
+/// A new `ArrayBuffer` holding the first `bytes` bytes of `store` (the rest of a short read is
+/// dropped with the store).
+fn compact<'s>(scope: &mut v8::PinScope<'s, '_>, store: &v8::SharedRef<v8::BackingStore>, bytes: usize) -> v8::Local<'s, v8::ArrayBuffer> {
+    let buffer = v8::ArrayBuffer::new(scope, bytes);
+    if let (Some(dst), Some(src)) = (buffer.data().filter(|_| bytes > 0), store.data()) {
+        // SAFETY: `bytes <= store.byte_length() / 2` (see `should_compact`), so `src` has `bytes`
+        // readable bytes, all initialized by the completed read or zeroed by V8; `dst` is the
+        // fresh buffer's `bytes` writable bytes. They are separate allocations.
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr().cast::<u8>(), dst.as_ptr().cast::<u8>(), bytes) };
+    }
+    buffer
 }
 
 /// Starts a read into the guest buffer `buffer` (`offset` `None` = the file position).

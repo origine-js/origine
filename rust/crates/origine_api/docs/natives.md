@@ -69,7 +69,7 @@ synchronously, so a bad call returns a rejected promise without starting a task.
 | `filePwriteAll` | `fs, fileId, data, offset: u64` | `undefined`. Pins/detaches like `writeAll`. |
 | `fileReadInto` | `fs, fileId, buffer` | `{ bytes, buffer: ArrayBuffer }`: one read at the position into `buffer`'s window; pinned = new ArrayBuffer over the same store (original dead), else the guest's own buffer after copy-out. |
 | `filePreadInto` | `fs, fileId, buffer, offset: u64` | as `fileReadInto` at `offset`. |
-| `fileReadAlloc` | `fs, fileId, len: u64` | `Uint8Array` of the bytes read (<= `len`, empty at EOF) over a V8-allocated buffer of `len` bytes; `len` > 256 MiB rejects `FileTooBig`. |
+| `fileReadAlloc` | `fs, fileId, len: u64` | `Uint8Array` of the bytes read (<= `len`, empty at EOF) over a V8-allocated buffer of `len` bytes (or an exact-size copy when at most half of a >= 4 KiB buffer was used); `len` > 256 MiB rejects `FileTooBig`. |
 | `filePreadAlloc` | `fs, fileId, len: u64, offset: u64` | as `fileReadAlloc` at `offset`. |
 | `fileSetLength` | `fs, fileId, length: u64` | `undefined`. |
 | `fileSync` | `fs, fileId` | `undefined`. |

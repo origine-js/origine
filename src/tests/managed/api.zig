@@ -1243,7 +1243,7 @@ test "api: async buffers are pinned and detached, BYOB and host-allocated reads 
         try check(fx.scope, "report.copyFallbackAll");
         try check(fx.scope, "report.byob && report.byobDead && report.subView && report.u16 && report.dataView && report.bareBuffer");
         try check(fx.scope, "report.shortByob && report.eofByob && report.emptyByob && report.streamByob && report.byobFallback");
-        try check(fx.scope, "report.alloc && report.allocShort && report.allocEof && report.allocZero && report.allocStream === '012345:4'");
+        try check(fx.scope, "report.alloc && report.allocShort && report.allocCompact && report.allocEof && report.allocZero && report.allocStream === '012345:4'");
         try check(fx.scope, "report.syncUnsupported && report.validation === '8,8,8,8,8,8,8,8,8,8' && report.validationUntouched && report.rawOk && report.rawFrozen && report.afterClose");
     }
 }
@@ -1274,6 +1274,8 @@ test "api: closing an io runtime with pinned reads and writes in flight is safe"
         \\  await closing;
         \\  out.settled = settled.length === pending.length;
         \\  const allowed = [IoError.Canceled, IoError.StaleHandle, IoError.BadHandle];
+    \\  const big = await rf.readAlloc(fs, 1 << 20, 6);
+    \\  out.allocCompact = big.length === 4 && text(big) === '6789' && big.buffer.byteLength === 4;
         \\  out.errors = settled.every(r => r.status === 'fulfilled' || allowed.includes(r.reason.errno));
         \\  out.canceled = settled.some(r => r.status === 'rejected' && r.reason.errno === IoError.Canceled) || settled.every(r => r.status === 'fulfilled');
         \\  // Whatever completed holds exactly what was read; nothing is resurrected into the dead buffers.

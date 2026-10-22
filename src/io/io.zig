@@ -18,4 +18,5 @@ test {
     _ = @import("c_api.zig");
     _ = @import("contract_test.zig");
     _ = @import("tests.zig");
+    _ = @import("timers.zig");
 }

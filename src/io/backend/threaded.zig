@@ -2,12 +2,13 @@
 //!
 //! Locking: `mu` guards `work`, `done`, `posts`, `stop`, `woken` and every op's `priv[1]` state
 //! while the op is owned by the pool. Workers touch nothing but the op and those queues. Timers
-//! live in a loop-thread-only list (deadline stashed in `op.result` until expiry).
+//! live in a loop-thread-only heap (timers.zig, heap index in `op.priv[4]`).
 //! `PostNode`s are allocated with `std.heap.c_allocator`; whoever runs them must free them there.
 const std = @import("std");
 const builtin = @import("builtin");
 const backend = @import("../backend.zig");
 const op_mod = @import("../op.zig");
+const tm = @import("../timers.zig");
 const Op = op_mod.Op;
 const c = std.c;
 
@@ -19,11 +20,11 @@ const max_workers = 64;
 const State = enum(usize) { none = 0, queued = 1, running = 2, running_cancelled = 3, done = 4 };
 
 fn getState(op: *Op) State {
-    return @enumFromInt(@intFromPtr(op.priv[1]));
+    return @fromBackingInt(@intCast(@intFromPtr(op.priv[1])));
 }
 
 fn setState(op: *Op, s: State) void {
-    op.priv[1] = @ptrFromInt(@intFromEnum(s));
+    op.priv[1] = @ptrFromInt(@backingInt(s));
 }
 
 const Self = struct {
@@ -43,7 +44,7 @@ const Self = struct {
     pipe_w: c_int = -1,
     signalled: bool = false,
     /// Loop-thread only.
-    timers: op_mod.Queue = .{},
+    timers: tm.Timers = .{ .slot = 4 },
     /// Loop-thread only (grown by `submit`, joined by `destroy`).
     threads: std.ArrayList(std.Thread) = .empty,
     /// Guarded by `mu`: queued ops and workers parked on `work_cv`.
@@ -145,10 +146,6 @@ fn nowNs(clock: c.clockid_t) u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
-fn deadlineOf(op: *Op) u64 {
-    return @bitCast(op.result);
-}
-
 // ---- vtable -------------------------------------------------------------------------------
 
 fn submit(ctx: *anyopaque, op: *Op) anyerror!void {
@@ -156,11 +153,9 @@ fn submit(ctx: *anyopaque, op: *Op) anyerror!void {
     op.priv[0] = null;
     switch (op.kind) {
         .timeout => {
-            const now = nowNs(.MONOTONIC);
-            const dl = std.math.add(u64, now, op.aux) catch std.math.maxInt(u64) >> 1;
-            op.result = @bitCast(dl);
+            op.priv[4] = null;
+            try s.timers.push(s.allocator, op, tm.deadlineAfter(nowNs(.MONOTONIC), op.aux));
             setState(op, .none);
-            s.timers.push(op);
         },
         .nop => {
             s.lock();
@@ -220,7 +215,7 @@ fn cancel(ctx: *anyopaque, op: *Op) bool {
     }
 }
 
-const ecancelled: i64 = @intFromEnum(c.E.CANCELED);
+const ecancelled: i64 = @backingInt(c.E.CANCELED);
 
 fn poll(ctx: *anyopaque, block: bool, out: *backend.Drained) void {
     const s = ctxOf(ctx);
@@ -255,27 +250,16 @@ fn poll(ctx: *anyopaque, block: bool, out: *backend.Drained) void {
 
     if (!s.timers.isEmpty()) {
         const now = nowNs(.MONOTONIC);
-        var cur = s.timers.head;
-        while (cur) |op| {
-            cur = op_mod.Queue.nextOf(op);
-            if (deadlineOf(op) <= now) {
-                _ = s.timers.remove(op);
-                op.result = 0;
-                setState(op, .none);
-                out.done.push(op);
-            }
+        while (s.timers.popDue(now)) |op| {
+            op.result = 0;
+            setState(op, .none);
+            out.done.push(op);
         }
     }
 }
 
 fn earliest(s: *Self) ?u64 {
-    var best: ?u64 = null;
-    var cur = s.timers.head;
-    while (cur) |op| : (cur = op_mod.Queue.nextOf(op)) {
-        const d = deadlineOf(op);
-        if (best == null or d < best.?) best = d;
-    }
-    return best;
+    return s.timers.peek();
 }
 
 /// Caller holds `mu`.
@@ -322,7 +306,7 @@ fn destroy(ctx: *anyopaque, out: *backend.Drained) void {
         s.done.push(op);
     }
     s.unlock();
-    while (s.timers.pop()) |op| {
+    while (s.timers.popFirst()) |op| {
         op.result = -ecancelled;
         setState(op, .none);
         out.done.push(op);
@@ -349,6 +333,7 @@ fn destroy(ctx: *anyopaque, out: *backend.Drained) void {
     _ = c.pthread_mutex_destroy(&s.mu);
     const allocator = s.allocator;
     s.threads.deinit(allocator);
+    s.timers.deinit(allocator);
     allocator.destroy(s);
 }
 
@@ -413,8 +398,8 @@ fn translateOpen(aux: u64) c.O {
 }
 
 fn execute(op: *Op) i64 {
-    const enosys: i64 = -@as(i64, @intFromEnum(c.E.NOSYS));
-    const einval: i64 = -@as(i64, @intFromEnum(c.E.INVAL));
+    const enosys: i64 = -@as(i64, @backingInt(c.E.NOSYS));
+    const einval: i64 = -@as(i64, @backingInt(c.E.INVAL));
     while (true) {
         const r: i64 = switch (op.kind) {
             .open => blk: {
@@ -504,7 +489,7 @@ fn execute(op: *Op) i64 {
             },
             else => enosys,
         };
-        if (r == -@as(i64, @intFromEnum(c.E.INTR))) continue;
+        if (r == -@as(i64, @backingInt(c.E.INTR))) continue;
         return r;
     }
 }
@@ -525,7 +510,7 @@ fn doFstat(op: *Op, einval: i64) i64 {
         var sx: linux.Statx = undefined;
         const rc = linux.statx(@intCast(op.fd), "", linux.AT.EMPTY_PATH, @bitCast(@as(u32, 0x7ff)), &sx);
         const e = linux.errno(rc);
-        if (e != .SUCCESS) return -@as(i64, @intFromEnum(e));
+        if (e != .SUCCESS) return -@as(i64, @backingInt(e));
         out.* = .{ .size = sx.size, .mode = sx.mode, .kind = kindOfMode(sx.mode) };
         return 0;
     } else {
@@ -561,10 +546,10 @@ const sys = struct {
     extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
 };
 
-const eintr: i64 = -@as(i64, @intFromEnum(c.E.INTR));
+const eintr: i64 = -@as(i64, @backingInt(c.E.INTR));
 
 fn neg(e: c.E) i64 {
-    return -@as(i64, @intFromEnum(e));
+    return -@as(i64, @backingInt(e));
 }
 
 // ---- fsync / fallocate ------------------------------------------------------------------------
@@ -593,7 +578,7 @@ fn doFallocate(op: *Op, einval: i64) i64 {
     if (builtin.os.tag == .linux) {
         const rc = std.os.linux.fallocate(fd, if (keep) 1 else 0, op.offset, len);
         const e = std.os.linux.errno(rc);
-        return if (e == .SUCCESS) 0 else neg(@enumFromInt(@intFromEnum(e)));
+        return if (e == .SUCCESS) 0 else neg(@fromBackingInt(@intCast(@backingInt(e))));
     } else if (builtin.os.tag.isDarwin()) {
         const end = std.math.add(i64, op.offset, len) catch return einval;
         var st: c.Stat = undefined;
@@ -746,7 +731,7 @@ fn doFutexWait(op: *Op, einval: i64) i64 {
         };
         const rc = linux.futex_4arg(addr, .{ .cmd = .WAIT, .private = true }, expected, if (op.offset >= 0) &ts else null);
         const e = linux.errno(rc);
-        return if (e == .SUCCESS) 0 else neg(@enumFromInt(@intFromEnum(e)));
+        return if (e == .SUCCESS) 0 else neg(@fromBackingInt(@intCast(@backingInt(e))));
     } else if (builtin.os.tag.isDarwin()) {
         if (@atomicLoad(u32, addr, .seq_cst) != expected) return neg(.AGAIN);
         const rc: c_int = if (op.offset >= 0) blk: {
@@ -770,7 +755,7 @@ fn doFutexWake(op: *Op, einval: i64) i64 {
         const n: u32 = @intCast(@min(count, std.math.maxInt(i32)));
         const rc = linux.futex_3arg(addr, .{ .cmd = .WAKE, .private = true }, n);
         const e = linux.errno(rc);
-        return if (e == .SUCCESS) @intCast(rc) else neg(@enumFromInt(@intFromEnum(e)));
+        return if (e == .SUCCESS) @intCast(rc) else neg(@fromBackingInt(@intCast(@backingInt(e))));
     } else if (builtin.os.tag.isDarwin()) {
         // Darwin cannot report how many waiters were woken: count == 1 uses the "any" variant
         // (result 1 or 0); larger counts wake everyone and report 1 if there was any waiter, else 0.
@@ -791,7 +776,7 @@ fn doStat(op: *Op, einval: i64) i64 {
         var sx: linux.Statx = undefined;
         const rc = linux.statx(dirfdOf(op.fd), path, if (nofollow) linux.AT.SYMLINK_NOFOLLOW else 0, @bitCast(@as(u32, 0x7ff)), &sx);
         const e = linux.errno(rc);
-        if (e != .SUCCESS) return neg(@enumFromInt(@intFromEnum(e)));
+        if (e != .SUCCESS) return neg(@fromBackingInt(@intCast(@backingInt(e))));
         out.* = .{ .size = sx.size, .mode = sx.mode, .kind = kindOfMode(sx.mode) };
         return 0;
     } else {
@@ -837,7 +822,7 @@ fn readNative(fd: c_int, buf: []u8, len: usize) i64 {
     if (builtin.os.tag == .linux) {
         const rc = std.os.linux.getdents64(fd, buf.ptr, @intCast(len));
         const e = std.os.linux.errno(rc);
-        return if (e == .SUCCESS) @intCast(rc) else neg(@enumFromInt(@intFromEnum(e)));
+        return if (e == .SUCCESS) @intCast(rc) else neg(@fromBackingInt(@intCast(@backingInt(e))));
     } else {
         var base: i64 = 0;
         const rc = sysd.__getdirentries64(fd, buf.ptr, len, &base);
@@ -1003,7 +988,7 @@ test "open missing file yields -ENOENT; nop completes" {
     try be.vtable.submit(be.ctx, &open);
     try be.vtable.submit(be.ctx, &nop);
     _ = collect(be, 2, &got);
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.NOENT)), open.result);
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.NOENT)), open.result);
     try testing.expectEqual(@as(i64, 0), nop.result);
 }
 
@@ -1289,7 +1274,7 @@ test "stat nofollow, link, rename via fd2" {
     var s4: Op = .{ .kind = .stat, .path = base ++ "/b/moved", .buf = &st };
     try testing.expectEqual(@as(i64, 0), try run(be, &s4));
     var s5: Op = .{ .kind = .stat, .path = base ++ "/a/file2", .buf = &st };
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.NOENT)), try run(be, &s5));
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.NOENT)), try run(be, &s5));
     _ = c.close(@intCast(da));
     _ = c.close(@intCast(db));
 }
@@ -1374,7 +1359,7 @@ test "loopback connect + accept + send/recv" {
 fn futexSupported(be: backend.Backend) !bool {
     var v: u32 = 0;
     var w: Op = .{ .kind = .futex_wake, .buf = &v, .aux = 1 };
-    return (try run(be, &w)) != -@as(i64, @intFromEnum(c.E.NOSYS));
+    return (try run(be, &w)) != -@as(i64, @backingInt(c.E.NOSYS));
 }
 
 test "futex wait/wake/-EAGAIN/-ETIMEDOUT" {
@@ -1384,9 +1369,9 @@ test "futex wait/wake/-EAGAIN/-ETIMEDOUT" {
     if (!try futexSupported(be)) return error.SkipZigTest;
     var v: u32 = 0;
     var mismatch: Op = .{ .kind = .futex_wait, .buf = &v, .aux = 1 };
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.AGAIN)), try run(be, &mismatch));
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.AGAIN)), try run(be, &mismatch));
     var to: Op = .{ .kind = .futex_wait, .buf = &v, .aux = 0, .offset = 20 * std.time.ns_per_ms };
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.TIMEDOUT)), try run(be, &to));
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.TIMEDOUT)), try run(be, &to));
 
     var waiter: Op = .{ .kind = .futex_wait, .buf = &v, .aux = 0 };
     try be.vtable.submit(be.ctx, &waiter);
@@ -1483,7 +1468,7 @@ test "ftruncate shrink and grow" {
     try testing.expectEqual(@as(u64, 9000), st.size);
 
     var t3: Op = .{ .kind = .ftruncate, .fd = fd, .offset = -5 };
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.INVAL)), try run(be, &t3));
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.INVAL)), try run(be, &t3));
 }
 
 const Entry = struct { kind: u8, name: []const u8 };
@@ -1567,7 +1552,7 @@ test "readdir: kinds, no dots, cookie continuation, -ERANGE" {
     const dfd = try openDir(be, dir);
     defer _ = c.close(@intCast(dfd));
     const expected = [_]Entry{
-        .{ .kind = 2, .name = "dir_1" }, .{ .kind = 2, .name = "dir_2" },
+        .{ .kind = 2, .name = "dir_1" },  .{ .kind = 2, .name = "dir_2" },
         .{ .kind = 1, .name = "file_a" }, .{ .kind = 1, .name = "file_b" },
         .{ .kind = 1, .name = "file_c" }, .{ .kind = 3, .name = "link_x" },
     };
@@ -1586,7 +1571,7 @@ test "readdir: kinds, no dots, cookie continuation, -ERANGE" {
     // First entry cannot fit (1 byte buffer).
     var tiny: [1]u8 = undefined;
     var rd: Op = .{ .kind = .readdir, .fd = dfd, .buf = &tiny, .len = 1, .offset = 0 };
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.RANGE)), try run(be, &rd));
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.RANGE)), try run(be, &rd));
 }
 
 test "readdir: 2000 entries through a 4096-byte buffer" {

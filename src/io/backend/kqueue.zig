@@ -1,8 +1,8 @@
 //! macOS kqueue + GCD backend.
 //!
-//! kqueue is the wait primitive: `EVFILT_USER`/`NOTE_TRIGGER` implements `wake`, `EVFILT_TIMER`
-//! implements timeout ops, and `EVFILT_READ`/`EVFILT_WRITE` implement readiness waits for sockets
-//! in non-blocking mode. Blocking syscalls run on the GCD global queue through the plain C function
+//! kqueue is the wait primitive: `EVFILT_USER`/`NOTE_TRIGGER` implements `wake`, a user-space
+//! timer heap (timers.zig) implements timeout ops, and `EVFILT_READ`/`EVFILT_WRITE` implement
+//! readiness waits for sockets in non-blocking mode. Blocking syscalls run on the GCD global queue through the plain C function
 //! `dispatch_async_f` (no blocks). A GCD thread only touches its op and the mutex-guarded
 //! done-list, then triggers the user event; it never calls back into the loop.
 //!
@@ -44,6 +44,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const op_mod = @import("../op.zig");
 const backend = @import("../backend.zig");
+const tm = @import("../timers.zig");
 
 const Op = op_mod.Op;
 const Queue = op_mod.Queue;
@@ -57,6 +58,9 @@ pub const supported = switch (builtin.os.tag) {
 
 const c = std.c;
 
+/// Events fetched per kevent call (uSockets uses 1024; 256 keeps the stack frame at 8 KiB).
+const event_batch = 256;
+
 // libSystem dispatch, no blocks needed.
 const dispatch = struct {
     const Fn = *const fn (?*anyopaque) callconv(.c) void;
@@ -66,7 +70,6 @@ const dispatch = struct {
 };
 
 // Darwin constants not (all) exposed by std.
-const NOTE_NSECONDS: u32 = 0x4;
 const S_IFMT: u32 = 0o170000;
 const S_IFSOCK: u32 = 0o140000;
 const O_CLOEXEC: u32 = 0x01000000;
@@ -136,10 +139,10 @@ const os_sync = struct {
 const State = enum(usize) { idle = 0, queued, running, cancelled, timer, waiting, done };
 
 fn getState(op: *Op) State {
-    return @enumFromInt(@intFromPtr(op.priv[1]));
+    return @fromBackingInt(@intCast(@intFromPtr(op.priv[1])));
 }
 fn setState(op: *Op, s: State) void {
-    op.priv[1] = @ptrFromInt(@intFromEnum(s));
+    op.priv[1] = @ptrFromInt(@backingInt(s));
 }
 
 fn gcdPrev(op: *Op) ?*Op {
@@ -163,7 +166,9 @@ const Kq = struct {
 
     // Loop thread only.
     ready: Queue = .{},
-    timers: Queue = .{},
+    /// Timeout ops, ordered by deadline (heap index in priv[4]). No kernel timer per op: `poll`
+    /// blocks in kevent with the earliest deadline as its timeout.
+    timers: tm.Timers = .{ .slot = 4 },
     waits: Queue = .{},
     /// Every op handed to GCD and not yet reported (doubly linked through priv[4]/priv[5]).
     gcd_head: ?*Op = null,
@@ -206,7 +211,7 @@ const Kq = struct {
 };
 
 fn negErrno() i64 {
-    return -@as(i64, @intFromEnum(c.errno(@as(isize, -1))));
+    return -@as(i64, @backingInt(c.errno(@as(isize, -1))));
 }
 
 fn sys(rc: anytype) i64 {
@@ -215,7 +220,7 @@ fn sys(rc: anytype) i64 {
 }
 
 fn errno(e: c.E) i64 {
-    return -@as(i64, @intFromEnum(e));
+    return -@as(i64, @backingInt(e));
 }
 
 fn ecanceled() i64 {
@@ -733,22 +738,9 @@ fn submit(ctx: *anyopaque, op: *Op) anyerror!void {
     switch (op.kind) {
         .nop => finishLocal(k, op, 0),
         .timeout => {
-            const ns: isize = @intCast(@min(op.aux, @as(u64, std.math.maxInt(isize))));
-            const ev = [1]c.Kevent{.{
-                .ident = @intFromPtr(op),
-                .filter = c.EVFILT.TIMER,
-                .flags = c.EV.ADD | c.EV.ONESHOT,
-                .fflags = NOTE_NSECONDS,
-                .data = ns,
-                .udata = @intFromPtr(op),
-            }};
-            var out: [1]c.Kevent = undefined;
-            if (c.kevent(k.kq, &ev, 1, &out, 0, null) < 0) {
-                finishLocal(k, op, negErrno());
-            } else {
-                setState(op, .timer);
-                k.timers.push(op);
-            }
+            const deadline = tm.deadlineAfter(tm.nowNs(), op.aux);
+            k.timers.push(k.allocator, op, deadline) catch return finishLocal(k, op, errno(.NOMEM));
+            setState(op, .timer);
         },
         .open, .close, .read, .write, .fstat, .mkdir, .unlink, .rename => toGcd(k, op),
         .fsync, .fallocate, .ftruncate, .readdir, .sendfile, .stat, .link, .readv, .writev, .futex_wait => toGcd(k, op),
@@ -771,25 +763,11 @@ fn finishLocal(k: *Kq, op: *Op, res: i64) void {
     k.ready.push(op);
 }
 
-fn deleteTimer(k: *Kq, op: *Op) void {
-    const ev = [1]c.Kevent{.{
-        .ident = @intFromPtr(op),
-        .filter = c.EVFILT.TIMER,
-        .flags = c.EV.DELETE,
-        .fflags = 0,
-        .data = 0,
-        .udata = 0,
-    }};
-    var out: [1]c.Kevent = undefined;
-    _ = c.kevent(k.kq, &ev, 1, &out, 0, null);
-}
-
 fn cancel(ctx: *anyopaque, op: *Op) bool {
     const k = kqOf(ctx);
     switch (getState(op)) {
         .idle => return false,
         .timer => {
-            deleteTimer(k, op);
             _ = k.timers.remove(op);
             finishLocal(k, op, ecanceled());
             return true;
@@ -843,19 +821,23 @@ fn poll(ctx: *anyopaque, block: bool, out: *Drained) void {
     const k = kqOf(ctx);
     while (k.ready.pop()) |op| handOut(op, out);
 
-    const zero: c.timespec = .{ .sec = 0, .nsec = 0 };
+    var timeout: c.timespec = .{ .sec = 0, .nsec = 0 };
     const nonblocking = !block or out.done.head != null;
-    var events: [64]c.Kevent = undefined;
+    if (!nonblocking) {
+        if (k.timers.peek()) |dl| {
+            const now = tm.nowNs();
+            const wait = if (dl > now) dl - now else 0;
+            timeout = .{ .sec = @intCast(wait / std.time.ns_per_s), .nsec = @intCast(wait % std.time.ns_per_s) };
+        }
+    }
+    const bounded = nonblocking or !k.timers.isEmpty();
+    var events: [event_batch]c.Kevent = undefined;
     const none: [0]c.Kevent = .{};
-    const n = c.kevent(k.kq, &none, 0, &events, events.len, if (nonblocking) &zero else null);
+    const n = c.kevent(k.kq, &none, 0, &events, events.len, if (bounded) &timeout else null);
     if (n > 0) {
         for (events[0..@intCast(n)]) |ev| {
-            if (ev.filter == c.EVFILT.TIMER) {
-                const op: *Op = @ptrFromInt(ev.udata);
-                _ = k.timers.remove(op);
-                op.result = 0;
-                handOut(op, out);
-            } else if (ev.filter == c.EVFILT.READ or ev.filter == c.EVFILT.WRITE) {
+            // EVFILT_USER is the wake: the shared lists are drained below.
+            if (ev.filter == c.EVFILT.READ or ev.filter == c.EVFILT.WRITE) {
                 const op: *Op = @ptrFromInt(ev.udata);
                 if (getState(op) != .waiting) continue;
                 _ = k.waits.remove(op);
@@ -867,6 +849,13 @@ fn poll(ctx: *anyopaque, block: bool, out: *Drained) void {
                     handOut(op, out);
                 }
             }
+        }
+    }
+    if (!k.timers.isEmpty()) {
+        const now = tm.nowNs();
+        while (k.timers.popDue(now)) |op| {
+            op.result = 0;
+            handOut(op, out);
         }
     }
     drainShared(k, out);
@@ -896,8 +885,7 @@ fn destroy(ctx: *anyopaque, out: *Drained) void {
     const k = kqOf(ctx);
 
     // Cancel everything that can be cancelled before waiting for the rest.
-    while (k.timers.pop()) |op| {
-        deleteTimer(k, op);
+    while (k.timers.popFirst()) |op| {
         op.result = ecanceled();
         handOut(op, out);
     }
@@ -917,6 +905,7 @@ fn destroy(ctx: *anyopaque, out: *Drained) void {
     while (k.ready.pop()) |op| handOut(op, out);
     drainShared(k, out);
 
+    k.timers.deinit(k.allocator);
     _ = c.close(k.kq);
     _ = c.pthread_cond_destroy(&k.cond);
     _ = c.pthread_mutex_destroy(&k.mutex);
@@ -1048,7 +1037,7 @@ test "write/read round trip" {
     try testing.expectEqual(@as(i64, 0), try runOne(b, &un));
     // Second unlink fails with -ENOENT.
     var un2: Op = .{ .kind = .unlink, .path = path };
-    try testing.expectEqual(-@as(i64, @intFromEnum(c.E.NOENT)), try runOne(b, &un2));
+    try testing.expectEqual(-@as(i64, @backingInt(c.E.NOENT)), try runOne(b, &un2));
 
     var d: Drained = .{};
     b.vtable.destroy(b.ctx, &d);
@@ -1098,7 +1087,7 @@ test "cancel" {
     try b.vtable.submit(b.ctx, &bad);
     try testing.expect(b.vtable.cancel(b.ctx, &bad));
     _ = try collect(b, 1, &buf);
-    try testing.expect(bad.result == ecanceled() or bad.result == -@as(i64, @intFromEnum(c.E.NOENT)));
+    try testing.expect(bad.result == ecanceled() or bad.result == -@as(i64, @backingInt(c.E.NOENT)));
 
     var d: Drained = .{};
     b.vtable.destroy(b.ctx, &d);
@@ -1177,13 +1166,13 @@ test "destroy with ops in flight" {
     try testing.expectEqual(ops.len + 2, count);
     try testing.expectEqual(ecanceled(), timer.result);
     // Queued ops are cancelled by destroy; ones that already started report their real result.
-    for (&ops) |*o| try testing.expect(o.result == ecanceled() or o.result == -@as(i64, @intFromEnum(c.E.NOENT)));
+    for (&ops) |*o| try testing.expect(o.result == ecanceled() or o.result == -@as(i64, @backingInt(c.E.NOENT)));
 }
 
 // ----- tests for the extended op set -----
 
 fn negE(e: c.E) i64 {
-    return -@as(i64, @intFromEnum(e));
+    return -@as(i64, @backingInt(e));
 }
 
 fn openOp(b: backend.Backend, path: [*:0]const u8, flags: u64) !i64 {
@@ -1753,7 +1742,7 @@ test "readdir kinds, cookie continuation, ERANGE" {
 
     const expected = [_]struct { []const u8, u8 }{
         .{ "f1", 1 }, .{ "f2", 1 }, .{ "file_three_long_name", 1 },
-        .{ "d1", 2 },  .{ "d2", 2 }, .{ "lnk", 3 },
+        .{ "d1", 2 }, .{ "d2", 2 }, .{ "lnk", 3 },
     };
     for ([_]usize{ 4096, 128, 64 }) |sz| {
         var seen = Seen.init(testing.allocator);

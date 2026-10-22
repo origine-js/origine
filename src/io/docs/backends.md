@@ -28,6 +28,7 @@ Uses `std.os.linux.IoUring` directly (no liburing).
 - **Wake.** An eventfd is watched by a permanently re-armed read SQE (`user_data = 1`). `wake` writes 1 to it from any thread; the read CQE ends a blocking `poll`.
 - **Post.** A lock-free MPSC stack (CAS push, `Xchg` drain, reversed to FIFO), then `wake`. Nodes come from `std.heap.c_allocator`.
 - **Poll.** Reap CQEs (batches of 64), drain posts, drain finished readdirs; if `block` and nothing was collected, `submit_and_wait(1)` and reap again.
+- **Setup flags.** `IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG` (completion task_work runs when the loop thread next enters the kernel instead of interrupting it with an IPI); `reap` enters with `GETEVENTS` when the kernel sets `IORING_SQ_TASKRUN`. A kernel that rejects the flags (< 5.19) gets a plain ring. `SINGLE_ISSUER` is deliberately not set: a loop may be created on one thread and run on another.
 - **Timeouts.** `timeout` is `IORING_OP_TIMEOUT` (`-ETIME` is mapped to result 0). `futex_wait` with `offset >= 0` is a `FUTEX_WAIT` SQE linked (`IOSQE_IO_LINK`) to an `IORING_OP_LINK_TIMEOUT` SQE; the op has two CQEs and completes on the second, mapping "wait cancelled by the timeout" to `-ETIMEDOUT`. Futex ops use `FUTEX2_SIZE_U32 | FUTEX2_PRIVATE` with a match-any mask.
 - **fstat/stat** use `statx` into a heap `Statx`, converted to `Stat` on completion.
 - **sendfile** has no io_uring opcode: it allocates a pipe (`pipe2`, enlarged best effort to 1 MiB) and loops `splice(in -> pipe)` then `splice(pipe -> out)` as chained SQEs until `count` bytes moved or EOF. The pipe and state are freed when the op completes. A short result is success; an error is reported only if nothing was copied.
@@ -42,7 +43,7 @@ Uses `std.os.linux.IoUring` directly (no liburing).
 Wait primitive is kqueue; blocking syscalls run on the libdispatch global queue via the plain C function `dispatch_async_f` (no blocks, `QOS_CLASS_USER_INITIATED`).
 
 - **Wake.** `EVFILT_USER` with `NOTE_TRIGGER` (ident 1, registered `EV_CLEAR`). `post` appends to a mutex-guarded list then triggers the event.
-- **Timers.** `EVFILT_TIMER` one-shot with `NOTE_NSECONDS`, ident = op address. Cancel deletes the kevent.
+- **Timers.** A loop-thread min-heap (`timers.zig`, heap index in `priv[4]`). Arming and cancelling a timeout is a heap operation with no syscall; a blocking `poll` passes the earliest deadline as the `kevent` timeout and expires every due entry after the call. A nonblocking `poll` expires due timers too.
 - **GCD ops** (open, close, read, write, fstat, stat, mkdir, unlink, rename, link, fsync, fallocate, ftruncate, readdir, sendfile, readv, writev, futex_wait, and sockets on blocking fds). `submit` links the op in an outstanding list, marks it queued, and `dispatch_async_f`s it. A GCD thread (function `work`) only touches its op and the mutex-guarded done list, sets `op.result`, pushes the op, triggers the user event and signals a condvar. It never calls into the loop. Per-op states live in `priv[1]`: idle, queued, running, cancelled, timer, waiting, done.
 - **Non-blocking sockets.** For `send/recv/sendmsg/recvmsg/accept/connect`, if the fd has `O_NONBLOCK` (checked with `F_GETFL` at submit) the syscall is attempted on the loop thread. On `EAGAIN` (connect: `EINPROGRESS`) the op registers a one-shot `EVFILT_READ` (accept/recv/recvmsg) or `EVFILT_WRITE` (send/sendmsg/connect) on a private `dup` (`F_DUPFD_CLOEXEC`) of the fd, so several ops can wait on the same descriptor, then retries when the event fires. Cancelling closes the dup and reports `-ECANCELED`. No GCD thread is held while waiting. Blocking fds run the call on GCD.
 - **futex.** `futex_wait` runs `os_sync_wait_on_address(_with_timeout)` on a GCD thread (weak-linked; absent means `-ENOSYS` and no `futex` cap). `futex_wake` completes inline on the loop thread: the kernel cannot report how many it woke, so the backend scans its own outstanding futex waits for that address, marks `min(count, waiting)` of them, issues that many `os_sync_wake_by_address_any` calls and returns the number. Waiters from other code on the same word are not counted.
@@ -50,8 +51,9 @@ Wait primitive is kqueue; blocking syscalls run on the libdispatch global queue 
 - **fsync.** Without the data-only flag: `fcntl(F_FULLFSYNC)`, falling back to `fsync` if the filesystem rejects it. With data-only: plain `fsync`, which on macOS does not flush the drive cache (no `fdatasync` equivalent).
 - **fallocate.** See [ops.md](ops.md#fallocflags).
 - **sendfile.** `sendfile(2)` when `out` is a socket; else a pread/write loop.
-- **destroy.** Deletes timers, drops socket waits, flags queued GCD ops as cancelled (they complete `-ECANCELED` when GCD gets to them), then waits on a condvar for ops that are already inside a syscall. Those cannot be interrupted, so destroy blocks until they return.
+- **destroy.** Drops timers, drops socket waits, flags queued GCD ops as cancelled (they complete `-ECANCELED` when GCD gets to them), then waits on a condvar for ops that are already inside a syscall. Those cannot be interrupted, so destroy blocks until they return.
 - **pollable.** The kqueue fd itself (can be added to another kqueue or `poll`ed). Ops finished inline on the loop thread (nop, futex_wake, immediate socket results, submission errors) sit on an internal ready list that does not make the kqueue fd readable; they are collected by the next `poll`, so call `run(NOWAIT)` after submitting.
+- **Event batch.** `poll` fetches up to 256 kevents per call (was 64).
 - `Options.entries` is ignored. Per-fd ordering of streaming (`offset == -1`) ops is not provided.
 
 ## threaded (portable POSIX)
@@ -60,7 +62,7 @@ A pool of worker threads runs blocking libc calls.
 
 - **Pool.** `entries` workers at creation (default 4, at most 64). When an op is submitted while every worker is busy (`queued > idle`) and fewer than 64 threads exist, `submit` spawns another worker, so blocked ops (accept, recv, futex_wait, pipe reads) do not starve later ops, up to the cap. Workers are never retired before `destroy`. Beyond 64 blocked ops, further ops wait in the queue.
 - **Sync.** One mutex guards the work queue, done queue, post list, stop/woken flags and each op's state (`priv[1]`: none, queued, running, running_cancelled, done). Workers touch only the op and these queues.
-- **Timers** live in a loop-thread-only list; the deadline (`CLOCK_MONOTONIC`) is stashed in `op.result` until expiry. A blocking `poll` waits on a condvar with an absolute timeout computed from the earliest deadline.
+- **Timers** live in a loop-thread-only min-heap (`timers.zig`, shared with kqueue; heap index in `priv[4]`, deadline on `CLOCK_MONOTONIC`). Arm, cancel and "earliest deadline" are O(log n) / O(1) instead of list scans. A blocking `poll` waits on a condvar with an absolute timeout computed from the earliest deadline.
 - **Nop** completes inline: it is queued as done and signals the pollable pipe.
 - **Wake/post.** Set a flag (or append a node), signal the condvar and the self-pipe.
 - **Self-pipe / `pollable()`.** A non-blocking close-on-exec pipe; the read end is returned. One byte is written when something is pending (coalesced through a `signalled` flag guarded by the mutex) and `poll` drains it. It is level-triggered and tracks worker completions, `wake`, `post` and inline nops. **Timer expiry does not make it readable** (timers are only examined inside `poll`), so a foreign loop must arrange its own timeout for outstanding `timeout` ops.
@@ -115,3 +117,19 @@ Contract:
 - **destroy(out).** Stop workers, make every outstanding op complete with `-ECANCELED` (or its real result if it already finished) into `out.done`, move leftover posts into `out`, free all resources including `ctx`. After it returns the loop dispatches `out` and frees itself.
 - **caps.** Report only what the backend truly supports; `Caps` bits are public API (`oio_loop_caps`). Per-instance capabilities (kernel probes) can be set by copying a base vtable into the state, as `uring.zig` does.
 - **Tests.** Drive the vtable directly in the backend file (see [testing.md](testing.md)) and add the backend to the `backends` list in `tests.zig`.
+
+## Ideas taken from uSockets
+
+[uSockets](https://github.com/uNetworking/uSockets) is a readiness-based socket library built for very many connections. Reviewed against this loop:
+
+| uSockets technique | Here |
+|---|---|
+| One coarse sweep timer plus a one-byte tick stamp per socket, instead of a kernel timer per socket | Adopted in spirit: kqueue and threaded keep every `timeout` in one user-space heap and use one kernel wait deadline ([timers.zig](../timers.zig)). We keep nanosecond precision, so a heap rather than tick buckets. io_uring keeps `IORING_OP_TIMEOUT`, which is just an SQE batched with the rest. |
+| `IORING_SETUP_COOP_TASKRUN` (and `SINGLE_ISSUER`) on its io_uring loop | `COOP_TASKRUN` + `TASKRUN_FLAG` adopted; `SINGLE_ISSUER` rejected (see above). |
+| Up to 1024 events per `epoll_wait`/`kevent` | kqueue batch raised to 256. |
+| One shared receive buffer per loop; each socket reads into it and the data is handed out exact-size | Our ops write straight into caller-owned buffers, so no shared scratch. The host-provided read (`fileReadAlloc`) takes the same lesson: when a read uses at most half of a 4 KiB+ store it is copied into an exact-size `ArrayBuffer` (`origine_api_core::pin::should_compact`), so a short read of a big request does not pin the big store. Large full reads stay zero-copy. |
+| Interest changes only when the event mask differs (`kqueue_change`) | Already the case: socket waits register a single one-shot filter; no redundant `kevent` calls. |
+| Pending-ready-poll patching when a poll is closed or moved | Not needed: completions carry the `Op` pointer and a state word (`priv[1]`); a stale event for an op that is no longer waiting is skipped, and re-armed waits are idempotent. |
+| Multishot accept/recv with provided buffers on io_uring | Not adopted: the callback-per-op model has exactly one completion per op. Candidate for a future streaming op kind. |
+| Accept loop until `EAGAIN`; re-read when the buffer was filled completely | Belongs to the socket layer above the loop, not the loop itself. |
+| Low-priority socket queue with a per-iteration budget | Out of scope (TLS handshake fairness). |

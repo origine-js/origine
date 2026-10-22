@@ -1,0 +1,16 @@
+[package]
+name = "tcp_bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone crate: deliberately NOT a member of rust/Cargo.toml's workspace.
+[workspace]
+
+[dependencies]
+origine_io = { path = "../../../rust/crates/origine_io" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+panic = "unwind"

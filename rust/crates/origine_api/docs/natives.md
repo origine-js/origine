@@ -83,6 +83,21 @@ operation releases its guard.
 Buffer semantics (pin/detach, copy fallback, lifetime invariant): [README](README.md#buffers-pinning-and-copy-fallback).
 `fileRead`/`filePread` remain copying (they allocate `buffer.length` bytes per call).
 
+## `net.*` (loopback TCP, `needs = "runtime"`)
+
+Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, bound to the runtime they were created on and checked against the calling scope on every call (`BadHandle` otherwise). `accept`/`read`/`write` run on the runtime's loop; `connect` is a blocking `std` connect, acceptable only because the destination is restricted to loopback (`127.0.0.1`, `localhost`, `::1`; anything else is `AccessDenied`).
+
+| native | args | result |
+|---|---|---|
+| `net.listen` | `io, host, port` | `{ id, port }` (sync); port 0 picks one |
+| `net.accept` | `id` | Promise `{ id, port }` (port = the peer's) |
+| `net.connect` | `io, host, port` | Promise `{ id, port }` |
+| `net.read` | `id, len` | Promise `Uint8Array` of 1..=`len` bytes (empty at end of stream); host-allocated like `fileReadAlloc` (same compaction of short reads, 256 MiB cap) |
+| `net.write` | `id, data` | Promise byte count; copies `data` and sends all of it |
+| `net.close` | `id` | sync; streams are shut down so pending reads finish with 0 bytes |
+
+An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. A pending `accept` keeps its listener open until the runtime closes. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
+
 ## Adding a native
 
 1. Write the fn in `src/` with `#[native(side_effect = "...", path = "ns.name"[, needs = "runtime" | "async_fs"][, promise])]`

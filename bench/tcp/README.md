@@ -64,3 +64,18 @@ Persistent per-fd `EV_DISPATCH` filters with batched registration replaced `dup`
 | 64 KiB | 64 | 32,136 | 34,231 |
 
 Note: the Rust bench bundles `liborigine_io.a` into the `origine_io` rlib, so after rebuilding the Zig library delete the bench crate's `target/` before rebuilding, or cargo keeps linking the old code.
+
+## Full matrix with origine's JS API (`api.net`), after the kqueue rework
+
+`origine JS` is `bench.origine.js` on `zig-out/bin/origine` (same workload through `api.net`). The guest has no high-resolution clock (`Date.now()` only), so it reports mean latency instead of p50/p99. Median of 3, 1 s warmup, 3 s measured. Run with `bun run.js <out_dir> 1 3 3` after `zig build`.
+
+| size | conns | origine rt | origine JS | Bun native | Bun node:net | Deno native | Deno node:net |
+|---|---|---|---|---|---|---|---|
+| 16 B | 1 | 41,073 rt/s<br>p50 23.8 us / p99 36.3 us | 24,439 rt/s<br>mean 40.9 us | 37,700 rt/s<br>p50 25.8 us / p99 37.9 us | 37,974 rt/s<br>p50 25.1 us / p99 37.5 us | 33,211 rt/s<br>p50 29.2 us / p99 44.5 us | 32,957 rt/s<br>p50 29.3 us / p99 41.8 us |
+| 16 B | 64 | 107,349 rt/s<br>p50 571.5 us / p99 1.10 ms | 40,753 rt/s<br>mean 1.57 ms | 115,021 rt/s<br>p50 524.7 us / p99 992.1 us | 104,611 rt/s<br>p50 592.5 us / p99 1.03 ms | 88,365 rt/s<br>p50 693.5 us / p99 1.22 ms | 73,708 rt/s<br>p50 837.9 us / p99 1.33 ms |
+| 1 KiB | 1 | 38,223 rt/s<br>p50 25.0 us / p99 40.3 us | 23,149 rt/s<br>mean 43.2 us | 36,711 rt/s<br>p50 26.2 us / p99 41.4 us | 37,423 rt/s<br>p50 25.3 us / p99 38.5 us | 33,134 rt/s<br>p50 29.0 us / p99 47.8 us | 32,708 rt/s<br>p50 29.8 us / p99 45.3 us |
+| 1 KiB | 64 | 108,299 rt/s<br>p50 585.5 us / p99 671.6 us | 38,740 rt/s<br>mean 1.65 ms | 109,055 rt/s<br>p50 569.0 us / p99 986.7 us | 100,898 rt/s<br>p50 622.3 us / p99 901.5 us | 82,280 rt/s<br>p50 768.5 us / p99 892.2 us | 74,097 rt/s<br>p50 852.6 us / p99 972.7 us |
+| 64 KiB | 1 | 21,139 rt/s<br>p50 44.4 us / p99 65.2 us | 11,311 rt/s<br>mean 88.4 us | 18,574 rt/s<br>p50 50.6 us / p99 107.2 us | 18,211 rt/s<br>p50 51.2 us / p99 88.4 us | 15,800 rt/s<br>p50 61.3 us / p99 102.5 us | 15,381 rt/s<br>p50 60.7 us / p99 90.8 us |
+| 64 KiB | 64 | 34,551 rt/s<br>p50 1.82 ms / p99 2.42 ms | 10,813 rt/s<br>mean 5.92 ms | 33,907 rt/s<br>p50 1.86 ms / p99 2.33 ms | 32,448 rt/s<br>p50 1.92 ms / p99 2.41 ms | 31,354 rt/s<br>p50 2.02 ms / p99 2.41 ms | 30,556 rt/s<br>p50 2.02 ms / p99 3.31 ms |
+
+The JS path is 30-65% below Bun at small messages: per-operation promise, completion and `Uint8Array` machinery costs about 8 us per round trip on top of the same four syscalls (see the profile notes in the commit history); origine's Rust runtime matches Bun.

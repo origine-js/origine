@@ -21,6 +21,7 @@ use origine_io::rt::Runtime;
 use origine_io::{Loop, Mode, Options};
 
 use crate::native::{Hook, ScopeKey, Wrap, finish};
+use crate::net::Socket;
 use crate::sys::{self, WakeRx};
 
 /// Settles a promise on the isolate thread: finished async natives queue one of these.
@@ -109,6 +110,8 @@ pub struct HostState {
     next_runtime: u32,
     grants: BTreeMap<u32, Rc<GrantRecord>>,
     next_grant: u32,
+    sockets: BTreeMap<u32, Rc<Socket>>,
+    next_socket: u32,
     pending: BTreeMap<u64, Pending>,
     next_op: u64,
     completions: CompletionQueue,
@@ -125,6 +128,8 @@ impl HostState {
             next_runtime: 1,
             grants: BTreeMap::new(),
             next_grant: 1,
+            sockets: BTreeMap::new(),
+            next_socket: 1,
             pending: BTreeMap::new(),
             next_op: 1,
             completions: Rc::default(),
@@ -211,6 +216,7 @@ impl HostState {
         drop(rt); // cancels every task; the loop runs once to deliver the cancellations
         let ids: Vec<u64> = self.pending.iter().filter(|(_, pending)| pending.runtime == id).map(|(op, _)| *op).collect();
         let canceled = ids.into_iter().filter_map(|op| self.pending.remove(&op)).collect();
+        self.sockets.retain(|_, socket| socket.runtime() != id);
         let grant_ids: Vec<u32> = self.grants.iter().filter(|(_, record)| record.runtime == id).map(|(grant, _)| *grant).collect();
         if let Some(entry) = self.runtimes.get_mut(&id) {
             entry.state = RtState::Draining { close_op: None, grants_released: false };
@@ -352,6 +358,43 @@ impl HostState {
         Ok(())
     }
 
+    // ---- sockets ------------------------------------------------------------------------
+
+    /// The loop of the open runtime `io` of `owner`; `BadHandle` for an unknown, foreign or closing one.
+    pub(crate) fn loop_of(&self, owner: ScopeKey, io: u32) -> Result<Rc<Loop>, NativeError> {
+        Ok(Rc::clone(&self.open_runtime(owner, io)?.lp))
+    }
+
+    /// The socket `id` of `owner`, its loop and its runtime; `BadHandle` if unknown, foreign or
+    /// its runtime is closing.
+    pub(crate) fn socket(&self, owner: ScopeKey, id: u32) -> Result<(Rc<Socket>, Rc<Loop>), NativeError> {
+        let socket = self.sockets.get(&id).filter(|socket| socket.owner() == owner).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+        let lp = self.loop_of(owner, socket.runtime())?;
+        Ok((Rc::clone(socket), lp))
+    }
+
+    /// A fresh socket id (not yet addressable until [`HostState::insert_socket`]).
+    pub(crate) fn reserve_socket(&mut self) -> Result<u32, NativeError> {
+        let id = self.next_socket;
+        self.next_socket = id.checked_add(1).ok_or(NativeError::Errno(errno::ACCESS_DENIED))?;
+        Ok(id)
+    }
+
+    /// Makes `socket` addressable as `id`. `Canceled` if its runtime went away meanwhile.
+    pub(crate) fn insert_socket(&mut self, id: u32, socket: Socket) -> Result<(), NativeError> {
+        self.open_runtime(socket.owner(), socket.runtime()).map_err(|_| NativeError::Errno(errno::CANCELED))?;
+        self.sockets.insert(id, Rc::new(socket));
+        Ok(())
+    }
+
+    /// Takes socket `id` out of the table; operations in flight keep the descriptor alive.
+    pub(crate) fn remove_socket(&mut self, owner: ScopeKey, id: u32) -> Result<Rc<Socket>, NativeError> {
+        match self.sockets.get(&id) {
+            Some(socket) if socket.owner() == owner => Ok(self.sockets.remove(&id).expect("just found")),
+            _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
+        }
+    }
+
     // ---- teardown ----------------------------------------------------------------------
 
     /// Drops every pending promise and queued completion (they own V8 `Global`s, which must be
@@ -374,6 +417,7 @@ impl HostState {
         // Whatever is still not quiet is destroyed with its loop (which fires the callbacks).
         self.runtimes.clear();
         self.grants.clear();
+        self.sockets.clear();
         self.pending.clear();
     }
 }

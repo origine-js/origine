@@ -331,6 +331,12 @@ pub struct AllocRead {
     store: Option<v8::SharedRef<v8::BackingStore>>,
 }
 
+impl AllocRead {
+    pub(crate) fn new(bytes: usize, store: Option<v8::SharedRef<v8::BackingStore>>) -> AllocRead {
+        AllocRead { bytes, store }
+    }
+}
+
 impl<'s> IntoJs<'s> for AllocRead {
     fn into_js(self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
         let buffer = match &self.store {

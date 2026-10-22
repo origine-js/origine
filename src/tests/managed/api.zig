@@ -1342,3 +1342,94 @@ test "api: several BYOB reads over one ArrayBuffer settle cleanly and re-wrapped
     try fx.run();
     try check(fx.scope, "report.settled && report.won && report.right && report.cleanRejections && report.bufferDetachedOnce && report.sound");
 }
+
+const net_source =
+    \\export async function main(api) {
+    \\  try {
+    \\    await body(api);
+    \\  } catch (e) {
+    \\    throw new Error('net test failed: ' + (e instanceof Error ? e.stack : JSON.stringify(e)));
+    \\  }
+    \\}
+    \\async function body(api) {
+    \\  const out = globalThis.report = {};
+    \\  const { Handle, Server, Socket } = api.net;
+    \\  const io = api.io.create({ backend: '@BACKEND@' });
+    \\  const server = api.net.listen(io, { port: 0 });
+    \\  out.server = server instanceof Server && server instanceof Handle && server.port > 0 && server.io === io && !server.closed;
+    \\
+    \\  // Echo server: one connection, echo until end of stream.
+    \\  const echoed = (async () => {
+    \\    const conn = await server.accept();
+    \\    let total = 0;
+    \\    for (;;) {
+    \\      const chunk = await conn.read(4096);
+    \\      if (chunk.length === 0) break;
+    \\      total += await conn.write(chunk);
+    \\    }
+    \\    await conn.close();
+    \\    return total;
+    \\  })();
+    \\
+    \\  const client = await api.net.connect(io, { host: '127.0.0.1', port: server.port });
+    \\  out.client = client instanceof Socket && client instanceof Handle && client.remotePort === server.port;
+    \\  const message = Uint8Array.from('ping-pong', c => c.charCodeAt(0));
+    \\  let reply = '';
+    \\  for (let i = 0; i < 3; i++) {
+    \\    out.wrote = (await client.write(message)) === message.length;
+    \\    let got = new Uint8Array(0);
+    \\    while (got.length < message.length) {
+    \\      const part = await client.read(64);
+    \\      const next = new Uint8Array(got.length + part.length);
+    \\      next.set(got);
+    \\      next.set(part, got.length);
+    \\      got = next;
+    \\    }
+    \\    reply += String.fromCharCode(...got) + ';';
+    \\  }
+    \\  out.reply = reply === 'ping-pong;ping-pong;ping-pong;';
+    \\
+    \\  // A large write is sent whole and echoed back in order.
+    \\  const big = new Uint8Array(1 << 20).map((_, i) => i & 255);
+    \\  const sending = client.write(big);
+    \\  let received = 0, ordered = true;
+    \\  while (received < big.length) {
+    \\    const part = await client.read(1 << 16);
+    \\    for (let i = 0; i < part.length; i++) ordered &&= part[i] === ((received + i) & 255);
+    \\    received += part.length;
+    \\  }
+    \\  out.big = (await sending) === big.length && received === big.length && ordered;
+    \\
+    \\  // Closing the client ends the echo loop; reads after close reject.
+    \\  await client.close();
+    \\  out.echoTotal = (await echoed) === 27 + (1 << 20);
+    \\  out.closed = client.closed && (await client.read(1).then(() => false, e => e.name === 'BadHandle'));
+    \\
+    \\  // Errors and validation.
+    \\  const refused = await api.net.connect(io, { port: server.port }).then(() => 'ok', e => e.name);
+    \\  await server.close();
+    \\  out.refused = refused === 'ConnectionRefused' || refused === 'ok';
+    \\  out.denied = await api.net.connect(io, { host: '8.8.8.8', port: 53 }).then(() => false, e => e.name === 'AccessDenied');
+    \\  out.badIo = (() => { try { api.net.listen({}, {}); return false; } catch (e) { return e.name === 'BadHandle'; } })();
+    \\  out.badArgs = (() => { try { api.net.listen(io, { port: 70000 }); return false; } catch (e) { return e instanceof TypeError; } })();
+    \\  out.noForge = (() => { try { new Socket({}, 1, io, 1); return false; } catch (e) { return e instanceof TypeError; } })() &&
+    \\    await Socket.prototype.read.call({}, 1).then(() => false, e => e instanceof TypeError) &&
+    \\    Object.isFrozen(api.net) && Object.isFrozen(Socket) && Object.isFrozen(Socket.prototype);
+    \\
+    \\  // Closing the runtime invalidates open handles.
+    \\  const second = api.net.listen(io, {});
+    \\  await io.close();
+    \\  out.afterIoClose = second.closed && (await second.accept().then(() => false, e => e.name === 'BadHandle'));
+    \\}
+;
+
+test "api: net echo over loopback with Handle classes (auto and threaded backends)" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, net_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.server && report.client && report.wrote && report.reply && report.big && report.echoTotal && report.closed");
+        try check(fx.scope, "report.refused && report.denied && report.badIo && report.badArgs && report.noForge && report.afterIoClose");
+    }
+}

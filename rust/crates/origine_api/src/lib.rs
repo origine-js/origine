@@ -22,6 +22,7 @@ mod fs;
 pub mod host;
 mod io;
 pub mod native;
+mod net;
 pub mod pinned;
 mod registry;
 mod sys;

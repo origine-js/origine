@@ -19,7 +19,7 @@ pub const source = std.fmt.comptimePrint(
     \\(native) => {{
     \\  'use strict';
     \\  const util = ({[util]s})(native);
-    \\  return ({[index]s})(native, util, ({[fs]s}), ({[env]s}), ({[scope]s}), ({[io]s}));
+    \\  return ({[index]s})(native, util, ({[fs]s}), ({[env]s}), ({[scope]s}), ({[io]s}), ({[net]s}));
     \\}}
 , .{
     .util = part(@embedFile("../js/glue/util.js")),
@@ -28,4 +28,5 @@ pub const source = std.fmt.comptimePrint(
     .env = part(@embedFile("../js/glue/env.js")),
     .scope = part(@embedFile("../js/glue/scope.js")),
     .io = part(@embedFile("../js/glue/io.js")),
+    .net = part(@embedFile("../js/glue/net.js")),
 });

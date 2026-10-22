@@ -356,6 +356,12 @@ fn worker(s: *Self) void {
         s.unlock();
 
         var r = execute(op);
+        // A non-blocking socket reports EAGAIN instead of waiting: wait for readiness here (in
+        // slices, so a cancel is noticed) and retry, which is what a blocking socket would do.
+        while (r == -eagain and isSocketWait(op.kind)) {
+            if (!waitReady(s, op)) break;
+            r = execute(op);
+        }
 
         s.lock();
         if (getState(op) == .running_cancelled) r = -ecancelled;
@@ -365,6 +371,31 @@ fn worker(s: *Self) void {
         s.signalLocked();
         s.unlock();
         _ = c.pthread_cond_signal(&s.loop_cv);
+    }
+}
+
+const eagain: i64 = @backingInt(c.E.AGAIN);
+
+fn isSocketWait(kind: op_mod.Kind) bool {
+    return switch (kind) {
+        .send, .recv, .sendmsg, .recvmsg, .accept => true,
+        else => false,
+    };
+}
+
+/// Blocks (in 25 ms slices) until `op`'s descriptor is ready; false if the op was cancelled or the backend is shutting down.
+fn waitReady(s: *Self, op: *Op) bool {
+    const events: i16 = switch (op.kind) {
+        .send, .sendmsg => c.POLL.OUT,
+        else => c.POLL.IN,
+    };
+    while (true) {
+        var pfd = [_]c.pollfd{.{ .fd = @intCast(op.fd), .events = events, .revents = 0 }};
+        if (c.poll(&pfd, 1, 25) != 0) return true; // ready, or an error the retry will report
+        s.lock();
+        const cancelled = getState(op) == .running_cancelled or s.stop;
+        s.unlock();
+        if (cancelled) return false;
     }
 }
 

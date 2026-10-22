@@ -188,7 +188,7 @@ impl HostState {
         };
         let handle = entry.rt.as_ref().ok_or(NativeError::Errno(errno::BAD_HANDLE))?.handle();
         let id = self.pending.insert(pending);
-        drop(handle.spawn(make(id))); // detached: it reports through the completion queue
+        drop(handle.spawn_eager(make(id))); // detached: it reports through the completion queue; first poll now, so the op is submitted in the native call
         Ok(())
     }
 

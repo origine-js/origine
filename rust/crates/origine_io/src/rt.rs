@@ -230,7 +230,7 @@ fn drop_quiet<T>(v: T) {
 }
 
 impl RtInner {
-    fn spawn_raw<T: 'static>(self: &Rc<Self>, fut: impl Future<Output = T> + 'static, deliver: Deliver<T>) -> AbortHandle {
+    fn spawn_raw<T: 'static>(self: &Rc<Self>, fut: impl Future<Output = T> + 'static, deliver: Deliver<T>, eager: bool) -> AbortHandle {
         let wrapped = TaskFuture { fut: Some(Box::pin(fut)), deliver: Some(deliver) };
         if self.closed.get() {
             drop(wrapped); // delivers `Cancelled`
@@ -238,7 +238,14 @@ impl RtInner {
         }
         let id = self.tasks.borrow_mut().insert(Slot { fut: Some(Box::pin(wrapped)), abort: false });
         let task = Arc::new(Task { id, queued: AtomicBool::new(false), shared: Arc::downgrade(&self.shared) });
-        task.wake_by_ref();
+        if eager {
+            // First poll right here instead of a trip through the ready queue: a future that only
+            // has to submit an op does so now, and one that is already done finishes now.
+            let _enter = EnterGuard::enter(self);
+            self.poll_task(&task);
+        } else {
+            task.wake_by_ref();
+        }
         AbortHandle { rt: Rc::downgrade(self), id }
     }
 
@@ -456,6 +463,23 @@ impl Handle {
     where
         F::Output: 'static,
     {
+        self.spawn_with(f, false)
+    }
+
+    /// Like [`Handle::spawn`], but polls `f` once before returning instead of leaving the first
+    /// poll to the next tick. Use it when the work should start now (submitting an op). Do not
+    /// call it from inside a `Drop` or while a `RefCell` the future touches is borrowed.
+    pub fn spawn_eager<F: Future + 'static>(&self, f: F) -> JoinHandle<F::Output>
+    where
+        F::Output: 'static,
+    {
+        self.spawn_with(f, true)
+    }
+
+    fn spawn_with<F: Future + 'static>(&self, f: F, eager: bool) -> JoinHandle<F::Output>
+    where
+        F::Output: 'static,
+    {
         let state = Rc::new(RefCell::new(JoinInner { result: None, waker: None }));
         let st = state.clone();
         let deliver = Box::new(move |r: Result<F::Output, JoinError>| {
@@ -468,13 +492,13 @@ impl Handle {
                 w.wake();
             }
         });
-        let abort = self.spawn_raw(f, deliver);
+        let abort = self.spawn_raw(f, deliver, eager);
         JoinHandle { state, abort }
     }
 
-    fn spawn_raw<T: 'static>(&self, f: impl Future<Output = T> + 'static, deliver: Deliver<T>) -> AbortHandle {
+    fn spawn_raw<T: 'static>(&self, f: impl Future<Output = T> + 'static, deliver: Deliver<T>, eager: bool) -> AbortHandle {
         match self.inner.upgrade() {
-            Some(rt) => rt.spawn_raw(f, deliver),
+            Some(rt) => rt.spawn_raw(f, deliver, eager),
             None => {
                 drop(TaskFuture { fut: Some(Box::pin(f)), deliver: Some(deliver) });
                 AbortHandle { rt: Weak::new(), id: 0 }
@@ -685,7 +709,7 @@ fn start<T: 'static>(state: &Rc<RefCell<SetState<T>>>, fut: Pin<Box<dyn Future<O
             w.wake();
         }
     });
-    let abort = handle.spawn_raw(fut, deliver);
+    let abort = handle.spawn_raw(fut, deliver, false);
     let mut s = state.borrow_mut();
     if !abort.is_finished() {
         s.aborts.insert(seq, abort);
@@ -955,6 +979,29 @@ mod tests {
 
     fn slot() -> Slot {
         Slot { fut: None, abort: false }
+    }
+
+    #[test]
+    fn spawn_eager_polls_before_returning_but_spawn_waits_for_a_tick() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let lp = Rc::new(Loop::new(crate::Options::default()).expect("loop"));
+        let rt = Runtime::new(Rc::clone(&lp));
+        let polled = Rc::new(AtomicUsize::new(0));
+        let p = Rc::clone(&polled);
+        let eager = rt.handle().spawn_eager(async move {
+            p.fetch_add(1, SeqCst);
+            7
+        });
+        assert_eq!(polled.load(SeqCst), 1, "eager task ran inside spawn");
+        let p = Rc::clone(&polled);
+        let lazy = rt.handle().spawn(async move {
+            p.fetch_add(10, SeqCst);
+        });
+        assert_eq!(polled.load(SeqCst), 1, "plain spawn waits for a tick");
+        rt.tick(Mode::NoWait);
+        assert_eq!(polled.load(SeqCst), 11);
+        assert_eq!(rt.block_on(eager).ok(), Some(7));
+        assert!(rt.block_on(lazy).is_ok());
     }
 
     #[test]

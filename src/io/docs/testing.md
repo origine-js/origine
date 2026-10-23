@@ -5,7 +5,7 @@
 | where | what | how it runs |
 |---|---|---|
 | `backend/uring.zig` (21 tests) | Drive the io_uring vtable directly: file ops, cancel, post/wake, pollable, fsync, fallocate, readv/writev, stat/link/rename, TCP and sendmsg, futex, sendfile, ftruncate, readdir (including 2000 entries through a 4096-byte buffer, concurrent dirs, cancel, destroy) | Linux only; every test returns `SkipZigTest` where `supported` is false or the ring cannot be created |
-| `backend/kqueue.zig` (19 tests) | Same surface for kqueue+GCD, plus non-blocking socket waits (cancel, destroy), futex wake counting for tracked waiters | Darwin only (skipped elsewhere) |
+| `backend/tests/kqueue.zig` (19 tests) | Same surface for kqueue+GCD, plus non-blocking socket waits (cancel, destroy), futex wake counting for tracked waiters | Darwin only (skipped elsewhere); imported by `backend/kqueue.zig` |
 | `backend/threaded.zig` (18 tests) | Same surface for the pool; also cancel of a queued op, pool growth with blocked futex waiters, the pollable self-pipe | Any POSIX OS |
 | `tests.zig` (7 tests) | Loop-level behavior through `io.Loop` against `.auto` and `.threaded`: write/read round trip, `-ENOENT`, timeout ordering, cancel, cross-thread `post` waking a blocked `run`, `destroy` with ops in flight, independent loops | Everywhere |
 | `io.zig` `test {}` block | Pulls in `c_api.zig` and `tests.zig`; the backend files are compiled in through `Loop`'s lazy imports | |

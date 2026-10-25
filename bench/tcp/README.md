@@ -11,8 +11,9 @@ Implementations: origine `rt` + `Loop` (Rust, `Backend::Auto` = kqueue+GCD on ma
 ## Run
 
 ```sh
-# 1. static lib (not produced by build.zig); ReleaseFast
-zig build-lib -static -lc -OReleaseFast --name origine_io src/io/c_api.zig   # run in an empty dir
+# 1. static lib (build.zig links its own copy but has no install step); ReleaseFast
+zig build-lib -static -lc -OReleaseFast --name origine_io \
+  --dep @io -Mroot=<repo>/src/io/lib.zig --dep @safe -M@io=<repo>/src/io/io.zig -M@safe=<repo>/src/safe.zig   # run in an empty dir
 # 2. Rust bench (standalone crate, not in the rust/ workspace)
 cd bench/tcp/rust && ORIGINE_IO_LIB=<dir with liborigine_io.a> cargo +nightly-2026-10-19 build --release
 # 3. one cell

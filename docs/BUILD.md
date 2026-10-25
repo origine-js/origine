@@ -1,8 +1,11 @@
 # Building origine
 
-`origine` is a Zig application embedding V8. The root package builds the shell;
-`lib/v8_zig` is a local package that fetches, patches, and builds V8 and exposes the
-`@v8`, `@engine`, `@managed`, `@util`, `@mimalloc`, and `@diagnostics` modules.
+`origine` is a Zig application embedding V8. The root package builds the shell and links
+three things: the V8 archive from `lib/v8_zig`, a Rust static library (`rust/`, always built),
+and the Zig I/O library `liborigine_io.a` (`src/io/lib.zig`, always ReleaseFast). `lib/v8_zig`
+is a local package that fetches, patches, and builds V8 and exposes the `@v8`, `@engine`,
+`@managed`, `@util`, `@mimalloc`, and `@diagnostics` modules; for running the shell, see the
+[README](../README.md).
 
 ## Requirements
 
@@ -36,12 +39,28 @@ Run from the repository root.
 
 ```sh
 zig build                  # build zig-out/bin/origine (debug app, release V8)
-zig build run              # run the REPL (zig build run -- <args>)
+zig build run              # run the REPL (zig build run -- <args>, e.g. an init file)
 zig build -Doptimize=small # small release app
-zig build test             # V8 package tests
+zig build test             # V8 package tests and the managed runtime tests
+zig build test-io          # event loop tests; needs no V8
 ```
 
-`just build`, `just run`, `just test` wrap the same commands.
+`just build [debug|release] [debug|release]` (app mode, V8 mode), `just run`, `just test`
+wrap the same commands. `just` with no arguments lists every recipe.
+
+## Checks
+
+| Recipe | What it does |
+| --- | --- |
+| `just check` | Everything CI-style: `check-contracts`, `check-rust`, `check-format` |
+| `just check-contracts` | Regenerates cross-language files into a temp tree and fails on drift; runs `zig build test-io -Dtypescript=false` ([contracts](contracts.md)) |
+| `just check-rust` | `zig build clippy` (warnings denied; every `unsafe` needs a `// SAFETY:` comment), then Miri over the V8-free crates ([rust overview](../rust/docs/README.md)) |
+| `just check-format` | `cargo fmt --check`, `oxfmt --check` and `oxlint` over `bench examples src/js src/repl` |
+| `just format` | Applies the formatters |
+| `just gen-contracts` | Rewrites the committed generated files |
+| `just test-repl` | Drives the REPL in a pseudo-terminal ([repl](repl.md)) |
+
+`oxfmt` and `oxlint` run through `bunx` at the versions pinned in the `justfile`.
 
 ## Release V8 by default
 
@@ -107,11 +126,12 @@ Pass these to `zig build` at the root unless noted.
 | --- | --- |
 | `-Doptimize=debug\|safe\|fast\|small` | Zig executable mode (default debug) |
 | `-Dv8_debug=true` | Debug V8 (default release) |
-| `-Dprebuilt_v8_path=/abs/libv8_zig.a` | Skip building V8 and link an existing archive |
+| `-Dprebuilt_v8_path=/abs/libv8_zig.a` | Skip building V8 and link an existing archive. The Rust workspace cannot be built against it (no GN output for bindgen), so use it only where a Rust archive is not needed |
 | `-Dcache_root=<dir>` | V8 / depot_tools checkout cache (default `lib/v8_zig/.lp-cache`) |
 | `-Dv8_clang_dir=<llvm/bin>` | Override the matching LLVM toolchain |
 | `-Dtypescript=false` | Build the Rust library without the oxc transformer (no `.ts/.tsx/.jsx` support; default true) |
 | `-Dcargo-offline` | Pass `--offline` to cargo |
+| `-Dbuiltin_pgo=false` | Skip Google's builtin PGO baseline (default on for non-debug desktop V8) |
 
 `lib/v8_zig` additionally accepts `-Dthin_lto`, `-Dexclude_unwind_tables`,
 `-Dtemporal`, `-Dsymbol_level`, `-Dis_asan`, `-Dis_tsan`, `-Dv8_enable_sandbox`,
@@ -124,20 +144,23 @@ arguments. `-Dtemporal=false` disables Temporal, leaving no date functionality b
 
 | Step | Where | Purpose |
 | --- | --- | --- |
-| `run`, `shell` | root | Build and run the REPL |
-| `build-shell` | root | Build and install the REPL |
-| `test` | root, `lib/v8_zig` | Library tests |
+| `run`, `shell` | root | Build and run origine (REPL, or an init file passed after `--`) |
+| `build-shell` | root | Build and install `zig-out/bin/origine` |
+| `test` | root, `lib/v8_zig` | Root: V8 package and managed runtime tests. Package: library tests |
+| `test-io` | root | `src/io` and `src/safe.zig` tests, no V8 |
+| `clippy` | root | Clippy over the Rust workspace with the V8 environment |
 | `patch-v8` | both | Fetch V8 and apply patches only |
 | `build-v8` | root, `lib/v8_zig` | Rebuild V8 (plain builds reuse the last archive) |
 | `gen`, `check-generated`, `check-bindings` | `lib/v8_zig` | Regenerate / verify bindings |
 | `test-icu-lazy` | `lib/v8_zig` | Deferred ICU loading, in a fresh process |
 
 Run package-specific steps from `lib/v8_zig`. `lib/v8_zig` has its own `justfile`
-(`just build`, `just dev`, `just patch`, `just new-patch`, `just test-dev`).
+(`just build`, `just rebuild`, `just dev`, `just patch`, `just new-patch`, `just test`, `just test-dev`).
 
 ## Upgrading V8
 
-1. Change `version` in `lib/v8_zig/build/v8.build.zig`.
+1. Change `version` in `lib/v8_zig/build/v8.build.zig` (and the checkout path in
+   `lib/v8_zig/justfile`'s `new-patch` recipe).
 2. Run the build. The first patch that no longer applies stops it; rebase that patch against
    the new tree, regenerate it with `new-patch`, and repeat for later patches.
 3. Run `zig build gen`, `zig build check-generated`, and `zig build test` in `lib/v8_zig`,
@@ -164,7 +187,8 @@ external link) `build.zig` first runs `clang -r -exported_symbols_list <generate
 so only the prefixes in `kept_symbol_prefixes` (`build.zig`: `origine_*`, `crdtp__*`, `v8_inspector__*`) stay global
 (docs/contracts.md, surface F). Debug builds and tests link the plain archive (a
 pre-linked object breaks Mach-O thread-locals there). Linux has an `ld -r` + `objcopy`
-equivalent in `build.zig` that is not exercised yet.
+equivalent in `build.zig` that is not exercised yet. Cross builds (`-Dtarget` other than native)
+cannot run the snapshot tool and fall back to V8's built-in startup seed.
 
 ### Size overhead (macOS arm64, `-Doptimize=small`)
 

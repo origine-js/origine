@@ -64,8 +64,8 @@ typedef struct oio_iovec { void *base; size_t len; } oio_iovec;                 
 
 ## Linking
 
-- The `oio_*` symbols are `export fn`s in `src/io/c_api.zig`. They exist in the Zig executable (or test binary) only if the compilation references that file: `src/io/io.zig` exposes it as `pub const c_api`, and `src/main.zig`, `src/tests.zig` (and the snapshot tool) contain `comptime { _ = @import("@io").c_api; }` to keep the exports. A new Zig program that links the Rust runtime must do the same.
-- The Rust crates declare the functions as `extern "C"` (`rust/crates/origine_io/src/sys.rs`) and leave them unresolved in their static library; the final Zig link resolves them against the compiled `c_api.zig`. In the normal build, `build.zig` links the Rust archive into the host binary and the `io_module` (the whole of `src/io/io.zig`, `link_libc = true`) provides the symbols.
+- The `oio_*` symbols are `export fn`s in `src/io/c_api.zig`. `src/io/io.zig` exposes the file as `pub const c_api` but does not export the symbols itself. `src/io/lib.zig` is the root of the static archive `liborigine_io.a`: its `comptime { _ = @import("@io").c_api; }` keeps the exports, and `build.zig` (`ioLibrary`) always builds it in ReleaseFast. Every program that links the Rust runtime (the shell, the test binary, the snapshot tool) links this archive exactly once.
+- The Rust crates declare the functions as `extern "C"` (`rust/crates/origine_io/src/sys_gen.rs`, generated from the header) and leave them unresolved in their static library; the final Zig link resolves them against `liborigine_io.a`.
 - For standalone Rust tests `rust/crates/origine_io/build.rs` (and `origine_api_fs`) links `liborigine_io.a` from the directory in `ORIGINE_IO_LIB` when that variable is set; see [testing.md](testing.md#rust-tests-against-the-zig-library). Under Miri the Rust crate substitutes a pure-Rust fake (`mock.rs`) instead.
 - The library needs libc (`link_libc = true`); the io_uring backend uses raw syscalls, kqueue links libSystem's `dispatch_async_f`, `os_sync_*` are weak symbols.
 

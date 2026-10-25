@@ -1,5 +1,7 @@
 # origine I/O: event loop and Rust runtime, API for review
 
+A review-oriented tour of the public APIs. The maintained references are [src/io/docs](../src/io/docs/README.md) for the Zig loop and the [origine_io docs](../rust/crates/origine_io/docs/README.md) for the Rust crate; where this page and those differ, they win.
+
 Three layers, each on top of the one before:
 
 1. **`src/io` (Zig)**: the event loop / reactor. Completion-based (io_uring, IOCP-shaped), caller-owned ops, backends for io_uring, kqueue+GCD and a portable thread pool. Exposed to Zig (`io.Loop`) and as a C ABI (`origine_io.h`).

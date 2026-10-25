@@ -2,8 +2,8 @@
 
 The V8-facing half of the Rust code: guest API natives written in Rust against the vendored `v8`
 crate (`lib/v8_zig/rusty_v8`), running on the isolate that Zig creates. Zig keeps the Host,
-scopes, module loading and the sync natives; this crate adds the `native.io.*` and
-`native.fsAsync.*` tables (async, backed by [`origine_io`](../../origine_io/docs/README.md)).
+scopes, module loading and the sync natives; this crate adds the `native.io.*`, `native.fsAsync.*` and
+`native.net.*` tables (async, backed by [`origine_io`](../../origine_io/docs/README.md)).
 
 Details: [natives.md](natives.md) (the native table and each native). Related crates:
 

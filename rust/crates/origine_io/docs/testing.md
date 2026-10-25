@@ -18,7 +18,7 @@ stay meaningful under Miri.
 
 ## Real library
 
-See "Building and linking" in [README.md](README.md): build `liborigine_io.a` with Zig and set
+See "Building and linking" in [README.md](README.md): build `liborigine_io.a` with Zig (the command is there) and set
 `ORIGINE_IO_LIB`:
 
 ```sh

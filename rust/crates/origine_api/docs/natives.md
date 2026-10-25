@@ -1,7 +1,7 @@
-# Natives (`native.io.*`, `native.fsAsync.*`)
+# Natives (`native.io.*`, `native.fsAsync.*`, `native.net.*`)
 
 Reference for the Rust natives registered into the Zig `native` table (see
-[README.md](README.md) for how registration works). Code: `src/io.rs`, `src/fs.rs`; fs semantics in
+[README.md](README.md) for how registration works). Code: `src/io.rs`, `src/fs.rs`, `src/net.rs`; fs semantics in
 `rust/crates/origine_api_fs/src/lib.rs`. Planned/changing behaviour is specified in
 [`docs/async-host-contract.md`](../../../../docs/async-host-contract.md); this page describes the
 code as it is.
@@ -37,6 +37,12 @@ code as it is.
 |---|---|---|
 | `create` | `(opts?: { backend?, entries? })` | frozen `{ kind: 'io', id, backend }` (sync). Throws `{errno}`: `Unsupported` (backend excluded or unavailable), `AccessDenied` (runtime ceiling), `TypeError` for bad options. |
 | `close` | `(id: u32)` | `Promise<void>`: cancels the runtime's ops (their promises reject `Canceled`), drains, releases its grants, destroys the loop. Rejects `BadHandle` for unknown/foreign/closing ids. |
+| `sleep` | `(runtime: u32, token: u32, ms: number)` | `Promise<void>` resolving after a monotonic timeout. Finite delays from 0 through 2147483647 ms only; fractions allowed. Tokens are unique per JS runtime handle. Unknown/foreign/closed runtimes reject `BadHandle`. |
+| `cancelTimer` | `(runtime: u32, token: u32)` | Boolean; cancels a pending timer task and backend timeout, rejects its promise with `Canceled`, and returns true. False for a settled/unknown token; throws `BadHandle` for an unknown/foreign/closed runtime. |
+| `now` | `(runtime: u32)` | Monotonic milliseconds since host creation. Throws `BadHandle` for an unknown/foreign/closed runtime. |
+
+Guest-facing timer and deadline helpers are documented in
+[`src/js/docs/timers.md`](../../../../src/js/docs/timers.md).
 
 ## `native.fsAsync`
 

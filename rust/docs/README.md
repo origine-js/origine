@@ -15,7 +15,7 @@ runtime. The root package `origine_native` (`rust/src/lib.rs`) only re-exports t
 | `origine_io` | [docs](../crates/origine_io/docs/README.md) | no | yes (mock of the C ABI) | op futures, `rt` runtime, `fs` over the Zig loop |
 | `origine_api_core` | [docs](../crates/origine_api_core/docs/README.md) | no | yes | errno tables, arg rules, `NativeError`, handle tables, ceiling |
 | `origine_api_macros` | [docs](../crates/origine_api_macros/docs/README.md) | no | yes | `#[native]`, `derive(FromJs/IntoJs)` |
-| `origine_api_fs` | `crates/origine_api_fs/src/lib.rs` (crate docs) | no | capable, not in the `justfile` list | async fs `Grant` (handles + ops) over `origine_io::fs` |
+| `origine_api_fs` | `crates/origine_api_fs/src/lib.rs` (crate docs) | no | yes | async fs `Grant` (handles + ops) over `origine_io::fs` |
 | `origine_api` | [docs](../crates/origine_api/docs/README.md) | yes (`v8` fork) | no | V8 natives, Host state, C entry points |
 | `origine_oxc` | [docs](../crates/origine_oxc/docs/README.md) | no | yes | TypeScript/JSX transform C ABI |
 
@@ -68,8 +68,8 @@ Prefer pushing logic into V8-free crates so Miri can check it, and keep `unsafe`
 | Command | What |
 |---|---|
 | `just check` | `check-rust` + `check-format` |
-| `just check-rust` | `zig build clippy -Dcargo-offline=true`, then `cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_api_core -p origine_api_macros` |
-| `just check-format` | `cargo fmt --all --check` (in `rust/`), oxfmt and oxlint over `bench examples src/js` |
+| `just check-rust` | `zig build clippy -Dcargo-offline=true`, then `cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_api_core -p origine_api_fs -p origine_api_macros` |
+| `just check-format` | `cargo fmt --check` over `origine_native` and every crate (in `rust/`), then oxfmt and oxlint over `bench examples src/js src/repl` |
 | `just format` | apply formatters |
 
 Clippy goes through Zig because the `v8` crate's build script needs the `V8_ZIG_*` environment
@@ -107,5 +107,5 @@ nothing changed.
 
 Create it under `rust/crates/`, add it to `[workspace.dependencies]`, set `[lints] workspace =
 true`, and re-export it from `rust/src/lib.rs` if it has C exports. If it must be Miri-checked add
-it to the `-p` list of `check-rust` in the `justfile`. If it needs a Rust-side symbol hidden/visible
+it to the `-p` list of the Miri command in `check-rust` (`justfile`). If it needs a Rust-side symbol hidden/visible
 differently, update the exports handling in `build.zig`.

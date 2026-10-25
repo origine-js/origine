@@ -88,22 +88,25 @@ A loop is driven by exactly one thread, whoever calls `Loop::run`.
 ## Building and linking
 
 The crate calls the `oio_*` C ABI implemented by `src/io/c_api.zig`. Rust itself needs no link
-flags in the shipped executable: the final Zig link compiles `c_api.zig` into the program (a
-`comptime` reference to `@import("@io").c_api` keeps the `export fn`s; see
-[../../../../docs/async-host-contract.md](../../../../docs/async-host-contract.md) "Linking").
+flags in the shipped executable: `build.zig` links the Zig archive `liborigine_io.a` (root
+`src/io/lib.zig`, whose `comptime` reference to `@import("@io").c_api` keeps the `export fn`s) into
+the program; see [../../../../docs/async-host-contract.md](../../../../docs/async-host-contract.md)
+"Linking".
 
 For `cargo test`/dev builds of this crate, `build.rs` links the Zig-built static library only if
 `ORIGINE_IO_LIB` is set to a directory containing `liborigine_io.a`:
 
 ```sh
 mkdir -p /tmp/oio && cd /tmp/oio
-zig build-lib -static -lc -OReleaseSafe --name origine_io /path/to/origine/src/io/c_api.zig
-cd /path/to/origine/rust
+R=/path/to/origine
+zig build-lib -static -lc -OReleaseFast --name origine_io \
+  --dep @io -Mroot=$R/src/io/lib.zig --dep @safe -M@io=$R/src/io/io.zig -M@safe=$R/src/safe.zig
+cd $R/rust
 ORIGINE_IO_LIB=/tmp/oio cargo test -p origine_io
 ```
 
-(There is no `zig build` step that emits `liborigine_io.a` at the time of writing; the command above
-was verified by hand.) Without `ORIGINE_IO_LIB` and outside Miri, tests fail to link. Under Miri
+(`zig build` builds the same archive internally but declares no install step, so the command above
+produces a standalone copy.) Without `ORIGINE_IO_LIB` and outside Miri, tests fail to link. Under Miri
 (`cfg(miri)`), `sys.rs` re-exports the in-process mock from `src/mock.rs` instead of the
 `extern "C"` block, so no library is needed. `origine_api_fs` has the same `ORIGINE_IO_LIB`
 `build.rs`.

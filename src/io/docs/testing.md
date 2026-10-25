@@ -47,7 +47,16 @@ The Rust crates `origine_io` and `origine_api_fs` have `build.rs` scripts that l
 cd rust && ORIGINE_IO_LIB=/path/to/dir cargo test -p origine_io
 ```
 
-- The archive must contain the compiled `src/io/c_api.zig` exports (`oio_*`), built for the host target, with libc. `build.zig` has no step that emits it (checked: no library artifact is declared), so producing it is up to the caller.
+- The archive must contain the `oio_*` exports of `src/io/c_api.zig`, built for the host target, with libc. `build.zig` links its own copy (`ioLibrary`) into the shell and the tests but declares no install step, so build one by hand from the repository root:
+
+  ```sh
+  mkdir -p /tmp/oio && cd /tmp/oio
+  R=/path/to/origine
+  zig build-lib -static -lc -OReleaseFast --name origine_io \
+    --dep @io -Mroot=$R/src/io/lib.zig --dep @safe -M@io=$R/src/io/io.zig -M@safe=$R/src/safe.zig
+  ```
+
+  Then use `ORIGINE_IO_LIB=/tmp/oio`.
 - Without `ORIGINE_IO_LIB` the crates build normally (the final Zig link resolves the symbols), and tests that need the real library cannot link.
 - Under Miri (`cargo miri test`, see the `check-rust` recipe in the `justfile`) the crate uses its pure-Rust fake of the C API (`src/mock.rs`, `cfg(miri)`); Miri cannot call the Zig library.
 - Rust-side test documentation: [`origine_io` testing](../../../rust/crates/origine_io/docs/testing.md).

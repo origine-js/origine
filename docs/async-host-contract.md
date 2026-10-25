@@ -1,8 +1,15 @@
-# Async host contract (phase 4; working document)
+# Async host contract
 
-Splits the Host integration between the Rust side (`rust/crates/origine_api*`) and the Zig/JS side
-(`src/api`, `src/js`, `build.zig`). Both sides code against this file. Background: the approved plan
-at `~/.claude/plans/explore-how-to-implement-zippy-pillow.md`.
+The agreement between the Rust side (`rust/crates/origine_api*`) and the Zig/JS side (`src/api`,
+`src/js`, `build.zig`) for asynchronous host work: `api.io` runtimes, async `api.fs`, `api.net` and
+timers. Both sides code against this file. The guest-facing design is in
+[api-design.md](api-design.md); the native table is in
+[natives.md](../rust/crates/origine_api/docs/natives.md); the generated or checked parts of the
+C ABI are described in [contracts.md](contracts.md).
+
+The sections below are the original contract (async runtimes and copying fs natives), followed by
+the zero-copy buffer rules that were added later. `api.net` and the `io` timers (`now`, `sleep`,
+`cancelTimer`) follow the same patterns; their natives are listed in natives.md.
 
 ## Guest API (JS)
 ```js
@@ -28,8 +35,8 @@ or throw `{errno,name}` (sync natives):
 - `native.fsAsync.<op>(...)` -> Promise, with EXACTLY the argument lists of the sync natives in `src/api/fs.zig` (refs flattened as `fs, id` pairs;
   `bits`, `Limit` as numbers): `openFile openDir stat createDir deleteFile readDir readAll writeAll close closeDir createDirPath deleteDir
   deleteTree rename fileStat fileRead filePread fileWrite filePwriteAll fileSetLength fileSync`. Results identical to the sync results
-  (file id / dir id / `[kind,size]` / flat `[name,kind,...]` / `Uint8Array` / count / undefined). Phase 4 buffer semantics: COPY (writes copy the
-  guest bytes at call time; reads copy into the guest buffer at completion if it is still attached, else reject). Pin+detach/BYOB is phase 5.
+  (file id / dir id / `[kind,size]` / flat `[name,kind,...]` / `Uint8Array` / count / undefined). Base buffer semantics: COPY (writes copy the
+  guest bytes at call time; reads copy into the guest buffer at completion if it is still attached, else reject). Pin+detach/BYOB is described under "Zero-copy buffers" below.
 - Handle tables live in Rust per Grant: ids are per-fs-id like sync (`DirRef{fs,id}`, id 0 = grant root), not reused while an op is in flight (`in_flight`, `closing`; use after close rejects `StaleHandle`/`BadHandle`).
 - Ceiling checks mirror Zig (`write` ceiling, `cleanPath` rules are `origine_io::fs::sanitize`).
 
@@ -58,14 +65,15 @@ Zig `Host.settle(promise)`: `loop { pumpPlatform; if settled break; if (!has_wor
 `Host.destroy`: `origine_api_detach_isolate` BEFORE freeing grants and `Runtime.destroy` (as today).
 
 ## Linking
-The Rust runtime calls the `oio_*` C ABI (`src/io/c_api.zig`). The final executable (and the test binary, and the snapshot tool) must include
-`src/io/c_api.zig` compiled into it (Zig side owns this: `@io` module + a `comptime` reference so the `export fn`s are kept). Rust needs no link flags.
+The Rust runtime calls the `oio_*` C ABI (`src/io/c_api.zig`). The final executable, the test binary and the snapshot tool each link
+`liborigine_io.a` (`src/io/lib.zig`, built by `build.zig`; its `comptime` reference to `@import("@io").c_api` keeps the `export fn`s).
+Rust needs no link flags.
 
 ## Config (Zig)
 `Config.runtime: ?RuntimeConfig = null` (`backends`, `max_runtimes`, `default_entries`); `Config.fs: ?FsConfig` gains `async: bool = true`.
 `api.io` exists only when `Config.runtime != null`. `api.fs.requestAsync` requires `fs.async` and an `io`.
 
-## Phase 5: zero-copy buffers (Rust natives + JS glue; both sides code against this)
+## Zero-copy buffers (Rust natives + JS glue; both sides code against this)
 Rules (guest buffers = `ArrayBuffer` or any view over one; `view` regions are captured as (byteOffset, byteLength) BEFORE detaching):
 - **Eligibility for pinning:** `!backing_store.is_shared() && !is_resizable_by_user_javascript() && ab.is_detachable()` and, after `ab.detach(None)`, `was_detached()`/`byte_length()==0` is confirmed. Otherwise COPY (copy at call time for writes; host buffer + copy-out for reads). Never trust a length the guest can change.
 - **Writes** (`fileWrite`, `filePwriteAll`, `writeAll`, `writeAll`-style ops): the guest's ArrayBuffer is DETACHED (transferred) when eligible, the host writes straight from the pinned store (`SharedRef<BackingStore>` kept in the pending entry, memory accessed by the loop through raw `(ptr,len)` wrapped in `origine_io::RawRegion`); results unchanged (count / undefined). After the call the guest's buffer and all its views are empty (documented). Non-eligible buffers are copied and stay usable.

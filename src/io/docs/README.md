@@ -2,7 +2,7 @@
 
 A small completion-based event loop written in Zig. It runs file, directory, socket, timer and futex operations asynchronously and reports each one through a callback. It is used directly by the Zig host (`io.Loop`) and, through a C ABI (`oio_*`), by the Rust runtime.
 
-Sources: `op.zig` (the `Op` record), `backend.zig` (vtable, caps, options), `loop.zig` (`Loop`), `io.zig` (public Zig module), `c_api.zig` + `include/origine_io.h` (C ABI), `backend/{uring,kqueue,threaded}.zig`, `tests.zig`.
+Sources: `op.zig` (the `Op` record), `backend.zig` (vtable, caps, options), `loop.zig` (`Loop`), `io.zig` (public Zig module), `c_api.zig` + `include/origine_io.h` (C ABI), `lib.zig` (root of `liborigine_io.a`), `backend/{uring,kqueue,threaded}.zig`, `tests.zig`.
 
 ## The model
 
@@ -113,7 +113,7 @@ int main(void) {
 }
 ```
 
-Build: compile the exports (`src/io/c_api.zig`) and link them; see [c-api.md](c-api.md#linking).
+Build: link `liborigine_io.a` (root `src/io/lib.zig`); see [c-api.md](c-api.md#linking).
 
 ## Where to read next
 

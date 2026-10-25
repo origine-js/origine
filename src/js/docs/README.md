@@ -15,6 +15,18 @@ sits one directory up.
 
 Not std modules: [glue/](../glue/index.js) is the glue that builds the `api` object from the native
 tables (not importable), and [bootstrap.js](../bootstrap.js) is the hardening bootstrap.
+The runtime handle's monotonic clock, sleeps, deadlines, and cancellable timers are
+documented in [timers.md](timers.md).
+
+The API exposes memoized getters for `fs`, `env`, `scope`, `io`, and `net` (the last
+two require a runtime ceiling). Engine and init snapshots contain the prepared API,
+its non-configurable getters, frozen methods, and frozen network classes/prototypes.
+Installation binds per-scope state; getters bind each capability's native authority
+on first access. No general guest-export hardening walk runs for API installation.
+Without a snapshot, common glue initializes at installation and capability scripts
+load on first access, retaining their separate V8 code caches across runs.
+Standard ES modules evaluate on first import
+and reuse their module instance on subsequent imports within the same scope.
 
 Layering: `errno` ← `quansync` ← `io` ← `fs`; `text` is standalone and used by `fs`.
 Everything here is authority-free data and code: authority comes only from the `io` object

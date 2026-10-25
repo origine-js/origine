@@ -14,7 +14,6 @@ const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("binding.zig");
 const func = binding.func;
-const errno_api = @import("errno.zig");
 const env_api = @import("env.zig");
 const fs_api = @import("fs.zig");
 const scope_api = @import("scope.zig");
@@ -31,6 +30,7 @@ const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
 
 const glue_script = @import("glue.zig");
 const io_lib = @import("@io");
+const startup_trace = @import("@diagnostics").scope;
 
 // Rust natives (rust/crates/origine_api), linked from liborigine_native. CONTRACT (docs/contracts.md,
 // surfaces B and C): the C ABI is rust/crates/origine_api/include/origine_api.h; api_abi.zig holds
@@ -104,7 +104,7 @@ pub const Config = struct {
 
 /// Per-scope native state. The guest's errno array lives in sandbox memory (V8 refuses
 /// external backing stores), so `errno_cell` points into an ArrayBuffer kept alive by
-/// `errno_buffer` until `Host.destroy`. Before `install` builds the array it points at
+/// `errno_buffer` until `Host.destroy`. Before `install` binds the template's array it points at
 /// `errno_local`, which must therefore stay at a stable address.
 pub const ScopeState = struct {
     host: *Host,
@@ -162,11 +162,13 @@ pub const Host = struct {
     loaders: std.ArrayList(*JsLoader) = .empty,
     runs: std.ArrayList(*scope_api.RunState) = .empty,
     next_fs_id: u32 = 1,
-    /// The isolate the Rust API is attached to (first `install`); detached by `destroy`.
+    /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
     rust_isolate: ?v8.Isolate = null,
     /// True while a JS loader callback runs inside Runtime.pump's scope iteration;
     /// creating a scope then would invalidate that iteration.
     in_loader: bool = false,
+    /// Only scripts actually loaded are retained; flush after execution to include lazy code.
+    glue_unbound: [glue_script.module_count]?v8.Global.Of(v8.UnboundScript) = @splat(null),
 
     /// Borrows config contents until `destroy`. Returns a heap Host at a stable
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
@@ -200,19 +202,39 @@ pub const Host = struct {
             alloc.destroy(pending);
         }
         self.runs.deinit(alloc);
+        for (self.glue_unbound) |pending| if (pending) |script| script.deinit();
         alloc.destroy(self);
     }
 
-    /// Installs the natives of the Rust registry (`origine_api_natives_*`) whose requirements the
-    /// embedder's configuration meets, as `native.<namespace>.<name>` (the registry's `path`s).
+    /// Stores code caches of loaded glue scripts that compiled without an accepted cache.
+    /// Call after the glue and its users run; best effort, releasing retained scripts even
+    /// without a hook. Borrows scope on its isolate thread; retains no new handles or bytes.
+    pub fn flushGlueCache(self: *Host, scope: *Scope) void {
+        var session: Scope.Session = undefined;
+        session.init(scope);
+        defer session.deinit();
+        for (&self.glue_unbound, 0..) |*slot, index| {
+            const pending = slot.* orelse continue;
+            slot.* = null;
+            defer pending.deinit();
+            const hook = scope.options.code_cache orelse continue;
+            const cache = pending.deref().createCodeCache() orelse continue;
+            defer cache.deinit();
+            const bytes = v8.ScriptCompiler.CachedData.bytes(cache.handle);
+            if (bytes.len == 0) continue;
+            const script = glue_script.script(@fromBackingInt(@intCast(index)));
+            hook.store(hook.data, .{ .allocator = self.allocator, .module_id = script.cache_id, .source = script.source }, bytes);
+        }
+    }
+
+    /// Installs one namespace of the Rust registry whose requirements the configuration meets.
+    /// Borrows state/native in the entered realm; callbacks retain state until host teardown.
     /// Nothing about the natives is written on the Zig side: names, callbacks and side effects all
     /// come from the `#[native(...)]` attributes in rust/crates/origine_api.
-    fn installRustNatives(self: *Host, env: binding.Env, native: v8.Object, state: *ScopeState) !void {
+    fn installRustNatives(self: *Host, env: binding.Env, native: v8.Object, state: *ScopeState, wanted: []const u8) !void {
         const has_runtime = self.runtime != null;
         const has_async_fs = has_runtime and self.fs != null and self.fs.?.async;
-        const Namespace = struct { name: []const u8, object: v8.Object };
-        var namespaces: std.ArrayList(Namespace) = .empty;
-        defer namespaces.deinit(self.allocator);
+        var namespace_object: ?v8.Object = null;
         var index: usize = 0;
         const count = abi.origine_api_natives_count();
         while (index < count) : (index += 1) {
@@ -233,12 +255,11 @@ pub const Host = struct {
             const path = std.mem.span(entry.path);
             const dot = std.mem.indexOfScalar(u8, path, '.') orelse return error.BadNativeRegistry;
             const namespace = path[0..dot];
-            const object = for (namespaces.items) |known| {
-                if (std.mem.eql(u8, known.name, namespace)) break known.object;
-            } else blk: {
+            if (!std.mem.eql(u8, namespace, wanted)) continue;
+            const object = namespace_object orelse blk: {
                 const created = eu.v.object(env.isolate);
-                try namespaces.append(self.allocator, .{ .name = namespace, .object = created });
                 try binding.set(env, native, namespace, created);
+                namespace_object = created;
                 break :blk created;
             };
             const function = binding.rawDynamic(env, state, @ptrCast(entry.callback), side_effect);
@@ -363,10 +384,12 @@ pub const Host = struct {
         self.detach(scope);
     }
 
-    /// Builds the frozen `api` object in `scope`'s realm. Returns a caller-owned
-    /// persistent handle (release before Runtime.destroy). Error details follow
-    /// ErrorInfo ownership.
+    /// Binds per-scope native state to its prebuilt API template (cached-script fallback
+    /// when absent). Returns a caller-owned handle; release before Runtime.destroy.
+    /// Borrows scope through return; its realm retains natives until teardown.
+    /// Error details follow ErrorInfo ownership. No guest export validation is needed.
     pub fn install(self: *Host, scope: *Scope, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
+        var timing = startup_trace.begin();
         const state = try self.attach(scope);
         var session: Scope.Session = undefined;
         session.init(scope);
@@ -375,34 +398,104 @@ pub const Host = struct {
         const isolate = session.isolate();
         const ctx = session.ctx;
         const env: binding.Env = .{ .isolate = isolate, .ctx = ctx };
-        if (self.rust_isolate == null) {
-            _ = origine_api_attach_isolate(isolate.handle);
-            self.rust_isolate = isolate;
-            self.configureRust(isolate);
-        }
-        // The whole native surface in one table: typed Zig functions, nested objects.
-        const native = try binding.object(env, ScopeState, state, .{
-            .env = .{
-                .args = func(env_api.args, .{ .side_effect = .none }),
-                .get = func(env_api.get, .{ .side_effect = .none }),
-                .list = func(env_api.list, .{ .side_effect = .none }),
-            },
-            .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
-            .scope = .{
-                .create = func(scope_api.create, .{ .side_effect = .any }),
-                .preload = func(scope_api.preload, .{ .side_effect = .any }),
-                .run = func(scope_api.run, .{ .side_effect = .any }),
-                .close = func(scope_api.close, .{ .side_effect = .any }),
-            },
-        });
-        try self.installRustNatives(env, native, state);
-        try binding.set(env, native, "errno", try errnoArray(isolate, state));
-        try binding.set(env, native, "errors", (try errno_api.table(env)).value);
-        const script = v8.Script.compile(ctx, eu.v.str_utf8(isolate, glue_script.source), scope.scriptOrigin(glue_script.origin, false)) orelse return error.JavaScriptException;
-        const glue = v8.Function.from_opaque((script.run(ctx) orelse return error.JavaScriptException).data.handle) orelse return error.BootstrapFailed;
-        const api = glue.call(ctx, eu.v.undefined_value(isolate).value, &.{native.value}) orelse return error.JavaScriptException;
-        try scope.hardenLocal(api);
+        startup_trace.mark(&timing, "api_attach");
+        const bundle = glue_script.restored(ctx) orelse try glue_script.initialize(isolate, ctx, try self.compileGlue(scope, .common));
+        startup_trace.mark(&timing, "api_restore_template");
+        const native_value = bundle.object.getIndex(ctx, glue_script.native_index) orelse return error.BootstrapFailed;
+        const native = native_value.toObject(ctx) orelse return error.BootstrapFailed;
+        const load = binding.rawDynamic(env, state, binding.native(ScopeState, loadCapability), .any);
+        try binding.set(env, native, "load", load.object.value);
+        const errno_value = bundle.object.getIndex(ctx, glue_script.errno_index) orelse return error.BootstrapFailed;
+        try bindErrno(state, errno_value);
+        const api = bundle.object.getIndex(ctx, if (self.runtime != null) glue_script.full_index else glue_script.basic_index) orelse return error.BootstrapFailed;
+        startup_trace.mark(&timing, "api_bind_state");
         return .new(isolate, api);
+    }
+
+    /// Compiles/evaluates one glue expression in scope's entered realm. Returns a local
+    /// factory handle; retains an unbound script until flush/destroy only on a cache miss.
+    /// Borrows scope and cache bytes through compilation; errors transfer no caller ownership.
+    fn compileGlue(self: *Host, scope: *Scope, module: glue_script.Module) !v8.Function {
+        var timing = if (module == .common) startup_trace.begin() else null;
+        const isolate = scope.runtime.isolate;
+        const ctx = scope.context.deref();
+        const text = glue_script.script(module);
+        const hook = scope.options.code_cache;
+        var cache_arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer cache_arena.deinit();
+        const cached_bytes = if (hook) |h| h.load(h.data, .{ .allocator = cache_arena.allocator(), .module_id = text.cache_id, .source = text.source }) else null;
+        startup_trace.mark(&timing, "api_glue_cache_read");
+        // The Source owns the CachedData object it is given (not the bytes).
+        const cache_object = if (cached_bytes) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
+        const origin = scope.scriptOrigin(text.origin, false);
+        var source: v8.ScriptCompiler.Source = undefined;
+        source.init(eu.v.str_utf8(isolate, text.source), &origin, cache_object);
+        defer source.deinit();
+        const script = v8.ScriptCompiler.compile(ctx, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
+        const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
+        const slot = &self.glue_unbound[@backingInt(module)];
+        if (hook != null and !accepted and slot.* == null) {
+            if (script.getUnboundScript()) |unbound| slot.* = .new(isolate, unbound);
+        }
+        startup_trace.mark(&timing, "api_glue_compile");
+        const factory = v8.Function.from_opaque((script.run(ctx) orelse return error.JavaScriptException).data.handle) orelse return error.BootstrapFailed;
+        startup_trace.mark(&timing, "api_glue_evaluate");
+        return factory;
+    }
+
+    /// First-access callback: binds only this capability's natives to the private template.
+    /// Borrows local arguments; installed callbacks retain scope-owned state until teardown.
+    /// Returns a local JS factory only for the no-snapshot fallback, otherwise undefined.
+    /// Failures leave the getter retryable; never validates/freezes the prebuilt public graph.
+    fn loadCapability(state: *ScopeState, call: *binding.Call, name: []const u8, native: v8.Object, needs_factory: bool) !v8.Value {
+        const module = std.meta.stringToEnum(glue_script.Module, name) orelse return error.InvalidPath;
+        const host = state.host;
+        const env = call.env();
+        const part = switch (module) {
+            .common => return error.InvalidPath,
+            .env => try call.object(ScopeState, state, .{
+                .env = .{
+                    .args = func(env_api.args, .{ .side_effect = .none }),
+                    .get = func(env_api.get, .{ .side_effect = .none }),
+                    .list = func(env_api.list, .{ .side_effect = .none }),
+                },
+            }),
+            .fs => try call.object(ScopeState, state, .{
+                .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
+            }),
+            .scope => try call.object(ScopeState, state, .{
+                .scope = .{
+                    .create = func(scope_api.create, .{ .side_effect = .any }),
+                    .preload = func(scope_api.preload, .{ .side_effect = .any }),
+                    .run = func(scope_api.run, .{ .side_effect = .any }),
+                    .close = func(scope_api.close, .{ .side_effect = .any }),
+                },
+            }),
+            .io, .net => eu.v.object(env.isolate),
+        };
+        const key: ?[]const u8 = switch (module) {
+            .env, .scope => name,
+            .fs => "fsRequest",
+            else => null,
+        };
+        if (key) |property| {
+            const value = part.get(env.ctx, binding.string(env.isolate, property)) orelse return error.JavaScriptException;
+            try binding.set(env, native, property, value);
+        }
+        const rust_namespace: ?[]const u8 = switch (module) {
+            .fs => if (host.runtime != null and host.fs != null and host.fs.?.async) "fsAsync" else null,
+            .io, .net => if (host.runtime != null) name else return error.AccessDenied,
+            else => null,
+        };
+        if (rust_namespace) |namespace| {
+            if (host.rust_isolate == null) {
+                if (!origine_api_attach_isolate(env.isolate.handle)) return error.BootstrapFailed;
+                host.rust_isolate = env.isolate;
+                host.configureRust(env.isolate);
+            }
+            try host.installRustNatives(env, native, state, namespace);
+        }
+        return if (needs_factory) (try host.compileGlue(state.scope, module)).object.value else eu.v.undefined_value(env.isolate).value;
     }
 
     /// Lifecycle driver: evaluates `init_specifier` as a module in `scope` (which
@@ -410,12 +503,15 @@ pub const Host = struct {
     /// with the root `api` and pumps until it settles. Returns error.InitFailed or
     /// error.MainFailed with the rejection/exception in `error_info`.
     pub fn run(self: *Host, scope: *Scope, platform: v8.Platform, init_specifier: []const u8, error_info: ?*ErrorInfo) !void {
+        var timing = startup_trace.begin();
         const rt = scope.runtime;
         const api = try self.install(scope, error_info);
         defer api.deinit();
+        startup_trace.mark(&timing, "host_api_install");
         const loading = try scope.importModule(init_specifier, error_info);
         defer loading.deinit();
         try self.settle(rt, platform, loading);
+        startup_trace.mark(&timing, "host_module_import");
         const main_result = blk: {
             var session: Scope.Session = undefined;
             session.init(scope);
@@ -435,6 +531,7 @@ pub const Host = struct {
             break :blk v8.Global.Of(v8.Value).new(session.isolate(), result);
         };
         defer main_result.deinit();
+        startup_trace.mark(&timing, "host_main_call");
         var wrapper: ?v8.Global.Of(v8.Promise) = null;
         defer if (wrapper) |w| w.deinit();
         {
@@ -456,6 +553,7 @@ pub const Host = struct {
                 return error.MainFailed;
             }
         } else rt.pumpPlatform(platform);
+        startup_trace.mark(&timing, "host_main_settle");
     }
 
     /// Drives the platform, the microtask queue and every I/O runtime until `promise` settles.
@@ -521,19 +619,16 @@ pub const Host = struct {
     }
 };
 
-/// Builds the guest `Uint32Array(1)` over a sandbox-allocated buffer and points
-/// `state.errno_cell` at its memory (the V8 sandbox forbids aliasing host memory). Needs
-/// an entered context and live handle scope; the result is a local handle. The memory
-/// stays valid until `Host.destroy` because `state.errno_buffer` pins the buffer and the
-/// buffer is non-detachable (its detach key is a private object). Seeds the cell with
-/// the value already written to `errno_local`.
-fn errnoArray(isolate: v8.Isolate, state: *ScopeState) !v8.Value {
-    const buffer = eu.v.array_buffer(isolate, @sizeOf(u32)) orelse binding.oom();
+/// Pins the template's non-detachable errno buffer until Host.destroy and borrows its
+/// storage for state.errno_cell. Requires the entered realm and a live HandleScope.
+/// The template contains no host pointers; each restored context has its own buffer.
+fn bindErrno(state: *ScopeState, value: v8.Value) !void {
+    if (!value.isUint32Array()) return error.BootstrapFailed;
+    const view = v8.ArrayBufferView.from_opaque(value.data.handle) orelse return error.BootstrapFailed;
+    const backing = view.buffer() orelse return error.BootstrapFailed;
+    const buffer = v8.ArrayBuffer.from_opaque(backing.object.value.data.handle) orelse return error.BootstrapFailed;
     const cell: *u32 = @ptrCast(@alignCast(buffer.data() orelse binding.oom()));
     cell.* = state.errno_local;
     state.errno_cell = cell;
-    state.errno_buffer = .new(isolate, buffer);
-    buffer.setDetachKey(eu.v.object(isolate).value);
-    const array = v8.Uint32Array.init(buffer, 0, 1) orelse binding.oom();
-    return array.typedArray.arrayBufferView.object.value;
+    state.errno_buffer = .new(state.scope.runtime.isolate, buffer);
 }

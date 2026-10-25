@@ -6,56 +6,8 @@ const eu = @import("@util");
 const StartupTrace = @import("@diagnostics").StartupTrace;
 const Engine = @import("@engine").Engine;
 const build_options = @import("build_options");
+const repl = @import("repl.zig");
 var io_runtime: std.Io.Threaded = undefined;
-
-// The Rust library calls the `oio_*` C ABI of the I/O library; keep its exports.
-comptime {
-    _ = @import("@io").c_api;
-}
-
-/// Borrows format/arguments through buffered output; retains no resources.
-/// The global host I/O runtime must remain live through return, including I/O errors.
-fn print(comptime format: []const u8, args: anytype) void {
-    var buffer: [1024]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io_runtime.io(), &buffer);
-    writer.interface.print(format, args) catch return;
-    writer.interface.flush() catch return;
-}
-
-/// Borrows scope/value through string conversion; caller keeps the runtime alive.
-/// Local V8 handles and UTF-8 storage are released before return.
-fn show(scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
-    const alloc = eu.alloc;
-    const isolate = scope.runtime.isolate;
-    isolate.enter();
-    defer isolate.exit();
-    var h_scope: v8.HandleScope = undefined;
-    h_scope.init(isolate);
-    defer h_scope.deinit();
-    const ctx = scope.context.deref();
-    ctx.enter();
-    defer ctx.exit();
-    // toString may invoke arbitrary guest code, including a throwing getter.
-    var tc_scope: v8.TryCatch = undefined;
-    tc_scope.init(isolate);
-    defer tc_scope.deinit();
-    // An Error's stack starts with "Name: message" and adds the frames; diagnostics from the
-    // TypeScript transformer put their file:line:col lines there.
-    var shown = value.deref();
-    if (shown.toObject(ctx)) |object| {
-        if (object.get(ctx, eu.v.str_utf8(isolate, "stack").name.primitive.value)) |stack| {
-            if (stack.isString()) shown = stack;
-        }
-    }
-    const text = shown.toString(ctx) orelse {
-        print("<value conversion threw>\n", .{});
-        return;
-    };
-    const buffer = alloc.alloc(u8, text.lenUtf8(isolate)) catch return;
-    defer alloc.free(buffer);
-    const length = text.writeUtf8(isolate, buffer);
-    print("{s}\n", .{buffer[0..length]});
-}
 
 /// Owns the demo engine/runtime and host allocations until exit; releases all V8
 /// values before teardown. Uses process-lifetime eu.alloc for host allocations and
@@ -85,28 +37,15 @@ pub fn main(init: std.process.Init) !void {
     trace.mark("scope_create");
     trace.report();
     @import("@diagnostics").scope.report();
-    print("JavaScript REPL: exit() or Ctrl+D exits.\n", .{});
-    var input_buffer: [8192]u8 = undefined;
-    var reader = std.Io.File.stdin().reader(io_runtime.io(), &input_buffer);
-    while (true) {
-        print("> ", .{});
-        const line = (reader.interface.takeDelimiter('\n') catch |err| {
-            print("Input error: {s}\n", .{@errorName(err)});
-            return;
-        }) orelse break;
-        const input = std.mem.trim(u8, line, " \r\t");
-        if (std.mem.eql(u8, input, "exit()")) break;
-        var error_info: m.ErrorInfo = .{};
-        defer error_info.deinit();
-        const result = scope.eval(input, "app:/shell.js", &error_info) catch |err| {
-            print("Evaluation failed: {s}\n", .{@errorName(err)});
-            if (error_info.exception) |value| show(scope, value);
-            continue;
-        };
-        defer result.deinit();
-        show(scope, result);
-        rt.pumpPlatform(engine.platform);
-    }
+    const interactive = repl.isInteractive(io_runtime.io(), init.environ_map);
+    if (interactive) repl.display.print(io_runtime.io(), "JavaScript REPL: .help for commands; exit() or Ctrl+D exits.\n", .{});
+    try repl.run(scope, .{
+        .allocator = alloc,
+        .io = io_runtime.io(),
+        .platform = engine.platform,
+        .interactive = interactive,
+        .colors = interactive and init.environ_map.get("NO_COLOR") == null,
+    });
 }
 
 /// Runs `args[1]` as the init module: evaluates it, then calls its exported
@@ -140,7 +79,8 @@ fn runInit(
     var image: ?m.init_snapshot.Image = null;
     var rt: ?*m.Runtime = null;
     const caching = init.environ_map.get("ORIGINE_NO_SNAPSHOT") == null;
-    var code_cache = m.Api.init_cache.CodeCacheState.init(io_runtime.io(), host, std.Io.Dir.cwd());
+    const engine_key = m.Api.init_cache.engineKey(io_runtime.io(), host);
+    var code_cache = m.Api.init_cache.CodeCacheState.initWithKey(engine_key, host, std.Io.Dir.cwd());
     defer {
         host.destroy();
         if (rt) |runtime| runtime.destroy();
@@ -150,7 +90,7 @@ fn runInit(
     // isolate that makes it and to the one that restores it.
     const references = try host.externalReferences(alloc);
     defer alloc.free(references);
-    if (caching) image = initSnapshot(alloc, init.environ_map, host, references, args[1], engine_snapshot);
+    if (caching) image = initSnapshot(alloc, init.environ_map, host, references, args[1], engine_snapshot, engine_key);
     trace.mark("init_snapshot");
     rt = try m.Runtime.create(alloc, .{
         .array_buffer_allocator = buffer_allocator,
@@ -158,21 +98,29 @@ fn runInit(
         .external_references = m.init_snapshot.referenceTable(references),
     });
     trace.mark("runtime_isolate");
-    trace.report();
     var options = host.initOptions();
     if (image) |*cached| options.init_snapshot = &cached.table;
     if (caching) options.code_cache = code_cache.hook();
     const scope = try rt.?.createScope(options);
+    trace.mark("create_scope");
     var error_info: m.ErrorInfo = .{};
     defer error_info.deinit();
     host.run(scope, engine.platform, args[1], &error_info) catch |err| {
-        print("{s}\n", .{@errorName(err)});
-        if (error_info.exception) |value| show(scope, value);
+        repl.display.print(io_runtime.io(), "{s}\n", .{@errorName(err)});
+        if (error_info.exception) |value| repl.display.show(io_runtime.io(), scope, value);
         return err;
     };
+    trace.mark("host_run");
+    defer {
+        trace.report();
+        @import("@diagnostics").scope.report();
+    }
     // Modules that compiled without a V8 code cache (not in the snapshot) get one now that
     // their code has run, so lazily compiled functions are in it.
-    if (caching) _ = scope.flushCodeCache();
+    if (caching) {
+        _ = scope.flushCodeCache();
+        host.flushGlueCache(scope);
+    }
 }
 
 /// The cached snapshot of the init graph at `specifier`, created and stored on a miss. Null
@@ -187,10 +135,11 @@ fn initSnapshot(
     references: []const ?*const anyopaque,
     specifier: []const u8,
     engine_snapshot: ?[]align(16) const u8,
+    engine_key: m.Api.init_cache.Hash,
 ) ?m.init_snapshot.Image {
     const verbose = environ.get("ORIGINE_SNAPSHOT_LOG") != null;
     const io = io_runtime.io();
-    var entry = m.Api.init_cache.entryFor(alloc, io, host, specifier) catch return null;
+    var entry = m.Api.init_cache.entryWithKey(alloc, engine_key, specifier) catch return null;
     defer entry.deinit();
     var miss: m.Api.init_cache.Miss = undefined;
     if (m.Api.init_cache.load(alloc, io, std.Io.Dir.cwd(), &entry, m.Api.init_cache.sourceHasher(host), &miss)) |hit| {

@@ -1,22 +1,44 @@
-// Guest-side glue for the `api` object. Evaluated once per scope by src/api/glue.zig with
-// the native function tables as `native`; returns the (unfrozen) api object, which the host
-// then deep-freezes. Natives are the trust anchor: they validate every handle, path and
-// grant. The glue only shapes the surface (sync/async variants, narrowing wrappers, option
-// parsing) and never holds authority itself.
-//
-// Parts: util.js (shared helpers and the errno protocol), fs.js, env.js, scope.js, io.js (one
-// capability factory each). glue.zig splices them in as `util`, `fs`, `env`, `scope`, `io` and `net`.
-(native, util, fs, env, scope, io, net) => {
+// Builds a host-independent API template. Snapshots prepare every JS capability here;
+// restored getters bind native authority only on first access. Without a snapshot,
+// native.load also supplies each capability factory from its separate code cache.
+(native, util) => {
   'use strict';
-  const { freeze } = util;
-  const api = {
-    fs: fs(native, util)({ root: undefined, write: true, async: true, sync: true }),
-    env: env(native, util)(null),
-    scope: scope(native, util)({ remaining: Infinity }),
+  const { freeze, freezeMethods } = util;
+  const capabilities = Object.create(null);
+  const bound = Object.create(null);
+  const options = {
+    fs: { root: undefined, write: true, async: true, sync: true },
+    env: null,
+    scope: { remaining: Infinity },
+    io: { parent: null, backends: undefined, max: Infinity, live: 0 },
+    net: undefined,
   };
-  // `api.io` exists only when the embedder configured a runtime ceiling (`Config.runtime`).
-  if (native.io !== undefined) api.io = io(native, util)({ parent: null, backends: undefined, max: Infinity, live: 0 });
-  // `api.net` rides on the same ceiling: sockets are bound to an `api.io` runtime.
-  if (native.net !== undefined) api.net = net(native, util)();
-  return freeze(api);
+  const prepare = (name, factory) => {
+    capabilities[name] = freezeMethods(factory(native, util)(options[name]));
+  };
+  const full = {};
+  const basic = {};
+  for (const name of ['fs', 'env', 'scope', 'io', 'net']) {
+    const get = freeze(() => {
+      if (!bound[name]) {
+        // Accessing a capability must preserve a pending synchronous fs error.
+        const previous = util.errno[0];
+        try {
+          const factory = native.load(name, native, capabilities[name] === undefined);
+          const code = util.take();
+          if (code !== 0) throw util.failure(code);
+          if (factory !== undefined) prepare(name, factory);
+          bound[name] = true;
+        } finally {
+          util.errno[0] = previous;
+        }
+      }
+      return capabilities[name];
+    });
+    const descriptor = { get, enumerable: true, configurable: false };
+    Object.defineProperty(full, name, descriptor);
+    if (name !== 'io' && name !== 'net') Object.defineProperty(basic, name, descriptor);
+  }
+  // Private context embedder data holds this bundle; guest code receives only an API.
+  return [freeze(full), freeze(basic), native, util.errno, prepare];
 };

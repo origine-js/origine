@@ -7,6 +7,7 @@
 const std = @import("std");
 const v8 = @import("@v8");
 const binding = @import("binding.zig");
+const init_cache = @import("init_cache.zig");
 const func = binding.func;
 const Call = binding.Call;
 const host_mod = @import("host.zig");
@@ -43,13 +44,17 @@ pub const FileRef = struct {
     }
 };
 
-/// Rejects NUL, absolute paths and `..` components. Lexical only: symlinks inside
+/// Rejects NUL, absolute paths, `..` components and the engine's `__oricache__` directories
+/// (snapshots and code caches are trusted by V8, so a guest must not be able to plant them).
+/// Lexical only: symlinks inside
 /// the root are not resolved here (draft-1 limitation, see docs/api-design.md).
 fn cleanPath(path: []const u8) !void {
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
     if (path.len != 0 and path[0] == '/') return error.InvalidPath;
     var parts = std.mem.splitScalar(u8, path, '/');
-    while (parts.next()) |part| if (std.mem.eql(u8, part, "..")) return error.InvalidPath;
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "..") or std.mem.eql(u8, part, init_cache.dir_name)) return error.InvalidPath;
+    }
 }
 
 /// True when `path` names the grant root itself (empty or only `.` components).

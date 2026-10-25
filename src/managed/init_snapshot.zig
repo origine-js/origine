@@ -8,15 +8,17 @@
 //! scope with `Scope.Options.init_snapshot = &image.table` yields a scope whose init graph
 //! is already evaluated: importing it again hits the module map and runs nothing.
 //!
-//! The snapshot context can hold no host state: no capability, no `api`, no host natives.
-//! Only what the module loader returns as plain source goes in. The default (pristine)
-//! context of the blob stays the frozen-intrinsics one, so other scopes are unaffected.
+//! The snapshot context holds no live host state or API native callbacks. It carries a
+//! private JS-only API template (descriptors, methods and classes) with no native authority;
+//! Host.install binds it after restore. The default context keeps the same pristine
+//! template and frozen intrinsics, so each restored scope gets independent state.
 const std = @import("std");
 const v8 = @import("@v8");
 const Runtime = @import("runtime.zig").Runtime;
 const Scope = @import("scope.zig").Scope;
 const ImportAttribute = @import("module_types.zig").ImportAttribute;
 const print_binding = @import("print.zig");
+const api_glue = @import("../api/glue.zig");
 
 pub const alignment: std.mem.Alignment = .@"16";
 pub const hash_len = 32;
@@ -346,9 +348,21 @@ fn evaluate(rt: *Runtime, creator: *v8.SnapshotCreator, alloc: std.mem.Allocator
         var session: Runtime.Session = undefined;
         session.init(rt);
         defer session.deinit();
-        creator.setDefaultContext(v8.Context.init(isolate, null, null, null));
+        const ctx = v8.Context.init(isolate, null, null, null);
+        ctx.enter();
+        defer ctx.exit();
+        var timing: ?i64 = null;
+        _ = try @import("bootstrap.zig").prepare(isolate, ctx, &timing);
+        try api_glue.prepare(isolate, ctx);
+        creator.setDefaultContext(ctx);
     }
     const scope = try rt.createScope(options.scope);
+    {
+        var session: Scope.Session = undefined;
+        session.init(scope);
+        defer session.deinit();
+        try api_glue.prepare(isolate, session.ctx);
+    }
     if (options.hooks) |hooks| try hooks.attach(hooks.data, scope);
     defer if (options.hooks) |hooks| hooks.detach(hooks.data, scope);
     {

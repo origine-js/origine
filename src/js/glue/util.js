@@ -6,6 +6,16 @@
 // value (undefined / 0). They clear it on entry.
 native => {
   const { freeze, getOwnPropertyDescriptor } = Object;
+  // Trusted API surfaces only: freeze their methods/accessors without validating a guest graph.
+  const freezeMethods = object => {
+    for (const key of Reflect.ownKeys(object)) {
+      const descriptor = getOwnPropertyDescriptor(object, key);
+      if (typeof descriptor.value === 'function') freeze(descriptor.value);
+      if (descriptor.get !== undefined) freeze(descriptor.get);
+      if (descriptor.set !== undefined) freeze(descriptor.set);
+    }
+    return freeze(object);
+  };
   const errno = native.errno;
   // Reads and clears the shared errno cell.
   const take = () => {
@@ -31,5 +41,5 @@ native => {
   const ioHandles = new WeakSet();
   const closedIo = new WeakSet();
 
-  return { freeze, errno, take, errors, failure, own, joinPath, ioHandles, closedIo };
+  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo };
 };

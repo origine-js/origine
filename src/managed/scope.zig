@@ -121,26 +121,13 @@ pub const Scope = struct {
         unsupported_prototype: v8.Global.Of(v8.Function),
     };
 
-    /// Runs bootstrap.js in ctx. Requires ctx entered and a live HandleScope (the
-    /// caller's Runtime.Session). Borrows self/ctx/timing through return; GC-owned intrinsic
-    /// and prototype arrays exist only as locals. Returns two caller-owned persistent
-    /// helper functions; on error (BootstrapFailed) nothing is retained.
+    /// Restores snapshot-prepared helpers, initializing them only without a template.
+    /// Requires ctx entered and a live HandleScope. Borrows self/ctx/timing through
+    /// return; returns two caller-owned persistent functions, released by Scope.destroy.
+    /// Errors retain no persistent handles; helper JS storage remains context-owned.
     fn bootstrap(self: *Scope, ctx: v8.Context, timing: *?i64) !Helpers {
         const isolate = self.runtime.isolate;
-        const script = v8.Script.compile(ctx, eu.v.str_utf8(isolate, @embedFile("../js/bootstrap.js")), null) orelse return error.BootstrapFailed;
-        startup_trace.mark(timing, "bootstrap_compile");
-        const initializer_value = script.run(ctx) orelse return error.BootstrapFailed;
-        const initializer = v8.Function.from_opaque(initializer_value.data.handle) orelse return error.BootstrapFailed;
-        const intrinsic_objects = v8.Intrinsics.getObjects(ctx) orelse return error.BootstrapFailed;
-        if (intrinsic_objects.len() == 0) return error.BootstrapFailed;
-        const unsupported_objects = eu.v.array(isolate, 5);
-        inline for (.{ .array_iterator, .string_iterator, .regexp_string_iterator, .iterator_helper, .iterator_wrapper }, 0..) |prototype, index| {
-            const object = v8.Intrinsics.getPrototype(ctx, prototype) orelse return error.BootstrapFailed;
-            if (!(unsupported_objects.object.setIndex(ctx, index, object.value) orelse return error.BootstrapFailed)) return error.BootstrapFailed;
-        }
-        const helper_value = initializer.call(ctx, eu.v.undefined_value(isolate).value, &.{ intrinsic_objects.object.value, unsupported_objects.object.value }) orelse return error.BootstrapFailed;
-        const helper = helper_value.toObject(ctx) orelse return error.BootstrapFailed;
-        startup_trace.mark(timing, "bootstrap_run_harden");
+        const helper = (try @import("bootstrap.zig").prepare(isolate, ctx, timing)).object;
         const hardener = helper.getIndex(ctx, 0) orelse return error.BootstrapFailed;
         const unsupported = helper.getIndex(ctx, 1) orelse return error.BootstrapFailed;
         const hardener_fn = v8.Function.from_opaque(hardener.data.handle) orelse return error.BootstrapFailed;

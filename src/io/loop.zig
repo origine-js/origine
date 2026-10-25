@@ -1,6 +1,7 @@
 //! One event loop instance. Several may coexist; each is driven by the thread calling `run`.
 //! Thread rules: submit/cancel/run/destroy on the loop thread only; `wake` and `post` from any.
 const std = @import("std");
+const safe = @import("@safe");
 const builtin = @import("builtin");
 const op_mod = @import("op.zig");
 const backend_mod = @import("backend.zig");
@@ -18,6 +19,9 @@ pub const Loop = struct {
     /// Submitted ops whose callback has not run yet.
     active: u32 = 0,
     dispatching: bool = false,
+    /// Set once `destroy` has torn the backend down: callbacks running its cancellations must
+    /// not reach the (freed) backend.
+    closing: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, options: Options) !*Loop {
         const loop = try allocator.create(Loop);
@@ -29,6 +33,7 @@ pub const Loop = struct {
     /// Cancels everything outstanding, runs the cancellation callbacks, and frees the loop.
     pub fn destroy(loop: *Loop) void {
         var drained: backend_mod.Drained = .{};
+        loop.closing = true;
         loop.backend.vtable.destroy(loop.backend.ctx, &drained);
         loop.dispatch(&drained);
         const allocator = loop.allocator;
@@ -36,6 +41,10 @@ pub const Loop = struct {
     }
 
     pub fn submit(loop: *Loop, op: *Op) !void {
+        if (loop.closing) return error.Unsupported; // callbacks of `destroy` cannot start new work
+        // Backends narrow descriptors to the kernel's `int`; a wider value is a caller bug that an
+        // unchecked cast would turn into some other descriptor.
+        if (op.fd < -1 or op.fd > std.math.maxInt(i32) or op.fd2 < -1 or op.fd2 > std.math.maxInt(i32)) return error.InvalidArgument;
         op.result = 0;
         try loop.backend.vtable.submit(loop.backend.ctx, op);
         loop.active += 1;
@@ -43,6 +52,7 @@ pub const Loop = struct {
 
     /// Asks the backend to finish `op` early; its callback still runs, usually with -ECANCELED.
     pub fn cancel(loop: *Loop, op: *Op) bool {
+        if (loop.closing) return false;
         return loop.backend.vtable.cancel(loop.backend.ctx, op);
     }
 
@@ -66,6 +76,9 @@ pub const Loop = struct {
 
     fn dispatch(loop: *Loop, drained: *backend_mod.Drained) void {
         while (drained.done.pop()) |op| {
+            // A backend that completes an op twice (or one never submitted) would wrap this counter
+            // in ReleaseFast and make `run(.until_idle)` spin forever.
+            safe.ensure(loop.active > 0, "io: completion without an active op");
             loop.active -= 1;
             if (op.cb) |cb| cb(op, op.result);
         }

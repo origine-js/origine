@@ -68,6 +68,16 @@ codegen-units = 16
 strip = true
 panic = "unwind"
 
+# The I/O runtime and API natives poll futures and issue syscalls on every JS-visible operation.
+[profile.release.package.origine_io]
+opt-level = 3
+
+[profile.release.package.origine_api_core]
+opt-level = 3
+
+[profile.release.package.origine_api]
+opt-level = 3
+
 [profile.release.package.oxc_parser]
 opt-level = 3
 

@@ -97,10 +97,10 @@ const Fstore = extern struct { flags: c_uint, posmode: c_int, offset: i64, lengt
 
 // Declared locally with plain types; the symbols are the same libSystem functions std uses.
 pub const sc = struct {
-    extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+    pub extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
     extern "c" fn fstatat(dirfd: c_int, path: [*:0]const u8, buf: *c.Stat, flag: c_int) c_int;
     extern "c" fn linkat(oldfd: c_int, old: [*:0]const u8, newfd: c_int, new: [*:0]const u8, flag: c_int) c_int;
-    extern "c" fn lseek(fd: c_int, off: i64, whence: c_int) i64;
+    pub extern "c" fn lseek(fd: c_int, off: i64, whence: c_int) i64;
     extern "c" fn ftruncate(fd: c_int, len: i64) c_int;
     extern "c" fn preadv(fd: c_int, iov: ?*const anyopaque, cnt: c_int, off: i64) isize;
     extern "c" fn pwritev(fd: c_int, iov: ?*const anyopaque, cnt: c_int, off: i64) isize;
@@ -132,7 +132,7 @@ pub const os_sync = struct {
     fn wakeAny() ?WakeFn {
         return @extern(?WakeFn, .{ .name = "os_sync_wake_by_address_any", .linkage = .weak });
     }
-    fn available() bool {
+    pub fn available() bool {
         return wait() != null and waitTimeout() != null and wakeAny() != null;
     }
 };
@@ -227,7 +227,9 @@ const Kq = struct {
         // list would also dequeue ready events, and a disabled `EV_DISPATCH` filter never reports
         // them again.
         for (k.changes[0..k.nchanges]) |*change| change.flags |= c.EV.RECEIPT;
-        const n = c.kevent(k.kq, &k.changes, @intCast(k.nchanges), &errs, errs.len, &zero);
+        // A signal must not drop the batch: the registrations would be lost and waiters hang.
+        var n = c.kevent(k.kq, &k.changes, @intCast(k.nchanges), &errs, errs.len, &zero);
+        while (n < 0 and negErrno() == errno(.INTR)) n = c.kevent(k.kq, &k.changes, @intCast(k.nchanges), &errs, errs.len, &zero);
         k.nchanges = 0;
         if (n <= 0) return;
         for (errs[0..@intCast(n)]) |ev| k.failWaiters(ev);
@@ -316,7 +318,7 @@ fn openFlags(aux: u64) u32 {
     return f | O_CLOEXEC;
 }
 
-extern "c" fn openat(fd: c_int, path: [*:0]const u8, oflag: c_int, ...) c_int;
+pub extern "c" fn openat(fd: c_int, path: [*:0]const u8, oflag: c_int, ...) c_int;
 
 fn fillStat(out: *op_mod.Stat, st: *const c.Stat) void {
     const mode: u32 = @intCast(st.mode);
@@ -474,22 +476,26 @@ fn doSendfile(op: *Op) i64 {
             if (n == 0) break;
             var off: usize = 0;
             const got: usize = @intCast(n);
+            var failed = false;
             while (off < got) {
                 const w = c.write(out, buf[off..].ptr, got - off);
                 if (w < 0) {
                     const e = negErrno();
                     if (e == errno(.INTR)) continue;
                     if (total + off > 0) {
-                        total += off;
-                        off = got;
+                        failed = true; // report the bytes already written
                         break;
                     }
                     return e;
                 }
+                if (w == 0) {
+                    failed = true;
+                    break;
+                }
                 off += @intCast(w);
             }
             total += off;
-            if (off < got) break;
+            if (failed or off < got) break;
         }
     }
     if (!explicit) _ = sc.lseek(in, pos + @as(i64, @intCast(total)), SEEK_SET);

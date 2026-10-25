@@ -213,7 +213,11 @@ pub const Runtime = struct {
             self.queue.performCheckpoint(self.isolate);
             var progress = false;
             // Guest execution can create import tasks, but cannot create scopes.
-            for (self.scopes.items) |scope| {
+            // By index, re-reading the list each time: guest code that reaches `createScope`
+            // would reallocate it under a `for` over the old slice.
+            var index: usize = 0;
+            while (index < self.scopes.items.len) : (index += 1) {
+                const scope = self.scopes.items[index];
                 const ctx = scope.context.deref();
                 ctx.enter();
                 progress = scope.module_map.drive() or progress;

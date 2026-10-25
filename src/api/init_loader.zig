@@ -32,7 +32,12 @@ pub fn resolve(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror
             } else try parts.append(request.allocator, part);
         }
     }
-    return std.mem.join(request.allocator, "/", parts.items);
+    const joined = try std.mem.join(request.allocator, "/", parts.items);
+    // An absolute referrer keeps its root: dropping the empty first component would turn
+    // `/p/init.js` + `./dep.js` into the cwd-relative `p/dep.js`.
+    if (base.len == 0 or base[0] != '/') return joined;
+    defer request.allocator.free(joined);
+    return std.mem.concat(request.allocator, u8, &.{ "/", joined });
 }
 
 pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {

@@ -3,7 +3,7 @@
 // Handles are instances of the `Handle` classes below: the native id lives in a private field
 // the guest cannot read or swap, only this file can construct them (`token`), and methods
 // brand-check their receiver. Every native call still re-validates owner and runtime in Rust.
-(native, { freeze, own, failure, ioHandles, closedIo, errors: { BadHandle } }) => {
+(native, { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors: { BadHandle } }) => {
   const token = {};
   let idOf;
   let subscribed;
@@ -331,16 +331,16 @@
     }
   }
 
-  freeze(Lease);
-  freeze(Lease.prototype);
-  freeze(DataEvent);
-  freeze(DataEvent.prototype);
-  freeze(Handle);
-  freeze(Handle.prototype);
-  freeze(Server);
-  freeze(Server.prototype);
-  freeze(Socket);
-  freeze(Socket.prototype);
+  freezeMethods(Lease);
+  freezeMethods(Lease.prototype);
+  freezeMethods(DataEvent);
+  freezeMethods(DataEvent.prototype);
+  freezeMethods(Handle);
+  freezeMethods(Handle.prototype);
+  freezeMethods(Server);
+  freezeMethods(Server.prototype);
+  freezeMethods(Socket);
+  freezeMethods(Socket.prototype);
 
   // A live `io` handle made by this scope's `api.io`; the natives validate the id again.
   const ioId = io => {

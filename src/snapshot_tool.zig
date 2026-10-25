@@ -1,4 +1,4 @@
-//! Build-time tool: writes the frozen-intrinsics startup snapshot that origine
+//! Build-time tool: writes the frozen-intrinsics and prepared-API snapshot that origine
 //! embeds. Run by build.zig with the output path as the only argument. It uses the
 //! same V8 archive and `Engine.init` flags as the shell, which V8 requires for the
 //! blob to be accepted.
@@ -6,11 +6,6 @@ const std = @import("std");
 const m = @import("@managed");
 const eu = @import("@util");
 const Engine = @import("@engine").Engine;
-
-// The Rust library calls the `oio_*` C ABI of the I/O library; keep its exports.
-comptime {
-    _ = @import("@io").c_api;
-}
 
 pub fn main(init: std.process.Init) !void {
     const alloc = eu.alloc;

@@ -39,7 +39,7 @@ const Impl = if (supported) struct {
     const tag_cancel: u64 = 2;
     const stage_timeout: u64 = 1;
     comptime {
-        std.debug.assert(@alignOf(Op) >= 2);
+        if (@alignOf(Op) < 2) @compileError("user_data tagging needs Op alignment >= 2");
     }
 
     // Per-op scratch use (priv[0] is the Queue link, owned by op_mod.Queue / Drained):
@@ -74,7 +74,13 @@ const Impl = if (supported) struct {
         /// Bytes sitting in the pipe.
         pending: usize = 0,
         draining: bool = false,
+        /// Set by `cancel`: the next stage is not queued, so a cancel that raced a
+        /// stage completion (and found nothing to cancel) is not lost.
+        cancel_requested: bool = false,
     };
+    /// Largest single read/write/send/recv: SQE lengths are u32, and the kernel caps transfers near
+    /// this anyway. A short count is a legal result for all four.
+    const max_io: usize = 0x7ffff000;
     const live_mark: ?*anyopaque = @ptrFromInt(1);
 
     const rd_queued: usize = 0;
@@ -467,9 +473,9 @@ const Impl = if (supported) struct {
                 const sqe = try getSqe(s);
                 const ptr: [*]u8 = if (op.buf) |b| @ptrCast(b) else undefined;
                 if (op.kind == .send)
-                    sqe.prep_send(@intCast(op.fd), ptr[0..op.len], op.flags)
+                    sqe.prep_send(@intCast(op.fd), ptr[0..@min(op.len, max_io)], op.flags)
                 else
-                    sqe.prep_recv(@intCast(op.fd), ptr[0..op.len], op.flags);
+                    sqe.prep_recv(@intCast(op.fd), ptr[0..@min(op.len, max_io)], op.flags);
                 sqe.user_data = ud;
             },
             .sendmsg, .recvmsg => {
@@ -594,9 +600,9 @@ const Impl = if (supported) struct {
                 const off: u64 = @bitCast(op.offset); // -1 => current file position
                 const ptr: [*]u8 = if (op.buf) |b| @ptrCast(b) else undefined;
                 if (op.kind == .read)
-                    sqe.prep_read(@intCast(op.fd), ptr[0..op.len], off)
+                    sqe.prep_read(@intCast(op.fd), ptr[0..@min(op.len, max_io)], off)
                 else
-                    sqe.prep_write(@intCast(op.fd), ptr[0..op.len], off);
+                    sqe.prep_write(@intCast(op.fd), ptr[0..@min(op.len, max_io)], off);
                 sqe.user_data = ud;
             },
             .fstat => {
@@ -674,6 +680,13 @@ const Impl = if (supported) struct {
             _ = @cmpxchgStrong(usize, @as(*usize, @ptrCast(&op.priv[p_pend])), rd_queued, rd_canceled, .acq_rel, .acquire);
             return true;
         }
+        if (op.kind == .sendfile) {
+            if (sfOf(op)) |sf| sf.cancel_requested = true;
+        }
+        // The caller may close the descriptor right after this returns. SQEs not yet submitted
+        // would then run against a closed (or reused) fd number, so hand them to the kernel
+        // first: an issued op keeps its own file reference and the cancel below reaches it.
+        _ = s.ring.submit() catch {};
         const sqe = getSqe(s) catch return false;
         sqe.prep_cancel(@intFromPtr(op), 0);
         sqe.user_data = tag_cancel;
@@ -761,6 +774,8 @@ const Impl = if (supported) struct {
     fn sendfileCqe(s: *State, op: *Op, sf: *Sendfile, res: i32, out: *backend.Drained) void {
         if (s.closing) return sfDone(s, op, sf, errno(.CANCELED), out);
         if (res < 0) return sfDone(s, op, sf, res, out);
+        // Stop before queueing the next stage.
+        if (sf.cancel_requested) return sfDone(s, op, sf, errno(.CANCELED), out);
         if (!sf.draining) {
             if (res == 0) return sfDone(s, op, sf, 0, out); // EOF on the input
             const n: usize = @intCast(res);
@@ -840,6 +855,8 @@ const Impl = if (supported) struct {
 
     fn poll(ctx: *anyopaque, block: bool, out: *backend.Drained) void {
         const s = st(ctx);
+        // A failed re-arm (full SQ) would silence `wake` and `post` for good: try again.
+        if (!s.efd_armed and !s.closing) armWake(s) catch {};
         reap(s, out, true);
         drainPosts(s, out);
         drainRd(s, out);
@@ -907,10 +924,12 @@ const Impl = if (supported) struct {
             } else |_| {}
         }
         var cur = s.live_head;
-        while (cur) |op| : (cur = @ptrCast(@alignCast(op.priv[p_next]))) {
+        while (cur) |op| {
+            // Read the link first: completing an op unlinks it and clears its `next`.
+            cur = @ptrCast(@alignCast(op.priv[p_next]));
             const sqe = getSqe(s) catch {
-                // Still full: drain completions to make room, then retry once.
-                reap(s, out, false);
+                // Still full: only submit (never reap, which could unlink ops we have yet to
+                // visit) and retry once; an op that cannot be cancelled here is waited for below.
                 _ = s.ring.submit() catch {};
                 const again = getSqe(s) catch continue;
                 again.prep_cancel(@intFromPtr(op), 0);

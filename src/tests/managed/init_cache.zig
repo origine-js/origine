@@ -121,6 +121,16 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
     try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = "not a snapshot" });
     try t.expect(cache.load(t.allocator, t.io, tmp.dir, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
+    // A loaded image owns stable, aligned bytes even after the file is overwritten
+    // and truncated. Restoring V8 must keep working, without a live file or mapping.
+    try t.expectEqual(@as(usize, 0), @intFromPtr(hit.blob.ptr) % 16);
+    try t.expectEqualSlices(u8, image.blob, hit.blob);
+    const rt = try m.Runtime.create(t.allocator, .{ .snapshot = hit.blob });
+    defer rt.destroy();
+    const options: m.Scope.Options = .{ .resolver = .{ .resolve = Memory.resolve }, .loader = .{ .load = load }, .init_snapshot = &hit.table };
+    const scope = try rt.createScope(options);
+    try @import("support.zig").exposeModule(scope, "app/init.js", "cached_init");
+    try @import("support.zig").check(scope, "cached_init.x === 1");
 }
 
 test "init cache: code caches are stored beside the source and only served for identical text" {
@@ -167,4 +177,26 @@ test "init cache: code caches are stored beside the source and only served for i
     hook.store(hook.data, embedded, payload);
     try t.expect(hook.load(hook.data, embedded) == null);
     try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, "origine:@std/__oricache__", .{}));
+}
+
+fn resolved(referrer: []const u8, specifier: []const u8) ![]const u8 {
+    return m.Api.init_loader.resolve(null, .{
+        .allocator = t.allocator,
+        .context = undefined,
+        .scope_id = 0,
+        .specifier = specifier,
+        .referrer = referrer,
+    });
+}
+
+test "relative specifiers keep the root of an absolute referrer" {
+    const abs = try resolved("/p/init.js", "./dep.js");
+    defer t.allocator.free(abs);
+    try t.expectEqualStrings("/p/dep.js", abs);
+    const up = try resolved("/p/q/init.js", "../dep.js");
+    defer t.allocator.free(up);
+    try t.expectEqualStrings("/p/dep.js", up);
+    const rel = try resolved("app/init.js", "./dep.js");
+    defer t.allocator.free(rel);
+    try t.expectEqualStrings("app/dep.js", rel);
 }

@@ -15,10 +15,14 @@ const Op = op_mod.Op;
 const ENOMEM: c_int = @intFromEnum(std.c.E.NOMEM);
 const EINVAL: c_int = @intFromEnum(std.c.E.INVAL);
 const ENOSYS: c_int = @intFromEnum(std.c.E.NOSYS);
+const EAGAIN: c_int = @intFromEnum(std.c.E.AGAIN);
 
 fn fail(err: anyerror) c_int {
     return -switch (err) {
-        error.OutOfMemory => ENOMEM,
+        // Resource exhaustion (pipe/eventfd/thread creation) is not a caller bug; a full
+        // submission queue is transient and the caller may retry after polling.
+        error.OutOfMemory, error.SystemResources => ENOMEM,
+        error.SubmissionQueueFull => EAGAIN,
         error.Unsupported, error.UnsupportedOp => ENOSYS,
         else => EINVAL,
     };

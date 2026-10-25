@@ -93,8 +93,13 @@ fn cachePath(alloc: std.mem.Allocator, path: []const u8, tag: [12]u8, ext: []con
 /// Derives the snapshot entry for `init_specifier` (as the host imports it): the engine key
 /// plus the specifier. Borrows host and specifier through return.
 pub fn entryFor(alloc: std.mem.Allocator, io: std.Io, host: *const Host, init_specifier: []const u8) !Entry {
+    return entryWithKey(alloc, engineKey(io, host), init_specifier);
+}
+
+/// `entryFor` with an `engineKey` the caller already computed (it hashes every embedded
+/// module, so a start computes it once). Borrows init_specifier through return.
+pub fn entryWithKey(alloc: std.mem.Allocator, engine: Hash, init_specifier: []const u8) !Entry {
     var hasher = Blake3.init(.{});
-    const engine = engineKey(io, host);
     hasher.update(&engine);
     hasher.update(init_specifier);
     var key: Hash = undefined;
@@ -149,7 +154,7 @@ pub const Miss = enum {
 /// entry and hasher through return; the result owns its bytes (release with `Image.deinit`).
 pub fn load(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, entry: *const Entry, hasher: managed.init_snapshot.SourceHasher, why: ?*Miss) ?managed.init_snapshot.Image {
     var label: [128]u8 = undefined;
-    const bytes = root.readFileAllocOptions(io, entry.path, alloc, .limited(1 << 30), managed.init_snapshot.alignment, null) catch |err| {
+    const bytes = readSnapshot(alloc, io, root, entry.path) catch |err| {
         if (why) |out| out.* = if (err == error.FileNotFound) .no_file else .bad_file;
         return null;
     };
@@ -169,6 +174,25 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, entry: *cons
         return null;
     }
     return image;
+}
+
+/// Reads a regular cache file into one aligned, caller-owned allocation. Borrows
+/// root/path through return; closes the file on every path and frees partial reads
+/// on failure. The copy remains stable if the cache file is later changed/truncated.
+/// Retains the 1 GiB limit and rejects size changes detected during the read.
+fn readSnapshot(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, path: []const u8) ![]align(16) u8 {
+    const file = try root.openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.InvalidSnapshotFile;
+    if (stat.size >= 1 << 30) return error.FileTooBig;
+    const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
+    const bytes = try alloc.alignedAlloc(u8, managed.init_snapshot.alignment, size);
+    errdefer alloc.free(bytes);
+    if (try file.readPositionalAll(io, bytes, 0) != size) return error.SnapshotFileChanged;
+    var extra: [1]u8 = undefined;
+    if (try file.readPositionalAll(io, &extra, stat.size) != 0) return error.SnapshotFileChanged;
+    return bytes;
 }
 
 /// Writes the snapshot file under `root` atomically (temporary file in the same directory,
@@ -242,7 +266,12 @@ pub const CodeCacheState = struct {
     root: std.Io.Dir,
 
     pub fn init(io: std.Io, host: *Host, root: std.Io.Dir) CodeCacheState {
-        return .{ .host = host, .tag = tagOf(engineKey(io, host)), .root = root };
+        return initWithKey(engineKey(io, host), host, root);
+    }
+
+    /// `init` with an `engineKey` the caller already computed.
+    pub fn initWithKey(engine: Hash, host: *Host, root: std.Io.Dir) CodeCacheState {
+        return .{ .host = host, .tag = tagOf(engine), .root = root };
     }
 
     /// The hook to put into `Scope.Options.code_cache`; borrows self (stable address).
@@ -262,7 +291,7 @@ fn sourceHash(source: []const u8) Hash {
 /// disk. Result lives in request.allocator.
 fn loadCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest) ?[]const u8 {
     const state: *CodeCacheState = @ptrCast(@alignCast(data.?));
-    if (std.mem.startsWith(u8, request.module_id, managed.module_types.origine_prefix)) return null;
+    if (!cacheable(request.module_id)) return null;
     const path = cachePath(request.allocator, request.module_id, state.tag, code_cache_extension) catch return null;
     const bytes = state.root.readFileAllocOptions(state.host.io, path, request.allocator, .limited(1 << 28), .@"8", null) catch return null;
     if (bytes.len <= code_header_len or !std.mem.eql(u8, bytes[0..code_magic.len], code_magic)) return null;
@@ -273,11 +302,23 @@ fn loadCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest) ?
     return bytes[code_header_len..];
 }
 
+/// File-backed modules and each host glue script get code caches; the embedded `origine:`
+/// ES modules are covered by the init snapshot. Borrows the ID through return; retains nothing.
+fn cacheable(module_id: []const u8) bool {
+    if (!std.mem.startsWith(u8, module_id, managed.module_types.origine_prefix)) return true;
+    inline for (std.enums.values(glue.Module)) |module| {
+        if (std.mem.eql(u8, module_id, glue.script(module).cache_id)) return true;
+    }
+    return false;
+}
+
+const glue = @import("glue.zig");
+
 /// Hook `store`: writes the code cache of a file-backed module next to its source. Best
 /// effort; any failure just means no cache next time.
 fn storeCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest, bytes: []const u8) void {
     const state: *CodeCacheState = @ptrCast(@alignCast(data.?));
-    if (std.mem.startsWith(u8, request.module_id, managed.module_types.origine_prefix)) return;
+    if (!cacheable(request.module_id)) return;
     const alloc = state.host.allocator;
     const path = cachePath(alloc, request.module_id, state.tag, code_cache_extension) catch return;
     defer alloc.free(path);
@@ -290,4 +331,3 @@ fn storeCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest, 
     writeAtomic(alloc, state.host.io, state.root, path, file) catch return;
     sweepStale(state.host.io, state.root, path);
 }
-

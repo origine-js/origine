@@ -12,7 +12,7 @@ use std::future::Future;
 use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 use std::pin::Pin;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use origine_api_core::slab::Slab;
 use origine_api_core::{Backend, Ceiling, NativeError, errno};
@@ -119,6 +119,8 @@ pub struct HostState {
     pub(crate) refill: Rc<RefCell<Vec<u32>>>,
     idle: BTreeMap<u32, Rc<Idle>>,
     pending: Slab<Pending>,
+    timers: BTreeMap<(u32, u32), (u64, origine_io::rt::AbortHandle)>,
+    clock_start: Instant,
     completions: CompletionQueue,
     wake: WakeRx,
 }
@@ -140,6 +142,8 @@ impl HostState {
             refill: Rc::default(),
             idle: BTreeMap::new(),
             pending: Slab::default(),
+            timers: BTreeMap::new(),
+            clock_start: Instant::now(),
             completions: Rc::default(),
             wake,
         }
@@ -201,6 +205,45 @@ impl HostState {
         Ok(())
     }
 
+    /// Starts a monotonic timer belonging to the caller's runtime. Its token is never reused
+    /// by the JS handle, so cancelling an expired timer cannot reach a later timer.
+    pub(crate) fn start_timer(&mut self, owner: ScopeKey, token: u32, duration: Duration, pending: Pending) -> Result<(), NativeError> {
+        let runtime = pending.runtime;
+        let entry = self.open_runtime(owner, runtime)?;
+        let lp = Rc::clone(&entry.lp);
+        let handle = entry.rt.as_ref().ok_or(NativeError::Errno(errno::BAD_HANDLE))?.handle();
+        if self.timers.contains_key(&(runtime, token)) {
+            return Err(NativeError::Errno(errno::BAD_HANDLE));
+        }
+        let id = self.pending.insert(pending);
+        let completions = self.completions();
+        let task = handle.spawn_eager(async move {
+            let result = lp.timeout(duration).await.map_err(NativeError::from);
+            completions.borrow_mut().push(Box::new(move |scope| {
+                let Some(host) = scope.get_slot_mut::<HostState>() else { return };
+                host.timers.remove(&(runtime, token));
+                if let Some(pending) = host.take_pending(id) {
+                    finish(scope, pending, result);
+                }
+            }));
+        });
+        self.timers.insert((runtime, token), (id, task.abort_handle()));
+        Ok(())
+    }
+
+    /// Cancels just one timer, leaving all other operations of the runtime running.
+    pub(crate) fn cancel_timer(&mut self, owner: ScopeKey, runtime: u32, token: u32) -> Result<Option<Pending>, NativeError> {
+        self.open_runtime(owner, runtime)?;
+        let Some((id, abort)) = self.timers.remove(&(runtime, token)) else { return Ok(None) };
+        abort.abort();
+        Ok(self.take_pending(id))
+    }
+
+    pub(crate) fn timer_now(&self, owner: ScopeKey, runtime: u32) -> Result<f64, NativeError> {
+        self.open_runtime(owner, runtime)?;
+        Ok(self.clock_start.elapsed().as_secs_f64() * 1000.0)
+    }
+
     /// Starts closing runtime `id`: its tasks are dropped (cancelling their ops), its pending
     /// promises are returned to be rejected with `Canceled`, and `close` becomes the promise that
     /// resolves once the loop is quiet and the grants are released.
@@ -218,6 +261,7 @@ impl HostState {
     fn cancel_runtime(&mut self, id: u32) -> Vec<Pending> {
         let rt = self.runtimes.get_mut(&id).and_then(|entry| entry.rt.take());
         drop(rt); // cancels every task; the loop runs once to deliver the cancellations
+        self.timers.retain(|(runtime, _), _| *runtime != id);
         let canceled = self.pending.take_where(|pending| pending.runtime == id);
         self.sockets.retain(|_, socket| socket.runtime() != id);
         self.subs.retain(|_, sub| sub.runtime != id);

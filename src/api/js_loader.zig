@@ -221,8 +221,10 @@ fn callLoader(self: *JsLoader, request: module_types.LoadRequest) anyerror!Fetch
     const parent_ctx = self.parent.context.deref();
     parent_ctx.enter();
     defer parent_ctx.exit();
+    // Restore, not clear: a nested loader call must not drop the outer call's guard.
+    const was_in_loader = host.in_loader;
     host.in_loader = true;
-    defer host.in_loader = false;
+    defer host.in_loader = was_in_loader;
     var tc: v8.TryCatch = undefined;
     tc.init(isolate);
     defer tc.deinit();

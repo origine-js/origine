@@ -5,7 +5,7 @@
   "overrides": [
     {
       // Glue scripts are evaluated as scripts; their completion value (a function) is the result.
-      "files": ["src/js/bootstrap.js", "src/js/glue/*.js"],
+      "files": ["src/js/bootstrap.js", "src/js/glue/*.js", "src/repl/helpers.js"],
       "rules": { "no-unused-expressions": "off" }
     },
     {

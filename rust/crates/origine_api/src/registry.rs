@@ -19,6 +19,9 @@ use crate::{fs, io, net, sub};
 pub(crate) static NATIVES: &[RawNative] = &[
     io::NATIVE_IO_CREATE,
     io::NATIVE_IO_CLOSE,
+    io::NATIVE_IO_SLEEP,
+    io::NATIVE_IO_CANCEL_TIMER,
+    io::NATIVE_IO_NOW,
     fs::NATIVE_FS_ASYNC_REQUEST,
     fs::NATIVE_FS_ASYNC_OPEN_FILE,
     fs::NATIVE_FS_ASYNC_OPEN_DIR,

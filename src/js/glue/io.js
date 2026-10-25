@@ -18,6 +18,7 @@
       if (entries !== undefined) request.entries = entries;
       const made = native.io.create(request);
       let handle;
+      let nextTimer = 0;
       const close = () => {
         if (closedIo.has(handle)) return Promise.resolve();
         closedIo.add(handle);
@@ -30,7 +31,28 @@
         if (closedIo.has(handle)) return Promise.reject(failure(BadHandle));
         return native.io.run === undefined ? Promise.reject(failure(Unsupported)) : native.io.run(made.id);
       };
-      handle = freeze({ kind: 'io', id: made.id, backend: made.backend, close, run });
+      const now = () => {
+        if (closedIo.has(handle)) throw failure(BadHandle);
+        return native.io.now(made.id);
+      };
+      const timer = ms => {
+        if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0 || ms > 2147483647)
+          throw new TypeError('milliseconds must be finite and between 0 and 2147483647');
+        if (closedIo.has(handle)) throw failure(BadHandle);
+        if (nextTimer > 0xffffffff) throw failure(Unsupported);
+        const token = nextTimer++;
+        const promise = native.io.sleep(made.id, token, ms);
+        const cancel = () => (closedIo.has(handle) ? false : native.io.cancelTimer(made.id, token));
+        return freeze({ promise, cancel });
+      };
+      const timerAt = deadline => {
+        if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline < 0)
+          throw new TypeError('deadline must be a finite non-negative monotonic time');
+        return timer(Math.max(0, deadline - now()));
+      };
+      const sleep = ms => timer(ms).promise;
+      const sleepUntil = deadline => timerAt(deadline).promise;
+      handle = freeze({ kind: 'io', id: made.id, backend: made.backend, close, run, now, timer, timerAt, sleep, sleepUntil });
       ioHandles.add(handle);
       for (const s of chain) s.live++;
       return handle;

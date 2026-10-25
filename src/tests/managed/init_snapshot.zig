@@ -75,6 +75,27 @@ test "init snapshot: an evaluated graph restores without evaluating again" {
     try check(other, "typeof globalThis.runs === 'undefined' && Object.isFrozen(Array.prototype)");
 }
 
+test "init snapshot: preparation does not execute main or unused functions" {
+    ensureV8();
+    var creating: Graph = .{ .init_source =
+        \\globalThis.prepared = (globalThis.prepared ?? 0) + 1;
+        \\export let calls = 0;
+        \\export function main() { calls++; return 17; }
+        \\export function unused() { throw new Error('must only execute when called'); }
+    };
+    var image = try m.init_snapshot.create(t.allocator, .{ .key = @splat(8), .scope = creating.options(), .specifier = "init" });
+    defer image.deinit();
+    const rt = try m.Runtime.create(t.allocator, .{ .snapshot = image.blob });
+    defer rt.destroy();
+    var options = creating.options();
+    options.init_snapshot = &image.table;
+    const scope = try rt.createScope(options);
+    try exposeModule(scope, "init", "ns");
+    try check(scope, "prepared === 1 && ns.calls === 0");
+    try check(scope, "ns.main() === 17 && ns.calls === 1 && prepared === 1");
+    try check(scope, "(() => { try { ns.unused(); return false; } catch(e) { return e.message.includes('must only execute'); } })()");
+}
+
 test "init snapshot: a changed source is noticed and a foreign key is refused" {
     ensureV8();
     var creating: Graph = .{};

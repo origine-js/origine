@@ -37,3 +37,26 @@ test "snapshot: truncated blobs are rejected before V8 sees them" {
     var junk: [128]u8 align(16) = @splat(0xAB);
     try t.expectError(error.InvalidSnapshot, m.Runtime.create(t.allocator, .{ .snapshot = &junk }));
 }
+
+test "snapshot: restored bootstrap helpers preserve validation and code-generation lockdown" {
+    ensureV8();
+    const blob = try m.snapshot.create(t.allocator);
+    defer t.allocator.free(blob);
+    const rt = try m.Runtime.create(t.allocator, .{ .snapshot = blob });
+    defer rt.destroy();
+    const a = try rt.createScope(.{});
+    const b = try rt.createScope(.{});
+    for ([_]*m.Scope{ a, b }) |scope| {
+        try t.expectError(error.JavaScriptException, scope.eval("Object.prototype.modified = true", "test:intrinsic", null));
+        try t.expectError(error.JavaScriptException, scope.eval("Function('return 1')()", "test:codegen", null));
+        for ([_][]const u8{ "new Map()", "new Uint8Array(1)", "Promise.resolve(1)", "[][Symbol.iterator]()", "new Proxy({}, {ownKeys(){throw new Error('trap')}})" }) |source| {
+            const value = try scope.eval(source, "test:unsupported", null);
+            defer value.deinit();
+            try t.expectError(error.UnsupportedExport, scope.harden(value, null));
+        }
+        const graph = try scope.eval("globalThis.getterCalls = 0; globalThis.graph = {get value(){getterCalls++; return 1}}; graph", "test:descriptors", null);
+        defer graph.deinit();
+        try scope.harden(graph, null);
+        try check(scope, "getterCalls === 0 && Object.isFrozen(graph) && Object.isFrozen(Object.getOwnPropertyDescriptor(graph, 'value').get)");
+    }
+}

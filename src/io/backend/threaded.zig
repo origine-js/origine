@@ -362,9 +362,14 @@ fn worker(s: *Self) void {
             if (!waitReady(s, op)) break;
             r = execute(op);
         }
+        // A non-blocking connect returns EINPROGRESS: like the other backends, complete once the
+        // socket is writable and report the connection's own error.
+        if (r == -einprogress and op.kind == .connect and waitReady(s, op)) r = connectResult(op);
 
         s.lock();
-        if (getState(op) == .running_cancelled) r = -ecancelled;
+        // A cancel only replaces a result the syscall did not produce (the readiness wait gave up);
+        // a completed accept/recv/write must report its real result or its fd/bytes would be lost.
+        if (getState(op) == .running_cancelled and (r == -eagain or r == eintr)) r = -ecancelled;
         op.result = r;
         setState(op, .done);
         s.done.push(op);
@@ -375,6 +380,15 @@ fn worker(s: *Self) void {
 }
 
 const eagain: i64 = @backingInt(c.E.AGAIN);
+const einprogress: i64 = @backingInt(c.E.INPROGRESS);
+
+/// The outcome of a connect that has become writable: 0, or the negated SO_ERROR.
+fn connectResult(op: *Op) i64 {
+    var err: c_int = 0;
+    var len: u32 = @sizeOf(c_int);
+    if (sys.getsockopt(@intCast(op.fd), sol_socket, so_error, &err, &len) < 0) return errResult();
+    return -@as(i64, err);
+}
 
 fn isSocketWait(kind: op_mod.Kind) bool {
     return switch (kind) {
@@ -386,7 +400,7 @@ fn isSocketWait(kind: op_mod.Kind) bool {
 /// Blocks (in 25 ms slices) until `op`'s descriptor is ready; false if the op was cancelled or the backend is shutting down.
 fn waitReady(s: *Self, op: *Op) bool {
     const events: i16 = switch (op.kind) {
-        .send, .sendmsg => c.POLL.OUT,
+        .send, .sendmsg, .connect => c.POLL.OUT,
         else => c.POLL.IN,
     };
     while (true) {
@@ -520,7 +534,9 @@ fn execute(op: *Op) i64 {
             },
             else => enosys,
         };
-        if (r == -@as(i64, @backingInt(c.E.INTR))) continue;
+        // close(2) must not be retried (the descriptor is already released, and the number may
+        // have been reused), and a futex wait would restart its whole relative timeout.
+        if (r == eintr and op.kind != .close and op.kind != .futex_wait) continue;
         return r;
     }
 }
@@ -566,6 +582,7 @@ const sys = struct {
     extern "c" fn preadv(fd: c_int, iov: *const anyopaque, cnt: c_int, off: i64) isize;
     extern "c" fn pwritev(fd: c_int, iov: *const anyopaque, cnt: c_int, off: i64) isize;
     extern "c" fn connect(fd: c_int, addr: *const anyopaque, len: u32) c_int;
+    extern "c" fn getsockopt(fd: c_int, level: c_int, name: c_int, val: *anyopaque, len: *u32) c_int;
     extern "c" fn accept(fd: c_int, addr: ?*anyopaque, len: ?*u32) c_int;
     extern "c" fn accept4(fd: c_int, addr: ?*anyopaque, len: ?*u32, flags: c_int) c_int;
     extern "c" fn linkat(oldfd: c_int, old: [*:0]const u8, newfd: c_int, new: [*:0]const u8, flags: c_int) c_int;
@@ -578,6 +595,8 @@ const sys = struct {
 };
 
 const eintr: i64 = -@as(i64, @backingInt(c.E.INTR));
+const sol_socket: c_int = if (builtin.os.tag == .linux) 1 else 0xffff;
+const so_error: c_int = if (builtin.os.tag == .linux) 4 else 0x1007;
 
 fn neg(e: c.E) i64 {
     return -@as(i64, @backingInt(e));
@@ -1082,12 +1101,14 @@ test "cancel of a queued op is deterministic" {
     try testing.expect(got[0] == &victim);
     try testing.expectEqual(-ecancelled, victim.result);
 
-    // Cancel the running read, then release the worker so it finishes.
+    // Cancel the running read, then release the worker so it finishes. A blocking read cannot
+    // be interrupted, so it consumes the byte: the op must report that real result (1) rather
+    // than -ECANCELED, or the byte would be lost.
     try testing.expect(be.vtable.cancel(be.ctx, &blocker));
     _ = c.write(fds[1], "x", 1);
     _ = collect(be, 1, &got);
     try testing.expect(got[0] == &blocker);
-    try testing.expectEqual(-ecancelled, blocker.result);
+    try testing.expectEqual(@as(i64, 1), blocker.result);
     _ = c.close(fds[0]);
     _ = c.close(fds[1]);
 }

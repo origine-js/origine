@@ -547,7 +547,16 @@ fn net_send(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'
     out.writing = true;
     out.need_ready = true;
     drop(out); // the writer polls once at spawn and takes the same borrow
-    host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared))))?;
+    if let Err(error) = host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared)))) {
+        // No writer will ever drain the outbox: undo the queueing, or every later send would
+        // only append to it and `writing` would stay set forever.
+        let mut out = shared.out.borrow_mut();
+        out.queue.clear();
+        out.bytes = 0;
+        out.writing = false;
+        out.need_ready = false;
+        return Err(error);
+    }
     Ok(false)
 }
 

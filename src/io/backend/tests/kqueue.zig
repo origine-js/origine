@@ -702,7 +702,7 @@ fn mkdirQuiet(path: [*:0]const u8) void {
 }
 
 fn touch(path: [*:0]const u8) void {
-    const fd = openat(c.AT.FDCWD, path, @bitCast(@as(u32, 0x200 | 2 | O_CLOEXEC)), @as(c_uint, 0o644));
+    const fd = kqueue.openat(c.AT.FDCWD, path, @bitCast(@as(u32, 0x200 | 2 | O_CLOEXEC)), @as(c_uint, 0o644));
     if (fd >= 0) _ = c.close(fd);
 }
 

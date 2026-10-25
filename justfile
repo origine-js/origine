@@ -27,12 +27,17 @@ patch-v8:
 test:
     zig build test
 
+# Exercise the REPL in a real pseudo-terminal (Tab, suggestions, history, colors).
+test-repl:
+    zig build
+    uv run --no-project src/repl/tests/terminal_smoke.py
+
 # Everything CI-style: cross-language contracts, Rust lints + Miri, then formatting and JS/TS lint.
 check: check-contracts check-rust check-format
 
 oxlint := "oxlint@1.89.0"
 oxfmt := "oxfmt@0.74.0"
-js_paths := "bench examples src/js"
+js_paths := "bench examples src/js src/repl"
 
 # Rust: clippy with warnings denied (every `unsafe` needs a `// SAFETY:` comment, enforced by
 # clippy::undocumented_unsafe_blocks and friends in rust/Cargo.toml) and Miri over the crates'

@@ -29,6 +29,8 @@ const Entry = struct {
     id: ModuleId,
     attributes: []const ImportAttribute,
     module: ?v8.Global.Of(v8.Module) = null,
+    /// Next entry whose module has the same identity hash (see `ModuleMap.by_identity`).
+    identity_next: ?*Entry = null,
     failure: ?v8.Global.Of(v8.Value) = null,
     evaluation: ?v8.Global.Of(v8.Promise) = null,
     dependencies: std.ArrayList(Dependency) = .empty,
@@ -57,6 +59,8 @@ pub const ModuleMap = struct {
     entries: std.StringHashMapUnmanaged(*Entry) = .empty,
     // Retired entries remain available to existing namespaces, linked graphs and pending imports.
     all_entries: std.ArrayList(*Entry) = .empty,
+    /// Module identity hash -> chain of entries (`Entry.identity_next`), so `find` is not a scan.
+    by_identity: std.AutoHashMapUnmanaged(c_int, *Entry) = .empty,
     tasks: std.ArrayList(Task) = .empty,
     driving: bool = false,
     preparing_depth: usize = 0,
@@ -137,6 +141,7 @@ pub const ModuleMap = struct {
         }
         self.entries.deinit(self.scope.runtime.allocator);
         self.all_entries.deinit(self.scope.runtime.allocator);
+        self.by_identity.deinit(self.scope.runtime.allocator);
         self.tasks.deinit(self.scope.runtime.allocator);
         self.arena.deinit();
     }
@@ -302,6 +307,7 @@ pub const ModuleMap = struct {
                 const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
                 if (self.scope.options.code_cache != null and !accepted) entry.cache_source = try self.arenaAllocator().dupe(u8, text);
                 entry.module = .new(iso, module);
+                try self.indexModule(entry);
                 const requests = module.getModuleRequests().?;
                 try entry.dependencies.ensureTotalCapacity(self.scope.runtime.allocator, @intCast(requests.len()));
                 var index: c_int = 0;
@@ -332,6 +338,7 @@ pub const ModuleMap = struct {
                 }
                 const module = v8.Module.createSyntheticModule(iso, eu.v.str_utf8(iso, entry.id), names.len, @ptrCast(names.ptr), synthetic) orelse return error.JavaScriptException;
                 entry.module = .new(iso, module);
+                try self.indexModule(entry);
             },
         }
         entry.preparing = false;
@@ -417,6 +424,7 @@ pub const ModuleMap = struct {
             const restored = v8.Module.from_opaque(data.handle) orelse return error.InvalidSnapshot;
             if (!restored.isSourceTextModule()) return error.InvalidSnapshot;
             entry.*.module = .new(self.isolate(), restored);
+            try self.indexModule(entry.*);
             entry.*.preparing = false;
         }
         for (modules, entries) |module, entry| {
@@ -429,14 +437,24 @@ pub const ModuleMap = struct {
         }
     }
 
+    /// Adds `entry` (whose module is set) to the identity index. Allocation failure leaves the
+    /// entry unindexed, which `find` would then miss, so callers propagate it.
+    fn indexModule(self: *ModuleMap, entry: *Entry) !void {
+        const hash = entry.module.?.deref().getIdentityHash();
+        const slot = try self.by_identity.getOrPut(self.scope.runtime.allocator, hash);
+        entry.identity_next = if (slot.found_existing) slot.value_ptr.* else null;
+        slot.value_ptr.* = entry;
+    }
+
     /// Borrows self/module through lookup; returns a map-owned entry valid until
     /// map deinit, including retired entries. Requires a live local module handle.
     fn find(self: *ModuleMap, module: v8.Module) ?*Entry {
-        for (self.all_entries.items) |entry| if (entry.module) |stored| {
-            if (stored.deref().data.handle == module.data.handle) return entry;
+        var cursor = self.by_identity.get(module.getIdentityHash());
+        while (cursor) |entry| : (cursor = entry.identity_next) {
+            const stored = entry.module.?.deref();
             // Local handles are distinct slots. Compare module identity, not their addresses.
-            if (stored.deref().getIdentityHash() == module.getIdentityHash() and stored.deref().data.eq(module.data)) return entry;
-        };
+            if (stored.data.handle == module.data.handle or stored.data.eq(module.data)) return entry;
+        }
         return null;
     }
 
@@ -650,6 +668,7 @@ pub const ModuleMap = struct {
                 const module = root.module.?.deref();
                 if (module.getStatus() == 5) {
                     self.fail(root, module.getException().?);
+                    progress = true; // the import promise just settled
                     continue;
                 }
                 if (module.getStatus() == 0) {

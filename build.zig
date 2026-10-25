@@ -43,7 +43,8 @@ pub fn build(b: *std.Build) void {
     }
     // The I/O library: the Zig host uses `Loop` and the Rust runtime calls its `oio_*` C ABI, so
     // every program that links the Rust library must compile it in (see `io_module`).
-    const io_module = ioModule(b, target, optimize);
+    const io_module = ioModule(b, target);
+    const io_lib = ioLibrary(b, target, io_module);
     root.addImport("@io", io_module);
     const modules = hostModules(b, v8, io_module, target, optimize, config);
     root.addImport("@managed", modules.managed);
@@ -68,14 +69,14 @@ pub fn build(b: *std.Build) void {
         tool_module.addImport("@io", io_module);
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg(tool);
         const blob = generate.addOutputFileArg("engine.snapshot");
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -89,13 +90,19 @@ pub fn build(b: *std.Build) void {
     if (prebuilt == null) b.step("build-v8", "Fetch, patch and rebuild V8; ordinary builds reuse the last archive").dependOn(&v8.builder.top_level_steps.get("build-v8").?.step);
     b.step("patch-v8", "Fetch V8 and apply the patch series without building").dependOn(&v8.builder.top_level_steps.get("patch-v8").?.step);
     // The I/O library has no V8 dependency and tests on its own.
-    const io_tests = b.addTest(.{ .root_module = b.createModule(.{
+    // Debug by default so the library's safety checks run; `src/safe.zig` is tested the same way.
+    const io_test_module = b.createModule(.{
         .root_source_file = b.path("src/io/io.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-    }) });
-    b.step("test-io", "Run the src/io library tests (no V8)").dependOn(&b.addRunArtifact(io_tests).step);
+    });
+    io_test_module.addImport("@safe", b.createModule(.{ .root_source_file = b.path("src/safe.zig"), .target = target, .optimize = optimize }));
+    const io_tests = b.addTest(.{ .root_module = io_test_module });
+    const safe_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/safe.zig"), .target = target, .optimize = optimize }) });
+    const test_io_step = b.step("test-io", "Run the src/io library and src/safe.zig tests (no V8)");
+    test_io_step.dependOn(&b.addRunArtifact(io_tests).step);
+    test_io_step.dependOn(&b.addRunArtifact(safe_tests).step);
     const test_step = b.step("test", "Run the V8 package tests and the managed runtime tests");
     test_step.dependOn(&test_v8.builder.top_level_steps.get("test").?.step);
 
@@ -107,6 +114,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_root.addImport("@io", io_module);
+    test_root.linkLibrary(io_lib);
     for ([_][]const u8{ "@v8", "@util", "@mimalloc" }) |name| {
         test_root.addImport(name, test_v8.module(name));
     }
@@ -154,11 +162,28 @@ fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build
     });
 }
 
-/// The I/O library as a module (`src/io/io.zig`, which also exposes the `c_api` exports). Programs
-/// that link the Rust library reference `@import("@io").c_api` in a `comptime` block so its
-/// `export fn oio_*` symbols are kept. Borrows b through build teardown.
-fn ioModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("src/io/io.zig"), .target = target, .optimize = optimize, .link_libc = true });
+/// The I/O library's Zig API as a module (`src/io/io.zig`), always compiled in ReleaseFast. It
+/// does not export the C ABI: that lives in `liborigine_io.a` (`ioLibrary`), so a program links
+/// the archive exactly once. Borrows b through build teardown.
+fn ioModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const module = b.createModule(.{ .root_source_file = b.path("src/io/io.zig"), .target = target, .optimize = .fast, .link_libc = true });
+    module.addImport("@safe", safeModule(b, target));
+    return module;
+}
+
+/// Checks that survive ReleaseFast (`src/safe.zig`).
+fn safeModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("src/safe.zig"), .target = target, .optimize = .fast });
+}
+
+/// `liborigine_io.a`: the `oio_*` C ABI the Rust runtime calls, built once with LLVM in
+/// ReleaseFast whatever `-Doptimize` says (the event loop is a hot path, and debug builds of the
+/// host should not slow it down). Safety-critical invariants use `src/safe.zig`, which keeps its
+/// checks in this mode. Every program that links the Rust library links this archive.
+fn ioLibrary(b: *std.Build, target: std.Build.ResolvedTarget, io_module: *std.Build.Module) *std.Build.Step.Compile {
+    const root = b.createModule(.{ .root_source_file = b.path("src/io/lib.zig"), .target = target, .optimize = .fast, .link_libc = true });
+    root.addImport("@io", io_module);
+    return b.addLibrary(.{ .name = "origine_io", .linkage = .static, .root_module = root, .use_llvm = true });
 }
 
 const HostModules = struct { engine: *std.Build.Module, managed: *std.Build.Module };
@@ -271,7 +296,7 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, t
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         const link = b.addSystemCommand(&.{"/usr/bin/clang++"});
@@ -283,11 +308,13 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         link.addArtifactArg(object);
         link.addFileArg(v8.namedLazyPath("v8"));
         link.addArtifactArg(v8.artifact("mimalloc"));
+        link.addArtifactArg(io_lib);
         if (rust_lib) |lib| link.addFileArg(lib);
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
     }
     if (rust_lib) |lib| module.addObjectFile(lib);
+    module.linkLibrary(io_lib);
     const exe = b.addExecutable(.{ .name = name, .root_module = module });
     if (optimize != .debug) {
         exe.use_llvm = true;

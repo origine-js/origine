@@ -881,8 +881,11 @@ fn to_stat(stat: sys::oio_stat) -> Stat {
     }
 }
 
+/// `None` is -1 ("current position"). An offset above `i64::MAX` would wrap to a negative value
+/// (`u64::MAX` to -1, silently meaning "current position"), so it maps to `i64::MIN`, which every
+/// backend rejects with EINVAL.
 fn off(o: Option<u64>) -> i64 {
-    o.map_or(-1, |v| v as i64)
+    o.map_or(-1, |v| i64::try_from(v).unwrap_or(i64::MIN))
 }
 
 /// NUL-terminated copy of `p`.

@@ -86,6 +86,234 @@ const Fixture = struct {
     }
 };
 
+/// Wraps the real disk cache to observe which scripts are requested and reused.
+/// Owns recorded IDs until deinit; borrows inner's state while the scope is live.
+const GlueCacheProbe = struct {
+    inner: m.CodeCache,
+    loads: std.StringHashMapUnmanaged(usize) = .empty,
+    hits: usize = 0,
+    stores: usize = 0,
+
+    /// Borrows the request through the delegated load; returned bytes use its allocator.
+    fn load(data: ?*anyopaque, request: m.CodeCacheRequest) ?[]const u8 {
+        const self: *GlueCacheProbe = @ptrCast(@alignCast(data.?));
+        const entry = self.loads.getOrPut(t.allocator, request.module_id) catch unreachable;
+        if (!entry.found_existing) {
+            entry.key_ptr.* = t.allocator.dupe(u8, request.module_id) catch unreachable;
+            entry.value_ptr.* = 0;
+        }
+        entry.value_ptr.* += 1;
+        const bytes = self.inner.load(self.inner.data, request) orelse return null;
+        self.hits += 1;
+        return bytes;
+    }
+
+    /// Borrows bytes/request through the real disk store; retains no V8 storage.
+    fn store(data: ?*anyopaque, request: m.CodeCacheRequest, bytes: []const u8) void {
+        const self: *GlueCacheProbe = @ptrCast(@alignCast(data.?));
+        self.stores += 1;
+        self.inner.store(self.inner.data, request, bytes);
+    }
+
+    /// Releases all probe-owned IDs; inner cache ownership stays with the fixture.
+    fn deinit(self: *GlueCacheProbe) void {
+        var keys = self.loads.keyIterator();
+        while (keys.next()) |key| t.allocator.free(key.*);
+        self.loads.deinit(t.allocator);
+    }
+};
+
+/// Installs a test global without applying the general guest-export hardener, so
+/// assertions inspect exactly the immutable surface returned by Host.install.
+/// Borrows both handles; the context retains the value until runtime teardown.
+fn exposeApi(scope: *m.Scope, api: v8.Global.Of(v8.Value)) !void {
+    var session: m.Scope.Session = undefined;
+    session.init(scope);
+    defer session.deinit();
+    try t.expect(session.ctx.getGlobal().set(session.ctx, v8.String.initUtf8(session.isolate(), "api").name.primitive.value, api.deref()) orelse false);
+}
+
+test "api: getters load and harden capabilities once and retain separate disk code caches" {
+    ensureV8();
+    var tmp = t.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    // The second runtime must consume the first runtime's actual V8 code caches.
+    for (0..2) |run| {
+        const rt = try m.Runtime.create(t.allocator, .{});
+        defer rt.destroy();
+        const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .runtime = .{}, .fs = .{ .root = tmp.dir, .async = false } });
+        defer host.destroy();
+        var cache = m.Api.init_cache.CodeCacheState.init(t.io, host, tmp.dir);
+        var probe: GlueCacheProbe = .{ .inner = cache.hook() };
+        defer probe.deinit();
+        var options = host.initOptions();
+        options.code_cache = .{ .data = &probe, .load = GlueCacheProbe.load, .store = GlueCacheProbe.store };
+        const scope = try rt.createScope(options);
+        const api = try host.install(scope, null);
+        defer api.deinit();
+        try exposeApi(scope, api);
+        try check(scope,
+            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,env,scope,io,net' &&
+            \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
+            \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
+        );
+        try t.expectEqual(@as(usize, 1), probe.loads.count());
+        try t.expect(probe.loads.contains("origine:glue"));
+        try t.expect(host.rust_isolate == null);
+        try check(scope, "api.env === api.env && Object.isFrozen(api.env.args) && api.env.args().length === 0");
+        try t.expect(!probe.loads.contains("origine:glue.fs"));
+        try check(scope, "api.fs === api.fs && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.fs)");
+        try check(scope,
+            \\(() => {
+            \\  const sync = api.fs.requestSync({});
+            \\  sync.fileStat({});
+            \\  const code = sync.errno[0];
+            \\  return code !== 0 && api.scope === api.scope && Object.isFrozen(api.scope.create) && sync.errno[0] === code;
+            \\})()
+        );
+        try t.expect(host.rust_isolate == null);
+        try check(scope, "api.io === api.io && Object.isFrozen(api.io.create)");
+        try t.expect(host.rust_isolate != null);
+        try check(scope, "api.net === api.net && Object.isFrozen(api.net.Socket.prototype)");
+        try t.expectEqual(@as(usize, 6), probe.loads.count());
+        var counts = probe.loads.valueIterator();
+        while (counts.next()) |count| try t.expectEqual(@as(usize, 1), count.*);
+        host.flushGlueCache(scope);
+        try t.expectEqual(@as(usize, if (run == 0) 6 else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0) 0 else 6), probe.hits);
+        host.flushGlueCache(scope);
+        try t.expectEqual(@as(usize, if (run == 0) 6 else 0), probe.stores);
+    }
+}
+
+test "api: snapshot restores immutable getters and network classes without compiling glue" {
+    ensureV8();
+    const blob = try m.snapshot.create(t.allocator);
+    defer t.allocator.free(blob);
+    var tmp = t.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const rt = try m.Runtime.create(t.allocator, .{ .snapshot = blob });
+    defer rt.destroy();
+    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .runtime = .{}, .fs = .{ .root = tmp.dir, .async = false } });
+    defer host.destroy();
+    var cache = m.Api.init_cache.CodeCacheState.init(t.io, host, tmp.dir);
+    var probe: GlueCacheProbe = .{ .inner = cache.hook() };
+    defer probe.deinit();
+    var options = host.initOptions();
+    options.code_cache = .{ .data = &probe, .load = GlueCacheProbe.load, .store = GlueCacheProbe.store };
+    const a = try rt.createScope(options);
+    const b = try rt.createScope(options);
+    const first = try host.install(a, null);
+    defer first.deinit();
+    const second = try host.install(b, null);
+    defer second.deinit();
+    try exposeApi(a, first);
+    try exposeApi(b, second);
+    try t.expect(host.rust_isolate == null);
+    try check(a,
+        \\Object.isFrozen(api) && !Reflect.set(api, 'fs', {}) && !Reflect.deleteProperty(api, 'net') &&
+        \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
+        \\  typeof d.get === 'function' && Object.isFrozen(d.get) && !d.configurable && d.set === undefined)
+    );
+    try check(a, "Object.isFrozen(api.fs) && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.env.args) && Object.isFrozen(api.scope.create)");
+    try t.expect(host.rust_isolate == null);
+    try check(a,
+        \\[api.net.Handle, api.net.Server, api.net.Socket].every(C =>
+        \\  Object.isFrozen(C) && Object.isFrozen(C.prototype) &&
+        \\  Object.values(Object.getOwnPropertyDescriptors(C.prototype)).every(d =>
+        \\    (typeof d.value !== 'function' || Object.isFrozen(d.value)) &&
+        \\    (d.get === undefined || Object.isFrozen(d.get))))
+    );
+    try check(a, "api.io === api.io && Object.isFrozen(api.io.create)");
+    // Separate deserialized contexts retain distinct memoization, errno and class identities.
+    const first_net = try a.eval("api.net.Socket", "test:first-socket", null);
+    defer first_net.deinit();
+    const second_net = try b.eval("api.net.Socket", "test:second-socket", null);
+    defer second_net.deinit();
+    {
+        var session: m.Runtime.Session = undefined;
+        session.init(rt);
+        defer session.deinit();
+        try t.expect(!first_net.deref().strictEquals(second_net.deref()));
+    }
+    try check(a, "globalThis.sync = api.fs.requestSync({}); sync.fileStat({}); sync.errno[0] !== 0");
+    try check(b, "api.fs.requestSync({}).errno[0] === 0");
+    try check(a, "sync.errno[0] !== 0");
+    const restricted_host = try m.Api.Host.create(t.allocator, .{ .io = t.io });
+    defer restricted_host.destroy();
+    const restricted = try rt.createScope(options);
+    const restricted_api = try restricted_host.install(restricted, null);
+    defer restricted_api.deinit();
+    try exposeApi(restricted, restricted_api);
+    try check(restricted, "Object.keys(api).join(',') === 'fs,env,scope' && api.io === undefined && api.net === undefined && Object.isFrozen(api)");
+    try check(restricted, "(() => { try { api.fs.requestSync({}); return false; } catch (e) { return e.name === 'AccessDenied'; } })()");
+    try t.expect(restricted_host.rust_isolate == null);
+    host.flushGlueCache(a);
+    try t.expectEqual(@as(usize, 0), probe.loads.count());
+    try t.expectEqual(@as(usize, 0), probe.stores);
+}
+
+test "api: init snapshot retains prepared network classes and their runtime bindings work" {
+    ensureV8();
+    const Init = struct {
+        /// Borrows the request; returns static source for the snapshot's init module.
+        fn load(_: ?*anyopaque, _: m.LoadRequest) !m.LoadResult {
+            return .{ .source =
+            \\export async function main(api) {
+            \\  const frozen = Object.isFrozen(api.net.Socket.prototype.read);
+            \\  const io = api.io.create({ backend: 'threaded' });
+            \\  const server = api.net.listen(io, { port: 0 });
+            \\  const serving = (async () => {
+            \\    const peer = await server.accept();
+            \\    let count = 0;
+            \\    while (count < 3) {
+            \\      const bytes = await peer.read(3);
+            \\      count += bytes.length;
+            \\      await peer.write(bytes);
+            \\    }
+            \\    await peer.close();
+            \\  })();
+            \\  const client = await api.net.connect(io, { port: server.port });
+            \\  await client.write(new Uint8Array([1, 2, 3]));
+            \\  const received = [];
+            \\  while (received.length < 3) received.push(...await client.read(3));
+            \\  await client.close();
+            \\  await serving;
+            \\  await server.close();
+            \\  await io.close();
+            \\  globalThis.report = frozen && received.join(',') === '1,2,3';
+            \\}
+            };
+        }
+    };
+    var image = try m.init_snapshot.create(t.allocator, .{
+        .key = @splat(7),
+        .specifier = "init",
+        .scope = .{ .resolver = .{ .resolve = @import("support.zig").Memory.resolve }, .loader = .{ .load = Init.load } },
+    });
+    defer image.deinit();
+    const rt = try m.Runtime.create(t.allocator, .{ .snapshot = image.blob });
+    defer rt.destroy();
+    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .runtime = .{} });
+    defer host.destroy();
+    var tmp = t.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var cache = m.Api.init_cache.CodeCacheState.init(t.io, host, tmp.dir);
+    var probe: GlueCacheProbe = .{ .inner = cache.hook() };
+    defer probe.deinit();
+    var options = host.initOptions();
+    options.init_snapshot = &image.table;
+    options.code_cache = .{ .data = &probe, .load = GlueCacheProbe.load, .store = GlueCacheProbe.store };
+    const scope = try rt.createScope(options);
+    var error_info: m.ErrorInfo = .{};
+    defer error_info.deinit();
+    try host.run(scope, support.engine.platform, "init", &error_info);
+    try check(scope, "report === true");
+    try t.expectEqual(@as(usize, 0), probe.loads.count());
+    host.flushGlueCache(scope);
+    try t.expectEqual(@as(usize, 0), probe.stores);
+}
+
 test "api: main receives env and an fs with sync and async variants" {
     var fx: Fixture = undefined;
     try fx.setup(
@@ -813,6 +1041,31 @@ const CounterState = struct {
         return cell.data.count;
     }
 };
+
+test "api: embedded modules evaluate and create native state only on first import" {
+    CounterState.created = 0;
+    CounterState.torn_down = 0;
+    const modules = m.Api.std_modules ++ [_]m.Api.module.Module{
+        .{
+            .id = "origine:test/lazy",
+            .source = "const { next } = import.meta.native; globalThis.evaluations = (globalThis.evaluations ?? 0) + 1; export const bump = () => next();",
+            .bindings = m.Api.module.stateful(CounterState, .{ .next = m.Api.binding.func(CounterState.next, .{ .side_effect = .any }) }),
+        },
+        .{ .id = "origine:test/unused", .source = "throw new Error('unused module evaluated');" },
+    };
+    var fx: Fixture = undefined;
+    try fx.setupWith("export function main() {}", false, &.{}, &modules);
+    defer fx.deinit();
+    try fx.run();
+    try t.expectEqual(@as(u32, 0), CounterState.created);
+    try check(fx.scope, "globalThis.evaluations === undefined");
+    try @import("support.zig").exposeModule(fx.scope, "origine:test/lazy", "first");
+    try t.expectEqual(@as(u32, 1), CounterState.created);
+    try check(fx.scope, "evaluations === 1 && first.bump() === 101");
+    try @import("support.zig").exposeModule(fx.scope, "origine:test/lazy", "second");
+    try t.expectEqual(@as(u32, 1), CounterState.created);
+    try check(fx.scope, "evaluations === 1 && first === second && second.bump() === 102");
+}
 
 test "api: a module owns per-scope state that lives until the host is destroyed" {
     CounterState.created = 0;
@@ -1724,5 +1977,60 @@ test "api: net echo over loopback with Handle classes (auto and threaded backend
         try fx.run();
         try check(fx.scope, "report.server && report.client && report.wrote && report.reply && report.readCopy && report.readInto && report.readIntoRefused && report.big && report.echoTotal && report.closed");
         try check(fx.scope, "report.refused && report.denied && report.badIo && report.badArgs && report.noForge && report.afterIoClose");
+    }
+}
+
+const timers_source =
+    \\export async function main(api) {
+    \\  const io = api.io.create({ backend: '@BACKEND@' });
+    \\  const out = globalThis.report = {};
+    \\  const start = io.now();
+    \\  let synchronous = true;
+    \\  const zero = io.sleep(0).then(value => { out.async = !synchronous && value === undefined; });
+    \\  synchronous = false;
+    \\  await zero;
+    \\  const deadline = io.now() + 5;
+    \\  await io.sleepUntil(deadline);
+    \\  out.monotonic = io.now() >= deadline && io.now() >= start;
+    \\  const past = io.timerAt(0);
+    \\  await past.promise;
+    \\  out.expired = past.cancel() === false;
+    \\  const siblings = await Promise.all([io.sleep(5).then(() => 2), io.sleep(1).then(() => 1)]);
+    \\  out.siblings = siblings.join() === '2,1';
+    \\  const long = io.timer(60000);
+    \\  const rejected = long.promise.then(() => false, e => e.name === 'Canceled');
+    \\  out.frozen = Object.isFrozen(long);
+    \\  out.cancel = long.cancel() === true && long.cancel() === false && await rejected;
+    \\  const newer = io.timer(1);
+    \\  out.stale = long.cancel() === false;
+    \\  await newer.promise;
+    \\  out.validation = [-1, NaN, Infinity, 2147483648, '1', null, undefined].every(ms => {
+    \\    try { io.timer(ms); return false; } catch (e) { return e instanceof TypeError; }
+    \\  }) && [-1, NaN, Infinity, '1'].every(at => {
+    \\    try { io.timerAt(at); return false; } catch (e) { return e instanceof TypeError; }
+    \\  });
+    \\  const closing = io.timer(60000);
+    \\  const closingResult = closing.promise.then(() => false, e => e.name === 'Canceled');
+    \\  await io.close();
+    \\  out.close = await closingResult && closing.cancel() === false;
+    \\  try { io.sleep(1); out.closed = false; } catch (e) { out.closed = e.name === 'BadHandle'; }
+    \\  // Leave the second runtime open: cancellation must remove its work without close().
+    \\  const second = api.io.create({ backend: '@BACKEND@' });
+    \\  const canceled = second.timer(60000);
+    \\  const done = canceled.promise.catch(e => e.name === 'Canceled');
+    \\  canceled.cancel();
+    \\  out.noLiveTimer = await done;
+    \\  await second.sleep(0.5);
+    \\}
+;
+
+test "api: monotonic timers, deadlines, cancellation and close (auto and threaded backends)" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, timers_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.async && report.monotonic && report.expired && report.siblings && report.frozen && report.cancel && report.stale && report.validation && report.close && report.closed && report.noLiveTimer");
+        try t.expect(!fx.host.hasWork());
     }
 }

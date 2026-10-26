@@ -1,0 +1,25 @@
+{
+  // Preset for origine programs. Use it with `"extends": "@origine/types/tsconfig.json"` (or the
+  // relative path to this file); the reasons for each option are in README.md.
+  "compilerOptions": {
+    // What V8 15.8 in origine provides: ES2024 plus the proposals it already ships. There is no DOM.
+    "lib": ["ES2024", "esnext.disposable", "esnext.collection", "esnext.array", "esnext.iterator", "esnext.promise", "esnext.float16", "esnext.error"],
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    // No automatic @types/*: only the origine declarations are global.
+    "types": ["@origine/types"],
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": false,
+    "noEmit": true
+  }
+}

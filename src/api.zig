@@ -22,6 +22,7 @@ pub const Call = @import("api/call.zig").Call;
 pub const std_io_id = @import("api/std/io.zig").id;
 pub const std_io_source = @import("api/std/io.zig").source;
 pub const init_loader = @import("api/init_loader.zig");
+pub const json_module = @import("api/json_module.zig");
 pub const std_modules = @import("api/init_loader.zig").std_modules;
 pub const module = @import("api/module.zig");
 pub const transformer = @import("api/transform/transformer.zig");

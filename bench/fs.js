@@ -14,8 +14,9 @@ function time(name, iterations, fn) {
   print(name.padEnd(34), String(Math.round((ms * 1e6) / iterations)).padStart(9), 'ns/op');
 }
 
+/** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const io = api.fs.requestSync({ write: true });
+  const io = api.fs.requestSync({ access: 'rw' });
   const cwd = Dir.cwd();
   cwd.createDirPath(io, 'bench/work');
   const work = cwd.openDir(io, 'bench/work');
@@ -35,7 +36,8 @@ export async function main(api) {
     } catch {}
   });
   time('raw open+readAll+close (512 B)', N / 2, () => {
-    const f = io.dirOpenFile(work, 'small.txt', 'r');
+    // Raw sync ops return undefined on failure (and set io.errno); this loop never fails.
+    const f = /** @type {import('@origine/types').FileHandle} */ (io.dirOpenFile(work, 'small.txt', 'r'));
     io.fileReadAll(f, {});
     io.fileClose(f);
   });
@@ -52,7 +54,7 @@ export async function main(api) {
   time('Rust write (512 B)', N / 4, () => rs.write('w.txt', bytes(512)));
   time('Rust copy (512 B)', N / 4, () => rs.copy('small.txt', 'c.txt'));
   const runtime = api.io.create({});
-  const aio = await api.fs.requestAsync({ io: runtime, write: true });
+  const aio = await api.fs.requestAsync({ io: runtime, access: 'rw' });
   const ars = rustFs(aio, Dir.cwd());
   const start = Date.now();
   for (let i = 0; i < 2000; i++) await ars.read('bench/work/small.txt');

@@ -1,7 +1,7 @@
 //! `Grant` on the real library (set `ORIGINE_IO_LIB`) and, under Miri, on `origine_io`'s mock.
 
 use origine_api_core::{NativeError, errno};
-use origine_api_fs::{DirListing, Grant, Stat};
+use origine_api_fs::{Access, DirListing, Grant, Stat};
 use origine_io::fs::Dir;
 use origine_io::rt::{self, Runtime};
 use origine_io::{Loop, Mode, Options};
@@ -36,9 +36,14 @@ impl Env {
         self.rt.block_on(f)
     }
 
+    /// A read-only (`write` false) or read-write grant.
     async fn grant(&self, write: bool) -> Rc<Grant> {
+        self.grant_with(if write { Access::READ_WRITE } else { Access::READ }).await
+    }
+
+    async fn grant_with(&self, access: Access) -> Rc<Grant> {
         let root = Dir::open_ambient(&self.lp, &self.root).await.unwrap();
-        Grant::new(1, write, root)
+        Grant::new(1, access, root)
     }
 
     fn drain(&self) {
@@ -141,19 +146,19 @@ fn read_only_grants_deny_every_mutation() {
         let g = env.grant(false).await;
         assert!(!g.is_writable());
         for bits in [W, 2, 4, 8, CREATE_TRUNC] {
-            assert_eq!(code(g.open_file(0, "f", bits)), errno::ACCESS_DENIED, "bits {bits}");
+            assert_eq!(code(g.open_file(0, "f", bits)), errno::PERMISSION_DENIED, "bits {bits}");
         }
         let f = g.open_file(0, "f", R).unwrap().await.unwrap();
-        assert_eq!(code(g.create_dir(0, "n")), errno::ACCESS_DENIED);
-        assert_eq!(code(g.delete_file(0, "f")), errno::ACCESS_DENIED);
-        assert_eq!(code(g.create_dir_path(0, "a/b")), errno::ACCESS_DENIED);
-        assert_eq!(code(g.delete_dir(0, "d")), errno::ACCESS_DENIED);
-        assert_eq!(code(g.delete_tree(0, "d")), errno::ACCESS_DENIED);
-        assert_eq!(code(g.rename(0, "f", 0, "g")), errno::ACCESS_DENIED);
-        assert_eq!(code(g.write_all(f, vec![1])), errno::ACCESS_DENIED);
-        assert_eq!(code(g.file_write(f, vec![1])), errno::ACCESS_DENIED);
-        assert_eq!(code(g.file_pwrite_all(f, vec![1], 0)), errno::ACCESS_DENIED);
-        assert_eq!(code(g.file_set_length(f, 0)), errno::ACCESS_DENIED);
+        assert_eq!(code(g.create_dir(0, "n")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.delete_file(0, "f")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.create_dir_path(0, "a/b")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.delete_dir(0, "d")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.delete_tree(0, "d")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.rename(0, "f", 0, "g")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.write_all(f, vec![1])), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_write(f, vec![1])), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_pwrite_all(f, vec![1], 0)), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_set_length(f, 0)), errno::PERMISSION_DENIED);
         // Reading and syncing stay possible.
         assert_eq!(g.read_all(f, 10).unwrap().await.unwrap(), b"x");
         g.file_sync(f).unwrap().await.unwrap();
@@ -164,22 +169,83 @@ fn read_only_grants_deny_every_mutation() {
 }
 
 #[test]
+fn write_only_grants_deny_everything_that_observes() {
+    let env = Env::new("writeonly");
+    std::fs::write(env.root.join("f"), "secret").unwrap();
+    env.run(async {
+        let g = env.grant_with(Access::WRITE).await;
+        assert!(g.is_writable() && !g.is_readable());
+        // Opening read-only is a read; opening for write works, and the native handle could read.
+        assert_eq!(code(g.open_file(0, "f", R)), errno::PERMISSION_DENIED);
+        let f = g.open_file(0, "f", W).unwrap().await.unwrap();
+        assert_eq!(code(g.read_all(f, 10)), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_read(f, 4, None)), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_read(f, 4, Some(0))), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_read_into(f, vec![0u8; 4], None)), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.file_stat(f)), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.stat(0, "f")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.symlink_stat(0, "f")), errno::PERMISSION_DENIED);
+        assert_eq!(code(g.read_dir(0)), errno::PERMISSION_DENIED);
+        // Writing, syncing and directory handles stay possible.
+        g.write_all(f, b"new".to_vec()).unwrap().await.unwrap();
+        g.file_sync(f).unwrap().await.unwrap();
+        g.close(f).unwrap().await.unwrap();
+        g.create_dir(0, "d").unwrap().await.unwrap();
+        let d = g.open_dir(0, "d").unwrap().await.unwrap();
+        g.close_dir(d).unwrap().await.unwrap();
+        assert_eq!(std::fs::read(env.root.join("f")).unwrap(), b"newret".to_vec());
+    });
+    env.drain();
+}
+
+#[test]
+fn stat_follows_symlinks_and_symlink_stat_does_not() {
+    let env = Env::new("stat_follow");
+    std::fs::write(env.root.join("f"), "12345").unwrap();
+    std::os::unix::fs::symlink("f", env.root.join("link")).unwrap();
+    std::os::unix::fs::symlink("nowhere", env.root.join("dangling")).unwrap();
+    std::os::unix::fs::symlink("loop", env.root.join("loop")).unwrap();
+    env.run(async {
+        let g = env.grant(false).await;
+        assert_eq!(g.stat(0, "link").unwrap().await.unwrap(), Stat { kind: 1, size: 5.0 });
+        assert_eq!(g.symlink_stat(0, "link").unwrap().await.unwrap().kind, 3);
+        assert_eq!(code_of(g.stat(0, "dangling")).await, errno::NOT_FOUND);
+        assert_eq!(g.symlink_stat(0, "dangling").unwrap().await.unwrap().kind, 3);
+        assert_eq!(code_of(g.stat(0, "loop")).await, errno::FILESYSTEM_LOOP);
+        assert_eq!(g.symlink_stat(0, "").unwrap().await.unwrap().kind, 2, "an empty path is the directory");
+    });
+    env.drain();
+}
+
+#[test]
 fn paths_are_validated_before_anything_else() {
     let env = Env::new("paths");
     env.run(async {
-        let g = env.grant(false).await; // read-only: the path error must still win over AccessDenied
-        for bad in ["../x", "a/../b", "/etc/passwd", "a\0b"] {
-            assert_eq!(code(g.open_file(0, bad, W)), errno::INVALID_PATH, "{bad:?}");
-            assert_eq!(code(g.open_dir(0, bad)), errno::INVALID_PATH, "{bad:?}");
-            assert_eq!(code(g.stat(0, bad)), errno::INVALID_PATH, "{bad:?}");
-            assert_eq!(code(g.delete_tree(0, bad)), errno::INVALID_PATH, "{bad:?}");
+        let g = env.grant(false).await; // read-only: the path error must still win over PermissionDenied
+        // Policy denials are PermissionDenied (like the OS's), a malformed path is InvalidInput.
+        for (bad, expected) in [
+            ("../x", errno::PERMISSION_DENIED),
+            ("a/../b", errno::PERMISSION_DENIED),
+            ("/etc/passwd", errno::PERMISSION_DENIED),
+            ("__oricache__", errno::PERMISSION_DENIED),
+            ("a/__oricache__/x", errno::PERMISSION_DENIED),
+            ("a\0b", errno::INVALID_INPUT),
+            ("../a\0b", errno::INVALID_INPUT),
+        ] {
+            assert_eq!(code(g.open_file(0, bad, W)), expected, "{bad:?}");
+            assert_eq!(code(g.open_dir(0, bad)), expected, "{bad:?}");
+            assert_eq!(code(g.stat(0, bad)), expected, "{bad:?}");
+            assert_eq!(code(g.symlink_stat(0, bad)), expected, "{bad:?}");
+            assert_eq!(code(g.delete_tree(0, bad)), expected, "{bad:?}");
         }
-        assert_eq!(code(g.open_file(0, "", R)), errno::INVALID_PATH);
-        assert_eq!(code(g.create_dir(0, "")), errno::INVALID_PATH);
-        for root in ["", ".", "./.", "a/.."] {
-            // The root cannot be destroyed (`a/..` is rejected lexically, the others name the root).
-            assert_eq!(code(g.delete_dir(0, root)), errno::INVALID_PATH, "{root:?}");
+        assert!(g.stat(0, "__oricache__x").is_ok(), "only whole components are reserved");
+        assert_eq!(code(g.open_file(0, "", R)), errno::INVALID_INPUT);
+        assert_eq!(code(g.create_dir(0, "")), errno::INVALID_INPUT);
+        for root in ["", ".", "./."] {
+            // The root cannot be destroyed.
+            assert_eq!(code(g.delete_dir(0, root)), errno::INVALID_INPUT, "{root:?}");
         }
+        assert_eq!(code(g.delete_dir(0, "a/..")), errno::PERMISSION_DENIED, "`..` is rejected lexically");
         // The root can be stat'ed and opened by an empty path or ".".
         assert_eq!(g.stat(0, "").unwrap().await.unwrap().kind, 2);
         assert_eq!(g.stat(0, ".").unwrap().await.unwrap().kind, 2);
@@ -272,11 +338,11 @@ fn directories_listing_and_tree_operations() {
         g.create_dir_path(0, "a/b/c").unwrap().await.unwrap();
         g.create_dir_path(0, "a/b/c").unwrap().await.unwrap();
         g.create_dir(0, "d").unwrap().await.unwrap();
-        assert_eq!(code_of(g.create_dir(0, "d")).await, errno::PATH_ALREADY_EXISTS);
+        assert_eq!(code_of(g.create_dir(0, "d")).await, errno::ALREADY_EXISTS);
         let f = g.open_file(0, "a/b/f.txt", CREATE_TRUNC).unwrap().await.unwrap();
         g.write_all(f, b"data".to_vec()).unwrap().await.unwrap();
         g.close(f).unwrap().await.unwrap();
-        assert_eq!(code_of(g.open_file(0, "a/b/f.txt", EXCL)).await, errno::PATH_ALREADY_EXISTS);
+        assert_eq!(code_of(g.open_file(0, "a/b/f.txt", EXCL)).await, errno::ALREADY_EXISTS);
 
         let a = g.open_dir(0, "a").unwrap().await.unwrap();
         let DirListing(mut entries) = g.read_dir(a).unwrap().await.unwrap();
@@ -290,16 +356,16 @@ fn directories_listing_and_tree_operations() {
         assert_eq!(root, 2);
 
         assert_eq!(g.stat(a, "b/f.txt").unwrap().await.unwrap(), Stat { kind: 1, size: 4.0 });
-        assert_eq!(code_of(g.stat(a, "nope")).await, errno::FILE_NOT_FOUND);
-        assert_eq!(code_of(g.open_dir(a, "b/f.txt")).await, errno::NOT_DIR);
-        assert_eq!(code_of(g.open_file(0, "a", R)).await, errno::IS_DIR);
+        assert_eq!(code_of(g.stat(a, "nope")).await, errno::NOT_FOUND);
+        assert_eq!(code_of(g.open_dir(a, "b/f.txt")).await, errno::NOT_A_DIRECTORY);
+        assert_eq!(code_of(g.open_file(0, "a", R)).await, errno::IS_A_DIRECTORY);
 
         // rename between directories, then delete.
         g.rename(b, "f.txt", 0, "moved.txt").unwrap().await.unwrap();
         assert!(env.root.join("moved.txt").exists());
-        assert_eq!(code_of(g.delete_dir(0, "a")).await, errno::DIR_NOT_EMPTY);
+        assert_eq!(code_of(g.delete_dir(0, "a")).await, errno::DIRECTORY_NOT_EMPTY);
         g.delete_file(0, "moved.txt").unwrap().await.unwrap();
-        assert_eq!(code_of(g.delete_file(0, "moved.txt")).await, errno::FILE_NOT_FOUND);
+        assert_eq!(code_of(g.delete_file(0, "moved.txt")).await, errno::NOT_FOUND);
 
         g.close_dir(b).unwrap().await.unwrap();
         g.close_dir(a).unwrap().await.unwrap();
@@ -497,9 +563,9 @@ fn the_buffer_is_made_only_after_the_checks_pass() {
         };
         let read_only = env.grant(false).await;
         let id = read_only.open_file(0, "f", R).unwrap().await.unwrap();
-        assert_eq!(code(read_only.file_write_with(id, Box::new(make))), errno::ACCESS_DENIED);
-        assert_eq!(code(read_only.write_all_with(id, Box::new(make))), errno::ACCESS_DENIED);
-        assert_eq!(code(read_only.file_pwrite_all_with(id, 0, Box::new(make))), errno::ACCESS_DENIED);
+        assert_eq!(code(read_only.file_write_with(id, Box::new(make))), errno::PERMISSION_DENIED);
+        assert_eq!(code(read_only.write_all_with(id, Box::new(make))), errno::PERMISSION_DENIED);
+        assert_eq!(code(read_only.file_pwrite_all_with(id, 0, Box::new(make))), errno::PERMISSION_DENIED);
         assert_eq!(code(read_only.file_read_into_with(99, None, Box::new(make))), errno::BAD_HANDLE);
         assert_eq!(called.get(), 0, "a rejected call must not touch the guest buffer");
         // A failing `make` fails the call and releases the handle again.

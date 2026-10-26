@@ -1,12 +1,13 @@
 //! `native.net.*`: loopback TCP on the io loop.
 //!
-//! Sockets are created with `std::net` (non-blocking, `TCP_NODELAY`, no SIGPIPE) and live in the
-//! Host's socket table, bound to the runtime they were created on. `accept`, `read` and `write`
-//! run on that runtime's loop (`Loop::accept/recv/send`), so they never block the isolate
-//! thread. `connect` uses a blocking `std` connect, which is only acceptable because the
-//! destination is restricted to the loopback interface; a fully asynchronous connect needs a
-//! socket-creation op in the loop. Only `127.0.0.1`, `localhost` and `::1` are allowed
-//! (`AccessDenied` otherwise): there is no embedder permission for wider network access yet.
+//! Sockets are non-blocking, `TCP_NODELAY`, no SIGPIPE, and live in the Host's socket table,
+//! bound to the runtime they were created on. `accept`, `connect` and `read` run on that
+//! runtime's loop (`Loop::accept/connect/recv/send`), so they never block the isolate thread:
+//! `connect` creates a raw non-blocking `socket(2)` and lets the loop finish the handshake.
+//! Only loopback destinations are allowed (`PermissionDenied` otherwise): there is no embedder
+//! permission for wider network access yet. IP literals are used as given; `localhost` never
+//! reaches the system resolver (RFC 6761): `connect` tries `127.0.0.1` then `::1`, `listen`
+//! binds `127.0.0.1`.
 //!
 //! An operation in flight holds an `Rc<Socket>`, so `close` can never free a descriptor under a
 //! running `recv`; closing a stream shuts it down so a pending read completes with 0 bytes. A
@@ -72,6 +73,13 @@ impl Socket {
         }
     }
 
+    /// Sends the FIN: the peer reads end of stream, reads on this side keep working.
+    pub(crate) fn shutdown_write(&self) {
+        if let Endpoint::Stream(stream) = &self.endpoint {
+            let _ = stream.shutdown(Shutdown::Write);
+        }
+    }
+
     /// A stream socket (accepted by a subscription's pump) of `owner` on `runtime`.
     pub(crate) fn accepted(owner: ScopeKey, runtime: u32, stream: TcpStream) -> Socket {
         Socket { owner, runtime, endpoint: Endpoint::Stream(stream) }
@@ -116,15 +124,73 @@ pub(crate) fn prepare(stream: &TcpStream) -> Result<(), NativeError> {
     Ok(())
 }
 
-/// The loopback address `host:port`; `AccessDenied` for any other host.
-fn loopback(host: &str, port: u32) -> Result<SocketAddr, NativeError> {
-    let port = u16::try_from(port).map_err(|_| NativeError::Errno(errno::INVALID_PATH))?;
-    let ip = match host {
-        "127.0.0.1" | "localhost" => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        "::1" => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        _ => return Err(NativeError::Errno(errno::ACCESS_DENIED)),
+/// Loopback addresses `host:port` to try, in order; `PermissionDenied` for any other host.
+/// `localhost` is a name, not resolved: IPv4 first, then IPv6 (`connect` only; `listen` takes the first).
+fn loopback(host: &str, port: u32) -> Result<Vec<SocketAddr>, NativeError> {
+    let port = u16::try_from(port).map_err(|_| NativeError::Errno(errno::INVALID_INPUT))?;
+    let ips = if host.eq_ignore_ascii_case("localhost") {
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
+    } else {
+        match host.parse::<IpAddr>() {
+            Ok(ip) if ip.is_loopback() => vec![ip],
+            _ => return Err(NativeError::Errno(errno::PERMISSION_DENIED)),
+        }
     };
-    Ok(SocketAddr::new(ip, port))
+    Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect())
+}
+
+unsafe extern "C" {
+    fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
+}
+
+const AF_INET: i32 = 2;
+const AF_INET6: i32 = if cfg!(target_os = "linux") { 10 } else { 30 };
+const SOCK_STREAM: i32 = 1;
+/// Linux creates close-on-exec sockets atomically; macOS has no such flag.
+const SOCK_CLOEXEC: i32 = if cfg!(target_os = "linux") { 0x80000 } else { 0 };
+
+/// A fresh non-blocking stream socket for `addr`'s family (no SIGPIPE, no-delay), not connected.
+fn new_stream(addr: &SocketAddr) -> Result<TcpStream, NativeError> {
+    let domain = if addr.is_ipv4() { AF_INET } else { AF_INET6 };
+    // SAFETY: plain `socket(2)` call with constant arguments.
+    let fd = unsafe { socket(domain, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: `fd` was just returned by `socket` and nothing else owns it.
+    let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    // `set_nodelay` fails on an unconnected socket on some systems; the option is applied after connect.
+    stream.set_nonblocking(true)?;
+    no_sigpipe(&stream);
+    Ok(stream)
+}
+
+/// The platform's native `sockaddr_in` / `sockaddr_in6` bytes for `addr`.
+fn sockaddr_bytes(addr: &SocketAddr) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(28);
+    let family = |bytes: &mut Vec<u8>, len: u8, family: i32| {
+        if cfg!(target_os = "linux") {
+            bytes.extend_from_slice(&(family as u16).to_ne_bytes());
+        } else {
+            bytes.extend_from_slice(&[len, family as u8]);
+        }
+    };
+    match addr {
+        SocketAddr::V4(v4) => {
+            family(&mut bytes, 16, AF_INET);
+            bytes.extend_from_slice(&v4.port().to_be_bytes());
+            bytes.extend_from_slice(&v4.ip().octets());
+            bytes.extend_from_slice(&[0; 8]);
+        }
+        SocketAddr::V6(v6) => {
+            family(&mut bytes, 28, AF_INET6);
+            bytes.extend_from_slice(&v6.port().to_be_bytes());
+            bytes.extend_from_slice(&v6.flowinfo().to_ne_bytes());
+            bytes.extend_from_slice(&v6.ip().octets());
+            bytes.extend_from_slice(&v6.scope_id().to_ne_bytes());
+        }
+    }
+    bytes
 }
 
 /// A stream socket of the table (not a listener) with its loop; `BadHandle` otherwise.
@@ -134,12 +200,12 @@ pub(crate) fn stream_of(host: &HostState, key: ScopeKey, id: u32) -> Result<(Rc<
 }
 
 /// `native.net.listen(io, host, port)`: binds and listens on a loopback address (`port` 0 picks
-/// one) and returns `{ id, port }` with the actual port. Throws `AccessDenied` (not loopback),
+/// one) and returns `{ id, port }` with the actual port. Throws `PermissionDenied` (not loopback),
 /// `BadHandle` (unknown or closed `io`), `AddressInUse`, ...
 #[native(side_effect = "any", path = "net.listen", needs = "runtime")]
 fn net_listen(host: &mut HostState, key: ScopeKey, io: u32, addr: String, port: u32) -> Result<Opened, NativeError> {
     host.loop_of(key, io)?;
-    let listener = TcpListener::bind(loopback(&addr, port)?)?;
+    let listener = TcpListener::bind(loopback(&addr, port)?[0])?;
     listener.set_nonblocking(true)?;
     let port = u32::from(listener.local_addr()?.port());
     let id = host.reserve_socket()?;
@@ -178,7 +244,9 @@ fn net_accept(
     Ok(Op::new(runtime, future).with_hook(hook))
 }
 
-/// `native.net.connect(io, host, port)`: Promise `{ id, port }`. Loopback only (see the module docs).
+/// `native.net.connect(io, host, port)`: Promise `{ id, port }`. Loopback only (see the module
+/// docs). Nothing blocks: the socket is created here and the loop completes the handshake; for
+/// `localhost` each address is tried in turn, and the last error is reported when all fail.
 #[native(side_effect = "any", path = "net.connect", needs = "runtime", promise)]
 fn net_connect(
     host: &mut HostState,
@@ -187,17 +255,41 @@ fn net_connect(
     addr: String,
     port: u32,
 ) -> Result<Op<'static, impl Future<Output = Result<Opened, NativeError>> + use<>>, NativeError> {
-    host.loop_of(key, io)?;
-    let stream = TcpStream::connect(loopback(&addr, port)?)?;
-    prepare(&stream)?;
-    let port = u32::from(stream.peer_addr()?.port());
+    let lp = host.loop_of(key, io)?;
+    let candidates = loopback(&addr, port)?;
     let id = host.reserve_socket()?;
-    host.insert_socket(id, Socket { owner: key, runtime: io, endpoint: Endpoint::Stream(stream) })?;
-    Ok(Op::new(io, async move { Ok(Opened { id, port }) }))
+    let slot: Rc<RefCell<Option<TcpStream>>> = Rc::default();
+    let filled = Rc::clone(&slot);
+    let future = async move {
+        let mut last = NativeError::Errno(errno::UNEXPECTED);
+        for candidate in candidates {
+            let stream = match new_stream(&candidate) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    last = error;
+                    continue;
+                }
+            };
+            if let Err(error) = lp.connect(stream.as_raw_fd() as isize, sockaddr_bytes(&candidate)).await {
+                last = NativeError::Errno(errno::errno_of(&error));
+                continue;
+            }
+            let _ = stream.set_nodelay(true);
+            let port = u32::from(stream.peer_addr()?.port());
+            *filled.borrow_mut() = Some(stream);
+            return Ok(Opened { id, port });
+        }
+        Err(last)
+    };
+    let hook = Box::new(move |scope: &mut v8::PinScope<'_, '_>| {
+        let stream = slot.borrow_mut().take().ok_or(NativeError::Errno(errno::CANCELED))?;
+        host_mut(scope)?.insert_socket(id, Socket::accepted(key, io, stream))
+    });
+    Ok(Op::new(io, future).with_hook(hook))
 }
 
 /// `native.net.read(id, len)`: Promise `Uint8Array` of 1..=`len` bytes read once from the stream
-/// (empty at end of stream). `len` is capped like `fileReadAlloc` (256 MiB, else `FileTooBig`).
+/// (empty at end of stream). `len` is capped like `fileReadAlloc` (256 MiB, else `FileTooLarge`).
 #[native(side_effect = "any", path = "net.read", needs = "runtime", promise)]
 fn net_read(
     scope: &mut v8::PinScope<'_, '_>,
@@ -272,34 +364,6 @@ fn net_read_into<'s>(
         let bytes = read?;
         let store = buf.into_store().ok_or(NativeError::Errno(errno::UNEXPECTED))?;
         Ok(ReadInto::Pinned { bytes, store })
-    }))
-}
-
-/// `native.net.write(id, data)`: Promise of the byte count; copies `data` and sends all of it.
-#[native(side_effect = "any", path = "net.write", needs = "runtime", promise)]
-fn net_write(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-    data: ArrayBufferArg<'_>,
-) -> Result<Op<'static, impl Future<Output = Result<usize, NativeError>> + use<>>, NativeError> {
-    let (socket, lp) = stream_of(host, key, id)?;
-    let runtime = socket.runtime();
-    let mut data = data.to_vec();
-    let total = data.len();
-    Ok(Op::new(runtime, async move {
-        let mut sent = 0;
-        while sent < total {
-            let (result, buf) = lp.send(socket.fd(), data, SEND_FLAGS).await;
-            data = buf;
-            let n = result?;
-            if n == 0 {
-                return Err(NativeError::Errno(errno::BROKEN_PIPE));
-            }
-            sent += n;
-            data.drain(..n);
-        }
-        Ok(total)
     }))
 }
 

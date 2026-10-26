@@ -22,8 +22,12 @@ pub const Env = struct {
 /// Writes the `Errno` for `err` into `cell` (mapped as `Call.fail` documents). Borrows
 /// `cell` for the call only; retains nothing.
 pub fn record(cell: *u32, err: anytype) void {
+    // A pending JS exception is not an errno: the cell stays 0 and V8 rethrows it on return.
+    if (comptime errno.isBinding(@TypeOf(err))) {
+        if (errno.isPending(err)) return;
+    }
     const code = if (comptime errno.isBinding(@TypeOf(err))) errno.of(err) else errno.ofFs(err);
-    cell.* = @intFromEnum(code);
+    cell.* = @backingInt(code);
 }
 
 pub const Call = struct {

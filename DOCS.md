@@ -12,6 +12,7 @@ beside the implementation and list them here.
 | [README.md](README.md) | What origine is, quick start, running programs, examples |
 | [docs/BUILD.md](docs/BUILD.md) | Requirements, build options, V8 patching loop, checks, Rust and TypeScript support |
 | [docs/repl.md](docs/repl.md) | Interactive REPL: multiline input, inspection, history, completion |
+| [docs/repl-architecture.md](docs/repl-architecture.md) | What the REPL does in Rust (parsing, line editor) and what stays in Zig and JS |
 | [examples/net/README.md](examples/net/README.md) | Loopback TCP demos |
 
 ## Design and contracts
@@ -29,13 +30,15 @@ beside the implementation and list them here.
 [errno](src/js/docs/errno.md), plus the runtime handle's [timers](src/js/docs/timers.md) and
 loopback [net](src/js/docs/net.md).
 
+[types/](types/README.md) is `@origine/types`: the TypeScript declarations of `api` and `origine:@std/*` plus a `tsconfig` preset; the rules of [docs/api-guidelines.md](docs/api-guidelines.md) (names, required options) apply to them as to the API.
+
 ## Zig internals
 
 | Document | Covers |
 | --- | --- |
 | [src/api/docs/fast-calls.md](src/api/docs/fast-calls.md) | How Zig natives get V8 fast API entries; the `//!` header of [src/api/binding.zig](src/api/binding.zig) covers native bindings |
 | [src/io/docs/](src/io/docs/README.md) | Event loop: [model](src/io/docs/README.md), [loop](src/io/docs/event-loop.md), [ops](src/io/docs/ops.md), [backends](src/io/docs/backends.md), [C ABI](src/io/docs/c-api.md), [testing](src/io/docs/testing.md) |
-| [src/repl/BUN-NOTICE.md](src/repl/BUN-NOTICE.md) | Attribution and license notice for the REPL parts ported from Bun |
+| [rust/crates/origine_repl/BUN-NOTICE.md](rust/crates/origine_repl/BUN-NOTICE.md) | Attribution and license notice for the REPL parts ported from Bun |
 
 ## Rust workspace
 

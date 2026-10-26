@@ -15,6 +15,20 @@ const retainedBytes = support.retainedBytes;
 const mapAllocationFailures = support.mapAllocationFailures;
 const scopeAllocationFailures = support.scopeAllocationFailures;
 
+test "runtime allocators: sandbox backing stores are zeroed, reused and released with the runtime" {
+    ensureV8();
+    if (!v8.V8.isSandboxEnabled()) return error.SkipZigTest;
+    for (0..2) |_| {
+        const rt = try m.Runtime.create(t.allocator, .{ .array_buffer_allocator = .sandbox });
+        defer rt.destroy();
+        const scope = try rt.createScope(.{});
+        // V8 aborts on a backing store outside the sandbox, so surviving this proves placement.
+        try check(scope, "globalThis.buffer = new ArrayBuffer(65536); const view = new Uint8Array(buffer); view.every(x => x === 0) && (view[3] = 42) === 42");
+        try check(scope, "buffer = null; const again = new Uint8Array(new ArrayBuffer(65536)); again.every(x => x === 0)");
+        try check(scope, "new ArrayBuffer(0).byteLength === 0 && new ArrayBuffer(64 * 1024 * 1024).byteLength === 64 * 1024 * 1024");
+    }
+}
+
 test "runtime allocators: owned Zig backing stores are zeroed and released" {
     ensureV8();
     // Zig-allocated ArrayBuffer memory cannot live inside the V8 sandbox.

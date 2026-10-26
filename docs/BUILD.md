@@ -60,7 +60,7 @@ wrap the same commands. `just` with no arguments lists every recipe.
 | `just gen-contracts` | Rewrites the committed generated files |
 | `just test-repl` | Drives the REPL in a pseudo-terminal ([repl](repl.md)) |
 
-`oxfmt` and `oxlint` run through `bunx` at the versions pinned in the `justfile`.
+`oxfmt` and `oxlint` run through `vpx` at the versions pinned in the `justfile`.
 
 ## Release V8 by default
 
@@ -86,7 +86,7 @@ Patches are applied by ordered series in
 Nothing is copied or installed by hand: edit or add a patch and run
 `zig build build-v8`. A patch that no longer applies stops the build and names the file. The V8 series currently
 removes `Date` except `Date.now()` (Temporal replaces it), hardens the intrinsics, and
-routes allocations through mimalloc; see `lib/v8_zig/build-tools/README.md`.
+routes allocations through mimalloc; see `lib/v8_zig/build-tools/README.md`. mimalloc itself is the `lib/mimalloc` package (Zig and, in `rust/crates/origine_alloc`, Rust bindings; `zig build test-alloc` tests the Rust ones) (pinned upstream plus its own patch series, applied by the Zig build); see its README.
 
 ## Working on V8: debug V8
 
@@ -132,9 +132,10 @@ Pass these to `zig build` at the root unless noted.
 | `-Dtypescript=false` | Build the Rust library without the oxc transformer (no `.ts/.tsx/.jsx` support; default true) |
 | `-Dcargo-offline` | Pass `--offline` to cargo |
 | `-Dbuiltin_pgo=false` | Skip Google's builtin PGO baseline (default on for non-debug desktop V8) |
+| `-Dv8_sandbox=false` | Build V8 without the sandbox (default on). A sandboxed V8 gets ArrayBuffer memory from a mimalloc arena inside the sandbox; without it, from the Zig allocator. Also turns builtin PGO off. Exported to Zig as `build_options.v8_sandbox` |
 
 `lib/v8_zig` additionally accepts `-Dthin_lto`, `-Dexclude_unwind_tables`,
-`-Dtemporal`, `-Dsymbol_level`, `-Dis_asan`, `-Dis_tsan`, `-Dv8_enable_sandbox`,
+`-Dtemporal`, `-Dsymbol_level`, `-Dis_asan`, `-Dis_tsan`,
 `-Doptimize_for_size`, and `-Druntime_call_stats` (see `zig build --help` there). Each
 distinct GN configuration gets its own output directory, named by a hash of its
 arguments. `-Dtemporal=false` disables Temporal, leaving no date functionality beyond

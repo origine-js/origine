@@ -1,0 +1,14 @@
+{
+  "name": "@origine/types",
+  "version": "0.0.0",
+  "description": "TypeScript declarations for origine programs: main(api), api.*, origine:@std/* and a tsconfig preset.",
+  "private": true,
+  "license": "UNLICENSED",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts" },
+    "./repl": { "types": "./repl.d.ts" },
+    "./tsconfig.json": "./tsconfig.json"
+  },
+  "files": ["index.d.ts", "repl.d.ts", "globals.d.ts", "errors.d.ts", "api.d.ts", "fs.d.ts", "io.d.ts", "net.d.ts", "env.d.ts", "scope.d.ts", "generated", "std", "tsconfig.json", "README.md"]
+}

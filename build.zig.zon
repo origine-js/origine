@@ -5,6 +5,10 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .v8 = .{ .path = "lib/v8_zig" },
+        .source = .{
+            .url = "https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.0.tar.gz",
+            .hash = "N-V-__8AANuvYABi5jog-DztRky4YoOf22dg9zXIGARBUzCY",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "lib", "docs", "README.md" },
 }

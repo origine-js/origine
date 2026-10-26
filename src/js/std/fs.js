@@ -2,7 +2,7 @@
 // `origine:@std/io`. There is no ambient cwd, so the API is bound to an `io`
 // (the sync or async cap of `api.fs`) and a directory (default `Dir.cwd()`):
 //
-//   const rs = fs(api.fs.requestSync({}));     // or fs(await api.fs.requestAsync({ io }), someDir)
+//   const rs = fs(api.fs.requestSync({ access: 'rw' }));  // or fs(await api.fs.requestAsync({ io, access: 'rw' }), someDir)
 //   rs.write('a.txt', 'hello');                // sync: returns / throws an IoError value
 //   const text = rs.read_to_string('a.txt');   // async: the same calls return promises
 //   const f = rs.File.open('a.txt'); f.read(buf); f.close();
@@ -17,7 +17,7 @@
 // (`read_dir` returns an array of DirEntry).
 import { quansync } from 'origine:@std/quansync';
 import { Dir, FileKind, IoError, ops } from 'origine:@std/io';
-import { decodeUtf8, encodeUtf8 } from 'origine:@std/text';
+import { tryDecodeUtf8, encodeUtf8 } from 'origine:@std/text';
 
 const freeze = Object.freeze;
 const UNLIMITED = freeze({ limit: Infinity });
@@ -101,13 +101,13 @@ const read = quansync(
 
 const readToString = quansync(
   function* (ctx, path) {
-    const text = decodeUtf8(yield* read(ctx, path));
-    return text === undefined ? fail(IoError.InvalidData) : text;
+    const text = tryDecodeUtf8(yield* read(ctx, path));
+    return text === null ? fail(IoError.InvalidData) : text;
   },
   {
     sync(ctx, path) {
-      const text = decodeUtf8(ops.readFile.sync(ctx.io, ctx.dir, path, Infinity));
-      return text === undefined ? fail(IoError.InvalidData) : text;
+      const text = tryDecodeUtf8(ops.readFile.sync(ctx.io, ctx.dir, path, Infinity));
+      return text === null ? fail(IoError.InvalidData) : text;
     },
   },
 );
@@ -129,6 +129,8 @@ const readDir = quansync(function* (ctx, path) {
   }
 });
 
+// `std::fs::metadata`: a final symlink is followed (a dangling one is NotFound). Confinement is
+// lexical, so following a symlink can leave the grant's root.
 const metadata = quansync(
   function* (ctx, path) {
     return new Metadata(yield* ops.stat(ctx.io, ctx.dir, path));
@@ -136,13 +138,23 @@ const metadata = quansync(
   { sync: (ctx, path) => new Metadata(ops.stat.sync(ctx.io, ctx.dir, path)) },
 );
 
+/// `std::fs::symlink_metadata`: the entry itself, a final symlink is not followed.
+const symlinkMetadata = quansync(
+  function* (ctx, path) {
+    return new Metadata(yield* ops.symlinkStat(ctx.io, ctx.dir, path));
+  },
+  { sync: (ctx, path) => new Metadata(ops.symlinkStat.sync(ctx.io, ctx.dir, path)) },
+);
+
+// `std::fs::exists`: follows symlinks (a dangling one is `false`); only NotFound is `false`, any
+// other error (a denied read, a loop, a bad path) is thrown / rejected.
 const tryExists = quansync(
   function* (ctx, path) {
     try {
       yield* ops.stat(ctx.io, ctx.dir, path);
       return true;
     } catch (error) {
-      if (IoError.is(error, IoError.FileNotFound)) return false;
+      if (IoError.is(error, IoError.NotFound)) return false;
       throw error;
     }
   },
@@ -152,13 +164,15 @@ const tryExists = quansync(
         ops.stat.sync(ctx.io, ctx.dir, path);
         return true;
       } catch (error) {
-        if (IoError.is(error, IoError.FileNotFound)) return false;
+        if (IoError.is(error, IoError.NotFound)) return false;
         throw error;
       }
     },
   },
 );
 
+// `Path::exists`: `try_exists(..).unwrap_or(false)`, so `false` on ANY error (including a denied
+// path or a write-only grant), never an error. Use `try_exists` to tell the cases apart.
 const exists = quansync(
   function* (ctx, path) {
     try {
@@ -188,13 +202,13 @@ const copy = quansync(function* (ctx, from, to) {
     try {
       let total = 0;
       if (io.kind === 'async') {
-        // Async writes detach their buffer, so each chunk is a fresh host-allocated read that the
-        // write then consumes (no copy and no buffer reuse).
+        // Each chunk is a fresh host-allocated read that the write then takes over: a move, so
+        // neither side copies it, and the buffer is never reused.
         for (;;) {
           const chunk = yield* ops.fileReadAlloc(io, source, COPY_CHUNK);
           const count = chunk.length; // before the write detaches it
           if (count === 0) return total;
-          yield* ops.fileWriteAll(io, target, chunk);
+          yield* ops.fileWriteMoveAll(io, target, chunk);
           total += count;
         }
       }
@@ -243,8 +257,8 @@ const fileReadToEnd = quansync(function* (ctx, file) {
   return yield* ops.fileReadAll(ctx.io, file, UNLIMITED);
 });
 const fileReadToString = quansync(function* (ctx, file) {
-  const text = decodeUtf8(yield* fileReadToEnd(ctx, file));
-  return text === undefined ? fail(IoError.InvalidData) : text;
+  const text = tryDecodeUtf8(yield* fileReadToEnd(ctx, file));
+  return text === null ? fail(IoError.InvalidData) : text;
 });
 const fileReadExact = quansync(function* (ctx, file, buffer) {
   let filled = 0;
@@ -293,13 +307,25 @@ class FileHandle {
   read_to_string() {
     return fileReadToString[this.#ctx.io.kind](this.#ctx, this.#file);
   }
-  /// Writes one slice and returns the byte count written (may be partial). Async: detaches the
-  /// guest's ArrayBuffer when eligible (also `write_all` and `fs.write`); pass `bytes.slice()` to keep it.
+  /// Writes one slice and returns the byte count written (may be partial). Always copies `bytes`
+  /// at call time and never detaches the caller's buffer (also `write_all` and `fs.write`).
   write(bytes) {
     return ops.fileWrite[this.#ctx.io.kind](this.#ctx.io, this.#file, toBytes(bytes));
   }
   write_all(bytes) {
     return ops.fileWriteAll[this.#ctx.io.kind](this.#ctx.io, this.#file, toBytes(bytes));
+  }
+  /// Async only (sync: throws Unsupported, there is nothing to hand over). `write` that TRANSFERS
+  /// `bytes` (a Uint8Array): its whole ArrayBuffer is detached and written in place, no copy.
+  /// Unsupported, with nothing written and the buffer untouched, when it cannot be detached
+  /// (shared, resizable, WebAssembly memory): there is no silent copy. A string is encoded to a
+  /// fresh buffer, which is then moved.
+  write_move(bytes) {
+    return ops.fileWriteMove[this.#ctx.io.kind](this.#ctx.io, this.#file, toBytes(bytes));
+  }
+  /// Async only. `write_all` that transfers `bytes` (see `write_move`).
+  write_move_all(bytes) {
+    return ops.fileWriteMoveAll[this.#ctx.io.kind](this.#ctx.io, this.#file, toBytes(bytes));
   }
   flush() {
     return this.#ctx.io.kind === 'sync' ? undefined : Promise.resolve();
@@ -313,8 +339,8 @@ const fileMetadata = quansync(function* (ctx, file) {
 // Validates a builder snapshot like Rust does, then opens. Errors throw/reject.
 const openOptions = quansync(function* (ctx, path, spec) {
   if (spec.append) fail(IoError.Unsupported);
-  if (!spec.read && !spec.write) fail(IoError.InvalidPath); // Rust: InvalidInput
-  if (!spec.write && (spec.truncate || spec.create || spec.create_new)) fail(IoError.InvalidPath);
+  if (!spec.read && !spec.write) fail(IoError.InvalidInput);
+  if (!spec.write && (spec.truncate || spec.create || spec.create_new)) fail(IoError.InvalidInput);
   const create = spec.create || spec.create_new;
   return yield* openWith(
     ctx,
@@ -386,6 +412,7 @@ export function fs(io, dir = Dir.cwd()) {
     write: two(write),
     read_dir: one(readDir),
     metadata: one(metadata),
+    symlink_metadata: one(symlinkMetadata),
     try_exists: one(tryExists),
     exists: one(exists),
     copy: two(copy),

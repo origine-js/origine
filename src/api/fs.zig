@@ -44,16 +44,17 @@ pub const FileRef = struct {
     }
 };
 
-/// Rejects NUL, absolute paths, `..` components and the engine's `__oricache__` directories
+/// Rejects NUL (`InvalidInput`: a malformed path) and, as policy denials (`PermissionDenied`, like
+/// the OS's own), absolute paths, `..` components and the engine's `__oricache__` directories
 /// (snapshots and code caches are trusted by V8, so a guest must not be able to plant them).
-/// Lexical only: symlinks inside
-/// the root are not resolved here (draft-1 limitation, see docs/api-design.md).
+/// Lexical only: symlinks inside the root are not resolved here, so following one can leave the
+/// root (docs/api-design.md). The Rust twin is `clean` in rust/crates/origine_api_fs.
 fn cleanPath(path: []const u8) !void {
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
-    if (path.len != 0 and path[0] == '/') return error.InvalidPath;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidInput;
+    if (path.len != 0 and path[0] == '/') return error.PermissionDenied;
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
-        if (std.mem.eql(u8, part, "..") or std.mem.eql(u8, part, init_cache.dir_name)) return error.InvalidPath;
+        if (std.mem.eql(u8, part, "..") or std.mem.eql(u8, part, init_cache.dir_name)) return error.PermissionDenied;
     }
 }
 
@@ -82,7 +83,7 @@ pub const EntryPath = struct {
     pub fn decode(call: *Call, index: usize) !EntryPath {
         const text = try binding.decode([]const u8, call, index);
         try cleanPath(text);
-        if (text.len == 0) return error.InvalidPath;
+        if (text.len == 0) return error.InvalidInput;
         return .{ .bytes = text };
     }
 };
@@ -94,7 +95,7 @@ pub const SubPath = struct {
     pub fn decode(call: *Call, index: usize) !SubPath {
         const text = try binding.decode([]const u8, call, index);
         try cleanPath(text);
-        if (namesRoot(text)) return error.InvalidPath;
+        if (namesRoot(text)) return error.InvalidInput;
         return .{ .bytes = text };
     }
 };
@@ -126,9 +127,9 @@ fn kindCode(kind: std.Io.File.Kind) u32 {
     };
 }
 
-/// Converts a file size to f64, failing with `FileTooBig` instead of rounding.
+/// Converts a file size to f64, failing with `FileTooLarge` instead of rounding.
 fn exactSize(size: u64) !f64 {
-    if (size > max_exact) return error.FileTooBig;
+    if (size > max_exact) return error.FileTooLarge;
     return @floatFromInt(size);
 }
 
@@ -136,23 +137,35 @@ fn exactSize(size: u64) !f64 {
 
 pub const FsGrant = struct {
     host: *Host,
-    /// Borrowed from the owning `ScopeState`; valid until `Host.destroy`.
-    errno: *u32,
+    /// The scope this grant was requested in; valid until `Host.destroy`. Its errno cell is the
+    /// grant's, and disposing the scope closes the grant (see `Host.release`).
+    owner: *ScopeState,
+    closed: bool = false,
     id: u32,
     root: std.Io.Dir,
+    /// The grant's access (`api.fs.requestSync({ access })`): 'r' reads, 'w' writes, 'rw' both.
+    /// Handles are read/write natively, so a write-only grant is enforced here: see `readable`.
+    read: bool,
     write: bool,
     files: std.ArrayList(?std.Io.File) = .empty,
     dirs: std.ArrayList(?std.Io.Dir) = .empty,
 
     // Binding State protocol (see binding.zig).
     pub fn errnoCell(self: *FsGrant) *u32 {
-        return self.errno;
+        return self.owner.errnoCell();
+    }
+    pub fn isDetached(self: *const FsGrant) bool {
+        return self.owner.isDetached();
     }
     pub fn allocator(self: *FsGrant) std.mem.Allocator {
         return self.host.allocator;
     }
 
+    /// Closes every open file and directory and the root. Idempotent: a disposed scope closes its
+    /// grants early, and `Host.destroy` closes them all again.
     pub fn deinit(self: *FsGrant) void {
+        if (self.closed) return;
+        self.closed = true;
         const handle_io = self.io();
         for (self.files.items) |slot| if (slot) |opened| opened.close(handle_io);
         for (self.dirs.items) |slot| if (slot) |opened| opened.close(handle_io);
@@ -165,9 +178,15 @@ pub const FsGrant = struct {
         return self.host.io;
     }
 
-    /// Fails with `AccessDenied` on a read-only grant.
+    /// Fails with `PermissionDenied` on a read-only grant.
     fn writable(self: *FsGrant) !void {
-        if (!self.write) return error.AccessDenied;
+        if (!self.write) return error.PermissionDenied;
+    }
+
+    /// Fails with `PermissionDenied` on a write-only grant: it may not observe anything that
+    /// exists (file contents, stat, directory listings), though its handles could read natively.
+    fn readable(self: *FsGrant) !void {
+        if (!self.read) return error.PermissionDenied;
     }
 
     /// The sentinel `{0,0}` names the root; any other descriptor must have been
@@ -206,27 +225,36 @@ pub const FsGrant = struct {
 
 // ---- fs.requestSync ----------------------------------------------------------
 
-/// `native.fsRequest(root?, write)`: opens a sync grant over the host directory (or a
+/// Access bits of `native.fsRequest` / `native.fsAsync.request`: 1 read, 2 write (`access: 'r' | 'w' | 'rw'`
+/// in src/js/glue/fs.js).
+const access_read: u32 = 1;
+const access_write: u32 = 2;
+
+/// `native.fsRequest(root?, access)`: opens a sync grant over the host directory (or a
 /// subdirectory of it) and returns its ops object. The host config is the ceiling:
-/// a read-only host never yields a writable grant, and `sync = false` denies the request.
-/// (Async grants live in the Rust runtime: `native.fsAsync`.)
-pub fn request(state: *ScopeState, call: *Call, root: ?Path, write: bool) !v8.Object {
+/// a read-only host rejects a write request with `PermissionDenied` (it is never silently
+/// downgraded), and `sync = false` denies the request. `access` is the bits above; anything else is
+/// `InvalidInput`. (Async grants live in the Rust runtime: `native.fsAsync`.)
+pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Object {
     const host = state.host;
     const alloc = host.allocator;
-    const config = host.fs orelse return error.AccessDenied;
-    if (!config.sync) return error.AccessDenied;
+    if (access == 0 or access > (access_read | access_write)) return error.InvalidInput;
+    const config = host.fs orelse return error.PermissionDenied;
+    if (!config.sync) return error.PermissionDenied;
+    if (access & access_write != 0 and !config.write) return error.PermissionDenied;
     const sub = if (root) |path| path.bytes else "";
     const opened = try config.root.openDir(host.io, if (sub.len == 0) "." else sub, .{ .iterate = true });
     errdefer opened.close(host.io);
     const grant = try alloc.create(FsGrant);
     errdefer alloc.destroy(grant);
-    grant.* = .{ .host = host, .errno = state.errno_cell, .id = host.next_fs_id, .root = opened, .write = config.write and write };
+    grant.* = .{ .host = host, .owner = state, .id = host.next_fs_id, .root = opened, .read = access & access_read != 0, .write = access & access_write != 0 };
     try host.grants.append(alloc, grant);
     host.next_fs_id += 1;
     const ops = try call.object(FsGrant, grant, .{
         .openFile = func(openFile, .{ .side_effect = .any }),
         .openDir = func(openDir, .{ .side_effect = .any }),
         .stat = func(stat, .{ .side_effect = .none }),
+        .symlinkStat = func(symlinkStat, .{ .side_effect = .none }),
         .createDir = func(createDir, .{ .side_effect = .any }),
         .deleteFile = func(deleteFile, .{ .side_effect = .any }),
         .readDir = func(readDir, .{ .side_effect = .none }),
@@ -254,7 +282,7 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, write: bool) !v8.Ob
 
 /// Open bits: 1 write, 2 create, 4 truncate, 8 exclusive (src/js/glue/fs.js `OPEN_MODES`).
 fn openFile(g: *FsGrant, dir: DirRef, path: EntryPath, bits: u32) !u32 {
-    if (bits & 0b1111 != 0) try g.writable();
+    if (bits & 0b1111 != 0) try g.writable() else try g.readable();
     const parent = try g.dir(dir);
     const opened = if (bits & 2 != 0)
         try parent.createFile(g.io(), path.bytes, .{ .read = true, .truncate = bits & 4 != 0, .exclusive = bits & 8 != 0 })
@@ -271,10 +299,41 @@ fn openDir(g: *FsGrant, dir: DirRef, path: Path) !u32 {
     return g.storeDir(opened);
 }
 
+/// Metadata of the entry, following a final symlink (`std::fs::metadata`); an empty path is the
+/// directory itself. A dangling link is `NotFound`.
 fn stat(g: *FsGrant, dir: DirRef, path: Path) !Stat {
+    return statOf(g, dir, path, true);
+}
+
+/// Metadata of the entry itself (`std::fs::symlink_metadata`): a final symlink is not followed.
+fn symlinkStat(g: *FsGrant, dir: DirRef, path: Path) !Stat {
+    return statOf(g, dir, path, false);
+}
+
+fn statOf(g: *FsGrant, dir: DirRef, path: Path, follow: bool) !Stat {
+    try g.readable();
     const parent = try g.dir(dir);
-    const info = if (path.bytes.len == 0) try parent.stat(g.io()) else try parent.statFile(g.io(), path.bytes, .{ .follow_symlinks = false });
+    const info = if (path.bytes.len == 0) try parent.stat(g.io()) else parent.statFile(g.io(), path.bytes, .{ .follow_symlinks = follow }) catch |err| switch (err) {
+        error.FileNotFound => return missing(g, parent, path.bytes),
+        else => |other| return other,
+    };
     return .{ kindCode(info.kind), try exactSize(info.size) };
+}
+
+/// Zig's `statFile` reports ENOTDIR (a file used as a directory) as `FileNotFound`, while the
+/// async backend, like Rust, says `NotADirectory`. On that error path only: when a leading component
+/// of `path` exists and is not a directory, report `NotDir` so both backends agree.
+fn missing(g: *FsGrant, parent: std.Io.Dir, path: []const u8) error{ NotDir, FileNotFound } {
+    var from: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, path, from, '/')) |slash| {
+        from = slash + 1;
+        var stop = slash;
+        while (stop > 0 and path[stop - 1] == '/') stop -= 1;
+        if (stop == 0) continue;
+        const info = parent.statFile(g.io(), path[0..stop], .{}) catch continue;
+        if (info.kind != .directory) return error.NotDir;
+    }
+    return error.FileNotFound;
 }
 
 fn createDir(g: *FsGrant, dir: DirRef, path: EntryPath) !void {
@@ -289,6 +348,7 @@ fn deleteFile(g: *FsGrant, dir: DirRef, path: EntryPath) !void {
 
 /// Returns a flat array `[name0, kind0, name1, kind1, ...]`.
 fn readDir(g: *FsGrant, call: *Call, dir: DirRef) !v8.Value {
+    try g.readable();
     var list = call.array();
     var iterator = (try g.dir(dir)).iterate();
     while (try iterator.next(g.io())) |entry| {
@@ -299,6 +359,7 @@ fn readDir(g: *FsGrant, call: *Call, dir: DirRef) !v8.Value {
 }
 
 fn readAll(g: *FsGrant, call: *Call, file_ref: FileRef, limit: Limit) !v8.Value {
+    try g.readable();
     const handle = try g.file(file_ref);
     var list: std.ArrayList(u8) = .empty;
     defer list.deinit(g.allocator());
@@ -310,7 +371,7 @@ fn readAll(g: *FsGrant, call: *Call, file_ref: FileRef, limit: Limit) !v8.Value 
             else => return err,
         };
         if (count == 0) break;
-        if (list.items.len + count > max_read_bytes) return error.FileTooBig;
+        if (list.items.len + count > max_read_bytes) return error.FileTooLarge;
         try list.appendSlice(g.allocator(), buffer[0..count]);
     }
     return call.bytesValue(list.items);
@@ -357,12 +418,14 @@ fn rename(g: *FsGrant, dir: DirRef, old_path: SubPath, new_dir: DirRef, new_path
 }
 
 fn fileStat(g: *FsGrant, file_ref: FileRef) !Stat {
+    try g.readable();
     const info = try (try g.file(file_ref)).stat(g.io());
     return .{ kindCode(info.kind), try exactSize(info.size) };
 }
 
 /// Streaming read into the caller's buffer; returns the byte count (0 at end).
 fn fileRead(g: *FsGrant, file_ref: FileRef, buffer: []u8) !usize {
+    try g.readable();
     const handle = try g.file(file_ref);
     if (buffer.len == 0) return 0;
     return handle.readStreaming(g.io(), &.{buffer}) catch |err| switch (err) {
@@ -372,6 +435,7 @@ fn fileRead(g: *FsGrant, file_ref: FileRef, buffer: []u8) !usize {
 }
 
 fn filePread(g: *FsGrant, file_ref: FileRef, buffer: []u8, offset: u64) !usize {
+    try g.readable();
     const handle = try g.file(file_ref);
     if (buffer.len == 0) return 0;
     return handle.readPositional(g.io(), &.{buffer}, offset);

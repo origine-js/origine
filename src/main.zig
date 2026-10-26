@@ -25,15 +25,53 @@ pub fn main(init: std.process.Init) !void {
     var engine = Engine.init(.{ .trace = &trace });
     defer engine.deinit();
     const snapshot = embeddedSnapshot(init.environ_map);
-    // The V8 sandbox only accepts its own ArrayBuffer memory, so Zig-allocated backing stores
-    // are limited to builds without it.
+    // The V8 sandbox only accepts ArrayBuffer memory inside itself, so a sandboxed V8 gets
+    // backing stores from its own pages; builds without it use the Zig allocator.
     const buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator") =
-        if (v8.V8.isSandboxEnabled()) .default else .{ .zig = alloc };
+        if (v8.V8.isSandboxEnabled()) .sandbox else .{ .zig = alloc };
     if (args.len > 1) return runInit(alloc, init, engine, args, &trace, buffer_allocator, snapshot);
-    const rt = try m.Runtime.create(alloc, .{ .array_buffer_allocator = buffer_allocator, .snapshot = snapshot });
+    return runRepl(alloc, init, engine, &trace, buffer_allocator, snapshot);
+}
+
+/// Builds the host every entry point runs with: the working directory read/write with sync and
+/// async access, all `user_args`, and the whole environment. `env` is caller-owned storage.
+fn createHost(alloc: std.mem.Allocator, init: std.process.Init, user_args: []const []const u8, env: []m.Api.EnvPair, cwd: std.Io.Dir) !*m.Api.Host {
+    const keys = init.environ_map.keys();
+    const values = init.environ_map.values();
+    for (keys, values, env) |key, value, *out| out.* = .{ .name = key, .value = value };
+    return m.Api.Host.create(alloc, .{ .io = io_runtime.io(), .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{} });
+}
+
+/// Starts the REPL with the same host API as an init module: `api` is a global and `import`
+/// resolves `origine:@std/*` and files under the working directory. Borrows everything through return.
+fn runRepl(
+    alloc: std.mem.Allocator,
+    init: std.process.Init,
+    engine: Engine,
+    trace: *StartupTrace,
+    buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator"),
+    engine_snapshot: ?[]align(16) const u8,
+) !void {
+    const env = try alloc.alloc(m.Api.EnvPair, init.environ_map.keys().len);
+    defer alloc.free(env);
+    var cwd = try std.Io.Dir.cwd().openDir(io_runtime.io(), ".", .{ .iterate = true });
+    defer cwd.close(io_runtime.io());
+    const host = try createHost(alloc, init, &.{}, env, cwd);
+    var rt: ?*m.Runtime = null;
+    // The host releases V8 handles, so it goes before the runtime.
+    defer {
+        host.destroy();
+        if (rt) |runtime| runtime.destroy();
+    }
+    const references = try host.externalReferences(alloc);
+    defer alloc.free(references);
+    rt = try m.Runtime.create(alloc, .{
+        .array_buffer_allocator = buffer_allocator,
+        .snapshot = engine_snapshot,
+        .external_references = m.init_snapshot.referenceTable(references),
+    });
     trace.mark("runtime_isolate");
-    defer rt.destroy();
-    const scope = try rt.createScope(.{});
+    const scope = try rt.?.createScope(host.initOptions());
     trace.mark("scope_create");
     trace.report();
     @import("@diagnostics").scope.report();
@@ -45,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
         .platform = engine.platform,
         .interactive = interactive,
         .colors = interactive and init.environ_map.get("NO_COLOR") == null,
+        .host = host,
     });
 }
 
@@ -66,14 +105,11 @@ fn runInit(
     const user_args = try alloc.alloc([]const u8, args.len - 1);
     defer alloc.free(user_args);
     for (args[1..], user_args) |arg, *out| out.* = arg;
-    const keys = init.environ_map.keys();
-    const values = init.environ_map.values();
-    const env = try alloc.alloc(m.Api.EnvPair, keys.len);
+    const env = try alloc.alloc(m.Api.EnvPair, init.environ_map.keys().len);
     defer alloc.free(env);
-    for (keys, values, env) |key, value, *out| out.* = .{ .name = key, .value = value };
     var cwd = try std.Io.Dir.cwd().openDir(io_runtime.io(), ".", .{ .iterate = true });
     defer cwd.close(io_runtime.io());
-    const host = try m.Api.Host.create(alloc, .{ .io = io_runtime.io(), .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{} });
+    const host = try createHost(alloc, init, user_args, env, cwd);
     // The host releases V8 handles, so it goes before the runtime; the snapshot image backs
     // the runtime's heap, so it goes after.
     var image: ?m.init_snapshot.Image = null;

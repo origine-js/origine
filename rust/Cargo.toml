@@ -10,13 +10,17 @@ edition = "2024"
 
 [workspace.dependencies]
 oxc_allocator = "=0.155.0"
+oxc_ast = "=0.155.0"
+oxc_ast_visit = "=0.155.0"
 oxc_codegen = "=0.155.0"
 oxc_diagnostics = "=0.155.0"
 oxc_parser = "=0.155.0"
 oxc_semantic = "=0.155.0"
 oxc_span = "=0.155.0"
+oxc_syntax = "=0.155.0"
 oxc_transformer = "=0.155.0"
 origine_oxc = { path = "crates/origine_oxc" }
+origine_repl = { path = "crates/origine_repl" }
 origine_io = { path = "crates/origine_io" }
 origine_alloc = { path = "crates/origine_alloc" }
 origine_api_core = { path = "crates/origine_api_core" }
@@ -52,11 +56,12 @@ crate-type = ["staticlib"]
 origine_oxc = { workspace = true, optional = true }
 origine_alloc.workspace = true
 origine_api.workspace = true
+origine_repl.workspace = true
 
 [features]
 default = ["typescript"]
 # oxc-based TypeScript/JSX transformer (`zig build -Dtypescript=false` turns it off).
-typescript = ["dep:origine_oxc"]
+typescript = ["dep:origine_oxc", "origine_repl/typescript"]
 
 # Size first: everything is optimized for size (no loop unrolling) except the crates that sit on
 # a hot path (parsing, traversal, codegen, byte scanning), which get -O3. Add a crate here when

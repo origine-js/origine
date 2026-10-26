@@ -642,6 +642,7 @@ dependencies = [
  "origine_alloc",
  "origine_api",
  "origine_oxc",
+ "origine_repl",
 ]
 
 [[package]]
@@ -655,6 +656,21 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_transformer",
+]
+
+[[package]]
+name = "origine_repl"
+version = "0.1.0"
+dependencies = [
+ "origine_oxc",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_diagnostics",
+ "oxc_parser",
+ "oxc_span",
+ "oxc_syntax",
+ "unicode-width",
 ]
 
 [[package]]

@@ -163,7 +163,7 @@ pub const ModuleMap = struct {
     /// Borrows inputs and alloc through the resolver call. The resolver's
     /// contract returns bytes owned by alloc; errors transfer no result storage.
     fn resolve(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) ![]const u8 {
-        const enabled = self.scope.options.enable_origine_namespace;
+        const enabled = self.scope.options.origine_namespace;
         if (!enabled and std.mem.startsWith(u8, specifier, origine_prefix)) return error.OrigineNamespaceDisabled;
         const resolver = self.scope.options.resolver orelse return alloc.dupe(u8, specifier);
         const id = try resolver.resolve(resolver.data, .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .import_attributes = attributes });
@@ -720,14 +720,23 @@ pub const ModuleMap = struct {
 /// Borrows a local managed context through return; returns its runtime-owned
 /// Scope pointer, valid until Runtime.destroy begins. Requires a context created
 /// by Runtime.createScope, entered isolate and a live HandleScope.
-pub fn fromContext(ctx: v8.Context) *Scope {
-    return @ptrCast(@alignCast(ctx.getAlignedPointerFromEmbedderData(1).?));
+pub fn fromContext(ctx: v8.Context) ?*Scope {
+    return @ptrCast(@alignCast(ctx.getAlignedPointerFromEmbedderData(1)));
+}
+/// A promise rejected with an Error saying the context's scope is gone. Needs no scope, so it
+/// works once the scope has been freed and only a stray reference into the context is left.
+fn rejectedDisposed(ctx: v8.Context) v8.MaybeHandle {
+    const resolver = eu.v.promise_resolver(ctx) orelse return null;
+    const isolate = v8.Isolate.getCurrent();
+    const reason = eu.v.err(eu.v.str_utf8(isolate, "ScopeDisposed")) orelse return null;
+    _ = resolver.reject(ctx, reason);
+    return resolver.getPromise().object.value.data.handle;
 }
 /// Borrows local callback handles through return in the entered context;
 /// V8 copies the module URL into meta, then the scope's meta hook (if any) adds its
 /// properties. Retains no host storage or handles.
 pub fn importMeta(ctx: v8.Context, module: v8.Module, meta: v8.Object) callconv(.c) void {
-    const scope = fromContext(ctx);
+    const scope = fromContext(ctx) orelse return;
     const entry = scope.module_map.find(module) orelse return;
     _ = meta.createDataProperty(ctx, eu.v.str_utf8(scope.runtime.isolate, "url").name, eu.v.str_utf8(scope.runtime.isolate, entry.id).name.primitive.value);
     if (scope.options.meta) |hook| hook.init(hook.data, .{ .context = ctx, .scope_id = scope.id, .module_id = entry.id, .meta = meta });
@@ -736,7 +745,7 @@ pub fn importMeta(ctx: v8.Context, module: v8.Module, meta: v8.Object) callconv(
 /// allocations are released on success/error. Returns a local module handle
 /// from map-owned state, valid in the enclosing HandleScope; transfers no ownership.
 fn resolveStatic(ctx: v8.Context, specifier: v8.String, attributes: v8.FixedArray, referrer: v8.Module) callconv(.c) v8.MaybeHandle {
-    const scope = fromContext(ctx);
+    const scope = fromContext(ctx) orelse return null;
     const registry = &scope.module_map;
     const entry = registry.find(referrer) orelse return null;
     var scratch = std.heap.ArenaAllocator.init(scope.runtime.allocator);
@@ -752,7 +761,7 @@ fn resolveStatic(ctx: v8.Context, specifier: v8.String, attributes: v8.FixedArra
 /// map-retained values into the V8 module. Returns a local promise or null in
 /// the enclosing HandleScope; requires entered context and retains no host inputs.
 fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle {
-    const scope = fromContext(ctx);
+    const scope = fromContext(ctx) orelse return null;
     const entry = scope.module_map.find(module) orelse return null;
     for (entry.exports) |exp| {
         if (!(module.setSyntheticModuleExport(scope.runtime.isolate, eu.v.str_utf8(scope.runtime.isolate, exp.name), exp.value.deref()) orelse false)) return null;
@@ -766,7 +775,8 @@ fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle {
 /// map-owned load/task state persists through settlement or map deinit, including
 /// rejection paths. Requires entered isolate/context.
 pub fn dynamic(ctx: v8.Context, _: v8.Data, resource: v8.Value, specifier: v8.String, attributes: v8.FixedArray) callconv(.c) v8.MaybeHandle {
-    const scope = fromContext(ctx);
+    const scope = fromContext(ctx) orelse return rejectedDisposed(ctx);
+    if (scope.disposed) return rejectedDisposed(ctx);
     var tc_scope: v8.TryCatch = undefined;
     tc_scope.init(scope.runtime.isolate);
     defer tc_scope.deinit();
@@ -800,7 +810,7 @@ fn equalAttributes(a: []const ImportAttribute, b: []const ImportAttribute) bool 
 /// map-owned task state persists; unsupported phases retain no host inputs.
 pub fn dynamicPhase(ctx: v8.Context, options: v8.Data, resource: v8.Value, specifier: v8.String, phase: v8.ModuleImportPhase, attributes: v8.FixedArray) callconv(.c) v8.MaybeHandle {
     if (phase == .Evaluation) return dynamic(ctx, options, resource, specifier, attributes);
-    const scope = fromContext(ctx);
+    const scope = fromContext(ctx) orelse return rejectedDisposed(ctx);
     const promise = scope.module_map.rejected(scope.module_map.errorValue(error.UnsupportedImport)) catch return null;
     return promise.object.value.data.handle;
 }

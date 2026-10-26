@@ -9,13 +9,29 @@ const { encode: nativeEncode, decode: nativeDecode } = import.meta.native ?? {};
 /// Encodes a string as UTF-8. Lone surrogates become U+FFFD, like TextEncoder.
 export const encodeUtf8 = nativeEncode === undefined ? encodeJs : text => (typeof text === 'string' ? nativeEncode(text) : encodeJs(text));
 
-/// Decodes UTF-8 bytes to a string, or returns `undefined` when the bytes are not
-/// valid UTF-8 (overlong forms, surrogates, > U+10FFFF and truncation included).
-export const decodeUtf8 =
-  nativeDecode === undefined ? decodeJs : bytes => (bytes instanceof Uint8Array ? nativeDecode(bytes) : decodeJs(bytes));
+/// Returns the string for strictly valid UTF-8, or `null` for anything else (overlong forms,
+/// surrogates, > U+10FFFF and truncation included). No BOM handling, no replacement, never throws.
+export const tryDecodeUtf8 = nativeDecode === undefined ? tryDecodeJs : bytes => (bytes instanceof Uint8Array ? (nativeDecode(bytes) ?? null) : tryDecodeJs(bytes));
+
+/// Decodes UTF-8 bytes like `new TextDecoder('utf-8', { fatal, ignoreBOM }).decode(bytes)`: invalid
+/// sequences become U+FFFD (maximal subpart rule), a leading BOM is dropped unless `ignoreBOM`, and
+/// `fatal` throws a TypeError instead of substituting.
+export const decodeUtf8 = makeDecode(tryDecodeUtf8);
 
 /// The JS implementations, whether or not natives are installed.
-export const utf8Js = Object.freeze({ encode: encodeJs, decode: decodeJs });
+export const utf8Js = Object.freeze({ encode: encodeJs, decode: makeDecode(tryDecodeJs), tryDecode: tryDecodeJs });
+
+function makeDecode(tryDecode) {
+  return (bytes, options) => {
+    const fatal = options?.fatal === true;
+    const bom = options?.ignoreBOM !== true && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+    const view = bom ? bytes.subarray(3) : bytes;
+    const text = tryDecode(view);
+    if (text !== null) return text;
+    if (fatal) throw new TypeError('The encoded data was not valid UTF-8');
+    return decodeJs(view, true);
+  };
+}
 
 function encodeJs(text) {
   const length = text.length;
@@ -62,7 +78,13 @@ function encodeJs(text) {
 
 const CHUNK = 8192;
 
-function decodeJs(bytes) {
+function tryDecodeJs(bytes) {
+  return decodeJs(bytes, false);
+}
+
+// Strict: `null` on the first invalid sequence. Lossy: each maximal invalid subpart becomes one
+// U+FFFD, following the WHATWG UTF-8 decoder (the offending byte is not consumed).
+function decodeJs(bytes, lossy) {
   const length = bytes.length;
   let result = '';
   let units = [];
@@ -81,22 +103,41 @@ function decodeJs(bytes) {
       for (let at = i - 1; at < end; at += CHUNK) result += String.fromCharCode.apply(null, bytes.subarray(at, Math.min(end, at + CHUNK)));
       i = end;
       continue;
-    } else if (lead >= 0xc2 && lead <= 0xdf) {
-      if (i >= length || (bytes[i] & 0xc0) !== 0x80) return undefined;
-      point = ((lead & 0x1f) << 6) | (bytes[i++] & 63);
+    }
+    let need = 0;
+    let bad = false;
+    let lower = 0x80;
+    let upper = 0xbf;
+    if (lead >= 0xc2 && lead <= 0xdf) {
+      need = 1;
+      point = lead & 0x1f;
     } else if (lead >= 0xe0 && lead <= 0xef) {
-      if (i + 1 >= length || (bytes[i] & 0xc0) !== 0x80 || (bytes[i + 1] & 0xc0) !== 0x80) return undefined;
-      point = ((lead & 0x0f) << 12) | ((bytes[i] & 63) << 6) | (bytes[i + 1] & 63);
-      i += 2;
-      if (point < 0x800 || (point >= 0xd800 && point <= 0xdfff)) return undefined;
+      need = 2;
+      point = lead & 0x0f;
+      if (lead === 0xe0) lower = 0xa0;
+      else if (lead === 0xed) upper = 0x9f;
     } else if (lead >= 0xf0 && lead <= 0xf4) {
-      if (i + 2 >= length || (bytes[i] & 0xc0) !== 0x80 || (bytes[i + 1] & 0xc0) !== 0x80 || (bytes[i + 2] & 0xc0) !== 0x80)
-        return undefined;
-      point = ((lead & 0x07) << 18) | ((bytes[i] & 63) << 12) | ((bytes[i + 1] & 63) << 6) | (bytes[i + 2] & 63);
-      i += 3;
-      if (point < 0x10000 || point > 0x10ffff) return undefined;
+      need = 3;
+      point = lead & 0x07;
+      if (lead === 0xf0) lower = 0x90;
+      else if (lead === 0xf4) upper = 0x8f;
     } else {
-      return undefined;
+      bad = true;
+    }
+    for (let k = 0; k < need; k++) {
+      const next = i < length ? bytes[i] : -1;
+      if (next < lower || next > upper) {
+        bad = true;
+        break;
+      }
+      lower = 0x80;
+      upper = 0xbf;
+      point = (point << 6) | (next & 63);
+      i++;
+    }
+    if (bad) {
+      if (!lossy) return null;
+      point = 0xfffd;
     }
     if (point >= 0x10000) {
       point -= 0x10000;

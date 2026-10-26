@@ -14,8 +14,8 @@
 //! closing handle fail with `StaleHandle`, on a closed or unknown one with `BadHandle`.
 //!
 //! # Order of checks
-//! Like Zig: paths are validated first (`InvalidPath`), then the write ceiling (`AccessDenied`),
-//! then the handles (`BadHandle`/`StaleHandle`), then the OS.
+//! Like Zig: paths are validated first (`InvalidInput`, `PermissionDenied`), then the grant's access
+//! (`PermissionDenied`), then the handles (`BadHandle`/`StaleHandle`), then the OS.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -59,13 +59,36 @@ pub fn kind_code(kind: FileType) -> u32 {
     }
 }
 
-fn invalid_path() -> NativeError {
-    NativeError::Errno(errno::INVALID_PATH)
+fn invalid_input() -> NativeError {
+    NativeError::Errno(errno::INVALID_INPUT)
 }
 
-/// Rejects NUL, absolute paths and `..` components (lexical only).
+fn denied() -> NativeError {
+    NativeError::Errno(errno::PERMISSION_DENIED)
+}
+
+/// The engine's snapshot / code-cache directory (`init_cache.dir_name` in Zig): V8 trusts what it
+/// finds there, so a guest must not be able to plant it.
+const CACHE_DIR: &str = "__oricache__";
+
+/// Rejects NUL (`InvalidInput`: a malformed path) and, as policy denials (`PermissionDenied`, like
+/// the OS's own), absolute paths, `..` components and `__oricache__` components. Lexical only:
+/// symlinks are not resolved here, so following one can leave the grant's root. The Zig twin is
+/// `cleanPath` in `src/api/fs.zig`.
 fn clean(path: &str) -> Result<(), NativeError> {
-    sanitize(Path::new(path)).map(|_| ()).map_err(NativeError::from)
+    if path.contains('\0') {
+        return Err(invalid_input());
+    }
+    if path.starts_with('/') || path.split('/').any(|part| part == ".." || part == CACHE_DIR) {
+        return Err(denied());
+    }
+    // The rest of `sanitize` (non-Unix prefixes) is a policy denial too.
+    sanitize(Path::new(path)).map(|_| ()).map_err(|_| denied())
+}
+
+/// Validates the `root` of a grant request like any other path (lexical policy, see `clean`).
+pub fn check_root(root: &str) -> Result<(), NativeError> {
+    clean(root)
 }
 
 /// True when `path` names the grant root itself (empty or only `.` components).
@@ -83,7 +106,7 @@ fn any_path(path: &str) -> Result<String, NativeError> {
 fn entry_path(path: &str) -> Result<String, NativeError> {
     clean(path)?;
     if path.is_empty() {
-        return Err(invalid_path());
+        return Err(invalid_input());
     }
     Ok(path.to_owned())
 }
@@ -92,14 +115,14 @@ fn entry_path(path: &str) -> Result<String, NativeError> {
 fn sub_path(path: &str) -> Result<String, NativeError> {
     clean(path)?;
     if names_root(path) {
-        return Err(invalid_path());
+        return Err(invalid_input());
     }
     Ok(path.to_owned())
 }
 
-/// Converts a size to the f64 JS sees, failing with `FileTooBig` instead of rounding.
+/// Converts a size to the f64 JS sees, failing with `FileTooLarge` instead of rounding.
 fn exact_size(size: u64) -> Result<f64, NativeError> {
-    if size > MAX_EXACT { Err(NativeError::Errno(errno::FILE_TOO_BIG)) } else { Ok(size as f64) }
+    if size > MAX_EXACT { Err(NativeError::Errno(errno::FILE_TOO_LARGE)) } else { Ok(size as f64) }
 }
 
 /// A directory an operation works on: the grant root, or a guarded table entry.
@@ -132,19 +155,46 @@ fn open_options(bits: u32) -> OpenOptions {
     options
 }
 
+/// What a grant may do: `READ`, `WRITE` or both (`access: 'r' | 'w' | 'rw'` in `api.fs`). Native
+/// handles are readable whenever they are writable, so a write-only grant is enforced here: it
+/// denies (`PermissionDenied`) everything that observes what exists, namely reads, `stat`,
+/// `readDir` and opening a file read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Access {
+    pub read: bool,
+    pub write: bool,
+}
+
+impl Access {
+    pub const READ: Access = Access { read: true, write: false };
+    pub const WRITE: Access = Access { read: false, write: true };
+    pub const READ_WRITE: Access = Access { read: true, write: true };
+
+    /// The bits of `native.fsAsync.request`: 1 read, 2 write; `None` for anything else.
+    pub fn from_bits(bits: u32) -> Option<Access> {
+        match bits {
+            1 => Some(Access::READ),
+            2 => Some(Access::WRITE),
+            3 => Some(Access::READ_WRITE),
+            _ => None,
+        }
+    }
+}
+
 /// A capability over one directory. See the crate docs.
 pub struct Grant {
     id: u32,
-    write: bool,
+    access: Access,
     root: Dir,
     files: RefCell<Table<File>>,
     dirs: RefCell<Table<Dir>>,
 }
 
 impl Grant {
-    /// A grant named `id` over `root`; `write` false rejects every mutating operation.
-    pub fn new(id: u32, write: bool, root: Dir) -> Rc<Grant> {
-        Rc::new(Grant { id, write, root, files: RefCell::default(), dirs: RefCell::default() })
+    /// A grant named `id` over `root` with `access`: without write every mutating operation is
+    /// rejected, without read every observing one.
+    pub fn new(id: u32, access: Access, root: Dir) -> Rc<Grant> {
+        Rc::new(Grant { id, access, root, files: RefCell::default(), dirs: RefCell::default() })
     }
 
     /// The grant's id (`fs` of its handles).
@@ -154,7 +204,12 @@ impl Grant {
 
     /// Whether mutating operations are allowed.
     pub fn is_writable(&self) -> bool {
-        self.write
+        self.access.write
+    }
+
+    /// Whether observing operations (reads, `stat`, `readDir`) are allowed.
+    pub fn is_readable(&self) -> bool {
+        self.access.read
     }
 
     /// Open files plus open (non-root) directories.
@@ -162,9 +217,14 @@ impl Grant {
         self.files.borrow().live() + self.dirs.borrow().live()
     }
 
-    /// Fails with `AccessDenied` on a read-only grant.
+    /// Fails with `PermissionDenied` on a read-only grant.
     fn writable(&self) -> Result<(), NativeError> {
-        if self.write { Ok(()) } else { Err(NativeError::Errno(errno::ACCESS_DENIED)) }
+        if self.access.write { Ok(()) } else { Err(denied()) }
+    }
+
+    /// Fails with `PermissionDenied` on a write-only grant.
+    fn readable(&self) -> Result<(), NativeError> {
+        if self.access.read { Ok(()) } else { Err(denied()) }
     }
 
     fn dir(&self, id: u32) -> Result<DirHandle, NativeError> {
@@ -192,6 +252,8 @@ impl Grant {
         let path = entry_path(path)?;
         if bits & 0b1111 != 0 {
             self.writable()?;
+        } else {
+            self.readable()?;
         }
         let parent = self.dir(dir)?;
         let options = open_options(bits);
@@ -199,7 +261,7 @@ impl Grant {
         Ok(async move {
             let file = parent.open_file(&path, &options).await?;
             if bits & 0b11 == 0 {
-                // Read-only without create: like Zig's `allow_directory = false`, a directory is `IsDir`.
+                // Read-only without create: like Zig's `allow_directory = false`, a directory is `IsADirectory`.
                 let is_dir = match file.metadata().await {
                     Ok(meta) => meta.is_dir(),
                     Err(err) => {
@@ -209,7 +271,7 @@ impl Grant {
                 };
                 if is_dir {
                     let _ = file.close().await;
-                    return Err(NativeError::Errno(errno::IS_DIR));
+                    return Err(NativeError::Errno(errno::IS_A_DIRECTORY));
                 }
             }
             Ok(grant.files.borrow_mut().insert(file))
@@ -227,12 +289,29 @@ impl Grant {
         })
     }
 
-    /// `stat(dir, path)`: the entry itself (symlinks are not followed); an empty path is the directory.
+    /// `stat(dir, path)`: `std::fs::metadata`, a final symlink is followed (a dangling one is
+    /// `NotFound`); an empty path is the directory itself.
     pub fn stat(&self, dir: u32, path: &str) -> Result<impl Future<Output = Result<Stat, NativeError>> + use<>, NativeError> {
+        self.stat_of(dir, path, true)
+    }
+
+    /// `symlinkStat(dir, path)`: `std::fs::symlink_metadata`, the entry itself.
+    pub fn symlink_stat(&self, dir: u32, path: &str) -> Result<impl Future<Output = Result<Stat, NativeError>> + use<>, NativeError> {
+        self.stat_of(dir, path, false)
+    }
+
+    fn stat_of(&self, dir: u32, path: &str, follow: bool) -> Result<impl Future<Output = Result<Stat, NativeError>> + use<>, NativeError> {
         let path = any_path(path)?;
+        self.readable()?;
         let parent = self.dir(dir)?;
         Ok(async move {
-            let meta = if path.is_empty() { parent.metadata(".").await? } else { parent.symlink_metadata(&path).await? };
+            let meta = if path.is_empty() {
+                parent.metadata(".").await?
+            } else if follow {
+                parent.metadata(&path).await?
+            } else {
+                parent.symlink_metadata(&path).await?
+            };
             Ok(Stat { kind: kind_code(meta.file_type()), size: exact_size(meta.len())? })
         })
     }
@@ -255,6 +334,7 @@ impl Grant {
 
     /// `readDir(dir)`: every entry of the directory (no `.`/`..`), in OS order.
     pub fn read_dir(&self, dir: u32) -> Result<impl Future<Output = Result<DirListing, NativeError>> + use<>, NativeError> {
+        self.readable()?;
         let parent = self.dir(dir)?;
         Ok(async move {
             let mut entries = parent.read_dir(".").await?;
@@ -348,6 +428,7 @@ impl Grant {
 
     /// `fileStat(file)`.
     pub fn file_stat(&self, file: u32) -> Result<impl Future<Output = Result<Stat, NativeError>> + use<>, NativeError> {
+        self.readable()?;
         let file = self.file(file)?;
         Ok(async move {
             let meta = file.metadata().await?;
@@ -356,8 +437,9 @@ impl Grant {
     }
 
     /// `readAll(file, limit)`: from the current position to the end or until `limit` bytes. Fails
-    /// with `FileTooBig` beyond [`MAX_READ_BYTES`].
+    /// with `FileTooLarge` beyond [`MAX_READ_BYTES`].
     pub fn read_all(&self, file: u32, limit: usize) -> Result<impl Future<Output = Result<Vec<u8>, NativeError>> + use<>, NativeError> {
+        self.readable()?;
         let file = self.file(file)?;
         Ok(async move {
             let mut out: Vec<u8> = Vec::new();
@@ -370,7 +452,7 @@ impl Grant {
                     Ok(0) => break,
                     Ok(count) => {
                         if out.len() + count > MAX_READ_BYTES {
-                            return Err(NativeError::Errno(errno::FILE_TOO_BIG));
+                            return Err(NativeError::Errno(errno::FILE_TOO_LARGE));
                         }
                         out.extend_from_slice(&chunk[..count]);
                     }
@@ -416,6 +498,7 @@ impl Grant {
         len: usize,
         offset: Option<u64>,
     ) -> Result<impl Future<Output = Result<Vec<u8>, NativeError>> + use<>, NativeError> {
+        self.readable()?;
         let file = self.file(file)?;
         Ok(async move {
             if len == 0 {
@@ -508,6 +591,7 @@ impl Grant {
         offset: Option<u64>,
         make: Box<dyn FnOnce() -> Result<B, NativeError> + '_>,
     ) -> Result<impl Future<Output = Result<(usize, B), NativeError>> + use<B>, NativeError> {
+        self.readable()?;
         let file = self.file(file)?;
         let buf = make()?;
         Ok(async move {

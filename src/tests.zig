@@ -4,6 +4,7 @@ test {
     _ = @import("tests/managed/repl.zig");
     _ = @import("tests/managed/ownership.zig");
     _ = @import("tests/managed/runtime.zig");
+    _ = @import("tests/managed/disposal.zig");
     _ = @import("tests/managed/errors.zig");
     _ = @import("tests/managed/capabilities.zig");
     _ = @import("tests/managed/modules.zig");

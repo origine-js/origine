@@ -93,7 +93,7 @@ reference for what Zig expects and may be ahead of or behind the code.
 number }`). It calls `HostState::create_runtime(key, backend, entries)`:
 
 1. `Ceiling::check_create(live, backend)`: `Unsupported` for a backend the embedder excluded
-   (checked first), `AccessDenied` when `live >= max_runtimes`.
+   (checked first), `PermissionDenied` when `live >= max_runtimes`.
 2. `entries = entries.unwrap_or(default_entries).min(1 << 16)`.
 3. `origine_io::Loop::new(Options { backend, entries })`; failure maps to `Unsupported`.
 4. `Runtime::new(Rc<Loop>)`, store a `RuntimeEntry`, return the id.
@@ -143,9 +143,13 @@ Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions 
   detaching). The store becomes the owner of an `origine_io::RawRegion` over the window; the loop
   reads/writes the guest memory in place. All guest views become length 0.
 * **Copy** (SharedArrayBuffer, resizable, non-detachable such as WebAssembly memory, a detach that
-  did not take effect): writes copy at call time and the buffer stays usable; reads use a host
-  `Vec` and a `Wrap` copies the result into the guest buffer at completion (`StaleHandle` if it
-  was detached/shrunk meanwhile).
+  did not take effect): reads use a host `Vec` and a `Wrap` copies the result into the guest
+  buffer at completion (`StaleHandle` if it was detached/shrunk meanwhile).
+* **Writes choose explicitly.** The plain writes (`writeAll`, `fileWrite`, `filePwriteAll`) ALWAYS
+  copy at call time (`pinned::copy_for_write`) and never detach the guest's buffer. The `*Move`
+  natives (`writeMoveAll`, `fileWriteMove`, `filePwriteMoveAll`, `pinned::pin_for_move`) pin and
+  detach, and fail `Unsupported`, buffer untouched, where a pin is impossible (shared, resizable,
+  wasm memory): no silent copy.
 * **Empty** (0 bytes): no I/O, nothing detached or copied.
 * A buffer that is already detached at call time rejects `StaleHandle`.
 * Order: write ceiling, handle checks, THEN the buffer is taken (`Grant::*_with(.., make)`), so a
@@ -159,7 +163,7 @@ Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions 
 * **Resolutions:** `fileReadInto`/`filePreadInto` resolve `{ bytes, buffer: ArrayBuffer }`:
   pinned = a NEW `ArrayBuffer` over the same store (`ArrayBuffer::with_backing_store`), copy or
   empty = the guest's own `ArrayBuffer`. `fileReadAlloc`/`filePreadAlloc` allocate a V8 store of
-  `len` bytes (max `MAX_ALLOC_READ` = 256 MiB, else `FileTooBig`), read once and resolve a
+  `len` bytes (max `MAX_ALLOC_READ` = 256 MiB, else `FileTooLarge`), read once and resolve a
   `Uint8Array(0..bytes)` over it (`len` 0: empty array, no I/O).
 * Legacy: `fileRead`/`filePread` still copy out (count result); `readAll` is host-provided (one
   copy out of a Rust `Vec`).

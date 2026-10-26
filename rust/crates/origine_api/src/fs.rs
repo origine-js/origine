@@ -24,24 +24,24 @@ pub struct GrantOpened {
     id: u32,
 }
 
-/// `native.fsAsync.request(ioId, root, write)`: opens `root` (relative to the embedder's fs root)
+/// `native.fsAsync.request(ioId, root, access)`: opens `root` (relative to the embedder's fs root)
 /// as a grant bound to runtime `ioId`. Rejects `BadHandle` (runtime unknown/closed/foreign),
-/// `AccessDenied` (no async fs configured), `InvalidPath`, or the OS error of opening the root.
+/// `PermissionDenied` (no async fs configured), `InvalidInput`, or the OS error of opening the root.
 #[native(side_effect = "any", path = "fsAsync.request", needs = "async_fs", promise)]
 fn fs_async_request<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     key: ScopeKey,
     io: u32,
     root: String,
-    write: bool,
+    access: u32,
 ) -> Result<Op<'s, impl Future<Output = Result<GrantOpened, NativeError>> + use<>>, NativeError> {
-    let (runtime, id, write, base, root) = host_mut(scope)?.prepare_grant(key, io, &root, write)?;
+    let (runtime, id, access, base, root) = host_mut(scope)?.prepare_grant(key, io, &root, access)?;
     let slot: Rc<RefCell<Option<Rc<Grant>>>> = Rc::default();
     let filled = Rc::clone(&slot);
     let future = async move {
         let opened = base.open_dir(&root).await;
         let _ = base.close().await;
-        *filled.borrow_mut() = Some(Grant::new(id, write, opened?));
+        *filled.borrow_mut() = Some(Grant::new(id, access, opened?));
         Ok(GrantOpened { id })
     };
     let hook = Box::new(move |scope: &mut v8::PinScope<'_, '_>| {
@@ -74,6 +74,7 @@ fn fs_async_open_dir(
     Ok(Op::new(runtime, g.open_dir(dir.id, &path)?))
 }
 
+/// `stat(fs, id, path)`: `std::fs::metadata`, follows a final symlink (see `symlinkStat`).
 #[native(side_effect = "any", path = "fsAsync.stat", needs = "async_fs", promise)]
 fn fs_async_stat(
     host: &mut HostState,
@@ -83,6 +84,17 @@ fn fs_async_stat(
 ) -> Result<Op<'static, impl Future<Output = Result<Stat, NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
     Ok(Op::new(runtime, g.stat(dir.id, &path)?))
+}
+
+#[native(side_effect = "any", path = "fsAsync.symlinkStat", needs = "async_fs", promise)]
+fn fs_async_symlink_stat(
+    host: &mut HostState,
+    key: ScopeKey,
+    dir: DirRef,
+    path: String,
+) -> Result<Op<'static, impl Future<Output = Result<Stat, NativeError>> + use<>>, NativeError> {
+    let (g, runtime) = host.grant(key, dir.fs)?;
+    Ok(Op::new(runtime, g.symlink_stat(dir.id, &path)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.createDir", needs = "async_fs", promise)]
@@ -128,6 +140,8 @@ fn fs_async_read_all(
     Ok(Op::new(runtime, g.read_all(file.id, limit.0)?))
 }
 
+/// Writes copy the guest's bytes at call time and never touch its buffer; the `*Move` natives
+/// below transfer (detach) it instead and fail `Unsupported` when they cannot.
 #[native(side_effect = "any", path = "fsAsync.writeAll", needs = "async_fs", promise)]
 fn fs_async_write_all(
     host: &mut HostState,
@@ -136,7 +150,18 @@ fn fs_async_write_all(
     data: ArrayBufferArg<'_>,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, file.fs)?;
-    Ok(Op::new(runtime, g.write_all_with(file.id, Box::new(|| pinned::pin_for_write(&data)))?))
+    Ok(Op::new(runtime, g.write_all_with(file.id, Box::new(|| pinned::copy_for_write(&data)))?))
+}
+
+#[native(side_effect = "any", path = "fsAsync.writeMoveAll", needs = "async_fs", promise)]
+fn fs_async_write_move_all(
+    host: &mut HostState,
+    key: ScopeKey,
+    file: FileRef,
+    data: ArrayBufferArg<'_>,
+) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
+    let (g, runtime) = host.grant(key, file.fs)?;
+    Ok(Op::new(runtime, g.write_all_with(file.id, Box::new(|| pinned::pin_for_move(&data)))?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.close", needs = "async_fs", promise)]
@@ -226,7 +251,18 @@ fn fs_async_file_write(
     data: ArrayBufferArg<'_>,
 ) -> Result<Op<'static, impl Future<Output = Result<usize, NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, file.fs)?;
-    Ok(Op::new(runtime, g.file_write_with(file.id, Box::new(|| pinned::pin_for_write(&data)))?))
+    Ok(Op::new(runtime, g.file_write_with(file.id, Box::new(|| pinned::copy_for_write(&data)))?))
+}
+
+#[native(side_effect = "any", path = "fsAsync.fileWriteMove", needs = "async_fs", promise)]
+fn fs_async_file_write_move(
+    host: &mut HostState,
+    key: ScopeKey,
+    file: FileRef,
+    data: ArrayBufferArg<'_>,
+) -> Result<Op<'static, impl Future<Output = Result<usize, NativeError>> + use<>>, NativeError> {
+    let (g, runtime) = host.grant(key, file.fs)?;
+    Ok(Op::new(runtime, g.file_write_with(file.id, Box::new(|| pinned::pin_for_move(&data)))?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.filePwriteAll", needs = "async_fs", promise)]
@@ -238,7 +274,19 @@ fn fs_async_file_pwrite_all(
     offset: u64,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, file.fs)?;
-    Ok(Op::new(runtime, g.file_pwrite_all_with(file.id, offset, Box::new(|| pinned::pin_for_write(&data)))?))
+    Ok(Op::new(runtime, g.file_pwrite_all_with(file.id, offset, Box::new(|| pinned::copy_for_write(&data)))?))
+}
+
+#[native(side_effect = "any", path = "fsAsync.filePwriteMoveAll", needs = "async_fs", promise)]
+fn fs_async_file_pwrite_move_all(
+    host: &mut HostState,
+    key: ScopeKey,
+    file: FileRef,
+    data: ArrayBufferArg<'_>,
+    offset: u64,
+) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
+    let (g, runtime) = host.grant(key, file.fs)?;
+    Ok(Op::new(runtime, g.file_pwrite_all_with(file.id, offset, Box::new(|| pinned::pin_for_move(&data)))?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.fileSetLength", needs = "async_fs", promise)]
@@ -445,7 +493,7 @@ fn read_alloc(
     len: u64,
     offset: Option<u64>,
 ) -> Result<Op<'static, impl Future<Output = Result<AllocRead, NativeError>> + use<>>, NativeError> {
-    let len = usize::try_from(len).map_err(|_| NativeError::Errno(errno::FILE_TOO_BIG)).and_then(pin::check_alloc_len)?;
+    let len = usize::try_from(len).map_err(|_| NativeError::Errno(errno::FILE_TOO_LARGE)).and_then(pin::check_alloc_len)?;
     let (g, runtime) = host_mut(scope)?.grant(key, file.fs)?;
     let isolate: &mut v8::Isolate = scope;
     let started = g.file_read_into_with(file.id, offset, Box::new(|| pinned::alloc_for_read(isolate, len)))?;
@@ -456,7 +504,7 @@ fn read_alloc(
 }
 
 /// `fileReadAlloc(fs, id, len)`: allocates a V8 `ArrayBuffer` of `len` bytes (at most 256 MiB,
-/// else `FileTooBig`), reads once at the file position into it and resolves a `Uint8Array`
+/// else `FileTooLarge`), reads once at the file position into it and resolves a `Uint8Array`
 /// over the first `bytes` bytes of that buffer (empty at end of file).
 #[native(side_effect = "any", path = "fsAsync.fileReadAlloc", needs = "async_fs", promise)]
 fn fs_async_file_read_alloc(

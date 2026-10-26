@@ -50,13 +50,13 @@ test "managed step 4: native ESM graphs, cycles, TLA and defining scope" {
     }
 }
 
-test "managed: the origine: namespace needs enable_origine_namespace" {
+test "managed: the origine: namespace needs origine_namespace" {
     ensureV8();
     var memory: Memory = .{};
     const rt = try m.Runtime.create(t.allocator, .{});
     defer rt.destroy();
     var enabled_options = memory.options();
-    enabled_options.enable_origine_namespace = true;
+    enabled_options.origine_namespace = true;
     const closed = try rt.createScope(memory.options());
     const open = try rt.createScope(enabled_options);
     try exposeModule(open, "origine:mod", "direct");

@@ -1,0 +1,18 @@
+{
+  // The examples and benchmarks that run on origine, checked against the declarations.
+  // `erasableSyntaxOnly` is off for examples/typescript, which shows the enums, namespaces and
+  // parameter properties the oxc transform compiles (the preset forbids them in new code).
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "paths": { "@origine/types": ["../index.d.ts"] },
+    "allowJs": true,
+    "checkJs": true,
+    "maxNodeModuleJsDepth": 0,
+    "erasableSyntaxOnly": false,
+    // The JS files are not annotated beyond `main(api)`: what is checked is every use of the API.
+    "noImplicitAny": false
+  },
+  "include": ["../index.d.ts", "../../examples/**/*.js", "../../examples/**/*.ts", "../../bench/*.js", "../../bench/tcp/bench.origine.js"],
+  "exclude": ["../../**/__oricache__"]
+}

@@ -72,7 +72,7 @@ impl Ceiling {
     pub const NONE: Ceiling = Ceiling { max_runtimes: 0, backends_mask: 0, default_entries: 0 };
 
     /// Whether a runtime on `backend` may be created while `live` exist: `Err(errno)` with
-    /// `AccessDenied` when the count ceiling is reached and `Unsupported` for a backend the
+    /// `PermissionDenied` when the count ceiling is reached and `Unsupported` for a backend the
     /// embedder excluded.
     pub fn check_create(&self, live: usize, backend: Backend) -> Result<(), u32> {
         let allowed = match backend {
@@ -83,7 +83,7 @@ impl Ceiling {
             return Err(errno::UNSUPPORTED);
         }
         if live >= self.max_runtimes as usize {
-            return Err(errno::ACCESS_DENIED);
+            return Err(errno::PERMISSION_DENIED);
         }
         Ok(())
     }
@@ -107,7 +107,7 @@ mod tests {
             Ceiling { max_runtimes: 2, backends_mask: Backend::Threaded.mask_bit() | Backend::Kqueue.mask_bit(), default_entries: 8 };
         assert_eq!(ceiling.check_create(0, Backend::Auto), Ok(()));
         assert_eq!(ceiling.check_create(1, Backend::Threaded), Ok(()));
-        assert_eq!(ceiling.check_create(2, Backend::Threaded), Err(errno::ACCESS_DENIED));
+        assert_eq!(ceiling.check_create(2, Backend::Threaded), Err(errno::PERMISSION_DENIED));
         assert_eq!(ceiling.check_create(0, Backend::Uring), Err(errno::UNSUPPORTED));
         // A backend refusal wins over the count.
         assert_eq!(ceiling.check_create(5, Backend::Uring), Err(errno::UNSUPPORTED));

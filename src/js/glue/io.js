@@ -19,11 +19,23 @@
       const made = native.io.create(request);
       let handle;
       let nextTimer = 0;
+      // Every call returns the same promise, which settles when the runtime is really closed. The
+      // handle is marked closed (new work is refused) as soon as the first close starts, but the
+      // narrowing slots are only given back once it settles. Without `native.io.close` the call
+      // rejects Unsupported and the handle stays open.
+      let closing;
       const close = () => {
-        if (closedIo.has(handle)) return Promise.resolve();
+        if (closing !== undefined) return closing;
+        if (native.io.close === undefined) return Promise.reject(failure(Unsupported));
         closedIo.add(handle);
-        for (const s of chain) s.live--;
-        return native.io.close === undefined ? Promise.reject(failure(Unsupported)) : native.io.close(made.id);
+        closing = (async () => {
+          try {
+            await native.io.close(made.id);
+          } finally {
+            for (const s of chain) s.live--;
+          }
+        })();
+        return closing;
       };
       // Resolves once every flowing socket or server of this runtime has closed (immediately when
       // none is): `await io.run()` keeps the program alive for event-style handlers.
@@ -59,7 +71,7 @@
     }
 
     return freeze({
-      // Synchronous; throws a frozen `{ errno, name }` (InvalidPath for bad options, Unsupported
+      // Synchronous; throws a frozen `{ errno, name }` (InvalidInput for bad options, Unsupported
       // when the backend or the runtime count is not allowed or available).
       create(opts) {
         if (opts !== undefined && (opts === null || typeof opts !== 'object')) throw new TypeError('options must be an object');

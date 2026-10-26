@@ -16,13 +16,13 @@ Rust natives in `rust/crates/origine_api*`. Tests: `src/tests/managed/api.zig`. 
 | Area | State |
 |---|---|
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. The evaluated init graph is snapshotted lazily: the first run of `dir/init.js` evaluates it in a throwaway `SnapshotCreator` isolate (no host natives, so only `source` modules and pure-JS `origine:@std/*`; `import.meta.native` is absent) and stores `dir/__oricache__/init.js.<engine>.v8-snapshot`; later runs restore it, skip evaluation and call `main`. Valid while the engine tag, the init specifier and every file-backed module's content hash are unchanged (`src/api/init_cache.zig`, `src/managed/init_snapshot.zig`). An init that throws, awaits I/O or fails to load runs the normal path instead. Modules that run outside the snapshot (lazy imports, or every module when the init cannot be snapshotted) also get a V8 code cache, `name.<engine>.v8-code-cache` in the same `__oricache__`, written after the program ran and served only for byte-identical source (V8 itself only compares length); V8 refuses a cache made under a different startup blob, so a rebuilt snapshot costs one round of rejected caches. Snapshot files carry a readable header (file layout version, V8 build and code-cache tag, then the key); a file from another version is rejected with its reason, never migrated, and writing a cache file sweeps the directory of cache files made by other engine tags. `ORIGINE_NO_SNAPSHOT=1` disables both, `ORIGINE_SNAPSHOT_LOG=1` reports snapshot hit/miss (with the reason)/create/skip on stderr. |
-| `origine:@std/*` | `io` (Zig-style `Dir`/`File`/`IoError`/`Limit`), `fs` (Rust `std::fs`-style), `quansync` (write once, run sync or async), `text` (`encodeUtf8`/`decodeUtf8`, no `TextEncoder`/`TextDecoder` in the context), `errno`, and `transformer/oxc`. Each is documented in [src/js/docs](../src/js/docs/README.md). Native versions (V8 string conversion, simdutf) reach `text` through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. Scopes only see `origine:*` when created with `enable_origine_namespace` (the init scope has it; child scopes never do). |
+| `origine:@std/*` | `io` (Zig-style `Dir`/`File`/`IoError`/`Limit`), `fs` (Rust `std::fs`-style), `quansync` (write once, run sync or async), `text` (`encodeUtf8`/`decodeUtf8`/`tryDecodeUtf8`, no `TextEncoder`/`TextDecoder` in the context), `errno`, and `transformer/oxc`. Each is documented in [src/js/docs](../src/js/docs/README.md). Native versions (V8 string conversion, simdutf) reach `text` through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. Scopes only see `origine:*` when created with `origine_namespace` (the init scope has it; child scopes never do). |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. No `set`. |
-| `api.fs` | `requestSync({root, write})` (blocking, Zig natives, errno cell), `await requestAsync({io, root, write})` (genuinely asynchronous on an `api.io` runtime; Rust natives), `narrow({root, write, mode: {sync, async}})`. Real backend only (no memory/overlay). The two variants have the same op names (`dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirCreateDir`, `dirCreateDirPath`, `dirDeleteFile`, `dirDeleteDir`, `dirDeleteTree`, `dirRename`, `dirRead`, `fileStat`, `fileReadAll`, `fileRead`, `filePread`, `fileWrite`, `fileWriteAll`, `filePwriteAll`, `fileSetLength`, `fileSync`, `fileClose`); async additionally has `fileReadInto`, `filePreadInto`, `fileReadAlloc`, `filePreadAlloc`. |
-| `api.io` | Only when the embedder sets `Config.runtime` (the ceiling: backends, `max_runtimes`, `default_entries`). `create({backend?: 'auto'\|'uring'\|'kqueue'\|'threaded', entries?})` (sync) returns a frozen handle with `close()`, `run()`, and the clock and timers `now`, `sleep`, `sleepUntil`, `timer`, `timerAt` ([timers](../src/js/docs/timers.md)); `await io.close()` cancels in-flight operations and destroys the runtime; `narrow({backends, maxRuntimes})` only lowers the ceiling. Handles are not transferable across scopes. See 4.4. |
+| `api.fs` | `requestSync({root, access})` (blocking, Zig natives, errno cell), `await requestAsync({io, root, access})` (genuinely asynchronous on an `api.io` runtime; Rust natives); `access` is required: `'r'`, `'w'` or `'rw'`, and a request above the host ceiling is denied, never downgraded. No `narrow` on fs for now: `Config.fs` is the only ceiling. Real backend only (no memory/overlay). The two variants have the same op names (`dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirSymlinkStat`, `dirCreateDir`, `dirCreateDirPath`, `dirDeleteFile`, `dirDeleteDir`, `dirDeleteTree`, `dirRename`, `dirRead`, `fileStat`, `fileReadAll`, `fileRead`, `filePread`, `fileWrite`, `fileWriteAll`, `filePwriteAll`, `fileSetLength`, `fileSync`, `fileClose`); async additionally has `fileReadInto`, `filePreadInto`, `fileReadAlloc`, `filePreadAlloc` and the move writes `fileWriteMove`, `fileWriteMoveAll`, `filePwriteMoveAll` (the sync cap has them too, failing `Unsupported`). |
+| `api.io` | Only when the embedder sets `Config.runtime` (the ceiling: backends, `max_runtimes`, `default_entries`). `create({backend?: 'auto'\|'uring'\|'kqueue'\|'threaded', entries?})` (sync) returns a frozen handle with `close()`, `run()`, and the clock and timers `now`, `sleep`, `sleepUntil`, `timer`, `timerAt` ([timers](../src/js/docs/timers.md)); `await io.close()` cancels in-flight operations and destroys the runtime (every call returns the same promise, which settles once the runtime is closed, and `maxRuntimes` slots are freed then); `narrow({backends, maxRuntimes})` only lowers the ceiling. Handles are not transferable across scopes. See 4.4. |
 | `api.net` | Present wherever `api.io` is. Loopback TCP only (`127.0.0.1`, `localhost`, `::1`): `listen`, `connect`, `Server.accept`, `Socket.read/readInto/readCopy/write`, and event-style handles (`register`, `send`, `io.run()`). See [net](../src/js/docs/net.md). UDP, other hosts and an embedder network permission are not implemented. |
 | Errors | Errno in a native-backed `Uint32Array` (one per scope, `sync.errno`; the glue fetches it once as `native.errno`) for the sync cap; the async cap never uses it and rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. The cppgc out-parameter for detailed errors is not implemented. |
-| `api.scope` | `create({main, importMap, loader, preload, transformers})`, `narrow({count})`; handle has `run()` and `close()`. |
+| `api.scope` | `create({main, importMap, loader, preload, transformers, origineNamespace})`, handle has `run()` and `close()`. |
 | Transformers | The init scope transforms `.ts .mts .cts .tsx .jsx` through oxc by default (`Host.Config.transformers`); children get none unless the init passes them. See 4.5. |
 | Intrinsics snapshot | Done (engine level, below the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. Scope bootstrap helpers are restored from the snapshot instead of recompiled ([startup research](startup-optimization-research.md)). |
 | `isolate` | Absent (reserved name, see 4.6). |
@@ -44,17 +44,17 @@ const ops = try call.object(FsGrant, grant, .{ .openFile = openFile, .stat = sta
 - **State.** The first parameter is the state the function is bound to (`FsGrant`, `ScopeState`, ...). A state type provides `errnoCell()` and `allocator()`.
 - **Arguments** are decoded in order: `u32`, `u64`, `f64`, `bool`, `[]const u8` (string, copied into the per-call arena), `[]u8` (typed-array bytes, aliased), `v8.Value/Function/Object`, `?T`, or any type with `pub fn decode(call, index) !T` and an optional `arity`. Validating types such as `Path`, `SubPath` and `DirRef` put the security checks at the boundary, so ops only see checked values. A mistyped or missing argument fails with `InvalidArgument` (reported as `InvalidPath`) before the function runs.
 - **Results** are encoded: ints/floats/bools directly, strings, `?T`, slices and tuples as arrays, named structs as objects, V8 handles, or `encode(self, env)`.
-- **Errors, two domains.** Natives return either the closed binding set `errno.Error` (env, scope, argument decoding, encoding) or `std.Io` fs errors. `errno.of(Error)` maps the closed set strictly (every member has a code, checked at compile time); `errno.ofFs` maps fs errors by name, resolved at compile time for a concrete error set (unknown members become `Unexpected`; `anyerror` is rejected). `error.OutOfMemory` is never an errno: it panics (natives allocate through `Call.allocSlice`/`print`, which panic, and the mapping functions panic on it). `Call.fail` picks the domain from the error set. Non-fs code narrows its internal errors with `errno.narrow` (the one boundary that also takes the managed layer's `anyerror`-typed callbacks) and asserts it with `comptime errno.requireBinding(native)`, so a native that leaks other errors fails to compile. The `Errno` enum is the single source of truth for the guest: `origine:@std/errno` (`ERRNO`) is generated from it at compile time and the glue gets `native.errors` generated at install, so adding a member needs no JS change.
+- **Errors, two domains.** Natives return either the closed binding set `errno.Error` (env, scope, argument decoding, encoding) or `std.Io` fs errors. `errno.of(Error)` maps the closed set strictly (every member has a code, checked at compile time); `errno.ofFs` maps fs errors by name through one alias table (`FileNotFound` -> `NotFound`, `SymLinkLoop` -> `FilesystemLoop`, ...), resolved at compile time for a concrete error set (unknown members become `Unexpected`; `anyerror` is rejected). The `Errno` names follow Rust's `std::io::ErrorKind` and the Rust backend maps `io::Error` onto the same table (`errno_of`); a test provokes the same failures through sync and async fs and compares. `InvalidInput` is a bad argument or path (NUL, empty entry name, missing `access`), `PermissionDenied` every denial: the grant's (`..`, absolute path, `__oricache__`, wrong access, above the ceiling) and the OS's. `error.OutOfMemory` is never an errno: it panics (natives allocate through `Call.allocSlice`/`print`, which panic, and the mapping functions panic on it). `Call.fail` picks the domain from the error set. Non-fs code narrows its internal errors with `errno.narrow` (the one boundary that also takes the managed layer's `anyerror`-typed callbacks) and asserts it with `comptime errno.requireBinding(native)`, so a native that leaks other errors fails to compile. `JavaScriptException` is not an errno: a native failing with it leaves the pending JS exception to propagate (`Call.fail` writes nothing), and `errno.narrow` turns the managed layer's already-captured exceptions into `InvalidData`. The codes are two enums, `IoErrno` (Rust's `ErrorKind` names) and `HostErrno` (`BadHandle`, `StaleHandle`, `Canceled`, `Unexpected`), numbered in readable blocks (`src/js/docs/errno.md`); `IoError` and `HostError` of `origine:@std/io` expose them. They are the single source of truth for the guest: `origine:@std/errno` (`ERRNO`) is generated from it at compile time and the glue gets `native.errors` generated at install, so adding a member needs no JS change.
 - **Tables.** `binding.object` builds a whole native surface from one comptime table: function fields become natives, named structs become nested objects, other fields are plain values.
 
 Known limitations:
 - **Async fs is real:** `requestAsync` operations run on an `io` runtime (Zig `src/io` loop + Rust runtime, see 4.4). Writes and the `*Into`/`*Alloc` reads move buffers to the host instead of copying (see the buffer semantics in 4.4).
 - **Path checks are lexical.** NUL, absolute paths and `..` are rejected; a symlink inside the root can still point outside it.
 - **Option bags** are read from own data properties, but Proxies are not detected.
-- **`scope.close()`** revokes the handle and clears the import cache. The V8 context stays alive until `Runtime.destroy`, since `Runtime` cannot destroy a single scope.
+- **`scope.close()`** revokes the handle and disposes the child and its own children (`Runtime.disposeScope`); the context and host state are freed at the runtime's next safe point. Handles also implement `Symbol.dispose`. See `docs/scope-disposal.md`.
 - **Loader** is called as `loader(moduleId: string)` and may return a string, `{ source }`, or a promise of either. `{ exports }` results and a custom `resolver` are not supported. Creating a scope from inside a loader callback is refused (`Unsupported`).
 - **Cross-realm errors:** a child's failed `run()` rejects with a fresh `{errno: 255, name: 'ModuleError', message}`; child error objects never reach the parent.
-- **Depth limit** for `scope.narrow` is not implemented (only `count`).
+- **No `scope.narrow`:** the only option was a total-creation `count`, which was never restored on close; it was removed. A scope depth or live-count limit is not implemented.
 - Sync fs ignores `allow_explicit_blocking_api`.
 - **Network** is loopback-only with no embedder permission; there is no UDP or `fetch`.
 
@@ -116,15 +116,15 @@ interface Api {
 ### 4.1 Request, then grant (`fs`)
 
 ```ts
-const sync: SyncFs = api.fs.requestSync({ root?, write? });                       // hint only; throws {errno, name} when denied
-const async: AsyncFs = await api.fs.requestAsync({ io, root?, write? });         // hint only; rejects BadHandle / AccessDenied / ...
+const sync: SyncFs = api.fs.requestSync({ root?, access });                       // access: 'r' | 'w' | 'rw'; throws {errno, name} when denied
+const async: AsyncFs = await api.fs.requestAsync({ io, root?, access });         // rejects BadHandle / PermissionDenied / InvalidInput / ...
 interface SyncFs  { kind: 'sync';  id: number; errno: Uint32Array; /* FsOps<sync> */ }
 interface AsyncFs { kind: 'async'; id: number;                      /* FsOps<Promise> */ }
 ```
 
 - The guest sends a **hint**. The **host's provider decides** and returns one of: the real fs (rooted), a virtual (memory) fs, an overlay (lower read-only plus upper writable), or a denial. Only the real fs and denial exist today. The guest cannot tell which one it got and cannot choose.
-- The sync and async variants expose the **same operation names** (`dirOpenFile`, `fileRead`, `fileWrite`, `dirCreateDir`, `stat`, `dirIterate`, `fileClose`, ...). Sync blocks the isolate thread. `requestSync` throws `AccessDenied` unless the grant allows it (host `FsConfig.sync`, not narrowed away), and the runtime must have `allow_explicit_blocking_api` set (already in `Runtime.Options`). `requestAsync` additionally needs `FsConfig.async`, `Config.runtime`, and an `io` handle of the same scope that is still open.
-- An fs object is the whole authority for its backend. Sub-directory grants are made with `narrow`.
+- The sync and async variants expose the **same operation names** (`dirOpenFile`, `fileRead`, `fileWrite`, `dirCreateDir`, `stat`, `dirIterate`, `fileClose`, ...). Sync blocks the isolate thread. `requestSync` throws `PermissionDenied` unless the grant allows it (host `FsConfig.sync`), and the runtime must have `allow_explicit_blocking_api` set (already in `Runtime.Options`). `requestAsync` additionally needs `FsConfig.async`, `Config.runtime`, and an `io` handle of the same scope that is still open.
+- An fs object is the whole authority for its backend. A sub-directory grant is a request with a `root`. `access: 'w'` is write-only: native handles are readable when writable, so the grant itself denies (`PermissionDenied`) everything that observes what exists (reads, stat, directory listings, opening for read). Confinement of `root` is lexical only: `..`, absolute paths and `__oricache__` components are denied, but a symlink inside the root can still lead out of it when followed (`metadata`, `stat`, `open`); how to confine symlinks is undecided.
 
 ### 4.2 `env`
 
@@ -138,7 +138,7 @@ Implemented as loopback TCP on an `io` runtime; the reference is [net.md](../src
 
 ```ts
 const io = api.io.create({ backend?: 'auto' | 'uring' | 'kqueue' | 'threaded', entries?: number });   // sync
-const fs = await api.fs.requestAsync({ io, root, write });   // the grant's operations run on `io`
+const fs = await api.fs.requestAsync({ io, root, access });   // the grant's operations run on `io`
 await io.close();                                             // cancels in-flight operations, destroys the runtime
 ```
 
@@ -148,10 +148,10 @@ await io.close();                                             // cancels in-flig
 - **Errors.** The open point of section 6 is resolved: async operations never touch the shared errno cell; they reject with the frozen `{errno, name}` value. Errno members for the async/network world: `Canceled` 14, `TimedOut` 15, `WouldBlock` 16, `ConnectionRefused` 17, `ConnectionReset` 18, `BrokenPipe` 19, `AddressInUse` 20, `NotConnected` 21 (single source of truth: `Errno` in `src/api/errno_codes.zig`; the Rust table is generated from it, see [contracts.md](contracts.md) surface D).
 - **Buffer semantics (pin + detach, BYOB, host-allocated).** Where possible the host takes guest memory for the duration of an operation instead of copying it (details in [async-host-contract.md](async-host-contract.md)).
   - *Eligibility.* A guest ArrayBuffer can be pinned only if it is not shared (`SharedArrayBuffer`), not resizable, not WebAssembly memory (not detachable) and detaching it succeeds. Anything else falls back to copying, with the buffer left usable. The decision is the host's and is not observable except through the detach, so guests must treat both outcomes as valid.
-  - *Writes* (`fileWrite`, `filePwriteAll`, `fileWriteAll`, and everything built on them: `File.writeStreaming*`, `Dir.writeFile`, Rust-style `write`/`write_all`): an eligible buffer is **detached** (transferred) and written from directly. Afterwards the buffer reads `byteLength === 0` and every view over it has length 0, whether the write succeeds, fails or is canceled. Pass `bytes.slice()` to keep the data; never write one buffer twice or in a loop (a partial `fileWrite` remainder must come from a copy). Non-eligible buffers are copied at call time.
+  - *Writes* (`fileWrite`, `filePwriteAll`, `fileWriteAll`, and everything built on them: `File.writeStreaming*`, `Dir.writeFile`, Rust-style `write`/`write_all`): the plain writes ALWAYS copy at call time and never detach the caller's buffer. The explicit `*Move` variants (`fileWriteMove`, `fileWriteMoveAll`, `filePwriteMoveAll`; `File.writeStreamingMove*`, `writePositionalMoveAll`, Rust-style `File.write_move`/`write_move_all`) **detach** (transfer) an eligible buffer and write from it directly: afterwards it reads `byteLength === 0` and every view over it has length 0, whether the write succeeds, fails or is canceled. A buffer that cannot be detached (shared, resizable, wasm memory) fails `Unsupported` untouched; a move never copies silently. Never move one buffer twice or in a loop (a partial `fileWriteMove` remainder must come from a fresh buffer).
   - *BYOB reads* (`fileReadInto(file, view)`, `filePreadInto(file, view, offset)`; `File.readInto(io, view, offset?)`): `view` is an ArrayBuffer or any view; its buffer is pinned and detached, the read lands in it, and the promise resolves a frozen `{ bytes, buffer }` where `buffer` is a view of the same kind, byteOffset and length as `view` over the filled memory. Use `buffer`, not `view` (detached when pinned; in the copy fallback `view` also holds the data). A buffer can be handed to one operation at a time: a second operation on an already-detached buffer is a zero-length request or a rejection, never a use of freed memory.
   - *Host-allocated reads* (`fileReadAlloc(file, len)`, `filePreadAlloc(file, len, offset)`; `File.readAlloc(io, len, offset?)`): the host allocates the buffer, reads once and resolves a `Uint8Array` of exactly the bytes read (shorter than `len` near the end, empty at the end). No guest buffer is involved, so there is nothing to detach.
-  - *Unchanged.* `fileRead`/`filePread` still copy into the caller's buffer at completion and resolve a count (rejecting if the buffer was detached meanwhile); `readAll` returns a host-provided `Uint8Array`. The sync variants never detach and have no `*Into`/`*Alloc` operations (`File.readInto`/`readAlloc` throw `Unsupported` on a sync io).
+  - *Unchanged.* `fileRead`/`filePread` still copy into the caller's buffer at completion and resolve a count (rejecting if the buffer was detached meanwhile); `readAll` returns a host-provided `Uint8Array`. The sync variants never detach and have no `*Into`/`*Alloc`/`*Move` operations (`File.readInto`/`readAlloc`/`writeStreamingMove*` throw `Unsupported` on a sync io).
   - *Cancellation.* `io.close()` with a pinned operation in flight rejects it with `Canceled`; the host keeps the memory alive until the runtime has finished with it and nothing is handed back to the guest.
 - **Timers.** `now`, `sleep`, `sleepUntil`, `timer` and `timerAt` run on the same runtime and are cancelled by `io.close()`; see [timers.md](../src/js/docs/timers.md).
 - **Linking.** The Rust runtime calls the `oio_*` C ABI of `src/io/c_api.zig`; `build.zig` links the archive `liborigine_io.a` (root `src/io/lib.zig`) into the executable, the test binary and the snapshot tool.
@@ -164,7 +164,8 @@ const child = await api.scope.create({
   main:      "app:/main.js",        // main module specifier
   importMap: { imports: {...} },    // data-only, parsed by ImportMap.parseJson
   loader:    (moduleId) => Content, // basic JS callback loader (may be async)
-  preload:   [{ source, values }],  // scripts run before main
+  preload:   [{ source, values } | { module, values }],  // run in order before main
+  origineNamespace: false,    // child may import `origine:` modules; only if the parent can
 });
 await child.run();    // evaluate main
 child.close();        // destroy scope, revoke its grants
@@ -174,6 +175,8 @@ child.close();        // destroy scope, revoke its grants
 - **`transformers`: extension-keyed source transforms.** `transformers: { ".ts": t, ".tsx": t2 }` maps a file extension (starts with `.`, no `/ \\ ? #`, no trailing dot, no `..`; longest suffix wins, so `.d.ts` beats `.ts`) to a transformer, applied to loader results before compilation. A value is a host transformer from `origine:@std/transformer/oxc` (`ts(options)`, `tsx(options)`, `jsx(options)`: a native function branded with a `v8::Private` symbol, options supplied per transformer) or a plain JS function `(source, id) => string | { source }` (promises are not supported). Requires `loader`; a child gets no transformers unless the init passes them. The init scope itself uses `Host.Config.transformers` (default: `.ts .mts .cts` and `.tsx .jsx` through oxc). Syntax errors are reported as `file:line:col: error: message`; runtime stack positions refer to the transformed text. The JSX automatic runtime needs the runtime module to be importable (`importSource`), or use the classic runtime.
 - **Scope is not exposed to children by default.** A child's preload `values` and globals contain no `scope` capability. Creating a scope requires the init to explicitly request and hand it a narrowed `scope` capability.
 - **Preload scripts and `values`.** Each preload is evaluated in the child before `main`, as `(values) => { ... }`. `values` is a hardened (deep-frozen) value built in the parent. The preload can install globals (`globalThis.process`, `Buffer`, `console`) and close over the received `api` slices. Values that cross a scope boundary follow the existing `Scope.harden` rules: plain data and functions only. No Promise/ArrayBuffer/Proxy/Map/etc. passes through the boundary.
+- **Module preloads.** `{ module, values }` evaluates `module` as an ES module (`preload:<index>`) in the child. If its default export is a function it is called with the hardened `values`, and an async one is awaited; the preload settles after that. Exactly one of `source` and `module` per entry. A failing preload rejects `create` with a `ModuleError` and closes the child.
+- **`origineNamespace`.** Lets the child import the host's `origine:` modules (served from the host table, never by the child's `loader`, with their natives bound to the child). It is the parent's to give: a parent scope without it gets `Unsupported`, so a child cannot widen its authority.
 - **Child authority.** A child gets only what the init passes through preload `values` (already-narrowed capability objects). Nothing is inherited implicitly.
 
 ### 4.6 `isolate`
@@ -182,12 +185,11 @@ Not implemented. Reserved name. Constraints already fixed: it is an `api` capabi
 
 ## 5. Narrowing (monotonic attenuation)
 
-Each capability narrows itself: `api.fs.narrow(spec)`, `api.env.narrow(spec)`, `api.scope.narrow(spec)`, `api.io.narrow(spec)`. (`api.net` has no `narrow` yet.) Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
+Each capability narrows itself: `api.env.narrow(spec)`, `api.io.narrow(spec)`. (`api.fs` has no `narrow` for now, only the embedder's `Config.fs` ceiling and the `access` of each request; `api.scope` and `api.net` have no `narrow`.) Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
 
 ```js
-const roFs   = api.fs.narrow({ root: "/data", write: false, mode: { sync: false } });
+const roFs   = api.fs.requestSync({ root: "/data", access: "r" });
 const env    = api.env.narrow({ allow: ["HOME", "PATH"] });
-const scopes = api.scope.narrow({ count: 4 });   // `depth` is not implemented
 ```
 
 - **`api.*` is just an object map of functions, so narrowing is function replacement.** `narrow` returns a copy of the map in which the affected functions are replaced by wrappers that check the spec first and return an error (or call the original). For example the narrowed `dirOpenFile` rejects a path outside `root`, and a narrowed `fileRead` clamps its `limit`. This is plain JS, so it is easy to write and audit, and the init can narrow with any policy it likes (the spec shapes above are only examples).
@@ -201,7 +203,7 @@ const scopes = api.scope.narrow({ count: 4 });   // `depth` is not implemented
   | `Limit.nothing` | `0`; reads nothing |
 
   `origine:@std/io` exposes the same three values to JS. They are the `limit` argument of reads (`fileReadAll(file, { limit })`) and the byte quota in fs specs. Quotas are not a bag of unrelated knobs: any byte budget is a `Limit`, and narrowing takes the minimum of two limits.
-- **`sync` is the init's decision.** The init chooses whether to expose `sync` to anything it hands a capability to, by narrowing it away (`mode: { sync: false }`) or leaving it.
+- **`sync` is the init's decision.** The init chooses whether to expose `sync` to anything it hands a capability to, by not handing the sync grant on, or leaving it.
 - Revoking a parent revokes its descendants: each grant has a generation and a `revoked` flag that every call checks (the `StaleLoadToken` pattern from `Runtime.completeLoad`). `Scope.destroy` and `child.close()` bump it, and in-flight completions fail with the stale-handle error (`IoError.StaleHandle`, see section 6).
 
 ## 6. Security properties
@@ -213,7 +215,7 @@ const scopes = api.scope.narrow({ count: 4 });   // `depth` is not implemented
 5. **Inputs are read once, defensively.** Option bags are parsed from own data properties only (no getters, Proxies or prototype lookups) and copied into Zig memory before validation or `await`.
 6. **Results are fresh values in the caller's context.** No host or cross-scope identity leaks.
 7. **Errors are a closed set with no host details.** Errors never carry host paths or Zig internals; details go to an audit hook. See "Error representation" below.
-8. **Audit and quotas.** Requests, grants, denials and revokes are all audited. Limits: open handles, in-flight ops, bytes (`Limit`), scope depth and count.
+8. **Audit and quotas.** Requests, grants, denials and revokes are all audited. Limits: open handles, in-flight ops, bytes (`Limit`), scope depth and live count (not implemented).
 
 ### Error representation (decided): errno out-state
 
@@ -221,8 +223,8 @@ Node-style string codes are cryptic and per-failure `Error` objects with capture
 
 - **Error state is a `Uint32Array`.** The native side exposes a `Uint32Array` as the error state. When an operation fails it writes a **non-zero errno** into element 0 and returns a neutral value (e.g. `-1` / `undefined`). On success it leaves element 0 as `0` (the caller resets it, or the native side clears it on entry). A failure check is one typed-array read, with no allocation and no stack capture.
 - **Detailed errors via an out parameter.** When more than an errno is needed, the caller passes a **pre-constructed cppgc object** as an out parameter, and the native side fills it in. Reuse is the caller's choice, so the common path allocates nothing.
-- **`IoError` in `origine:@std/io`** is a frozen table of errno values with Zig-style names (`IoError.FileNotFound`, `AccessDenied`, `NotDir`, `StaleHandle`, `BadHandle`). It is data only, so it is snapshot-safe.
-- **Node layer maps to codes in userland.** `node:fs` turns `IoError.FileNotFound` into a Node-style error with `code: "ENOENT"`, paying for stack capture only where Node semantics demand it.
+- **`IoError` in `origine:@std/io`** is a frozen table of errno values with Zig-style names (`IoError.NotFound`, `PermissionDenied`, `NotADirectory`, `StaleHandle`, `BadHandle`, named like Rust's `io::ErrorKind`). It is data only, so it is snapshot-safe.
+- **Node layer maps to codes in userland.** `node:fs` turns `IoError.NotFound` into a Node-style error with `code: "ENOENT"`, paying for stack capture only where Node semantics demand it.
 - **No host details.** The errno is the whole default payload. Paths and Zig internals go to the audit hook.
 
 Open points:
@@ -240,7 +242,7 @@ import { makeNodeFs }   from "./node/fs.js";    // factories take `api` slices
 import { makeProcess }  from "./node/process.js";
 
 export async function main(api) {
-  const fs = { sync: api.fs.requestSync({ root: "/", write: true }) };   // async: await api.fs.requestAsync({ io, root: "/", write: true })
+  const fs = { sync: api.fs.requestSync({ root: "/", access: "rw" }) };   // async: await api.fs.requestAsync({ io, root: "/", access: "rw" })
 
   const nodeFs  = makeNodeFs(fs, Dir);
   const process = makeProcess(api.env.narrow({ allow: ["HOME", "PATH"] }));
@@ -294,7 +296,7 @@ Layout: `src/api/{host,glue,fs,env,scope,js_loader,init_loader,init_cache,errno,
 ## 9. Delivery status
 
 1. Snapshot plus `main(api)`; `origine:@std/io` descriptors: done.
-2. `fs`: real backend with sync and async variants and `narrow` done; memory and overlay backends not started.
+2. `fs`: real backend with sync and async variants done (`narrow` dropped for now); memory and overlay backends not started.
 3. `scope.create` with import map, preload `values`, a JS callback loader and transformers: done (custom resolver not started).
 4. `env`: done. `io`, timers and loopback `net`: done. Wider `net` (fetch, UDP): not started.
 5. `isolate`: not started.
@@ -302,7 +304,7 @@ Layout: `src/api/{host,glue,fs,env,scope,js_loader,init_loader,init_cache,errno,
 ## 10. Open questions
 
 - **Resolver:** a custom module resolver is not supported; the import map is the only resolution control. Exception routing and reentrancy beyond the no-`createScope`-in-loader rule still need a definition.
-- **Native narrowing:** which specs get a native intersect layer beyond fs `root`/`write`/`mode` (section 5).
+- **Native narrowing:** which specs get a native intersect layer beyond `root`/`mode` of the dropped fs `narrow` (section 5).
 - **Network permission:** how the embedder grants wider network access than loopback, and whether it follows the request/grant shape (4.3).
 - **Detailed errors:** the cppgc out-parameter (section 6) is unimplemented.
 - **Hardener and typed arrays:** `supportedExport` rejects `ArrayBufferView`, so the errno array cannot cross a scope boundary through `values`; a narrowed sync fs handed to a child cannot carry it.

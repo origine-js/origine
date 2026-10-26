@@ -23,8 +23,10 @@ native => {
     errno[0] = 0;
     return code;
   };
-  // `native.errors` is generated from the Zig `Errno` enum: { FileNotFound: 1, ... }.
-  const errors = native.errors;
+  // `native.errors` is generated from the Zig `IoErrno` and `HostErrno` enums:
+  // `{ io: { NotFound: 10, ... }, host: { BadHandle: 2, ... } }`. The factories get the two domains
+  // flat as `errors` (the names are unique across them) and failures are built by code.
+  const errors = freeze({ ...native.errors.io, ...native.errors.host });
   const names = freeze(Object.fromEntries(Object.entries(errors).map(([name, code]) => [code, name])));
   const failure = code => freeze({ errno: code, name: names[code] ?? 'Unexpected' });
 

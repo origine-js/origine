@@ -1,45 +1,46 @@
 # origine_alloc
 
-`MiMalloc`, a `#[global_allocator]`-ready `GlobalAlloc` that forwards to mimalloc's `mi_*` API
-(`mi_malloc_aligned`, `mi_zalloc_aligned`, `mi_realloc_aligned`, `mi_free`). Rust, Zig and V8 then
-share one allocator implementation in the process. Source: `src/lib.rs` (about 50 lines).
+Rust bindings for the mimalloc 3.6.0 that the Zig build links (`lib/mimalloc`), so Rust, Zig and V8
+share one allocator in the process. The Zig bindings (`lib/mimalloc/src`) mirror this crate.
 
-## Linking
+| Module | What it is |
+|---|---|
+| `sys` | The raw C ABI, grouped like `mimalloc.h`. Pure functions are declared `safe`. |
+| `MiMalloc` | A `#[global_allocator]`. |
+| `Heap`, `Theap` | `Heap`: a first-class heap, `Send + Sync` (any thread may allocate from it or free its blocks). Dropping one hands its live blocks to the main heap; `unsafe destroy` frees them all at once. `Theap`: the calling thread's part of a heap, `!Send`, for allocating without the thread-local lookup. |
+| `ArenaId`, `reserve*` | Memory mimalloc allocates from beyond its own OS requests: reserved, huge pages, or a range someone else owns (the V8 sandbox). `unload` takes it back before the range is unmapped. |
+| `Setting`, `Tuning` | Typed runtime options (`MIMALLOC_*`), and the ones upstream's performance guide names. `Tuning::apply` uses the `*_default` setters so an environment variable still wins. |
+| `stats` | Process info, JSON statistics, printing. |
 
-The crate declares the four `extern "C"` symbols and **links nothing itself**: the mimalloc static
-library is built by the Zig build (`dep.artifact("mimalloc")` of the V8 dependency; it only defines
-`mi_*`: libc `malloc` and the macOS malloc zones are not overridden) and is linked into the final
-executable by Zig. For cargo builds that go through `rust/scripts/cargo-v8.sh` the archive path is
-passed as `V8_ZIG_MIMALLOC` (consumed by the vendored `v8` crate's build script). Any binary or
-test that installs `MiMalloc` as its global allocator must be linked with mimalloc, or it will
-fail to link with undefined `mi_*` symbols.
+## Performance
+
+Following upstream's [getting the best performance](https://github.com/microsoft/mimalloc#getting-the-best-performance):
+
+* build flags: `lib/mimalloc` compiles with `-Dopt_arch` (MI_OPT_ARCH) by default;
+* `MiMalloc` takes the `*_small` entry points for blocks up to `SMALL_SIZE_MAX` (1 KiB on 64-bit) at word
+  alignment, and the zeroing calls for `alloc_zeroed`;
+* `Theap::current()` once per thread, then allocate through it, for code that keeps per-thread state;
+* tune with `Tuning { large_os_pages, huge_os_pages, transparent_huge_pages, purge_delay_ms, reserve_bytes }`.
+
+`dealloc` calls plain `mi_free`, not `mi_free_size`: the sized fast path treats `size <= SMALL_SIZE_MAX` as
+"this block is in a small page", which `realloc` and in-place resizing do not preserve.
+
+## Linking and tests
+
+The crate declares the symbols and **links nothing itself**: the Zig build links the archive into the final
+executable. `build.rs` makes the crate's own tests link it when `V8_ZIG_MIMALLOC` is set (exported by
+`rust/scripts/cargo-v8.sh`), which turns on `cfg(mimalloc_linked)`; without it a bare `cargo test` skips the
+tests that call mimalloc.
+
+```sh
+zig build test-alloc    # cargo test -p origine_alloc against the Zig-built mimalloc
+zig build clippy        # the whole workspace, -D warnings
+```
+
+The option numbers (`Setting`) come from `mimalloc.h`; `lib/mimalloc/tests/abi.c` asserts them on the Zig
+side at build time, and a test here pins a sample.
 
 ## Where it is installed
 
-Only in the root crate `origine_native` (`rust/src/lib.rs`):
-
-```rust
-#[cfg(not(miri))]
-#[global_allocator]
-static GLOBAL: origine_alloc::MiMalloc = origine_alloc::MiMalloc;
-```
-
-* Member crates (`origine_io`, `origine_api_core`, ...) never install it, so their `cargo test`
-  runs use the system allocator and need no mimalloc.
-* **Not under Miri**: Miri cannot call foreign allocators, hence the `cfg(not(miri))`.
-* The static library carries Rust's own `std`; the allocator is process-wide for the Rust code in
-  `liborigine_native.a`, including the `v8` crate's Rust side.
-
-## Caveats
-
-* Alignment: every method passes `layout.align()`; the `*_aligned` functions handle any power of
-  two. Zero-sized allocations never reach the allocator (`GlobalAlloc` contract).
-* `realloc` uses `mi_realloc_aligned` and preserves contents up to the smaller size; there is no
-  `mi_usable_size` use, no statistics, no custom options.
-* mimalloc is thread-safe; no extra locking here.
-* Memory allocated by Rust must be freed by Rust (it comes from the same allocator, but handing
-  Rust-allocated blocks to Zig/V8 or the reverse is not part of any interface here). V8 sandbox
-  memory (ArrayBuffers) is separate and never exposed as Rust allocations
-  ([origine_api buffers](../../origine_api/docs/README.md#buffers-and-copy-semantics)).
-* There is no allocation-failure hook: on failure mimalloc returns null and std aborts via
-  `handle_alloc_error`.
+Only in the root crate `origine_native` (`rust/src/lib.rs`), `#[cfg(not(miri))]`; Miri cannot call foreign
+allocators. Member crates never install it, so their `cargo test` runs use the system allocator.

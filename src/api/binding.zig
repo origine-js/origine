@@ -21,6 +21,12 @@
 //!   and `constructor` (`.throw`, the default, or `.allow`) sets the constructor behavior;
 //!   `.allow` implies no fast entry. A bare function in a table is a compile error.
 //!
+//! - **Detached scopes.** When the scope a native belongs to has been disposed, the state record
+//!   outlives it (V8 may keep the context alive through references from other realms) and
+//!   `State.isDetached(self) bool` is true. A native then fails with `StaleHandle` before it runs,
+//!   unless `func` says `.detached = .allow`, which takes `*State.Core` (allocator and errno cell
+//!   only, no resources) as its first parameter and requires `side_effect = .none`.
+//!
 //! - **State.** The first parameter is the state pointer (`*State`) the function was
 //!   bound to. `State` provides two methods: `errnoCell(self) *u32` (where failures are
 //!   reported) and `allocator(self) std.mem.Allocator` (backing the per-call arena).
@@ -152,6 +158,12 @@ pub fn bytesValue(env: Env, data: []const u8) !v8.Value {
 /// Wraps the typed function `callee` as a V8 callback. `callee` must take `*State` first;
 /// see the file comment for argument, result and error handling.
 pub fn native(comptime State: type, comptime callee: anytype) v8.FunctionCallback {
+    return nativeWith(State, callee, .fail);
+}
+
+/// `native` with an explicit policy for a detached scope (see the file comment).
+pub fn nativeWith(comptime State: type, comptime callee: anytype, comptime detached: Detached) v8.FunctionCallback {
+    comptime checkDetached(State, callee, detached);
     return struct {
         fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
             const state = nativeState(State, info) orelse {
@@ -161,6 +173,9 @@ pub fn native(comptime State: type, comptime callee: anytype) v8.FunctionCallbac
             var arena = std.heap.ArenaAllocator.init(state.allocator());
             defer arena.deinit();
             var call = Call.init(info, state.errnoCell(), arena.allocator());
+            if (comptime detached == .fail and @hasDecl(State, "isDetached")) {
+                if (state.isDetached()) return call.fail(error.StaleHandle);
+            }
             invoke(State, callee, state, &call) catch |err| call.fail(err);
         }
     }.callback;
@@ -172,8 +187,11 @@ fn invoke(comptime State: type, comptime callee: anytype, state: *State, call: *
     inline for (Fn.param_types, 0..) |maybe_type, position| {
         const P = maybe_type.?;
         if (position == 0) {
-            if (P != *State) @compileError("the first parameter of a native must be the state pointer *" ++ @typeName(State));
-            args[0] = state;
+            if (P == *State) {
+                args[0] = state;
+            } else if (comptime hasCore(State) and P == *State.Core) {
+                args[0] = state.core();
+            } else @compileError("the first parameter of a native must be the state pointer *" ++ @typeName(State));
         } else if (P == *Call) {
             args[position] = call;
         } else {
@@ -185,6 +203,27 @@ fn invoke(comptime State: type, comptime callee: anytype, state: *State, call: *
         .error_union => setReturn(call, try @call(.auto, callee, args)),
         else => setReturn(call, @call(.auto, callee, args)),
     }
+}
+
+fn hasCore(comptime State: type) bool {
+    return @hasDecl(State, "Core") and @hasDecl(State, "core");
+}
+
+/// Whether `P` is a valid first parameter for natives of `State`.
+fn isStateParam(comptime State: type, comptime P: type) bool {
+    return P == *State or (hasCore(State) and P == *State.Core);
+}
+
+/// Compile-time rules tying `.detached` to the first parameter: only `.allow` natives see the
+/// core, and `.allow` natives see nothing else.
+fn checkDetached(comptime State: type, comptime callee: anytype, comptime detached: Detached) void {
+    const Fn = @typeInfo(@TypeOf(callee)).@"fn";
+    if (Fn.param_types.len == 0) return;
+    const P = Fn.param_types[0].?;
+    if (detached == .allow and !(hasCore(State) and P == *State.Core))
+        @compileError("a `.detached = .allow` native must take *" ++ @typeName(State) ++ ".Core first, not the full state");
+    if (detached == .fail and hasCore(State) and P == *State.Core)
+        @compileError("a native taking *" ++ @typeName(State) ++ ".Core must be declared `.detached = .allow`");
 }
 
 /// The JS argument index of parameter `position`: the summed arity of the decoded
@@ -244,7 +283,7 @@ fn Payload(comptime T: type) type {
 /// True when `callee` can be exposed through V8's fast API (see the file comment).
 fn isFast(comptime State: type, comptime callee: anytype) bool {
     const Fn = @typeInfo(@TypeOf(callee)).@"fn";
-    if (Fn.param_types.len == 0 or Fn.param_types.len > max_fast_args + 1 or Fn.param_types[0].? != *State) return false;
+    if (Fn.param_types.len == 0 or Fn.param_types.len > max_fast_args + 1 or !isStateParam(State, Fn.param_types[0].?)) return false;
     inline for (Fn.param_types[1..]) |param| {
         if (fastParam(param.?) == null) return false;
     }
@@ -256,7 +295,7 @@ const max_fast_args = 6;
 /// The fast API entry for `callee`: the C callback plus the static type description V8
 /// and the overload list keep for as long as the function template lives (V8 retains
 /// pointers into them rather than copying).
-fn Fast(comptime State: type, comptime callee: anytype) type {
+fn Fast(comptime State: type, comptime callee: anytype, comptime detached: Detached) type {
     return struct {
         const Fn = @typeInfo(@TypeOf(callee)).@"fn";
         const arity = Fn.param_types.len - 1;
@@ -291,8 +330,14 @@ fn Fast(comptime State: type, comptime callee: anytype) type {
             const state = statePointer(State, v8.Value.from_opaque(v8.fromRawLocal(options.data)).?);
             const cell = state.errnoCell();
             cell.* = 0;
+            if (comptime detached == .fail and @hasDecl(State, "isDetached")) {
+                if (state.isDetached()) {
+                    call_mod.record(cell, error.StaleHandle);
+                    return std.mem.zeroes(Result);
+                }
+            }
             var args: std.meta.ArgsTuple(@TypeOf(callee)) = undefined;
-            args[0] = state;
+            args[0] = if (comptime Fn.param_types[0].? == *State) state else state.core();
             inline for (0..arity) |index| args[index + 1] = js_args[index];
             if (@typeInfo(Fn.return_type.?) == .error_union) {
                 return @call(.always_inline, callee, args) catch |err| {
@@ -380,8 +425,18 @@ pub const Constructor = enum {
     }
 };
 
+/// What a native does once its scope has been disposed (see the file comment).
+pub const Detached = enum {
+    /// Fails with `StaleHandle` without running. The default, so a native that touches a released
+    /// resource cannot stay callable by omission.
+    fail,
+    /// Runs, with only the scope's core. Requires `side_effect = .none`.
+    allow,
+};
+
 /// Per-native settings for `func`.
 pub const FuncOptions = struct {
+    detached: Detached = .fail,
     /// Required: the table cannot be built while this is unset.
     side_effect: ?SideEffect = null,
     /// Keep the native on the slow callback even if it could take the fast API path.
@@ -408,6 +463,12 @@ pub fn Wrapped(comptime F: type) type {
         pub fn nofast(self: Self, value: bool) Self {
             var next = self;
             next.options.nofast = value;
+            return next;
+        }
+
+        pub fn detached(self: Self, value: Detached) Self {
+            var next = self;
+            next.options.detached = value;
             return next;
         }
 
@@ -463,18 +524,21 @@ fn rawFunction(env: Env, state: *anyopaque, comptime native_raw: Raw) v8.Functio
 /// The returned handle is local to the current handle scope; `state` must outlive the function.
 fn function(env: Env, comptime State: type, state: *State, comptime callee: anytype, comptime options: FuncOptions) v8.Function {
     const side_effect = options.side_effect.?.toV8();
+    if (comptime options.detached == .allow and options.side_effect.? != .none)
+        @compileError("a `.detached = .allow` native must be `side_effect = .none`");
+    const callback = comptime nativeWith(State, callee, options.detached);
     // Natives for a snapshot are always plain callbacks over a static marker.
     if (env.rebind) |index| {
         const data = eu.v.external(env.isolate, &rebind_markers[index]).value.data;
-        return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
+        return v8.Function.init(env.ctx, callback, data, 0, options.constructor.toV8(), side_effect);
     }
     if (comptime options.nofast or options.constructor == .allow or !isFast(State, callee)) {
         const data = eu.v.external(env.isolate, state).value.data;
-        return v8.Function.init(env.ctx, native(State, callee), data, 0, options.constructor.toV8(), side_effect);
+        return v8.Function.init(env.ctx, callback, data, 0, options.constructor.toV8(), side_effect);
     }
     const data = eu.v.num_f64(env.isolate, @floatFromInt(@intFromPtr(state))).numeric.primitive.value.data;
     var builder: v8.FunctionTemplate.Builder = .{};
-    const template = builder.data(data).constructor_behavior(.Throw).side_effect_type(side_effect).build(env.isolate, native(State, callee), @constCast(&Fast(State, callee).overloads));
+    const template = builder.data(data).constructor_behavior(.Throw).side_effect_type(side_effect).build(env.isolate, callback, @constCast(&Fast(State, callee, options.detached).overloads));
     return template.getFunction(env.ctx).?;
 }
 
@@ -683,7 +747,7 @@ pub fn callbacksOf(comptime State: type, comptime table: anytype) []const v8.Fun
             const field = @field(table, name);
             const F = @TypeOf(field);
             if (isWrapped(F)) {
-                out = out ++ [_]v8.FunctionCallback{native(State, field.callee.*)};
+                out = out ++ [_]v8.FunctionCallback{nativeWith(State, field.callee.*, field.options.detached)};
             } else if (isTable(F)) {
                 out = out ++ callbacksOf(State, field);
             }

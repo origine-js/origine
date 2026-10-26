@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn errors_map_to_errno_codes() {
-        assert!(matches!(NativeError::from(HandleError::Bad), NativeError::Errno(6)));
-        assert!(matches!(NativeError::from(HandleError::Stale), NativeError::Errno(7)));
+        assert!(matches!(NativeError::from(HandleError::Bad), NativeError::Errno(crate::errno::BAD_HANDLE)));
+        assert!(matches!(NativeError::from(HandleError::Stale), NativeError::Errno(crate::errno::STALE_HANDLE)));
     }
 }

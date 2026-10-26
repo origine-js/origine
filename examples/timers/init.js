@@ -1,3 +1,4 @@
+/** @param {import('@origine/types').Api} api */
 export async function main(api) {
   const io = api.io.create();
   try {

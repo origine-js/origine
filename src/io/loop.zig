@@ -242,7 +242,7 @@ pub const Loop = struct {
 
 fn createBackend(allocator: std.mem.Allocator, options: Options) !backend_mod.Backend {
     const threaded = @import("backend/threaded.zig");
-    const choice: backend_mod.Kind = @enumFromInt(options.backend);
+    const choice: backend_mod.Kind = @fromBackingInt(@intCast(options.backend));
     switch (choice) {
         .threaded => return threaded.create(allocator, options),
         .uring => {

@@ -1,4 +1,5 @@
-//! Event-style sockets: `native.net.subscribe/resume/take/release/send` and `native.io.run`.
+//! Event-style sockets: `native.net.subscribe/start/pause/resume/take/release`, the write lanes
+//! (`directWrite`, `put`, `queued`, `flushed`, `end`) and `native.io.run`.
 //!
 //! A socket is *subscribed* with one JS dispatcher function. Rust never sees the guest's
 //! handlers: the glue keeps the table and registers a single `dispatch(kind, a, b)` function, and
@@ -12,17 +13,27 @@
 //!   undelivered, so a slow handler backpressures the peer through TCP.
 //! * [`crate::host::poll`] drains the queue on the isolate thread (`deliver`): it calls the
 //!   dispatcher inside the socket's context and runs a microtask checkpoint after each event.
-//! * The pump receives straight into a **pooled** V8 backing store (pinned like `readInto`: no
-//!   guest object wraps it while the loop owns it). `take` wraps that same store in a new
-//!   `ArrayBuffer` (a *lease*): no copy anywhere. `release` detaches the `ArrayBuffer` (a retained
-//!   view becomes empty, never aliasing the next chunk) and returns the store to the pool. A
-//!   handler that does not take the chunk gives the store back when it returns. The pool is topped
-//!   up on the isolate thread ([`refill`]) because only it can allocate stores; the pump waits
-//!   when the pool is empty.
-//! * `send` writes synchronously (a plain non-blocking `write(2)` on the isolate thread, no loop
-//!   op). What the kernel does not take goes to an outbox flushed by a writer task; `send`
-//!   answers `false` above [`HIGH_WATER`] bytes queued and a `Ready` event follows when the outbox
-//!   drains.
+//! * The pump receives straight into **slabs**: [`SLAB`]-byte V8 backing stores (allocated by the
+//!   isolate's `ArrayBuffer` allocator, so inside the V8 sandbox when there is one) that no guest
+//!   object wraps while the loop owns a window of it. Each receive gets the next [`CHUNK`] bytes
+//!   of the current slab and keeps only the bytes that arrived, so small reads pack tightly.
+//!   `take` carves exactly those bytes out of the slab ([`pinned::carve`]) into a new
+//!   `ArrayBuffer` (a *lease*): `byteLength` is the chunk length, no other byte of the slab is
+//!   reachable through it and nothing is copied. The carved store holds a reference on its slab, so
+//!   the slab goes back to the allocator when its last lease is gone. `release` detaches the
+//!   `ArrayBuffer` (a retained view becomes empty) which drops that reference at once; a lease that
+//!   is never released is dropped by the garbage collector. Slabs are allocated on the isolate
+//!   thread ([`refill`]) because only it can allocate stores; the pump waits when none is ready.
+//! * Writes have two lanes that share one order. `directWrite` is a plain non-blocking
+//!   `write(2)` on the isolate thread: no copy, no buffer, it answers the bytes the kernel took and
+//!   answers 0 while the outbox is busy (the queue has priority). `put` tries the kernel first when
+//!   the outbox is idle, then copies what is left (at most `max` bytes) into the outbox, which a
+//!   writer task flushes in order. `flushed` is a promise for "everything accepted so far reached
+//!   the kernel"; the glue builds `queued.send` on it. A `Drain` event follows every time the
+//!   outbox becomes empty.
+//! * `pause` parks the socket's events (in order) instead of dispatching them; `resume` puts them
+//!   back in front of the host queue. The pump keeps its [`MAX_QUEUED`] bound, so a paused socket
+//!   holds at most that many chunks and then stops reading.
 //!
 //! # Lifetime
 //! Subscriptions never keep the host alive by themselves: the pump task and its in-flight
@@ -53,34 +64,35 @@ use crate::native::{ScopeKey, host_mut, host_ref};
 use crate::net::{ADDR_CAP, SEND_FLAGS, Socket, prepare, stream_of};
 use crate::pinned;
 
-/// Bytes of one pooled lease store and of one native receive buffer.
+/// Bytes offered to one receive (the most a `data` event carries).
 pub(crate) const CHUNK: usize = 16 * 1024;
+/// Bytes of one slab that chunks are carved from.
+const SLAB: usize = 4 * CHUNK;
+/// Chunks start at multiples of this inside a slab.
+const ALIGN: usize = 8;
 /// Undelivered data/connection events after which a pump stops re-arming.
 const MAX_QUEUED: usize = 8;
-/// Outbox bytes above which `send` answers `false`.
-const HIGH_WATER: usize = 64 * 1024;
-/// Stores a socket's pool is topped up to.
-const POOL_TARGET: usize = 4;
-/// Stores kept per socket for reuse.
-const POOL_MAX: usize = 32;
+/// Fresh slabs a socket keeps ready.
+const SLAB_TARGET: usize = 2;
 
 /// `dispatch(kind, a, b)` kinds; `glue/net.js` uses the same numbers.
 const KIND_DATA: u32 = 0;
 const KIND_END: u32 = 1;
 const KIND_ERROR: u32 = 2;
-const KIND_READY: u32 = 3;
+const KIND_DRAIN: u32 = 3;
 const KIND_CONNECTION: u32 = 4;
 const KIND_CLOSE: u32 = 5;
 
 pub(crate) enum EventKind {
-    /// `n` bytes at the start of `store`.
+    /// `n` bytes at `offset` of `slab`.
     Data {
-        store: v8::SharedRef<v8::BackingStore>,
+        slab: v8::SharedRef<v8::BackingStore>,
+        offset: usize,
         n: usize,
     },
     End,
     Error(u32),
-    Ready,
+    Drain,
     Accept {
         stream: TcpStream,
         port: u32,
@@ -143,11 +155,28 @@ impl Drop for Count<'_> {
 #[derive(Default)]
 struct Outbox {
     queue: VecDeque<Vec<u8>>,
+    /// Bytes in `queue`.
     bytes: usize,
     /// A writer task owns the queue.
     writing: bool,
-    /// A `send` answered `false`: emit `Ready` once drained.
-    need_ready: bool,
+    /// Bytes ever accepted (kernel or queue) and bytes that reached the kernel; `flushed` waits
+    /// for `sent >= accepted`.
+    accepted: u64,
+    sent: u64,
+    /// `end` was called: no more writes; FIN goes out once the queue is empty.
+    ended: bool,
+    /// The outbox failed (write error, peer gone, socket closed): the errno pending writes get.
+    failed: Option<u32>,
+    /// Pending `flushed` promises.
+    waiters: Vec<Waker>,
+}
+
+impl Outbox {
+    fn wake(&mut self) {
+        for waker in self.waiters.drain(..) {
+            waker.wake();
+        }
+    }
 }
 
 /// State shared between a subscription (host side) and its tasks.
@@ -155,11 +184,11 @@ pub(crate) struct Shared {
     socket: u32,
     events: Events,
     idle: Rc<Idle>,
-    /// Empty stores the pump may receive into (topped up by [`refill`]).
-    stores: RefCell<Vec<v8::SharedRef<v8::BackingStore>>>,
-    /// The pump waits here for a store.
+    /// Fresh slabs the pump may receive into (topped up by [`refill`]).
+    slabs: RefCell<Vec<v8::SharedRef<v8::BackingStore>>>,
+    /// The pump waits here for a slab.
     need: Signal,
-    /// Sockets whose pool ran low; the host refills them (shared with `HostState`).
+    /// Sockets whose slabs ran out; the host refills them (shared with `HostState`).
     refill: Rc<RefCell<Vec<u32>>>,
     queued: Cell<usize>,
     space: Signal,
@@ -177,8 +206,20 @@ impl Shared {
         self.events.borrow_mut().push_back(Event { socket: self.socket, kind });
     }
 
+    /// Fails the outbox once: drops the queue and rejects every pending `flushed` with `code`.
+    fn fail_out(&self, code: u32) {
+        let mut out = self.out.borrow_mut();
+        if out.failed.is_none() {
+            out.failed = Some(code);
+            out.queue.clear();
+            out.bytes = 0;
+            out.wake();
+        }
+    }
+
     /// Queues the final event once.
     fn push_closed(&self) {
+        self.fail_out(errno::CANCELED);
         if !self.closed.replace(true) {
             self.push(EventKind::Closed);
         }
@@ -196,6 +237,7 @@ impl Shared {
     }
 
     fn fail(&self, code: u32) {
+        self.fail_out(code);
         self.push(EventKind::Error(code));
         self.push_closed();
     }
@@ -203,8 +245,10 @@ impl Shared {
 
 /// The chunk being delivered.
 struct Current {
-    store: v8::SharedRef<v8::BackingStore>,
-    /// `take` moved the store into a lease.
+    slab: v8::SharedRef<v8::BackingStore>,
+    offset: usize,
+    n: usize,
+    /// `take` carved the chunk into a lease.
     taken: bool,
 }
 
@@ -219,6 +263,9 @@ pub(crate) struct Sub {
     counted: bool,
     started: bool,
     current: Option<Current>,
+    /// `pause` parks events instead of dispatching them.
+    paused: bool,
+    parked: VecDeque<Event>,
 }
 
 impl HostState {
@@ -233,6 +280,8 @@ impl HostState {
 async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
     let idle = Rc::clone(&shared.idle);
     let _alive = Count::new(&idle.pumps);
+    // The slab being filled and where its free part starts.
+    let mut current: Option<(v8::SharedRef<v8::BackingStore>, usize)> = None;
     loop {
         poll_fn(|cx| {
             if shared.queued.get() < MAX_QUEUED || shared.stop.get() {
@@ -246,22 +295,29 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
         if shared.stop.get() {
             return;
         }
-        let store = poll_fn(|cx| {
-            let spare = shared.stores.borrow_mut().pop();
-            match spare {
-                Some(store) => Poll::Ready(store),
-                None => {
-                    shared.refill.borrow_mut().push(shared.socket);
-                    shared.need.set(cx);
-                    Poll::Pending
-                }
+        if current.as_ref().is_none_or(|(slab, used)| slab.byte_length() - used < CHUNK) {
+            // The old slab stays alive through the leases carved from it.
+            current = Some((
+                poll_fn(|cx| {
+                    let spare = shared.slabs.borrow_mut().pop();
+                    match spare {
+                        Some(slab) => Poll::Ready(slab),
+                        None => {
+                            shared.refill.borrow_mut().push(shared.socket);
+                            shared.need.set(cx);
+                            Poll::Pending
+                        }
+                    }
+                })
+                .await,
+                0,
+            ));
+            if shared.stop.get() {
+                return;
             }
-        })
-        .await;
-        if shared.stop.get() {
-            return;
         }
-        let Ok(buf) = pinned::region_over_store(store, CHUNK) else {
+        let Some((slab, used)) = current.as_mut() else { return };
+        let Ok(buf) = pinned::region_over_slab(slab.clone(), *used, CHUNK) else {
             shared.fail(errno::UNEXPECTED);
             return;
         };
@@ -270,12 +326,16 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
         drop(recving);
         match read {
             Ok(0) => {
+                // The peer finished: the socket stays open (writable) until the guest closes it;
+                // the glue does that once the local write side has ended too.
                 shared.push(EventKind::End);
-                shared.push_closed();
                 return;
             }
-            Ok(n) => match buf.into_store() {
-                Some(store) => shared.push(EventKind::Data { store, n }),
+            Ok(n) => match buf.into_window() {
+                Some((slab, offset)) => {
+                    *used = offset + n.next_multiple_of(ALIGN);
+                    shared.push(EventKind::Data { slab, offset, n });
+                }
                 None => {
                     shared.fail(errno::UNEXPECTED);
                     return;
@@ -325,17 +385,21 @@ async fn accept_pump(listener: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
     }
 }
 
-/// Flushes the outbox of a socket whose kernel buffer was full.
+/// Flushes the outbox of a socket whose kernel buffer was full, in order, then sends the FIN of a
+/// pending `end`.
 async fn write_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
     loop {
         let next = shared.out.borrow_mut().queue.pop_front();
         let Some(mut chunk) = next else {
             let mut out = shared.out.borrow_mut();
             out.writing = false;
-            if std::mem::take(&mut out.need_ready) {
-                drop(out);
-                shared.push(EventKind::Ready);
+            let fin = out.ended && out.failed.is_none();
+            out.wake();
+            drop(out);
+            if fin {
+                socket.shutdown_write();
             }
+            shared.push(EventKind::Drain);
             return;
         };
         while !chunk.is_empty() {
@@ -351,13 +415,11 @@ async fn write_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
                     chunk.drain(..n);
                     let mut out = shared.out.borrow_mut();
                     out.bytes -= n;
+                    out.sent += n as u64;
+                    out.wake();
                 }
                 Err(code) => {
-                    let mut out = shared.out.borrow_mut();
-                    out.queue.clear();
-                    out.bytes = 0;
-                    out.writing = false;
-                    drop(out);
+                    shared.out.borrow_mut().writing = false;
                     shared.fail(code);
                     return;
                 }
@@ -398,7 +460,7 @@ fn net_subscribe<'s>(
         socket: id,
         events: Rc::clone(&host.events),
         idle,
-        stores: RefCell::default(),
+        slabs: RefCell::default(),
         need: Signal::default(),
         refill: Rc::clone(&host.refill),
         queued: Cell::new(0),
@@ -408,19 +470,33 @@ fn net_subscribe<'s>(
         closed: Cell::new(false),
         aborts: RefCell::default(),
     });
-    host.subs.insert(id, Sub { dispatch, context, shared, runtime, owner: key, counted: false, started: false, current: None });
+    host.subs.insert(
+        id,
+        Sub {
+            dispatch,
+            context,
+            shared,
+            runtime,
+            owner: key,
+            counted: false,
+            started: false,
+            current: None,
+            paused: false,
+            parked: VecDeque::new(),
+        },
+    );
     Ok(())
 }
 
-/// Tops `shared`'s pool up to [`POOL_TARGET`] fresh stores (isolate thread only).
+/// Tops `shared` up to [`SLAB_TARGET`] fresh slabs (isolate thread only).
 fn top_up(isolate: &mut v8::Isolate, shared: &Shared) {
-    while shared.stores.borrow().len() < POOL_TARGET {
-        let store = v8::ArrayBuffer::new_backing_store(isolate, CHUNK).make_shared();
-        shared.stores.borrow_mut().push(store);
+    while shared.slabs.borrow().len() < SLAB_TARGET {
+        let slab = v8::ArrayBuffer::new_backing_store(isolate, SLAB).make_shared();
+        shared.slabs.borrow_mut().push(slab);
     }
 }
 
-/// Refills the pools of the sockets whose pump found its pool empty, and wakes the pumps.
+/// Refills the slabs of the sockets whose pump ran out of them, and wakes the pumps.
 pub(crate) fn refill(scope: &mut v8::PinScope<'_, '_, ()>) {
     let Some(host) = scope.get_slot::<HostState>() else { return };
     let ids = std::mem::take(&mut *host.refill.borrow_mut());
@@ -435,10 +511,11 @@ pub(crate) fn refill(scope: &mut v8::PinScope<'_, '_, ()>) {
     }
 }
 
-/// `native.net.resume(id)`: starts reading a stream (`data`, `end`, `error`) or accepting on a
-/// listener (`connection`). Idempotent.
-#[native(side_effect = "any", path = "net.resume", needs = "runtime")]
-fn net_resume(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+/// `native.net.start(id)`: starts reading a stream (`data`, `end`, `error`) or accepting on a
+/// listener (`connection`). A peer's FIN only delivers `end`; the stream stays open until the
+/// guest closes it. Idempotent.
+#[native(side_effect = "any", path = "net.start", needs = "runtime")]
+fn net_start(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Result<(), NativeError> {
     let host = host_mut(scope)?;
     let (socket, lp) = host.socket(key, id)?;
     let sub = host.subs.get_mut(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
@@ -462,102 +539,224 @@ fn net_resume(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Resul
     host_mut(scope)?.spawn_pump(runtime, &shared, task)
 }
 
-/// `native.net.take(id)`: an `ArrayBuffer` over the very store the chunk was received into (no
-/// copy; the chunk is at its start, `length` bytes as the `data` dispatch said). Only valid inside
-/// the `data` dispatch, once per event (`StaleHandle` otherwise). Give it back with `release`.
+/// `native.net.pause(id)`: parks the socket's events from now on (see the module docs).
+/// Idempotent; `BadHandle` for an unknown, foreign or unsubscribed socket.
+#[native(side_effect = "any", path = "net.pause", needs = "runtime")]
+fn net_pause(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+    let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    sub.paused = true;
+    Ok(())
+}
+
+/// `native.net.resume(id)`: dispatches the parked events again, in order, ahead of everything
+/// else queued. Idempotent.
+#[native(side_effect = "any", path = "net.resume", needs = "runtime")]
+fn net_resume(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+    let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    sub.paused = false;
+    let mut events = host.events.borrow_mut();
+    while let Some(event) = sub.parked.pop_back() {
+        events.push_front(event);
+    }
+    Ok(())
+}
+
+/// `native.net.take(id)`: an `ArrayBuffer` of exactly the bytes of the chunk, carved out of the
+/// slab it was received into (no copy; `byteLength` is the `data` dispatch's length and no other
+/// byte of the slab is reachable). Only valid inside the `data` dispatch, once per event
+/// (`StaleHandle` otherwise). Give it back with `release`.
 #[native(side_effect = "any", path = "net.take", needs = "runtime")]
 fn net_take<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32) -> Result<v8::Local<'s, v8::ArrayBuffer>, NativeError> {
     let host = host_mut(scope)?;
     let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
     let current = sub.current.as_mut().filter(|current| !current.taken).ok_or(NativeError::Errno(errno::STALE_HANDLE))?;
+    let store = pinned::carve(&current.slab, current.offset, current.n)?;
     current.taken = true;
-    let store = current.store.clone();
     Ok(v8::ArrayBuffer::with_backing_store(scope, &store))
 }
 
-/// `native.net.release(id, buffer)`: detaches a lease from `take` and returns its store to the
-/// pool. Idempotent for a detached buffer. Nothing is remembered per lease (an unreleased lease
-/// that is garbage collected leaves no trace): any plain `CHUNK`-sized `ArrayBuffer` that detaches
-/// is a sound pool member, because a detached, unshared store has no guest alias left, so the
-/// pump may fill it. `Unsupported` for a buffer that is shared, undetachable or not a chunk-sized
-/// store; for a socket that is gone or not the caller's the buffer is only detached.
+/// `native.net.release(id, buffer)`: detaches a lease from `take`, which drops its hold on the slab
+/// at once (the slab is freed with its last lease). Idempotent for a detached buffer. Nothing is
+/// remembered per lease (an unreleased lease that is garbage collected has the same effect, later).
+/// `Unsupported` for a buffer that is shared or undetachable; the socket is not consulted.
 #[native(side_effect = "any", path = "net.release", needs = "runtime")]
-fn net_release<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
+fn net_release<'s>(_scope:&mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
+    let _ = (key, id);
     let buffer = v8::Local::<v8::ArrayBuffer>::try_from(buffer).map_err(|_| NativeError::type_error("buffer must be an ArrayBuffer"))?;
     if buffer.was_detached() {
         return Ok(());
     }
     let store = buffer.get_backing_store();
-    if store.is_shared() || store.is_resizable_by_user_javascript() || !buffer.is_detachable() || store.byte_length() != CHUNK {
+    if store.is_shared() || store.is_resizable_by_user_javascript() || !buffer.is_detachable() {
         return Err(NativeError::Errno(errno::UNSUPPORTED));
     }
-    let shared = host_ref(scope)?.subs.get(&id).filter(|sub| sub.owner == key).map(|sub| Rc::clone(&sub.shared));
     if buffer.detach(None) != Some(true) || !buffer.was_detached() {
         return Err(NativeError::Errno(errno::UNEXPECTED));
-    }
-    // The socket may be gone: the lease then only had to stop aliasing anything.
-    if let Some(shared) = shared
-        && shared.stores.borrow().len() < POOL_MAX
-    {
-        shared.stores.borrow_mut().push(store);
-        shared.need.wake();
     }
     Ok(())
 }
 
-/// `native.net.send(id, data)`: writes now and answers whether the caller may keep writing
-/// (`false`: the outbox is above the high-water mark; wait for `ready`). `data` is copied only for
-/// what the kernel did not take. A write error becomes an `error` event, not an exception.
-#[native(side_effect = "any", path = "net.send", needs = "runtime")]
-fn net_send(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_>) -> Result<bool, NativeError> {
+/// A subscribed stream with what its write lanes need.
+struct Writer {
+    socket: Rc<Socket>,
+    lp: Rc<Loop>,
+    shared: Rc<Shared>,
+    runtime: u32,
+}
+
+/// The subscribed stream `id` with its writer plumbing; `BadHandle` for a closed one.
+fn writer_of(host: &HostState, key: ScopeKey, id: u32) -> Result<Writer, NativeError> {
     let (socket, lp) = stream_of(host, key, id)?;
     let sub = host.subs.get(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let (shared, runtime) = (Rc::clone(&sub.shared), sub.runtime);
-    if shared.closed.get() {
+    if sub.shared.closed.get() {
         return Err(NativeError::Errno(errno::BAD_HANDLE));
     }
-    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let mut out = shared.out.borrow_mut();
+    Ok(Writer { socket, lp, shared: Rc::clone(&sub.shared), runtime: sub.runtime })
+}
+
+/// A write on `stream`: the bytes the kernel took, `Ok(0)` when it would block.
+fn kernel_write(stream: &TcpStream, bytes: &[u8]) -> Result<usize, std::io::Error> {
+    match (&*stream).write(bytes) {
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => Ok(0),
+        other => other,
+    }
+}
+
+/// `native.net.directWrite(id, data)`: the direct lane. A plain non-blocking write; answers the
+/// bytes the kernel took, 0 when it would block or while the outbox is busy (queued bytes go
+/// first). A write error throws its errno and the socket emits `error` and closes; `BrokenPipe`
+/// after `end`.
+#[native(side_effect = "any", path = "net.directWrite", needs = "runtime")]
+fn net_direct_write(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_>) -> Result<usize, NativeError> {
+    let Writer { socket, shared, .. } = writer_of(host, key, id)?;
+    let out = shared.out.borrow();
+    if out.ended {
+        return Err(NativeError::Errno(errno::BROKEN_PIPE));
+    }
+    if let Some(code) = out.failed {
+        return Err(NativeError::Errno(code));
+    }
     if out.writing {
-        out.bytes += data.len();
-        out.queue.push_back(data.to_vec());
-        let ok = out.bytes < HIGH_WATER;
-        out.need_ready |= !ok;
-        return Ok(ok);
+        return Ok(0);
     }
-    let (result, rest) = data.with_bytes(|bytes| {
-        let result = (&*stream).write(bytes);
-        let rest = match &result {
-            Ok(n) if *n < bytes.len() => Some(bytes[*n..].to_vec()),
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => Some(bytes.to_vec()),
-            _ => None,
-        };
-        (result, rest)
-    });
-    if let Err(error) = &result
-        && rest.is_none()
+    drop(out);
+    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    match data.with_bytes(|bytes| kernel_write(stream, bytes)) {
+        Ok(n) => Ok(n),
+        Err(error) => {
+            let code = errno::errno_of(&error);
+            shared.fail(code);
+            Err(NativeError::Errno(code))
+        }
+    }
+}
+
+/// `native.net.put(id, data, max)`: the queued lane. When the outbox is idle the kernel is tried
+/// first; what it does not take is copied into the outbox, at most `max` bytes of it (the caller's
+/// room). Answers the bytes accepted (kernel plus queue). A write error throws its errno and the
+/// socket emits `error` and closes; `BrokenPipe` after `end`.
+#[native(side_effect = "any", path = "net.put", needs = "runtime")]
+fn net_put(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_>, max: u64) -> Result<usize, NativeError> {
+    let Writer { socket, lp, shared, runtime } = writer_of(host, key, id)?;
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    let mut out = shared.out.borrow_mut();
+    if out.ended {
+        return Err(NativeError::Errno(errno::BROKEN_PIPE));
+    }
+    if let Some(code) = out.failed {
+        return Err(NativeError::Errno(code));
+    }
+    let len = data.len();
+    if out.writing {
+        let take = len.min(max);
+        if take > 0 {
+            out.queue.push_back(data.with_bytes(|bytes| bytes[..take].to_vec()));
+            out.bytes += take;
+            out.accepted += take as u64;
+        }
+        return Ok(take);
+    }
+    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    let (kernel, rest) = match data
+        .with_bytes(|bytes| kernel_write(stream, bytes).map(|n| (n, bytes[n..bytes.len().min(n.saturating_add(max))].to_vec())))
     {
-        drop(out);
-        shared.fail(errno::errno_of(error));
-        return Ok(false);
+        Ok(pair) => pair,
+        Err(error) => {
+            drop(out);
+            let code = errno::errno_of(&error);
+            shared.fail(code);
+            return Err(NativeError::Errno(code));
+        }
+    };
+    out.accepted += kernel as u64;
+    out.sent += kernel as u64;
+    if rest.is_empty() {
+        return Ok(kernel);
     }
-    let Some(rest) = rest else { return Ok(true) };
-    out.bytes += rest.len();
+    let queued = rest.len();
+    out.bytes += queued;
+    out.accepted += queued as u64;
     out.queue.push_back(rest);
     out.writing = true;
-    out.need_ready = true;
     drop(out); // the writer polls once at spawn and takes the same borrow
     if let Err(error) = host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared)))) {
-        // No writer will ever drain the outbox: undo the queueing, or every later send would
+        // No writer will ever drain the outbox: undo the queueing, or every later write would
         // only append to it and `writing` would stay set forever.
         let mut out = shared.out.borrow_mut();
         out.queue.clear();
         out.bytes = 0;
+        out.accepted -= queued as u64;
         out.writing = false;
-        out.need_ready = false;
         return Err(error);
     }
-    Ok(false)
+    Ok(kernel + queued)
+}
+
+/// `native.net.queued(id)`: bytes waiting in the outbox.
+#[native(side_effect = "none", path = "net.queued", needs = "runtime")]
+fn net_queued(host: &mut HostState, key: ScopeKey, id: u32) -> Result<usize, NativeError> {
+    let sub = host.subs.get(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    Ok(sub.shared.out.borrow().bytes)
+}
+
+/// `native.net.flushed(id)`: Promise<void> that resolves once every byte accepted so far reached
+/// the kernel; rejects with the outbox's errno (a write error, `Canceled` when the socket closed
+/// first).
+#[native(side_effect = "any", path = "net.flushed", needs = "runtime", promise)]
+fn net_flushed(
+    host: &mut HostState,
+    key: ScopeKey,
+    id: u32,
+) -> Result<native::Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
+    let sub = host.subs.get(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    let (shared, runtime) = (Rc::clone(&sub.shared), sub.runtime);
+    let target = shared.out.borrow().accepted;
+    Ok(native::Op::new(
+        runtime,
+        poll_fn(move |cx| {
+            let mut out = shared.out.borrow_mut();
+            if out.sent >= target {
+                Poll::Ready(Ok(()))
+            } else if let Some(code) = out.failed {
+                Poll::Ready(Err(NativeError::Errno(code)))
+            } else {
+                out.waiters.push(cx.waker().clone());
+                Poll::Pending
+            }
+        }),
+    ))
+}
+
+/// `native.net.end(id)`: no more writes; the FIN goes out once the outbox is empty (now when it
+/// already is). Idempotent.
+#[native(side_effect = "any", path = "net.end", needs = "runtime")]
+fn net_end(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+    let Writer { socket, shared, .. } = writer_of(host, key, id)?;
+    let mut out = shared.out.borrow_mut();
+    if !std::mem::replace(&mut out.ended, true) && !out.writing && out.failed.is_none() {
+        socket.shutdown_write();
+    }
+    Ok(())
 }
 
 /// `native.io.run(io)`: Promise<void> that resolves once every resumed subscription of the
@@ -601,18 +800,26 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
     let Some(host) = scope.get_slot_mut::<HostState>() else { return };
     let Some(sub) = host.subs.get(&id) else { return };
     let (shared, owner, runtime) = (Rc::clone(&sub.shared), sub.owner, sub.runtime);
+    // A paused socket holds its events back, in order. A socket the guest closed does not: its
+    // `Close` (and nothing before it) goes through.
+    if sub.paused && !shared.stop.get() {
+        if let Some(sub) = host.subs.get_mut(&id) {
+            sub.parked.push_back(event);
+        }
+        return;
+    }
     let (kind, a, b) = match event.kind {
-        EventKind::Data { store, n } => {
+        EventKind::Data { slab, offset, n } => {
             shared.queued.set(shared.queued.get() - 1);
             shared.space.wake();
             if let Some(sub) = host.subs.get_mut(&id) {
-                sub.current = Some(Current { store, taken: false });
+                sub.current = Some(Current { slab, offset, n, taken: false });
             }
             (KIND_DATA, n as u32, 0)
         }
         EventKind::End => (KIND_END, 0, 0),
         EventKind::Error(code) => (KIND_ERROR, code, 0),
-        EventKind::Ready => (KIND_READY, 0, 0),
+        EventKind::Drain => (KIND_DRAIN, 0, 0),
         EventKind::Accept { stream, port } => {
             shared.queued.set(shared.queued.get() - 1);
             shared.space.wake();
@@ -636,12 +843,9 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
 
     let Some(host) = scope.get_slot_mut::<HostState>() else { return };
     if kind == KIND_DATA {
-        // A chunk the handler did not take goes straight back to the pump.
-        if let Some(current) = host.subs.get_mut(&id).and_then(|sub| sub.current.take())
-            && !current.taken
-        {
-            shared.stores.borrow_mut().push(current.store);
-            shared.need.wake();
+        // A chunk the handler did not take is dropped here, and its slab reference with it.
+        if let Some(sub) = host.subs.get_mut(&id) {
+            sub.current = None;
         }
     } else if kind == KIND_CLOSE
         && let Some(sub) = host.subs.remove(&id)

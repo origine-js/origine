@@ -12,10 +12,10 @@ const backend_mod = @import("backend.zig");
 const Loop = loop_mod.Loop;
 const Op = op_mod.Op;
 
-const ENOMEM: c_int = @intFromEnum(std.c.E.NOMEM);
-const EINVAL: c_int = @intFromEnum(std.c.E.INVAL);
-const ENOSYS: c_int = @intFromEnum(std.c.E.NOSYS);
-const EAGAIN: c_int = @intFromEnum(std.c.E.AGAIN);
+const ENOMEM: c_int = @backingInt(std.c.E.NOMEM);
+const EINVAL: c_int = @backingInt(std.c.E.INVAL);
+const ENOSYS: c_int = @backingInt(std.c.E.NOSYS);
+const EAGAIN: c_int = @backingInt(std.c.E.AGAIN);
 
 fn fail(err: anyerror) c_int {
     return -switch (err) {

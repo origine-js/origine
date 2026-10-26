@@ -1,15 +1,13 @@
-//! Managed JavaScript REPL: evaluation and continuation probes (`eval`), REPL-only
-//! V8 helpers (`Helpers`), pending input and history (`input`), line editing
-//! (`terminal`) and the loop that ties them together (`run`).
+//! Managed JavaScript REPL: the Rust engine (`engine`: parsing, pending input, history and the
+//! line editor), terminal I/O (`tty`), evaluation (`eval`), REPL-only V8 helpers (`Helpers`) and
+//! the loop that ties them together (`run`).
 const std = @import("std");
 
-pub const input = @import("repl/input.zig");
-pub const terminal = @import("repl/terminal.zig");
+pub const engine = @import("repl/engine.zig");
+pub const Engine = engine.Engine;
 pub const display = @import("repl/display.zig");
 pub const Helpers = @import("repl/helpers.zig").Helpers;
-pub const sourceForEval = @import("repl/eval.zig").sourceForEval;
 pub const eval = @import("repl/eval.zig").eval;
-pub const incomplete = @import("repl/eval.zig").incomplete;
 pub const Options = @import("repl/session.zig").Options;
 pub const run = @import("repl/session.zig").run;
 

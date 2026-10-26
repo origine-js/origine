@@ -1,5 +1,6 @@
 // Run: zig build run -- examples/net/events.js
-// Stream a finite payload using events, pooled read buffers, and send backpressure.
+// Stream a finite payload using events, exact-size receive leases, and send-queue backpressure.
+/** @param {import('@origine/types').Api} api */
 export async function main(api) {
   const io = api.io.create();
   const sockets = [];
@@ -7,7 +8,7 @@ export async function main(api) {
   let received = 0;
   let failure;
   try {
-    const server = api.net.listen(io, { port: 0 });
+    const server = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
     const stop = () => {
       // close() is idempotent and fires close events; closing io drops handlers instead.
       for (const socket of sockets) void socket.close();
@@ -27,20 +28,23 @@ export async function main(api) {
       let sent = 0;
       const pump = () => {
         while (sent < total) {
-          const writable = peer.send(chunk);
-          sent += chunk.length;
-          // false means these bytes were accepted but queued. Do not resend them.
-          if (!writable) return; // Resume producing only when ready fires.
+          // put() takes what fits in the send queue and says how much; less than offered means
+          // the queue is full. Continue from where it stopped (the pattern repeats every 256 bytes).
+          const offset = sent % chunk.length;
+          const part = chunk.subarray(offset, Math.min(chunk.length, offset + total - sent));
+          const taken = peer.queued.put(part);
+          sent += taken;
+          if (taken < part.length) return; // Resume producing only when drain fires.
         }
       };
-      peer.register('ready', pump);
+      peer.register('drain', pump);
       pump();
     });
 
     // Registrations alone do not keep main alive. Start run() after the listener flows,
     // and keep it pending while waiting for callbacks to finish the transfer.
     const running = io.run();
-    const client = await api.net.connect(io, { port: server.port });
+    const client = await api.net.connect(io, { port: server.port, mode: 'event' });
     sockets.push(client);
     client.register('error', fail);
     client.register('end', () => {
@@ -56,7 +60,7 @@ export async function main(api) {
         if (received > total) throw new Error('too many bytes');
         if (received === total) stop();
       } finally {
-        // Returns the store to the pool and detaches chunk.buffer. Copy with slice()
+        // Detaches chunk.buffer and frees its memory. Copy with slice()
         // first if you need to retain the data after releasing this lease.
         chunk.unref();
       }

@@ -56,7 +56,7 @@ pub fn transform(alloc: std.mem.Allocator, filename: []const u8, source: []const
     if (options.verbatim_imports) flags |= 1 << 1;
     if (options.inline_source_map) flags |= 1 << 2;
     const c_options: COptions = .{
-        .jsx_runtime = @intFromEnum(options.jsx_runtime),
+        .jsx_runtime = @backingInt(options.jsx_runtime),
         .flags = flags,
         .import_source = if (options.jsx_import_source) |s| s.ptr else null,
         .import_source_len = if (options.jsx_import_source) |s| s.len else 0,

@@ -8,7 +8,7 @@ const m = @import("@managed");
 /// Buffered stdout write; I/O errors are dropped because there is nowhere to report them.
 pub fn print(io: std.Io, comptime format: []const u8, args: anytype) void {
     var buffer: [1024]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
     writer.interface.print(format, args) catch return;
     writer.interface.flush() catch return;
 }

@@ -37,7 +37,9 @@ pub const Scope = struct {
         else
             v8.Context.init(isolate, null, null, rt.queue);
         startup_trace.mark(&timing, "context_create");
-        scope.* = .{ .runtime = rt, .id = rt.scopes.items.len, .context = .new(isolate, ctx), .options = options };
+        const id = rt.next_scope_id;
+        rt.next_scope_id += 1;
+        scope.* = .{ .runtime = rt, .id = id, .context = .new(isolate, ctx), .options = options };
         errdefer scope.context.deinit();
         scope.module_map = .init(scope);
         // Entered like Scope.destroy: the map's teardown may reject pending tasks in this context.
@@ -148,7 +150,7 @@ pub const Scope = struct {
         /// resolved ID carries the prefix. Off by default, in which case such imports
         /// reject no matter what the resolver, import map or loader would have served.
         /// The host decides which scopes get it; guest code cannot change it.
-        enable_origine_namespace: bool = false,
+        origine_namespace: bool = false,
         /// Optional hook that populates each module's `import.meta`; the one way to give
         /// specific modules host values that no importer or other module can reach.
         meta: ?module_types.MetaInitializer = null,
@@ -168,6 +170,15 @@ pub const Scope = struct {
         /// changes blobs (a rebuilt init snapshot) sees one round of rejected caches, which
         /// are then replaced.
         code_cache: ?module_types.CodeCache = null,
+        /// Called when the scope is freed after `Runtime.disposeScope`, with its context entered
+        /// and before its module map goes: the host releases what it keeps for the scope. Not
+        /// called by `Runtime.destroy`, which hosts tear down first. Callback data is host-owned.
+        on_dispose: ?Disposer = null,
+    };
+
+    pub const Disposer = struct {
+        data: ?*anyopaque = null,
+        call: *const fn (data: ?*anyopaque, scope: *Scope) void,
     };
 
     /// RAII guard that makes a Scope's context current: enters the isolate, opens a
@@ -219,15 +230,35 @@ pub const Scope = struct {
     /// Runtime-owned; use module_map.update/delete/clear/get, never copy or deinit it.
     module_map: modules.ModuleMap = undefined,
     import_map: ?*import_map.ImportMap = null,
+    /// Set by `Runtime.disposeScope`. A disposed scope refuses new work (`error.ScopeDisposed`) and is
+    /// skipped by the runtime's drivers until it is freed.
+    disposed: bool = false,
+
+    pub fn isDisposed(self: *const Scope) bool {
+        return self.disposed;
+    }
 
     /// Frees this Scope's module map, persistent handles, cloned import map and the
     /// Scope allocation itself. Called only from Runtime.destroy with the isolate
     /// entered and a live HandleScope; self is invalid afterwards.
     pub fn destroy(self: *Scope) void {
+        self.teardown(false);
+    }
+
+    /// Frees a scope disposed with `Runtime.disposeScope`, after the host released its resources.
+    /// Called only from `Runtime.reap` with the isolate entered and a live HandleScope.
+    pub fn reapDisposed(self: *Scope) void {
+        self.teardown(true);
+    }
+
+    fn teardown(self: *Scope, notify: bool) void {
         const alloc = self.runtime.allocator;
         const ctx = self.context.deref();
         ctx.enter();
+        if (notify) if (self.options.on_dispose) |hook| hook.call(hook.data, self);
         self.module_map.deinit();
+        // A stray reference into the context (a function another realm kept) must find no scope.
+        ctx.setAlignedPointerInEmbedderData(1, null);
         ctx.exit();
         self.hardener.deinit();
         self.unsupported_prototype.deinit();
@@ -245,6 +276,7 @@ pub const Scope = struct {
     /// error_info follows ErrorInfo ownership; also captures UnsupportedExport exceptions.
     pub fn harden(self: *Scope, value: v8.Global.Of(v8.Value), error_info: ?*ErrorInfo) !void {
         if (error_info) |out| out.deinit();
+        if (self.disposed) return error.ScopeDisposed;
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();
@@ -328,6 +360,7 @@ pub const Scope = struct {
     /// the ModuleMap documents. Returns the retired-entry count (0 for update).
     fn mutateImportCache(self: *Scope, operation: CacheMutation, error_info: ?*ErrorInfo) !usize {
         if (error_info) |out| out.deinit();
+        if (self.disposed) return error.ScopeDisposed;
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();
@@ -350,6 +383,7 @@ pub const Scope = struct {
     /// resolution/link/evaluation failures normally reject the returned promise instead.
     pub fn importModuleWithAttributes(self: *Scope, specifier: []const u8, attributes: []const module_types.ImportAttribute, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Promise) {
         if (error_info) |out| out.deinit();
+        if (self.disposed) return error.ScopeDisposed;
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();
@@ -362,6 +396,7 @@ pub const Scope = struct {
     /// Does not consume the caller's handle; it must belong to this runtime.
     /// error_info follows ErrorInfo ownership, including hardening failures.
     pub fn installCapability(self: *Scope, name: []const u8, value: v8.Global.Of(v8.Value), error_info: ?*ErrorInfo) !void {
+        if (self.disposed) return error.ScopeDisposed;
         try self.harden(value, error_info);
         var session: Session = undefined;
         session.init(self);
@@ -380,6 +415,7 @@ pub const Scope = struct {
     /// values on JavaScriptException. Pass null to discard the exception value.
     pub fn eval(self: *Scope, source: []const u8, origin: []const u8, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
         if (error_info) |out| out.deinit();
+        if (self.disposed) return error.ScopeDisposed;
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();

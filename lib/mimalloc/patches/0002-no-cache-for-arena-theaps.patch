@@ -1,0 +1,13 @@
+--- a/src/heap/heap.c
++++ b/src/heap/heap.c
+@@ -105,7 +105,9 @@
+     theap = mi_heap_init_theap(heap);
+     if (theap==NULL) { return (mi_theap_t*)&_mi_theap_empty_wrong; }  // this will return NULL from alloc/alloc-generic.c:_mi_malloc_generic
+   }
+-  _mi_theap_cached_set(theap);
++  // A heap in an exclusive arena keeps its theaps in that arena, whose memory may be unmapped
++  // after mi_arena_unload while another thread's cache still refers to them: never cache those.
++  if (heap->exclusive_arena == NULL) { _mi_theap_cached_set(theap); }
+   return theap;
+ }
+ 

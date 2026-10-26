@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use origine_api_core::slab::Slab;
 use origine_api_core::{Backend, Ceiling, NativeError, errno};
-use origine_api_fs::Grant;
+use origine_api_fs::{Access, Grant};
 use origine_io::fs::Dir;
 use origine_io::rt::Runtime;
 use origine_io::{Loop, Mode, Options};
@@ -168,7 +168,7 @@ impl HostState {
     pub fn create_runtime(&mut self, owner: ScopeKey, backend: Backend, entries: Option<u32>) -> Result<u32, NativeError> {
         self.ceiling.check_create(self.runtimes.len(), backend).map_err(NativeError::Errno)?;
         let id = self.next_runtime;
-        let next = id.checked_add(1).ok_or(NativeError::Errno(errno::ACCESS_DENIED))?;
+        let next = id.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
         let kind = match backend {
             Backend::Auto => origine_io::Backend::Auto,
             Backend::Uring => origine_io::Backend::Uring,
@@ -388,20 +388,25 @@ impl HostState {
         owner: ScopeKey,
         io: u32,
         root: &str,
-        write: bool,
-    ) -> Result<(u32, u32, bool, Dir, String), NativeError> {
+        access: u32,
+    ) -> Result<(u32, u32, Access, Dir, String), NativeError> {
         let lp = Rc::clone(&self.open_runtime(owner, io)?.lp);
-        let denied = || NativeError::Errno(errno::ACCESS_DENIED);
+        let denied = || NativeError::Errno(errno::PERMISSION_DENIED);
+        let access = Access::from_bits(access).ok_or(NativeError::Errno(errno::INVALID_INPUT))?;
         if !self.fs.asynchronous {
             return Err(denied());
         }
         let base = self.fs.root.as_ref().ok_or_else(denied)?;
-        origine_io::fs::sanitize(std::path::Path::new(root))?;
+        // The embedder's write ceiling: a request above it is rejected, never downgraded.
+        if access.write && !self.fs.write {
+            return Err(denied());
+        }
+        origine_api_fs::check_root(root)?;
         let base = base.as_fd().try_clone_to_owned()?;
         let id = self.next_grant;
         self.next_grant = id.checked_add(1).ok_or_else(denied)?;
         let dir = Dir::from_fd(&lp, base.into_raw_fd() as isize);
-        Ok((io, id, self.fs.write && write, dir, if root.is_empty() { ".".to_owned() } else { root.to_owned() }))
+        Ok((io, id, access, dir, if root.is_empty() { ".".to_owned() } else { root.to_owned() }))
     }
 
     /// Makes a freshly opened grant addressable. Fails with `Canceled` if its runtime went away.
@@ -429,7 +434,7 @@ impl HostState {
     /// A fresh socket id (not yet addressable until [`HostState::insert_socket`]).
     pub(crate) fn reserve_socket(&mut self) -> Result<u32, NativeError> {
         let id = self.next_socket;
-        self.next_socket = id.checked_add(1).ok_or(NativeError::Errno(errno::ACCESS_DENIED))?;
+        self.next_socket = id.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
         Ok(id)
     }
 

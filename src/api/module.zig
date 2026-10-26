@@ -33,6 +33,9 @@ pub const Bindings = struct {
     /// Creates the state for `scope`. The result is owned by the scope's state record
     /// until `destroy`.
     create: *const fn (scope: *ScopeState) anyerror!*anyopaque,
+    /// Runs the state's teardown (`S.deinit`) once while keeping its memory, which natives of a
+    /// disposed scope may still reach. Idempotent; `destroy` calls it too.
+    release: *const fn (scope: *ScopeState, state: *anyopaque) void,
     /// Releases what `create` made. Never fails; the scope's V8 handles are still live.
     destroy: *const fn (scope: *ScopeState, state: *anyopaque) void,
     /// Builds the natives object in the entered context. Needs a live HandleScope; returns
@@ -48,6 +51,15 @@ pub fn Cell(comptime S: type) type {
     return struct {
         scope: *ScopeState,
         data: S,
+        released: bool = false,
+
+        pub const Core = @import("host.zig").ScopeCore;
+        pub fn core(self: *@This()) *Core {
+            return self.scope.core();
+        }
+        pub fn isDetached(self: *const @This()) bool {
+            return self.scope.isDetached();
+        }
 
         pub fn errnoCell(self: *@This()) *u32 {
             return self.scope.errnoCell();
@@ -69,6 +81,9 @@ pub fn stateless(comptime table: anytype) Bindings {
                 return scope;
             }
         }.create,
+        .release = struct {
+            fn release(_: *ScopeState, _: *anyopaque) void {}
+        }.release,
         .destroy = struct {
             fn destroy(_: *ScopeState, _: *anyopaque) void {}
         }.destroy,
@@ -95,10 +110,21 @@ pub fn stateful(comptime S: type, comptime table: anytype) Bindings {
                 return cell;
             }
         }.create,
+        .release = struct {
+            fn release(_: *ScopeState, state: *anyopaque) void {
+                const cell: *C = @ptrCast(@alignCast(state));
+                if (cell.released) return;
+                cell.released = true;
+                if (@hasDecl(S, "deinit")) cell.data.deinit();
+            }
+        }.release,
         .destroy = struct {
             fn destroy(scope: *ScopeState, state: *anyopaque) void {
                 const cell: *C = @ptrCast(@alignCast(state));
-                if (@hasDecl(S, "deinit")) cell.data.deinit();
+                if (!cell.released) {
+                    cell.released = true;
+                    if (@hasDecl(S, "deinit")) cell.data.deinit();
+                }
                 scope.allocator().destroy(cell);
             }
         }.destroy,

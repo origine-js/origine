@@ -6,7 +6,7 @@
 use crate::{NativeError, errno};
 
 /// Largest buffer a host-provided read (`fileReadAlloc`/`filePreadAlloc`) allocates up front:
-/// the same 256 MiB as `readAll`. Larger requests fail `FileTooBig` before anything is allocated.
+/// the same 256 MiB as `readAll`. Larger requests fail `FileTooLarge` before anything is allocated.
 pub const MAX_ALLOC_READ: usize = 256 << 20;
 
 /// Host-provided reads below this capacity are never compacted: the copy would cost more than
@@ -71,9 +71,9 @@ pub fn window_fits(offset: usize, len: usize, store_len: usize) -> bool {
     offset.checked_add(len).is_some_and(|end| end <= store_len)
 }
 
-/// `len` as the size of a host-allocated read: `Err(FileTooBig)` above [`MAX_ALLOC_READ`].
+/// `len` as the size of a host-allocated read: `Err(FileTooLarge)` above [`MAX_ALLOC_READ`].
 pub fn check_alloc_len(len: usize) -> Result<usize, NativeError> {
-    if len > MAX_ALLOC_READ { Err(NativeError::Errno(errno::FILE_TOO_BIG)) } else { Ok(len) }
+    if len > MAX_ALLOC_READ { Err(NativeError::Errno(errno::FILE_TOO_LARGE)) } else { Ok(len) }
 }
 
 #[cfg(test)]
@@ -125,7 +125,7 @@ mod tests {
     fn alloc_reads_are_capped() {
         assert!(matches!(check_alloc_len(0), Ok(0)));
         assert!(matches!(check_alloc_len(MAX_ALLOC_READ), Ok(MAX_ALLOC_READ)));
-        assert!(matches!(check_alloc_len(MAX_ALLOC_READ + 1), Err(NativeError::Errno(errno::FILE_TOO_BIG))));
-        assert!(matches!(check_alloc_len(usize::MAX), Err(NativeError::Errno(errno::FILE_TOO_BIG))));
+        assert!(matches!(check_alloc_len(MAX_ALLOC_READ + 1), Err(NativeError::Errno(errno::FILE_TOO_LARGE))));
+        assert!(matches!(check_alloc_len(usize::MAX), Err(NativeError::Errno(errno::FILE_TOO_LARGE))));
     }
 }

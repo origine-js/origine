@@ -13,18 +13,22 @@ the zero-copy buffer rules that were added later. `api.net` and the `io` timers 
 
 ## Guest API (JS)
 ```js
-const sync = api.fs.requestSync({ root, write });           // unchanged semantics (std.Io, errno cell); returns the sync cap
+const sync = api.fs.requestSync({ root, access });          // unchanged semantics (std.Io, errno cell); returns the sync cap
 const io = api.io.create({ backend: 'auto', entries: 256 }); // exists (spike): frozen { kind: 'io', id, backend }
-const async = await api.fs.requestAsync({ io, root, write }); // rejects BadHandle/AccessDenied/Unsupported
+const async = await api.fs.requestAsync({ io, root, access }); // rejects BadHandle/PermissionDenied/Unsupported
 await io.close();                                           // Promise<void>: cancels in-flight ops, destroys the runtime
 ```
-`api.fs.request` is removed. `api.fs.narrow` keeps `{root, write}` plus `{sync, async}` switches. `api.io.narrow({ backends, maxRuntimes })`
+`api.fs.request` is removed. `api.fs.narrow` was dropped for now (`Config.fs` is the ceiling, `access` is per request). `api.io.narrow({ backends, maxRuntimes })`
 only narrows what `create` may do (embedder ceiling = `Config.runtime`). Handles are frozen data, not transferable across scopes.
 
-## Errno additions (numbers fixed here; Zig `src/api/errno.zig` enum and Rust `origine_api_core::errno` must match)
-`Canceled=14, TimedOut=15, WouldBlock=16, ConnectionRefused=17, ConnectionReset=18, BrokenPipe=19, AddressInUse=20, NotConnected=21`.
-io::ErrorKind mapping in Rust (others stay 255): `ErrorKind::TimedOut->15`, `WouldBlock->16`,
-`ConnectionRefused->17`, `ConnectionReset->18`, `BrokenPipe->19`, `AddrInUse->20`, `NotConnected->21`; `-ECANCELED` (raw 125 linux/89 macos) ->14.
+## Errno (two domains, numbering)
+The error codes are two enums, `IoErrno` (Rust `io::ErrorKind` names, plus `TooManyOpenFiles` and `Io`) and `HostErrno`
+(`Unexpected`, `BadHandle`, `StaleHandle`, `Canceled`), in `src/api/errno_codes.zig`; Rust's `origine_api_core::errno`
+and the guest tables are generated from them. Host codes are 1-9, I/O codes 10-56 in blocks of ten by category, so a code's
+domain and category are readable from its number (table: `src/js/docs/errno.md`). The draft-stage numbers (14..21 for the
+async additions, etc.) were **replaced once** by this layout; the names are the contract and the numbers are not guaranteed stable until a few stable versions have shipped: look codes up by name.
+io::ErrorKind mapping in Rust (others stay `Unexpected`): `TimedOut`, `WouldBlock`, `ConnectionRefused`, `ConnectionReset`,
+`BrokenPipe`, `AddrInUse` -> `AddressInUse`, `NotConnected`; `-ECANCELED` (raw 125 linux/89 macos) -> `Canceled`.
 
 ## Natives (registered in the `native` table; JS glue calls them)
 Rust natives (`#[native]`, `rust/crates/origine_api`), all take plain JS values, none touch the shared errno cell; failures reject (promise natives)
@@ -76,7 +80,7 @@ Rust needs no link flags.
 ## Zero-copy buffers (Rust natives + JS glue; both sides code against this)
 Rules (guest buffers = `ArrayBuffer` or any view over one; `view` regions are captured as (byteOffset, byteLength) BEFORE detaching):
 - **Eligibility for pinning:** `!backing_store.is_shared() && !is_resizable_by_user_javascript() && ab.is_detachable()` and, after `ab.detach(None)`, `was_detached()`/`byte_length()==0` is confirmed. Otherwise COPY (copy at call time for writes; host buffer + copy-out for reads). Never trust a length the guest can change.
-- **Writes** (`fileWrite`, `filePwriteAll`, `writeAll`, `writeAll`-style ops): the guest's ArrayBuffer is DETACHED (transferred) when eligible, the host writes straight from the pinned store (`SharedRef<BackingStore>` kept in the pending entry, memory accessed by the loop through raw `(ptr,len)` wrapped in `origine_io::RawRegion`); results unchanged (count / undefined). After the call the guest's buffer and all its views are empty (documented). Non-eligible buffers are copied and stay usable.
+- **Writes** (`fileWrite`, `filePwriteAll`, `writeAll`) ALWAYS COPY at call time and never touch the guest's buffer. The explicit move variants (`fileWriteMove`, `filePwriteMoveAll`, `writeMoveAll`): the guest's ArrayBuffer is DETACHED (transferred) when eligible and the call fails `Unsupported` (buffer untouched, no copy) when it is not; the host writes straight from the pinned store (`SharedRef<BackingStore>` kept in the pending entry, memory accessed by the loop through raw `(ptr,len)` wrapped in `origine_io::RawRegion`); results unchanged (count / undefined). After a move the guest's buffer and all its views are empty (documented). The sync cap has no move variants (`Unsupported`).
 - **BYOB reads** (new natives): `fileReadInto(fs,id,buf)` and `filePreadInto(fs,id,buf,offset)` (`native.fsAsync.fileReadInto` / `filePreadInto`): the guest buffer is detached (if eligible) and read into directly; the promise resolves `{ bytes: number, buffer: ArrayBuffer }` where `buffer` is a NEW ArrayBuffer over the same backing store (pinned case) or the guest's own ArrayBuffer after copy-out (fallback case). The JS glue turns it into `{ bytes, buffer: <Uint8Array view with the original byteOffset/byteLength over that ArrayBuffer> }` for the guest. The original ArrayBuffer is dead after the call in the pinned case.
 - **Host-provided reads** (new natives): `fileReadAlloc(fs,id,len)` and `filePreadAlloc(fs,id,len,offset)` (`..._file_read_alloc` / `_file_pread_alloc`): the host allocates a V8 `ArrayBuffer` of `len` bytes up front (sandbox: only V8-allocated memory), pins it, reads once, resolves a `Uint8Array` view of length `bytes` over that buffer (zero-copy, no trailing copy), except that a short read of a large request (<= half of a 4 KiB+ buffer used) is copied into an exact-size buffer so the unused capacity is not retained.
 - The existing copying `fileRead`/`filePread` stay (count result, copy-out semantics) for compatibility; `readAll` stays host-provided (one copy out of the Rust Vec).

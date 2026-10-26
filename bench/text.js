@@ -18,6 +18,7 @@ const samples = {
   'cjk 1 MiB': '日本語テキスト'.repeat(((1 << 20) / 21) | 0),
 };
 
+/** @param {import('@origine/types').Api} _api */
 export async function main(_api) {
   const impls = { js: utf8Js, native: { encode: encodeUtf8, decode: decodeUtf8 } };
   for (const [label, text] of Object.entries(samples)) {

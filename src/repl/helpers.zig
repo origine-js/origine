@@ -10,6 +10,26 @@ fn isProxy(info: v8.FunctionCallbackInfo) callconv(.c) void {
     result.setBool(info.get_arg(0).isProxy());
 }
 
+/// Reads a promise's state ("pending", "fulfilled", "rejected"), or its result when the second
+/// argument is true, without running any guest code; undefined for non-promises.
+fn promiseInfo(info: v8.FunctionCallbackInfo) callconv(.c) void {
+    var result = info.retval();
+    result.setUndefined();
+    const argument = info.get_arg(0);
+    if (!argument.isPromise()) return;
+    const promise = v8.Promise.from_opaque(argument.data.handle).?;
+    if (info.length() > 1 and info.get_arg(1).isTrue()) {
+        result.set(promise.result());
+        return;
+    }
+    const state = switch (promise.state()) {
+        .Pending => "pending",
+        .Fulfilled => "fulfilled",
+        .Rejected => "rejected",
+    };
+    result.set(eu.v.str_utf8(info.isolate(), state).name.primitive.value);
+}
+
 /// Private REPL adapter: reads one validated identifier through V8's script
 /// API without enabling guest eval or Function code generation.
 fn lookupIdentifier(info: v8.FunctionCallbackInfo) callconv(.c) void {
@@ -51,7 +71,8 @@ pub const Helpers = struct {
         defer ctx.exit();
         const proxy = v8.Function.init(ctx, isProxy, null, 1, .Throw, .HasNoSideEffect);
         const lookup = v8.Function.init(ctx, lookupIdentifier, null, 1, .Throw, .HasSideEffect);
-        const function = v8.Function.from_opaque(factory.deref().data.handle).?.call(ctx, eu.v.undefined_value(isolate).value, &.{ proxy.object.value, lookup.object.value }) orelse return error.JavaScriptException;
+        const promise = v8.Function.init(ctx, promiseInfo, null, 2, .Throw, .HasNoSideEffect);
+        const function = v8.Function.from_opaque(factory.deref().data.handle).?.call(ctx, eu.v.undefined_value(isolate).value, &.{ proxy.object.value, lookup.object.value, promise.object.value }) orelse return error.JavaScriptException;
         return .{ .scope = scope, .function = .new(isolate, v8.Function.from_opaque(function.data.handle).?) };
     }
 

@@ -197,6 +197,23 @@ fn text(ptr: *const u8, len: usize) -> Option<String> {
     if raw.is_empty() { None } else { std::str::from_utf8(raw).ok().map(str::to_owned) }
 }
 
+/// For other Rust crates (the REPL): erases the types of `source` (`filename` selects TypeScript
+/// or JavaScript) without any JSX handling. With `verbatim_imports`, imports that only carry
+/// types are kept. Ok(js) or Err(rendered diagnostics).
+pub fn erase_types(source: &str, filename: &str, verbatim_imports: bool) -> Result<String, String> {
+    let options = OxcOptions {
+        jsx_runtime: 0,
+        flags: if verbatim_imports { FLAG_VERBATIM_IMPORTS } else { 0 },
+        import_source: std::ptr::null(),
+        import_source_len: 0,
+        pragma: std::ptr::null(),
+        pragma_len: 0,
+        pragma_frag: std::ptr::null(),
+        pragma_frag_len: 0,
+    };
+    transform(source, filename, Some(&options))
+}
+
 /// Ok(js) or Err(rendered diagnostics).
 fn transform(source: &str, filename: &str, options: Option<&OxcOptions>) -> Result<String, String> {
     let path = Path::new(filename);

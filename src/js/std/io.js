@@ -1,29 +1,38 @@
 // `origine:@std/io`: Zig-style Io vocabulary for the init context.
 // Pure data: holding any of these values confers no authority. The errno table is
-// generated from `Errno` in src/api/errno.zig (`origine:@std/errno`), not written here.
+// generated from `IoErrno` and `HostErrno` (`origine:@std/errno`), not written here.
 import { ERRNO } from 'origine:@std/errno';
 import { quansync } from 'origine:@std/quansync';
 
 const freeze = Object.freeze;
 
-const NAMES = new Map(Object.entries(ERRNO).map(([name, code]) => [code, name]));
+const NAMES = new Map([...Object.entries(ERRNO.io), ...Object.entries(ERRNO.host)].map(([name, code]) => [code, name]));
+const nameOf = code => NAMES.get(code) ?? 'Unexpected';
+const is = (value, code) => (typeof value === 'number' ? value : value?.errno) === code;
+/// A frozen `{ errno, name }` error value for `code`.
+const of = code => freeze({ errno: code, name: nameOf(code) });
 
-/// Errno values with Zig-style names. `is` accepts a number or any `{ errno }`.
+/// The I/O error codes, named like Rust's `std::io::ErrorKind` (`IoError.NotFound`, ...): what fs and
+/// net raise. `is` accepts a number or any `{ errno }`. A call can also fail with a `HostError`.
 export const IoError = freeze({
-  ...ERRNO,
-  name: code => NAMES.get(code) ?? 'Unexpected',
-  is: (value, code) => (typeof value === 'number' ? value : value?.errno) === code,
-  /// A frozen `{ errno, name }` error value for `code`.
-  of: code => freeze({ errno: code, name: NAMES.get(code) ?? 'Unexpected' }),
-  /// Throws a frozen `{ errno, name }` when a sync call left a non-zero errno in
-  /// `fs.errno`, and resets the state. Returns `value` otherwise.
+  ...ERRNO.io,
+  name: nameOf,
+  is,
+  of,
+  /// Throws a frozen `{ errno, name }` (an `IoError` or a `HostError` value) when a sync call left a
+  /// non-zero errno in `fs.errno`, and resets the state. Returns `value` otherwise.
   check(fs, value) {
     const code = fs.errno[0];
     if (code === 0) return value;
     fs.errno[0] = 0;
-    throw freeze({ errno: code, name: NAMES.get(code) ?? 'Unexpected' });
+    throw of(code);
   },
 });
+
+/// The host error codes: origine's own runtime concepts that Rust's `ErrorKind` has no name for
+/// (`HostError.BadHandle`, `StaleHandle`, `Canceled`, `Unexpected`). Any native can raise them.
+/// Same helpers as `IoError`.
+export const HostError = freeze({ ...ERRNO.host, name: nameOf, is, of });
 
 /// Byte limit with `std.Io.Limit` semantics. `unlimited` is Infinity (maxInt(usize)).
 export const Limit = freeze({
@@ -73,7 +82,8 @@ const op = (name, wrap) =>
     },
   });
 
-// An op that exists only on async caps (the zero-copy reads): the sync arm fails with Unsupported.
+// An op that exists only on async caps (the zero-copy reads and the `*Move` writes): the sync arm
+// fails with Unsupported.
 const asyncOnly = name =>
   quansync({
     sync: () => {
@@ -86,6 +96,7 @@ const dirOpenFile = op('dirOpenFile', wrapFile);
 const dirOpenDir = op('dirOpenDir', wrapDir);
 const dirClose = op('dirClose');
 const dirStat = op('dirStat');
+const dirSymlinkStat = op('dirSymlinkStat');
 const dirAccess = op('dirStat', dropResult);
 const dirCreateDir = op('dirCreateDir');
 const dirCreateDirPath = op('dirCreateDirPath');
@@ -107,6 +118,9 @@ const filePreadAlloc = asyncOnly('filePreadAlloc');
 const fileWrite = op('fileWrite');
 const fileWriteAll = op('fileWriteAll');
 const filePwriteAll = op('filePwriteAll');
+const fileWriteMove = asyncOnly('fileWriteMove');
+const fileWriteMoveAll = asyncOnly('fileWriteMoveAll');
+const filePwriteMoveAll = asyncOnly('filePwriteMoveAll');
 const fileSetLength = op('fileSetLength');
 const fileSync = op('fileSync');
 
@@ -216,11 +230,13 @@ class DirImpl {
   stat(io) {
     return dirStat[io.kind](io, this, '');
   }
-  /// Zig `Dir.statFile`: symlinks are not followed.
-  statFile(io, path) {
-    return dirStat[io.kind](io, this, path);
+  /// Zig `Dir.statFile(io, path, { follow_symlinks = true })`: like Rust's `fs::metadata` a final
+  /// symlink is followed (a dangling one is NotFound); `{ follow_symlinks: false }` is
+  /// `symlink_metadata`. Following a symlink can leave the grant's root (confinement is lexical).
+  statFile(io, path, options) {
+    return (options?.follow_symlinks === false ? dirSymlinkStat : dirStat)[io.kind](io, this, path);
   }
-  /// Zig `Dir.access`: fails with FileNotFound (etc.) when the path is not reachable.
+  /// Zig `Dir.access`: fails with NotFound (etc.) when the path (symlinks followed) is not reachable.
   access(io, path) {
     return dirAccess[io.kind](io, this, path);
   }
@@ -283,18 +299,34 @@ class FileImpl {
   readAll(io, limit = Limit.unlimited) {
     return fileReadAll[io.kind](io, this, limit === Infinity ? UNLIMITED : { limit });
   }
-  /// Zig `File.writeStreaming` of one slice: returns the byte count (may be partial). On an async
-  /// io the guest's ArrayBuffer is detached when eligible (see `readInto`), so pass a copy
-  /// (`bytes.slice()`) to keep using `bytes`, and rewrite a partial remainder from a fresh buffer.
+  /// Zig `File.writeStreaming` of one slice: returns the byte count (may be partial). Always copies
+  /// `bytes` at call time and leaves the caller's buffer alone, on both ios (see `writeStreamingMove`).
   writeStreaming(io, bytes) {
     return fileWrite[io.kind](io, this, bytes);
   }
-  /// Async io: detaches `bytes`' ArrayBuffer when eligible (also `writePositionalAll`).
+  /// Always copies, like `writeStreaming` (also `writePositionalAll`).
   writeStreamingAll(io, bytes) {
     return fileWriteAll[io.kind](io, this, bytes);
   }
   writePositionalAll(io, bytes, offset) {
     return filePwriteAll[io.kind](io, this, bytes, offset);
+  }
+  /// Async only (the sync arm throws Unsupported: a blocking write has nothing to hand over).
+  /// `writeStreaming` that TRANSFERS `bytes`: its whole ArrayBuffer is detached (like `transfer()`)
+  /// and written in place, so the write costs no copy. Fails Unsupported, with the buffer untouched
+  /// and nothing written, when it cannot be detached (shared, resizable, WebAssembly memory); it
+  /// never falls back to a copy. An empty `bytes` detaches nothing. A partial write loses the rest:
+  /// use `writeStreamingMoveAll` unless you can rewrite it.
+  writeStreamingMove(io, bytes) {
+    return fileWriteMove[io.kind](io, this, bytes);
+  }
+  /// Async only. `writeStreamingAll` that transfers `bytes` (see `writeStreamingMove`).
+  writeStreamingMoveAll(io, bytes) {
+    return fileWriteMoveAll[io.kind](io, this, bytes);
+  }
+  /// Async only. `writePositionalAll` that transfers `bytes` (see `writeStreamingMove`).
+  writePositionalMoveAll(io, bytes, offset) {
+    return filePwriteMoveAll[io.kind](io, this, bytes, offset);
   }
   setLength(io, length) {
     return fileSetLength[io.kind](io, this, length);
@@ -332,6 +364,7 @@ export const ops = freeze({
   openDir: dirOpenDir,
   closeDir: dirClose,
   stat: dirStat,
+  symlinkStat: dirSymlinkStat,
   access: dirAccess,
   createDir: dirCreateDir,
   createDirPath: dirCreateDirPath,
@@ -356,6 +389,9 @@ export const ops = freeze({
   fileWrite,
   fileWriteAll,
   filePwriteAll,
+  fileWriteMove,
+  fileWriteMoveAll,
+  filePwriteMoveAll,
   fileSetLength,
   fileSync,
   fileReadPositionalAll,

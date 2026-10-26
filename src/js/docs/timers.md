@@ -50,7 +50,8 @@ Pending timers supply native work while the host waits for `main`'s returned
 promise; await the timer or return a promise that depends on it. `io.run()` is
 unnecessary. As with other I/O, returning from `main` ends CLI execution even if
 an unawaited timer remains. `io.close()` cancels every pending timer along with the
-runtime's other operations. Starting a timer or reading its clock after close
+runtime's other operations. Every `io.close()` call returns the same promise, which
+settles once the runtime is really closed (a repeated call is not an instant no-op). Starting a timer or reading its clock after close
 throws `BadHandle`. Canceling a timer leaves sibling timers and filesystem/network
 operations alone. Timers are local to their owning scope and cannot grant access
 to another runtime by presenting its numeric identifier.

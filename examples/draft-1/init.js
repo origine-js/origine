@@ -2,9 +2,11 @@ import { Dir, IoError, Limit } from 'origine:@std/io';
 
 const text = bytes => String.fromCharCode(...bytes);
 
+/** @param {import('@origine/types').Api} api */
 export async function main(api) {
   print('args:', api.env.args().join(' '));
-  const grant = { root: 'examples/draft-1/work', write: true };
+  /** @type {import('@origine/types').FsRequest} */
+  const grant = { root: 'examples/draft-1/work', access: 'rw' };
   const sync = api.fs.requestSync(grant);
   const io = api.io.create({});
   const async = await api.fs.requestAsync({ io, ...grant });
@@ -17,6 +19,8 @@ export async function main(api) {
   try {
     IoError.check(sync, sync.dirOpenFile(Dir.cwd(), '../escape.txt', 'r'));
   } catch (e) {
+    // Failures are `{ errno, name }` values, not Errors: narrow with IoError.is.
+    if (!IoError.is(e, IoError.PermissionDenied)) throw e;
     print('escape rejected:', e.name);
   }
   const child = await api.scope.create({

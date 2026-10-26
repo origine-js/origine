@@ -17,7 +17,6 @@ const FD_CLOEXEC = kqueue.FD_CLOEXEC;
 const SEEK_SET = kqueue.SEEK_SET;
 const SEEK_CUR = kqueue.SEEK_CUR;
 
-
 const testing = std.testing;
 const scratch = "/tmp";
 

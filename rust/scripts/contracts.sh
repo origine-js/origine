@@ -14,11 +14,14 @@ mode=${1:?usage: contracts.sh gen|check}
 
 # path (relative to the repository root) of each generated file
 files="rust/crates/origine_api_core/src/errno_table.rs
+types/generated/errno.d.ts
 src/api/transform/oxc_abi_check.c
 src/api/api_abi_check.c
 rust/crates/origine_api/src/abi_gen.rs
 rust/crates/origine_io/src/sys_gen.rs
-rust/crates/origine_oxc/src/header_abi.rs"
+rust/crates/origine_oxc/src/header_abi.rs
+rust/crates/origine_repl/src/header_abi.rs
+src/repl/repl_abi_check.c"
 
 if [ -z "${LIBCLANG_PATH:-}" ] && [ -d /Library/Developer/CommandLineTools/usr/lib ]; then
     export LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib
@@ -28,12 +31,13 @@ fi
 generate() {
     out=$1
     for f in $files; do mkdir -p "$out/$(dirname "$f")"; done
-    # Surface D (errno table) and the Zig half of surface E (oxc_abi_check.c): from Zig declarations.
+    # Surface D (errno table, TypeScript errno types) and the Zig half of surfaces E and G (oxc_abi_check.c, repl_abi_check.c): from Zig declarations.
     (cd "$repo" && zig run src/gen_contracts.zig -- "$out")
-    # Surfaces A and E: bindgen over the C headers.
+    # Surfaces A, E and G: bindgen over the C headers.
     (cd "$repo/rust" &&
         cargo run -q --offline --locked -p origine_gen -- io-sys ../src/io/include/origine_io.h "$out/rust/crates/origine_io/src/sys_gen.rs" &&
         cargo run -q --offline --locked -p origine_gen -- oxc-abi crates/origine_oxc/include/origine_oxc.h "$out/rust/crates/origine_oxc/src/header_abi.rs" &&
+        cargo run -q --offline --locked -p origine_gen -- repl-abi crates/origine_repl/include/origine_repl.h "$out/rust/crates/origine_repl/src/header_abi.rs" &&
         cargo run -q --offline --locked -p origine_gen -- api-abi crates/origine_api/include/origine_api.h "$out/rust/crates/origine_api/src/abi_gen.rs")
 }
 
@@ -54,6 +58,8 @@ check)
     done
     # The Zig declarations of the oxc ABI against the header (surface E).
     clang -fsyntax-only -I "$repo/rust/crates/origine_oxc/include" "$repo/src/api/transform/oxc_abi_check.c" || status=1
+    # The Zig declarations of the REPL ABI against its header (surface G).
+    clang -fsyntax-only -I "$repo/rust/crates/origine_repl/include" "$repo/src/repl/repl_abi_check.c" || status=1
     # The Zig declarations of the origine_api ABI against its header (surfaces B and C).
     clang -fsyntax-only -I "$repo/rust/crates/origine_api/include" "$repo/src/api/api_abi_check.c" || status=1
     # Symbols the pre-link step would hide (surface F).

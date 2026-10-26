@@ -6,7 +6,7 @@ are adapted from Bun's native REPL:
 
 https://github.com/oven-sh/bun/blob/5c6d4e24cd185d5bef8d98e7f1f1e3ef10ac163f/src/runtime/cli/repl.rs
 
-The algorithms are ported to Zig; engine operations use Origine's V8 bindings.
+The algorithms are ported to Rust (src/complete.rs); engine operations use Origine's V8 bindings.
 Origine's value inspector and lexical binding adapter are separate implementations.
 This is not the entire Bun runtime or a Node compatibility layer.
 

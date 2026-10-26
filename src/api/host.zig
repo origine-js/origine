@@ -22,7 +22,8 @@ const origine_modules = @import("std/modules.zig");
 const module_api = @import("module.zig");
 const transformer_api = @import("transform/transformer.zig");
 const transformers = @import("transform/transformers.zig");
-const JsLoader = @import("js_loader.zig").JsLoader;
+const js_loader = @import("js_loader.zig");
+const JsLoader = js_loader.JsLoader;
 const Runtime = @import("../managed/runtime.zig").Runtime;
 const Scope = @import("../managed/scope.zig").Scope;
 const init_snapshot = @import("../managed/init_snapshot.zig");
@@ -106,11 +107,29 @@ pub const Config = struct {
 /// external backing stores), so `errno_cell` points into an ArrayBuffer kept alive by
 /// `errno_buffer` until `Host.destroy`. Before `install` binds the template's array it points at
 /// `errno_local`, which must therefore stay at a stable address.
+/// What a native may still use once its scope has been disposed: the host allocator and the
+/// errno cell, nothing that disposal released. Lives inside `ScopeState`, which outlives the
+/// scope's V8 context (other realms may keep that context, and the natives bound to it, alive).
+pub const ScopeCore = struct {
+    gpa: std.mem.Allocator,
+    errno_cell: *u32,
+
+    pub fn errnoCell(self: *ScopeCore) *u32 {
+        return self.errno_cell;
+    }
+    pub fn allocator(self: *ScopeCore) std.mem.Allocator {
+        return self.gpa;
+    }
+};
+
 pub const ScopeState = struct {
     host: *Host,
     scope: *Scope,
     errno_local: u32 = 0,
-    errno_cell: *u32 = undefined,
+    shared: ScopeCore = undefined,
+    /// True once `Host.release` took the scope's resources back. `scope` dangles from then on:
+    /// only `core` may be used.
+    released: bool = false,
     /// Persistent handle pinning the errno array's buffer; released by `Host.destroy`.
     errno_buffer: ?v8.Global.Of(v8.ArrayBuffer) = null,
     /// Per-scope state of modules with `bindings`, created on first use; torn down by
@@ -124,8 +143,15 @@ pub const ScopeState = struct {
     snapshotting: bool = false,
 
     // Binding State protocol (see binding.zig).
+    pub const Core = ScopeCore;
+    pub fn core(self: *ScopeState) *ScopeCore {
+        return &self.shared;
+    }
+    pub fn isDetached(self: *const ScopeState) bool {
+        return self.released;
+    }
     pub fn errnoCell(self: *ScopeState) *u32 {
-        return self.errno_cell;
+        return self.shared.errno_cell;
     }
     pub fn allocator(self: *ScopeState) std.mem.Allocator {
         return self.host.allocator;
@@ -160,6 +186,8 @@ pub const Host = struct {
     states: std.ArrayList(*ScopeState) = .empty,
     children: std.ArrayList(scope_api.Child) = .empty,
     loaders: std.ArrayList(*JsLoader) = .empty,
+    /// Loads still pending when their loader was released; freed as their promises settle, or by `destroy`.
+    orphaned_loads: std.ArrayList(*js_loader.Pending) = .empty,
     runs: std.ArrayList(*scope_api.RunState) = .empty,
     next_fs_id: u32 = 1,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
@@ -197,8 +225,14 @@ pub const Host = struct {
             alloc.destroy(loader);
         }
         self.loaders.deinit(alloc);
+        for (self.orphaned_loads.items) |pending| {
+            alloc.free(pending.module_id);
+            alloc.destroy(pending);
+        }
+        self.orphaned_loads.deinit(alloc);
         for (self.runs.items) |pending| {
             if (!pending.done) pending.resolver.deinit();
+            if (pending.values) |held| held.deinit();
             alloc.destroy(pending);
         }
         self.runs.deinit(alloc);
@@ -285,11 +319,31 @@ pub const Host = struct {
     /// reads other modules from the process working directory. Borrows self.
     pub fn initOptions(self: *Host) Scope.Options {
         return .{
-            .enable_origine_namespace = true,
+            .origine_namespace = true,
             .resolver = .{ .data = self, .resolve = init_loader.resolve },
             .loader = .{ .data = self, .load = init_loader.load },
             .meta = .{ .data = self, .init = init_loader.meta },
+            .on_dispose = self.disposer(),
         };
+    }
+
+    /// The `Scope.Options.on_dispose` hook for scopes of this host.
+    pub fn disposer(self: *Host) Scope.Disposer {
+        return .{ .data = self, .call = onDispose };
+    }
+
+    /// Runs while a disposed scope is freed: releases its host state and its JS loader.
+    fn onDispose(data: ?*anyopaque, scope: *Scope) void {
+        const self: *Host = @ptrCast(@alignCast(data.?));
+        self.release(scope);
+        const loader = scope.options.loader orelse return;
+        for (self.loaders.items, 0..) |owned, index| {
+            if (@as(?*anyopaque, owned) != loader.data) continue;
+            owned.deinit();
+            self.allocator.destroy(owned);
+            _ = self.loaders.swapRemove(index);
+            return;
+        }
     }
 
     /// Creates `scope`'s native-state record and makes it reachable from the scope's context
@@ -299,7 +353,7 @@ pub const Host = struct {
         const state = try self.allocator.create(ScopeState);
         errdefer self.allocator.destroy(state);
         state.* = .{ .host = self, .scope = scope };
-        state.errno_cell = &state.errno_local;
+        state.shared = .{ .gpa = self.allocator, .errno_cell = &state.errno_local };
         state.rebinder = .{ .owner = state, .resolve = resolveModuleState };
         try self.states.append(self.allocator, state);
         var session: Scope.Session = undefined;
@@ -314,13 +368,42 @@ pub const Host = struct {
     /// was never attached. Call with the scope's isolate alive, before `Runtime.destroy`.
     pub fn detach(self: *Host, scope: *Scope) void {
         for (self.states.items, 0..) |state, index| {
-            if (state.scope != scope) continue;
+            // A released record's `scope` dangles (the address may name a newer scope).
+            if (state.released or state.scope != scope) continue;
             var session: Scope.Session = undefined;
             session.init(scope);
             defer session.deinit();
             session.ctx.setAlignedPointerInEmbedderData(binding.rebinder_slot, null);
             self.releaseState(state);
             _ = self.states.swapRemove(index);
+            return;
+        }
+    }
+
+    /// Takes back everything `scope`'s guest was given: module states, fs grants and the errno
+    /// buffer. The record itself stays, marked released, until `Host.destroy`: natives bound to the
+    /// scope's context can outlive the scope (another realm may hold a function from it), and they
+    /// reach this record through V8 external data. Called by `Runtime.disposeScope`'s teardown,
+    /// before the context goes; no-op for a scope that was never attached or is already released.
+    pub fn release(self: *Host, scope: *Scope) void {
+        for (self.states.items) |state| {
+            if (state.released or state.scope != scope) continue;
+            var session: Scope.Session = undefined;
+            session.init(scope);
+            defer session.deinit();
+            session.ctx.setAlignedPointerInEmbedderData(binding.rebinder_slot, null);
+            var remaining = state.module_states.items.len;
+            while (remaining > 0) : (remaining -= 1) {
+                const owned = state.module_states.items[remaining - 1];
+                owned.bindings.release(state, owned.ptr);
+            }
+            for (self.grants.items) |grant| if (grant.owner == state) grant.deinit();
+            // The cell may live in the buffer being released: keep its value and move home.
+            state.errno_local = state.shared.errno_cell.*;
+            state.shared.errno_cell = &state.errno_local;
+            if (state.errno_buffer) |buffer| buffer.deinit();
+            state.errno_buffer = null;
+            state.released = true;
             return;
         }
     }
@@ -448,11 +531,11 @@ pub const Host = struct {
     /// Returns a local JS factory only for the no-snapshot fallback, otherwise undefined.
     /// Failures leave the getter retryable; never validates/freezes the prebuilt public graph.
     fn loadCapability(state: *ScopeState, call: *binding.Call, name: []const u8, native: v8.Object, needs_factory: bool) !v8.Value {
-        const module = std.meta.stringToEnum(glue_script.Module, name) orelse return error.InvalidPath;
+        const module = std.meta.stringToEnum(glue_script.Module, name) orelse return error.InvalidInput;
         const host = state.host;
         const env = call.env();
         const part = switch (module) {
-            .common => return error.InvalidPath,
+            .common => return error.InvalidInput,
             .env => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),
@@ -467,6 +550,7 @@ pub const Host = struct {
                 .scope = .{
                     .create = func(scope_api.create, .{ .side_effect = .any }),
                     .preload = func(scope_api.preload, .{ .side_effect = .any }),
+                    .preloadModule = func(scope_api.preloadModule, .{ .side_effect = .any }),
                     .run = func(scope_api.run, .{ .side_effect = .any }),
                     .close = func(scope_api.close, .{ .side_effect = .any }),
                 },
@@ -484,7 +568,7 @@ pub const Host = struct {
         }
         const rust_namespace: ?[]const u8 = switch (module) {
             .fs => if (host.runtime != null and host.fs != null and host.fs.?.async) "fsAsync" else null,
-            .io, .net => if (host.runtime != null) name else return error.AccessDenied,
+            .io, .net => if (host.runtime != null) name else return error.PermissionDenied,
             else => null,
         };
         if (rust_namespace) |namespace| {
@@ -558,7 +642,7 @@ pub const Host = struct {
 
     /// Drives the platform, the microtask queue and every I/O runtime until `promise` settles.
     /// Fails with `Stalled` when it is pending and nothing can still make progress.
-    fn settle(self: *Host, rt: *Runtime, platform: v8.Platform, promise: v8.Global.Of(v8.Promise)) !void {
+    pub fn settle(self: *Host, rt: *Runtime, platform: v8.Platform, promise: v8.Global.Of(v8.Promise)) !void {
         while (true) {
             rt.pumpPlatform(platform);
             {
@@ -629,6 +713,6 @@ fn bindErrno(state: *ScopeState, value: v8.Value) !void {
     const buffer = v8.ArrayBuffer.from_opaque(backing.object.value.data.handle) orelse return error.BootstrapFailed;
     const cell: *u32 = @ptrCast(@alignCast(buffer.data() orelse binding.oom()));
     cell.* = state.errno_local;
-    state.errno_cell = cell;
+    state.shared.errno_cell = cell;
     state.errno_buffer = .new(state.scope.runtime.isolate, buffer);
 }

@@ -8,9 +8,9 @@ meant to be built in JavaScript on top of `api` by narrowing it.
 
 | Layer | Where | Role |
 | --- | --- | --- |
-| Shell, managed runtime, `api` host | `src/` (Zig) | CLI, REPL, isolate/scope management, snapshots, native bindings |
+| Shell, managed runtime, `api` host | `src/` (Zig) | CLI, REPL loop and terminal, isolate/scope management, snapshots, native bindings |
 | Event loop | `src/io/` (Zig) | Completion-based loop (io_uring, kqueue + GCD, thread pool) with a C ABI |
-| Async natives, I/O runtime, TypeScript | `rust/` (Rust) | `api.io` / async `api.fs` / `api.net` natives, op futures, oxc transformer |
+| Async natives, I/O runtime, TypeScript, REPL parsing | `rust/` (Rust) | `api.io` / async `api.fs` / `api.net` natives, op futures, oxc transformer, REPL line editor and input analysis |
 | V8 package | `lib/v8_zig/` | Fetches, patches and builds V8; exposes `@v8`, `@engine`, `@managed`, `@util`, `@mimalloc`, `@diagnostics` |
 | Guest JavaScript | `src/js/` | `origine:@std/*` modules, the glue that builds `api`, hardening bootstrap |
 
@@ -49,7 +49,7 @@ origine path/to/init.js [args...]
 import { fs } from 'origine:@std/fs';
 
 export async function main(api) {
-  const files = fs(api.fs.requestSync({ write: false }));
+  const files = fs(api.fs.requestSync({ access: 'r' }));
   print(files.read_to_string('README.md').length);
 }
 ```

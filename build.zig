@@ -8,7 +8,10 @@ pub fn build(b: *std.Build) void {
     const external_link = target.result.os.tag == .macos and optimize != .debug;
     // Release V8 by default; a debug V8 compiles faster and is for working on V8 patches.
     const v8_debug = b.option(bool, "v8_debug", "Build V8 in debug mode for quick iteration on V8 patches (default: release V8)") orelse false;
-    const builtin_pgo = b.option(bool, "builtin_pgo", "Use Google's exact-version builtin PGO baseline (default: release desktop V8)") orelse (!v8_debug and target.result.os.tag != .ios);
+    // The V8 sandbox confines JS memory (ArrayBuffers use a mimalloc arena inside it). Off
+    // only for Zig-allocated backing stores or tools that need memory outside the sandbox.
+    const v8_sandbox = b.option(bool, "v8_sandbox", "Build V8 with the sandbox (default: on; off also disables builtin PGO)") orelse true;
+    const builtin_pgo = b.option(bool, "builtin_pgo", "Use Google's exact-version builtin PGO baseline (default: release desktop V8, needs the sandbox)") orelse (!v8_debug and v8_sandbox and target.result.os.tag != .ios);
     // V8 builds from source only on the first build and for `zig build build-v8` (patches apply
     // automatically, ninja makes it incremental); other builds reuse the last archive. An
     // explicit archive skips that.
@@ -22,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const cargo_offline = b.option(bool, "cargo-offline", "Run cargo with --offline") orelse false;
     const config = b.addOptions();
     config.addOption(bool, "typescript", typescript);
-    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .builtin_pgo = builtin_pgo, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
+    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .builtin_pgo = builtin_pgo, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
     const v8 = v8Dependency(b, options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
     const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
@@ -30,6 +33,7 @@ pub fn build(b: *std.Build) void {
     // Zig-linked programs (debug, tests) resolve duplicate Rust runtime symbols on their own and
     // would break on a pre-linked object (thread-locals), so they take the plain archive.
     const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, typescript, false, rust_v8);
+    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, rust_v8, cargo_offline, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
     b.step("clippy", "Run clippy (-D warnings) over the Rust workspace with the V8 environment").dependOn(&cargoCommand(b, rust_v8, cargo_offline, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -56,6 +60,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     const embed_snapshot = target.query.isNative();
     build_options.addOption(bool, "has_snapshot", embed_snapshot);
+    build_options.addOption(bool, "v8_sandbox", v8_sandbox);
     root.addOptions("build_options", build_options);
     if (embed_snapshot) {
         const tool_module = b.createModule(.{
@@ -135,6 +140,7 @@ pub fn build(b: *std.Build) void {
 const V8Options = struct {
     target: std.Build.ResolvedTarget,
     v8_debug: bool,
+    v8_sandbox: bool,
     builtin_pgo: bool,
     prebuilt: ?[]const u8,
     clang_bin: []const u8,
@@ -148,6 +154,7 @@ fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build
         .target = options.target,
         .optimize = .fast,
         .v8_debug = options.v8_debug,
+        .v8_sandbox = options.v8_sandbox,
         .link_native = link_native,
         .prebuilt_v8_path = path,
         .v8_clang_dir = options.clang_bin,
@@ -155,6 +162,7 @@ fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build
         .target = options.target,
         .optimize = .fast,
         .v8_debug = options.v8_debug,
+        .v8_sandbox = options.v8_sandbox,
         .link_native = link_native,
         .cache_root = options.cache_root,
         .builtin_pgo = options.builtin_pgo,

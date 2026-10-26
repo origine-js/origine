@@ -5,6 +5,7 @@ const module_types = @import("../managed/module_types.zig");
 const binding = @import("binding.zig");
 const origine_modules = @import("std/modules.zig");
 const transformer_api = @import("transform/transformer.zig");
+const json_module = @import("json_module.zig");
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
@@ -48,6 +49,10 @@ pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!modul
     // The `origine:` namespace belongs to the embedded modules: a working-directory file can
     // never take such an id (and so never receives the natives `meta` hands to std modules).
     if (std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) return error.FileNotFound;
+    if (json_module.requested(request.import_attributes)) {
+        const text = try std.Io.Dir.cwd().readFileAlloc(host.io, request.module_id, request.allocator, .unlimited);
+        return .{ .source = try json_module.wrap(request.allocator, text) };
+    }
     // A file that needs a transformer is mapped and handed to it in place, with no intermediate
     // buffer; only the transformed output is copied out. Plain files keep the read path, since
     // V8 copies the source into its own heap either way.
@@ -81,7 +86,7 @@ pub fn meta(data: ?*anyopaque, request: module_types.MetaRequest) void {
         const bindings = module.bindings orelse continue;
         if (!std.mem.eql(u8, request.module_id, module.id)) continue;
         const state: *ScopeState = for (host.states.items) |candidate| {
-            if (candidate.scope.id == request.scope_id) break candidate;
+            if (!candidate.released and candidate.scope.id == request.scope_id) break candidate;
         } else return;
         // For a snapshot the natives carry a marker and find their state again after restore.
         if (state.snapshotting and index >= binding.max_rebind) return;

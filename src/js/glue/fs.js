@@ -1,8 +1,17 @@
 // `api.fs`: the fs capability factory. Evaluated as an expression by src/api/glue.zig:
-// `(native, util) => makeFsCap`. `makeFsCap(spec)` returns a frozen `{ requestSync, requestAsync,
-// narrow }`; each request binds the native ops of one grant (Zig natives + errno cell for sync,
-// Rust natives on an io runtime for async) and returns the sync or async variant.
-(native, { freeze, errno, take, failure, own, joinPath, ioHandles, closedIo, errors: { InvalidPath, BadHandle, AccessDenied } }) => {
+// `(native, util) => makeFsCap`. `makeFsCap(spec)` returns a frozen `{ requestSync, requestAsync }`;
+// each request binds the native ops of one grant (Zig natives + errno cell for sync, Rust natives on
+// an io runtime for async) and returns the sync or async variant. `spec` is the embedder's
+// ceiling (`Config.fs`): `{ root, write, sync, async }`.
+//
+// A request names the access it wants, `access: 'r' | 'w' | 'rw'` (required). A request above the
+// ceiling is denied (PermissionDenied), never silently downgraded. Native handles are readable
+// whenever they are writable, so a write-only grant ('w') is enforced by the grant itself: it denies
+// everything that observes what exists (reads, stat, directory listings, opening read-only).
+(
+  native,
+  { freeze, errno, take, failure, own, joinPath, ioHandles, closedIo, errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported } },
+) => {
   // Python-style open modes -> native bits (write 1, create 2, truncate 4,
   // exclusive 8). Handles always allow reading when writable, so `x` and `x+`
   // (and `w`/`w+`, `r+`/`rw`) are equivalent natively. `c` and `t` extend Python's
@@ -22,7 +31,7 @@
       't+': 5,
     }),
   );
-  // `undefined` means `r`; anything unknown is -1 (rejected as InvalidPath).
+  // `undefined` means `r`; anything unknown is -1 (rejected as InvalidInput).
   const openBits = mode => (mode === undefined ? 0 : typeof mode === 'string' ? (OPEN_MODES[mode] ?? -1) : -1);
 
   const isString = value => typeof value === 'string';
@@ -85,13 +94,17 @@
   const asFile = handleOfKind('file');
 
   // Binds the native ops of one grant into the guest-visible operations. Each operation
-  // validates its arguments (failing with InvalidPath through the errno cell), calls the
+  // validates its arguments (failing with InvalidInput through the errno cell), calls the
   // native and, when the native succeeded, shapes its result. The natives take a handle as
   // two arguments, `(fs, id)`. Operations that fail return undefined.
   function makeOps(ops) {
     const fsId = ops.id;
     const bad = () => {
-      errno[0] = InvalidPath;
+      errno[0] = InvalidInput;
+    };
+    // Sync writes copy (the call blocks) and have no move variant: there is nothing to hand over.
+    const unsupported = () => {
+      errno[0] = Unsupported;
     };
     const ok = () => errno[0] === 0;
     const statOf = out => freeze({ kind: out[0], size: out[1] });
@@ -119,6 +132,12 @@
         const d = asDir(dir);
         if (d === null || !isString(path)) return bad();
         const out = ops.stat(d.fs, d.id, path);
+        return ok() ? statOf(out) : undefined;
+      },
+      dirSymlinkStat(dir, path) {
+        const d = asDir(dir);
+        if (d === null || !isString(path)) return bad();
+        const out = ops.symlinkStat(d.fs, d.id, path);
         return ok() ? statOf(out) : undefined;
       },
       dirRead(dir) {
@@ -208,6 +227,21 @@
         if (f === null || !isBytes(bytes)) return bad();
         ops.filePwriteAll(f.fs, f.id, bytes, offset);
       },
+      fileWriteMoveAll(file, bytes) {
+        const f = asFile(file);
+        if (f === null || !isBytes(bytes)) return bad();
+        unsupported();
+      },
+      fileWriteMove(file, bytes) {
+        const f = asFile(file);
+        if (f === null || !isBytes(bytes)) return bad();
+        unsupported();
+      },
+      filePwriteMoveAll(file, bytes) {
+        const f = asFile(file);
+        if (f === null || !isBytes(bytes)) return bad();
+        unsupported();
+      },
       fileSetLength(file, length) {
         const f = asFile(file);
         if (f === null) return bad();
@@ -228,13 +262,15 @@
   // returns a promise; validation and completion failures reject with a frozen `{ errno, name }`
   // (the natives reject with that shape already). `fsId` is the async grant's id.
   //
-  // Buffer semantics (phase 5): `fileWrite`/`filePwriteAll`/`fileWriteAll` DETACH the guest's
-  // ArrayBuffer when it is eligible (not shared, not resizable, detachable) and write straight from
-  // it; otherwise they copy at call time and the buffer stays usable. `fileRead`/`filePread` keep
-  // the copying semantics (count result; the bytes are copied into `buffer` at completion).
+  // Buffer semantics: `fileWrite`/`filePwriteAll`/`fileWriteAll` ALWAYS copy the bytes at call time
+  // and never touch the guest's buffer. `fileWriteMove`/`filePwriteMoveAll`/`fileWriteMoveAll` are
+  // the explicit transfers: they DETACH the guest's ArrayBuffer (the whole buffer, not only a view's
+  // window) and write straight from its memory, and fail Unsupported (with the buffer untouched, no
+  // silent copy) when it cannot be detached (shared, resizable, WebAssembly memory). `fileRead`/
+  // `filePread` copy too (count result; the bytes are copied into `buffer` at completion).
   // `fileReadInto`/`filePreadInto` (BYOB) and `fileReadAlloc`/`filePreadAlloc` are the zero-copy reads.
   function makeAsyncOps(ops, fsId) {
-    const bad = () => Promise.reject(failure(InvalidPath));
+    const bad = () => Promise.reject(failure(InvalidInput));
     // The `Dir.cwd()` sentinel `{0, 0}` names this grant's root.
     const root = handle => (handle !== null && handle.fs === 0 && handle.id === 0 ? { kind: 'dir', fs: fsId, id: 0 } : handle);
     const statOf = out => freeze({ kind: out[0], size: out[1] });
@@ -268,6 +304,11 @@
         const d = asDir(root(dir));
         if (d === null || !isString(path)) return bad();
         return ops.stat(d.fs, d.id, path).then(statOf);
+      },
+      dirSymlinkStat(dir, path) {
+        const d = asDir(root(dir));
+        if (d === null || !isString(path)) return bad();
+        return ops.symlinkStat(d.fs, d.id, path).then(statOf);
       },
       dirRead(dir) {
         const d = asDir(root(dir));
@@ -381,6 +422,21 @@
         if (f === null || !isBytes(bytes)) return bad();
         return ops.filePwriteAll(f.fs, f.id, bytes, offset);
       },
+      fileWriteMoveAll(file, bytes) {
+        const f = asFile(file);
+        if (f === null || !isBytes(bytes)) return bad();
+        return ops.writeMoveAll(f.fs, f.id, bytes);
+      },
+      fileWriteMove(file, bytes) {
+        const f = asFile(file);
+        if (f === null || !isBytes(bytes)) return bad();
+        return ops.fileWriteMove(f.fs, f.id, bytes);
+      },
+      filePwriteMoveAll(file, bytes, offset) {
+        const f = asFile(file);
+        if (f === null || !isBytes(bytes)) return bad();
+        return ops.filePwriteMoveAll(f.fs, f.id, bytes, offset);
+      },
       fileSetLength(file, length) {
         const f = asFile(file);
         if (f === null) return bad();
@@ -396,12 +452,21 @@
     return { ...dirOps, ...fileOps };
   }
 
-  // `{ root, write }` of a request hint against the cap's spec; null when `root` is malformed.
+  // Access bits of the natives: 1 read, 2 write.
+  const ACCESS = freeze(Object.assign(Object.create(null), { r: 1, w: 2, rw: 3 }));
+
+  // `{ root, access }` of a request hint against the cap's spec, or the errno of a bad or denied
+  // request: InvalidInput for a malformed `root` or a missing / unknown `access`, PermissionDenied
+  // for a write the embedder's ceiling (`spec.write`) does not allow (never downgraded).
   function grantOf(spec, hint) {
     let root = own(hint, 'root');
-    if (root !== undefined && typeof root !== 'string') return null;
+    if (root !== undefined && typeof root !== 'string') return InvalidInput;
+    const name = own(hint, 'access');
+    const access = typeof name === 'string' ? ACCESS[name] : undefined;
+    if (access === undefined) return InvalidInput;
+    if (access & 2 && !spec.write) return PermissionDenied;
     root = joinPath(spec.root, root);
-    return { root, write: own(hint, 'write') === true && spec.write };
+    return { root, access };
   }
 
   function makeFsCap(spec) {
@@ -410,35 +475,25 @@
       // `{ errno, name }` when denied.
       requestSync(hint) {
         const grant = grantOf(spec, hint);
-        if (grant === null) throw failure(InvalidPath);
-        if (!spec.sync) throw failure(AccessDenied);
-        const ops = native.fsRequest(grant.root, grant.write);
+        if (typeof grant === 'number') throw failure(grant);
+        if (!spec.sync) throw failure(PermissionDenied);
+        const ops = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
         return freeze({ kind: 'sync', id: ops.id, errno, ...makeOps(ops) });
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),
-      // AccessDenied (not granted), InvalidPath, or the native's failure.
+      // PermissionDenied (not granted), InvalidInput, or the native's failure.
       requestAsync(hint) {
         const io = own(hint, 'io');
         if (io === undefined || io === null || typeof io !== 'object' || !ioHandles.has(io) || closedIo.has(io))
           return Promise.reject(failure(BadHandle));
         const grant = grantOf(spec, hint);
-        if (grant === null) return Promise.reject(failure(InvalidPath));
-        if (!spec.async || native.fsAsync === undefined) return Promise.reject(failure(AccessDenied));
+        if (typeof grant === 'number') return Promise.reject(failure(grant));
+        if (!spec.async || native.fsAsync === undefined) return Promise.reject(failure(PermissionDenied));
         return native.fsAsync
-          .request(io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.write)
+          .request(io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access)
           .then(granted => freeze({ kind: 'async', id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) }));
-      },
-      narrow(next) {
-        const root = own(next, 'root');
-        if (root !== undefined && typeof root !== 'string') throw new TypeError('root must be a string');
-        return makeFsCap({
-          root: joinPath(spec.root, root),
-          write: spec.write && own(next, 'write') !== false,
-          async: spec.async && own(own(next, 'mode'), 'async') !== false,
-          sync: spec.sync && own(own(next, 'mode'), 'sync') !== false,
-        });
       },
     });
   }

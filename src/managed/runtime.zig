@@ -29,6 +29,7 @@ pub const Runtime = struct {
         allow_explicit_blocking_api: bool = false,
         /// Default uses V8's native allocator. zig creates a runtime-owned adapter;
         /// its allocator state must be thread-safe and live through Runtime.destroy.
+        /// sandbox creates a runtime-owned allocator in the V8 sandbox.
         /// borrowed leaves native allocator ownership with the caller, who must
         /// retain it until the runtime and all its backing stores have been released.
         /// Startup snapshot from `snapshot.create`, 16-byte aligned. Borrowed: the
@@ -43,6 +44,9 @@ pub const Runtime = struct {
         array_buffer_allocator: union(enum) {
             default,
             zig: std.mem.Allocator,
+            /// Backing stores in V8 sandbox pages (`ArrayBuffer.Allocator.fromSandbox`); the only
+            /// owned choice besides default that a sandboxed V8 accepts.
+            sandbox,
             borrowed: v8.ArrayBuffer.Allocator,
         } = .default,
     };
@@ -55,18 +59,23 @@ pub const Runtime = struct {
     pub const Session = struct {
         isolate: v8.Isolate,
         h_scope: v8.HandleScope,
+        rt: *Runtime,
 
-        /// Borrows rt only to read its isolate; retains nothing. Enters the isolate
-        /// and opens a HandleScope that stays open until `deinit`. Cannot fail.
-        pub fn init(self: *Session, rt: *const Runtime) void {
+        /// Borrows rt for the guard's lifetime; retains nothing. Enters the isolate
+        /// and opens a HandleScope that stays open until `deinit`. Counts as running
+        /// scope code (see `session_depth`). Cannot fail.
+        pub fn init(self: *Session, rt: *Runtime) void {
+            self.rt = rt;
             self.isolate = rt.isolate;
             self.isolate.enter();
             self.h_scope.init(self.isolate);
+            rt.session_depth += 1;
         }
 
         /// Closes the HandleScope (invalidating its local handles) and exits the
         /// isolate. Must run on the thread and in the LIFO order of `init`.
         pub fn deinit(self: *Session) void {
+            self.rt.session_depth -= 1;
             self.h_scope.deinit();
             self.isolate.exit();
         }
@@ -78,6 +87,13 @@ pub const Runtime = struct {
     /// Borrowed metadata allocator; backs Scopes, module maps and load arenas.
     allocator: std.mem.Allocator,
     scopes: std.ArrayList(*Scope) = .empty,
+    /// Next `Scope.id`. Monotonic, so an id never names two scopes even once scopes can be freed.
+    next_scope_id: usize = 0,
+    /// Open `Session`s. Zero means no scope code is on the stack, the only time a disposed scope
+    /// may be freed.
+    session_depth: usize = 0,
+    /// Disposed scopes still in `scopes`, waiting for `reap`.
+    disposed_pending: usize = 0,
     queue: v8.MicrotaskQueue,
     next_load_token: module_types.LoadToken = 1,
     /// Snapshot descriptor the isolate points at; must keep a stable address.
@@ -100,6 +116,7 @@ pub const Runtime = struct {
         const aba = switch (options.array_buffer_allocator) {
             .default => v8.ArrayBuffer.Allocator.initDefault(),
             .zig => |backing_alloc| try v8.ArrayBuffer.Allocator.fromZig(backing_alloc),
+            .sandbox => try v8.ArrayBuffer.Allocator.fromSandbox(),
             .borrowed => |provided| provided,
         };
         var params = v8.Isolate.CreateParams.init();
@@ -198,7 +215,41 @@ pub const Runtime = struct {
     /// runtime-owned Scope. Errors clean up partial state and leave self unchanged.
     /// See Scope.create for nested map, handle and tracing lifetime requirements.
     pub fn createScope(self: *Runtime, options: Scope.Options) !*Scope {
+        self.reap();
         return Scope.create(self, options);
+    }
+
+    /// Marks `scope` disposed. Safe at any time on the runtime thread, including from the
+    /// scope's own callbacks or while `pump` runs; idempotent. The scope refuses new work
+    /// (`error.ScopeDisposed`) and is no longer driven; nothing is freed until `reap`, which the
+    /// runtime's entry points (`pump`, `pumpPlatform`, `completeLoad`, `createScope`) run once
+    /// no scope code is on the stack. Anything the caller still holds for the scope
+    /// (Globals, promises it imported) must be released before then or before `destroy`.
+    pub fn disposeScope(self: *Runtime, scope: *Scope) void {
+        if (scope.disposed) return;
+        scope.disposed = true;
+        self.disposed_pending += 1;
+    }
+
+    /// Frees disposed scopes: the host's `on_dispose` hook, pending loads and import tasks
+    /// (rejected with `RuntimeClosed`), then the context. A no-op while any `Session` is open,
+    /// since a disposed scope may be running right now.
+    pub fn reap(self: *Runtime) void {
+        if (self.disposed_pending == 0 or self.session_depth != 0) return;
+        var session: Session = undefined;
+        session.init(self);
+        defer session.deinit();
+        var index: usize = 0;
+        while (index < self.scopes.items.len) {
+            const scope = self.scopes.items[index];
+            if (!scope.disposed) {
+                index += 1;
+                continue;
+            }
+            _ = self.scopes.orderedRemove(index);
+            self.disposed_pending -= 1;
+            scope.reapDisposed();
+        }
     }
 
     /// Runs microtask checkpoints and drives pending module loads in every Scope until
@@ -206,6 +257,7 @@ pub const Runtime = struct {
     /// Borrows nothing from callers; loader callbacks run synchronously inside and
     /// must not call createScope or destroy. Guest code may queue new import tasks.
     pub fn pump(self: *Runtime) void {
+        self.reap();
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();
@@ -218,6 +270,7 @@ pub const Runtime = struct {
             var index: usize = 0;
             while (index < self.scopes.items.len) : (index += 1) {
                 const scope = self.scopes.items[index];
+                if (scope.disposed) continue;
                 const ctx = scope.context.deref();
                 ctx.enter();
                 progress = scope.module_map.drive() or progress;
@@ -230,6 +283,7 @@ pub const Runtime = struct {
     /// Drains V8 foreground tasks from the borrowed platform with the isolate entered,
     /// then runs `pump`. The platform must outlive the call; nothing is retained.
     pub fn pumpPlatform(self: *Runtime, platform: v8.Platform) void {
+        self.reap();
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();
@@ -247,6 +301,7 @@ pub const Runtime = struct {
         session.init(self);
         defer session.deinit();
         for (self.scopes.items) |scope| {
+            if (scope.disposed) continue;
             const ctx = scope.context.deref();
             ctx.enter();
             defer ctx.exit();

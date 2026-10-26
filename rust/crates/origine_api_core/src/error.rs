@@ -70,8 +70,8 @@ mod tests {
     #[test]
     fn io_errors_become_errno_values() {
         let err = NativeError::from(io::Error::from(io::ErrorKind::NotFound));
-        assert!(matches!(err, NativeError::Errno(1)));
-        assert_eq!(err.to_string(), "errno 1 (FileNotFound)");
+        assert!(matches!(err, NativeError::Errno(errno::NOT_FOUND)));
+        assert_eq!(err.to_string(), "errno 10 (NotFound)");
     }
 
     #[test]

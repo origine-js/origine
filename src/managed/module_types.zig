@@ -6,7 +6,7 @@ const v8 = @import("@v8");
 /// the containing request, result, or function documents the slice lifetime.
 pub const ModuleId = []const u8;
 /// Module IDs with this prefix are the host's namespace; scopes opt in through
-/// `Scope.Options.enable_origine_namespace`.
+/// `Scope.Options.origine_namespace`.
 pub const origine_prefix = "origine:";
 /// Caller-owned key. Public cache operations borrow it, including nested strings,
 /// only until the operation returns; they never take ownership of caller memory.

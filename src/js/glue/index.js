@@ -9,7 +9,7 @@
   const options = {
     fs: { root: undefined, write: true, async: true, sync: true },
     env: null,
-    scope: { remaining: Infinity },
+    scope: undefined,
     io: { parent: null, backends: undefined, max: Infinity, live: 0 },
     net: undefined,
   };

@@ -4,10 +4,11 @@
 //
 // The guest has no high-resolution clock (only `Date.now()`), so this prints throughput and mean
 // round-trip latency (conns / rps) but not p50/p99.
+/** @param {import('@origine/types').Api} api */
 export async function main(api) {
   const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto', mode = 'copy'] = api.env.args();
   // mode: 'copy' = readCopy (copy into a reused buffer), 'into' = readInto (detach and get the buffer back),
-  // 'events' = socket.register('data') with pooled leases and synchronous send (no promise per message)
+  // 'events' = socket.register('data') with exact-size leases and synchronous send (no promise per message)
   const pinnedReads = mode === 'into';
   const SIZE = Number(sizeArg);
   const CONNS = Number(connsArg);
@@ -18,21 +19,21 @@ export async function main(api) {
   const eventsMode = mode === 'events';
   const pat = i => (i * 7 + 13) & 255;
   const expect = (seq, i) => (i < 4 ? (seq >>> (8 * i)) & 255 : i < 8 ? 0 : pat(i));
-  const io = api.io.create({ backend });
-  const server = api.net.listen(io, { port: 0 });
+  const io = api.io.create({ backend: /** @type {NonNullable<import('@origine/types').IoOptions['backend']>} */ (backend) });
 
   if (eventsMode) {
+    const server = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
     // Echo over events: lease the chunk, send it back, give the lease back.
     server.register('connection', conn => {
       conn.register('data', ev => {
         const buf = ev.buffer();
-        conn.send(buf);
+        if (conn.queued.put(buf) !== buf.length) throw new Error('send queue full'); // copied: the lease can go back
         buf.unref();
       });
     });
     const running = io.run(); // handlers alone do not keep the program alive
     const clients = [];
-    for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port }));
+    for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port, mode: 'event' }));
     const start = Date.now();
     const warmEnd = start + WARM;
     const end = warmEnd + MEAS;
@@ -56,12 +57,12 @@ export async function main(api) {
           got = 0;
           const now = Date.now();
           if (now >= warmEnd) rounds++;
-          if (now >= end) return resolve();
+          if (now >= end) return resolve(undefined);
           view.setUint32(0, ++seq, true);
-          sock.send(msg);
+          sock.queued.put(msg);
         });
         view.setUint32(0, seq, true);
-        sock.send(msg);
+        sock.queued.put(msg);
       });
     await Promise.all(clients.map(drive));
     const rps = Math.round(rounds / (MEAS / 1000));
@@ -84,6 +85,8 @@ export async function main(api) {
     await io.close();
     return;
   }
+
+  const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
 
   // A reusable read buffer per connection. 'copy' keeps one Uint8Array (readCopy copies into it);
   // 'into' gets the detached buffer back from readInto each time and wraps it in a new view.
@@ -110,7 +113,7 @@ export async function main(api) {
         const n = await reader.read(conn, 0);
         if (n === 0) break;
         const buf = reader.u8;
-        await conn.write(n === buf.length ? buf : buf.subarray(0, n));
+        await conn.queued.send(n === buf.length ? buf : buf.subarray(0, n));
       }
     } catch {
       // the client closed first
@@ -120,7 +123,7 @@ export async function main(api) {
   for (let i = 0; i < CONNS; i++) echo();
 
   const clients = [];
-  for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port }));
+  for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port, mode: 'pull' }));
 
   const start = Date.now();
   const warmEnd = start + WARM;
@@ -135,7 +138,7 @@ export async function main(api) {
       const t0 = Date.now();
       if (t0 >= end) return;
       view.setUint32(0, seq, true);
-      await sock.write(msg);
+      await sock.queued.send(msg);
       let got = 0;
       while (got < SIZE) {
         const n = await reader.read(sock, got);

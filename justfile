@@ -33,11 +33,13 @@ test-repl:
     uv run --no-project src/repl/tests/terminal_smoke.py
 
 # Everything CI-style: cross-language contracts, Rust lints + Miri, then formatting and JS/TS lint.
-check: check-contracts check-rust check-format
+check: check-contracts check-rust check-format check-types
 
 oxlint := "oxlint@1.89.0"
 oxfmt := "oxfmt@0.74.0"
 js_paths := "bench examples src/js src/repl"
+typescript := "typescript@7.0.2"
+tsc := typescript
 
 # Rust: clippy with warnings denied (every `unsafe` needs a `// SAFETY:` comment, enforced by
 # clippy::undocumented_unsafe_blocks and friends in rust/Cargo.toml) and Miri over the crates'
@@ -46,13 +48,14 @@ js_paths := "bench examples src/js src/repl"
 check-rust:
     # Through zig: the `v8` crate's build script needs the V8_ZIG_* environment (rust/scripts/cargo-v8.sh).
     zig build clippy -Dcargo-offline=true
-    cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_api_core -p origine_api_fs -p origine_api_macros
+    cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_repl -p origine_api_core -p origine_api_fs -p origine_api_macros
 
-# Formatting (rustfmt, oxfmt) and JS/TS lint (oxlint, configured in .oxlintrc.json).
+# Formatting (rustfmt, zig fmt, oxfmt) and JS/TS lint (oxlint, configured in .oxlintrc.json).
 check-format:
     cd rust && cargo fmt --check -p origine_native $(for d in crates/*; do printf ' -p %s' "$(basename $d)"; done)
-    bunx {{oxfmt}} --check {{js_paths}}
-    bunx {{oxlint}} -D warnings {{js_paths}}
+    zig fmt --check build.zig src
+    vpx {{oxfmt}} --check {{js_paths}}
+    vpx {{oxlint}} -D warnings {{js_paths}}
 
 # Regenerate the committed files derived from another language's declarations (bindgen over the C
 # headers, errno table and oxc ABI check from Zig). See docs/contracts.md.
@@ -68,7 +71,17 @@ check-contracts:
     rust/scripts/contracts.sh check
     zig build test-io -Dtypescript=false
 
-# Apply the formatters.
+# TypeScript: the declarations of `types/` (@origine/types) against their own tests (positive cases and
+# `@ts-expect-error` negatives), the examples and benchmarks that run on origine, and a check that
+# every public name of the JS runtime is declared. Needs network on the first run (the runner fetches tsc).
+check-types:
+    types/scripts/check-surface.sh
+    vpx {{tsc}} -p types/tests
+    vpx {{tsc}} -p types/tests/repl
+    vpx {{tsc}} -p types/tests/tsconfig.examples.json
+
+# Apply the formatters (rustfmt, zig fmt, oxfmt).
 format:
     cd rust && cargo fmt -p origine_native $(for d in crates/*; do printf ' -p %s' "$(basename $d)"; done)
-    bunx {{oxfmt}} {{js_paths}}
+    zig fmt build.zig src
+    vpx {{oxfmt}} {{js_paths}}

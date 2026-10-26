@@ -1,20 +1,21 @@
 //! `origine:@std/text`: UTF-8 encode and strict decode. The natives hold no authority;
-//! they reach this module alone, as `import.meta.native`, which it captures and deletes.
+//! they reach this module alone, as `import.meta.native`, which it captures and deletes. They
+//! use no scope resource, so they keep working in a disposed scope (`.detached = .allow`).
 const std = @import("std");
 const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("../binding.zig");
 const Call = binding.Call;
 const module = @import("../module.zig");
-const ScopeState = @import("../host.zig").ScopeState;
+const ScopeCore = @import("../host.zig").ScopeCore;
 const simdutf = v8.simdutf;
 
 pub fn modules() [1]module.Module {
     const natives = struct {
         /// The UTF-8 bytes of the string `value` as a new Uint8Array; lone surrogates become
         /// U+FFFD. The JS wrapper guarantees a string; anything else is an InvalidArgument.
-        pub fn encode(state: *ScopeState, call: *Call, value: v8.Value) !v8.Value {
-            _ = state;
+        pub fn encode(core: *ScopeCore, call: *Call, value: v8.Value) !v8.Value {
+            _ = core;
             if (!value.isString()) return error.InvalidArgument;
             const text = v8.String.from_opaque(value.data.handle) orelse return error.InvalidArgument;
             const length = text.lenUtf8(call.isolate);
@@ -28,8 +29,8 @@ pub fn modules() [1]module.Module {
         /// scope, or undefined for invalid UTF-8. Unshared bytes are borrowed; shared
         /// bytes are copied atomically into the call arena before validation, so no
         /// shared mutable slice escapes. Invalid arguments retain no resources.
-        pub fn decode(state: *ScopeState, call: *Call, value: v8.Value) !?v8.Value {
-            _ = state;
+        pub fn decode(core: *ScopeCore, call: *Call, value: v8.Value) !?v8.Value {
+            _ = core;
             const bytes = binding.viewBytes(value) orelse shared: {
                 if (!value.isArrayBufferView()) return error.InvalidArgument;
                 const view = v8.ArrayBufferView.from_opaque(value.data.handle).?;
@@ -52,8 +53,8 @@ pub fn modules() [1]module.Module {
         .id = "origine:@std/text",
         .source = @embedFile("../../js/std/text.js"),
         .bindings = module.stateless(.{
-            .encode = binding.func(natives.encode, .{ .side_effect = .none }),
-            .decode = binding.func(natives.decode, .{ .side_effect = .none }),
+            .encode = binding.func(natives.encode, .{ .side_effect = .none, .detached = .allow }),
+            .decode = binding.func(natives.decode, .{ .side_effect = .none, .detached = .allow }),
         }),
     }};
 }

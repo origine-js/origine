@@ -9,9 +9,11 @@
 //!   `ArrayBuffer.prototype.transfer()`), and the store's `SharedRef<BackingStore>` becomes the
 //!   owner of an [`origine_io::RawRegion`] over the captured `(byte_offset, byte_length)` window.
 //!   The kernel or a worker then reads or writes the guest's bytes in place; or
-//! * **copied**: otherwise (or if detaching did not take effect) writes copy the window at call
-//!   time and stay usable by the guest; reads use a host `Vec<u8>` that is copied out into the
-//!   guest's buffer at completion by the native's [`crate::native::Wrap`].
+//! * **copied**: reads fall back to a host `Vec<u8>` that is copied out into the guest's buffer at
+//!   completion by the native's [`crate::native::Wrap`] when the buffer is not pinnable. Writes
+//!   choose explicitly: the plain ones always copy the window at call time ([`copy_for_write`]) and
+//!   never touch the guest's buffer; the `*Move` ones pin it ([`pin_for_move`]) and fail
+//!   `Unsupported` instead of copying when they cannot.
 //!
 //! A region with no bytes is [`Plan::Empty`]: nothing is detached, nothing is copied, no I/O.
 //!
@@ -38,6 +40,7 @@
 //! detached, so those leave the buffer intact.)
 
 use std::any::Any;
+use std::ffi::c_void;
 
 use origine_api_core::pin::{self, Plan, StoreTraits};
 use origine_api_core::{NativeError, errno};
@@ -164,15 +167,29 @@ fn take(arg: &ArrayBufferArg<'_>, init: bool) -> Result<Taken, NativeError> {
     Ok(Taken::Region(region))
 }
 
-/// The source buffer for a write of `arg`'s bytes: the pinned window (the guest's buffer is
-/// detached), or a copy made now (the guest's buffer stays usable); empty for no bytes.
+/// The source buffer of a *copying* write of `arg`'s bytes: a copy made now, so the guest's buffer
+/// stays attached and usable (the default of every `write`, `writeAll`, ... in `api.fs`).
 /// `StaleHandle` if the buffer is already detached.
-pub fn pin_for_write(arg: &ArrayBufferArg<'_>) -> Result<GuestBuf, NativeError> {
-    Ok(match take(arg, true)? {
-        Taken::Region(region) => GuestBuf::Pinned(region),
-        Taken::Empty => GuestBuf::Copied(Vec::new()),
-        Taken::Copy => GuestBuf::Copied(arg.to_vec()),
-    })
+pub fn copy_for_write(arg: &ArrayBufferArg<'_>) -> Result<GuestBuf, NativeError> {
+    if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(arg.buffer())
+        && buffer.was_detached()
+    {
+        return Err(NativeError::Errno(errno::STALE_HANDLE));
+    }
+    Ok(GuestBuf::Copied(arg.to_vec()))
+}
+
+/// The source buffer of a *moving* write (`writeMove`, ...): the pinned window, the guest's
+/// `ArrayBuffer` is detached (the whole buffer, not only the view's window) and the loop writes
+/// from its store in place. Never copies: a buffer that cannot be detached (shared, resizable,
+/// WebAssembly memory) fails `Unsupported` with the buffer untouched, and so does a detached
+/// one with `StaleHandle`. A region with no bytes completes without I/O and detaches nothing.
+pub fn pin_for_move(arg: &ArrayBufferArg<'_>) -> Result<GuestBuf, NativeError> {
+    match take(arg, true)? {
+        Taken::Region(region) => Ok(GuestBuf::Pinned(region)),
+        Taken::Empty => Ok(GuestBuf::Copied(Vec::new())),
+        Taken::Copy => Err(NativeError::Errno(errno::UNSUPPORTED)),
+    }
 }
 
 /// The sink buffer for a read into `arg`'s window, and whether it is a host copy (`true`: the
@@ -203,15 +220,57 @@ pub fn alloc_for_read(isolate: &mut v8::Isolate, len: usize) -> Result<GuestBuf,
     Ok(GuestBuf::Pinned(region))
 }
 
-/// A sink over the first `len` bytes of an existing V8 store with no guest object attached (a
-/// pooled store: it was fresh, or its `ArrayBuffer` was detached when it was given back).
-pub fn region_over_store(store: v8::SharedRef<v8::BackingStore>, len: usize) -> Result<GuestBuf, NativeError> {
-    let base = store.data().filter(|_| store.byte_length() >= len && len > 0).ok_or(NativeError::Errno(errno::INVALID_DATA))?;
-    let start = base.cast::<u8>();
-    let owner: Box<dyn Any> = Box::new(PinnedStore(store));
-    // SAFETY: `start` is the start of the store's writable allocation of at least `len` bytes, kept
-    // alive by `owner`; its address is stable; no `ArrayBuffer` wraps the store while it sits in the
-    // pool (a lease is detached before the store comes back), so the loop is its only accessor.
+/// The owner of a receive window inside a slab: keeps the slab alive and remembers where the
+/// window starts.
+struct SlabWindow {
+    slab: v8::SharedRef<v8::BackingStore>,
+    offset: usize,
+}
+
+/// A sink over `len` bytes at `offset` of `slab`, a V8 store (inside the V8 sandbox when there is
+/// one) that no `ArrayBuffer` wraps over that window: the loop is the only accessor until the
+/// region is dropped. [`GuestBuf::into_window`] gives the slab and offset back.
+pub fn region_over_slab(slab: v8::SharedRef<v8::BackingStore>, offset: usize, len: usize) -> Result<GuestBuf, NativeError> {
+    let fits = offset.checked_add(len).is_some_and(|end| end <= slab.byte_length());
+    let base = slab.data().filter(|_| fits && len > 0).ok_or(NativeError::Errno(errno::INVALID_DATA))?;
+    // SAFETY: `offset <= slab.byte_length()`, so the result stays inside (or one past) the allocation.
+    let start = unsafe { base.cast::<u8>().add(offset) };
+    let owner: Box<dyn Any> = Box::new(SlabWindow { slab, offset });
+    // SAFETY: `start..start + len` lies inside the slab (checked above), which `owner` keeps alive;
+    // its address is stable; the window is handed to the loop only once (the pump advances past
+    // what a chunk keeps), and no `ArrayBuffer` wraps it until `carve` runs after the receive.
     let region = unsafe { RawRegion::new_uninit(start, len, owner) };
     Ok(GuestBuf::Pinned(region))
+}
+
+impl GuestBuf {
+    /// The slab and offset of a [`region_over_slab`] buffer (consuming it).
+    pub fn into_window(self) -> Option<(v8::SharedRef<v8::BackingStore>, usize)> {
+        match self {
+            GuestBuf::Pinned(region) => region.into_owner().downcast::<SlabWindow>().ok().map(|window| (window.slab, window.offset)),
+            GuestBuf::Copied(_) => None,
+        }
+    }
+}
+
+unsafe extern "C" fn release_slab(_data: *mut c_void, _length: usize, slab: *mut c_void) {
+    // SAFETY: `slab` is the `Box<SharedRef<BackingStore>>` that `carve` leaked for this store; V8
+    // calls the deleter exactly once, on whatever thread frees the store (the reference count is atomic).
+    drop(unsafe { Box::from_raw(slab.cast::<v8::SharedRef<v8::BackingStore>>()) });
+}
+
+/// A backing store of exactly `len` bytes at `offset` of `slab`: no copy, and nothing outside the
+/// window is reachable through it. The store holds a reference on `slab`, which goes back to the
+/// allocator when the last window is released (the `ArrayBuffer` over it detached or collected).
+/// The slab must be a V8-allocated store, so the window is inside the sandbox when there is one.
+pub fn carve(slab: &v8::SharedRef<v8::BackingStore>, offset: usize, len: usize) -> Result<v8::SharedRef<v8::BackingStore>, NativeError> {
+    let fits = offset.checked_add(len).is_some_and(|end| end <= slab.byte_length());
+    let base = slab.data().filter(|_| fits && len > 0).ok_or(NativeError::Errno(errno::INVALID_DATA))?;
+    // SAFETY: the window lies inside the slab (checked above).
+    let start = unsafe { base.cast::<u8>().add(offset) };
+    let keep = Box::into_raw(Box::new(slab.clone()));
+    // SAFETY: `start..start + len` stays valid while the leaked reference lives, which is until V8
+    // runs `release_slab` with it; the receive into the window finished before the carve.
+    let store = unsafe { v8::ArrayBuffer::new_backing_store_from_ptr(start.as_ptr().cast(), len, release_slab, keep.cast()) };
+    Ok(store.make_shared())
 }

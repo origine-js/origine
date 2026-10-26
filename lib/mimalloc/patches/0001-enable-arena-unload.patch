@@ -1,0 +1,44 @@
+--- a/src/arena/arena.c
++++ b/src/arena/arena.c
+@@ -1095,6 +1095,7 @@
+   return _mi_bitmap_forall_set(arena->pages, &mi_arena_page_register, arena, NULL);
+ }
+ 
++*/
+ mi_decl_export bool mi_arena_unload(mi_arena_id_t arena_id, void** base, size_t* accessed_size, size_t* full_size) {
+   mi_arena_t* arena = _mi_arena_from_id(arena_id);
+   if (arena==NULL) {
+@@ -1115,12 +1116,9 @@
+   if (full_size != NULL) { *full_size = arena->memid.mem.os.size;  }
+   if (accessed_size != NULL) { *accessed_size = asize; }
+ 
+-  // adjust abandoned page count
++  // Abandoned pages are counted per heap (and gone with it), so only the page map and the
++  // arena entry need cleaning. The heaps that used the arena must be destroyed already.
+   mi_subproc_t* const subproc = arena->subproc;
+-  for (size_t bin = 0; bin < MI_ARENA_BIN_COUNT; bin++) {
+-    const size_t count = mi_bitmap_popcount(arena->pages_abandoned[bin]);
+-    if (count > 0) { mi_atomic_decrement_acq_rel(&subproc->abandoned_count[bin]); }
+-  }
+ 
+   // unregister the pages
+   _mi_page_map_unregister_range(arena, asize);
+@@ -1140,6 +1138,7 @@
+   return true;
+ }
+ 
++/*
+ mi_decl_export bool mi_arena_reload(void* start, size_t size, mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id) {
+   // assume the memory area is already containing the arena
+   if (arena_id != NULL) { *arena_id = _mi_arena_id_none(); }
+--- a/include/mimalloc.h
++++ b/include/mimalloc.h
+@@ -420,7 +420,7 @@
+ mi_decl_export bool  mi_manage_memory(void* start, size_t size, bool is_committed, bool is_pinned, bool is_zero, int numa_node, bool exclusive,
+                                       mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id) mi_attr_noexcept;
+ 
+-//mi_decl_export bool  mi_arena_unload(mi_arena_id_t arena_id, void** base, size_t* accessed_size, size_t* size);
++mi_decl_export bool  mi_arena_unload(mi_arena_id_t arena_id, void** base, size_t* accessed_size, size_t* size);
+ //mi_decl_export bool  mi_arena_reload(void* start, size_t size, mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id);
+ //mi_decl_export bool  mi_theap_reload(mi_theap_t* theap, mi_arena_id_t arena);
+ //mi_decl_export void  mi_theap_unload(mi_theap_t* theap);

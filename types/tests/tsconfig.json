@@ -1,0 +1,10 @@
+{
+  // The repository's own check of the declarations: the preset, with the package taken by path
+  // (consumers list "@origine/types" in `types` through node_modules instead).
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "paths": { "@origine/types": ["../index.d.ts"], "@origine/types/repl": ["../repl.d.ts"] }
+  },
+  "include": ["../index.d.ts", "./*.ts"]
+}

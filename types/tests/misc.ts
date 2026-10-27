@@ -3,9 +3,10 @@ import type { Api, Main } from "@origine/types";
 import { ERRNO } from "origine:@std/errno";
 import { quansync, run } from "origine:@std/quansync";
 import { ts } from "origine:@std/transformer/oxc";
+import { eprintln } from "origine:@std/debug";
 
 export const main: Main = async (api: Api) => {
-  print("args", api.env.args().length, api.env.get("HOME") ?? "unset");
+  eprintln("args", api.env.args().length, api.env.get("HOME") ?? "unset");
   const narrowed = api.env.narrow({ allow: ["HOME"] });
   const names: readonly string[] = narrowed.list();
   void names;

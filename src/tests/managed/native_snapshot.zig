@@ -63,7 +63,7 @@ test "native snapshot: module natives are built for the snapshot and rebind to t
     ensureV8();
     CounterState.created = 0;
     CounterState.torn_down = 0;
-    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .modules = &modules });
+    const host = try m.Api.Host.create(t.allocator, .{ .modules = &modules });
     const references = try host.externalReferences(t.allocator);
     var image: ?m.init_snapshot.Image = null;
     var rt: ?*m.Runtime = null;

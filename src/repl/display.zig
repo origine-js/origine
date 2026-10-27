@@ -6,9 +6,9 @@ const eu = @import("@util");
 const m = @import("@managed");
 
 /// Buffered stdout write; I/O errors are dropped because there is nowhere to report them.
-pub fn print(io: std.Io, comptime format: []const u8, args: anytype) void {
+pub fn print(comptime format: []const u8, args: anytype) void {
     var buffer: [1024]u8 = undefined;
-    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    var writer = m.sys.File.stdout().writerStreaming(&buffer);
     writer.interface.print(format, args) catch return;
     writer.interface.flush() catch return;
 }
@@ -16,7 +16,7 @@ pub fn print(io: std.Io, comptime format: []const u8, args: anytype) void {
 /// Prints `value` as text, preferring an Error's `stack` (diagnostics from the
 /// TypeScript transformer put their file:line:col lines there). Local V8 handles
 /// and UTF-8 storage are released before return.
-pub fn show(io: std.Io, scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
+pub fn show(scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
     var session: m.Scope.Session = undefined;
     session.init(scope);
     defer session.deinit();
@@ -30,11 +30,11 @@ pub fn show(io: std.Io, scope: *m.Scope, value: v8.Global.Of(v8.Value)) void {
         }
     }
     const text = shown.toString(session.ctx) orelse {
-        print(io, "<value conversion threw>\n", .{});
+        print("<value conversion threw>\n", .{});
         return;
     };
     const buffer = eu.alloc.alloc(u8, text.lenUtf8(isolate)) catch return;
     defer eu.alloc.free(buffer);
     const length = text.writeUtf8(isolate, buffer);
-    print(io, "{s}\n", .{buffer[0..length]});
+    print("{s}\n", .{buffer[0..length]});
 }

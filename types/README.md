@@ -23,10 +23,11 @@ The package is not published; point at the directory (a workspace, `file:` depen
 // init.ts
 import type { Main } from '@origine/types';
 import { fs } from 'origine:@std/fs';
+import { eprintln } from 'origine:@std/debug';
 
 export const main: Main = async api => {
   const rs = fs(api.fs.requestSync({ access: 'r' }));
-  print(rs.read_to_string('README.md').length);
+  eprintln(rs.read_to_string('README.md').length);
 };
 ```
 
@@ -53,14 +54,14 @@ Version*) so the editor and `tsc` agree. Hover docs come from the JSDoc on every
 | `env.d.ts`, `scope.d.ts` | `api.env`, `api.scope` |
 | `errors.d.ts` | `IoError` and `HostError`, the `{ errno, name }` values thrown or rejected (plain objects, not an `Error`), one per error domain |
 | `generated/errno.d.ts` | **Generated** from `src/api/errno_codes.zig`: `IoErrnoTable`/`HostErrnoTable` (and their `*Name`, `*Code`), `ErrnoTable` |
-| `std/*.d.ts` | `declare module` for `origine:@std/errno`, `io`, `fs`, `text`, `quansync`, `transformer/oxc` |
-| `globals.d.ts`, `repl.d.ts` | the global `print`; the REPL's global `api` (opt in) |
+| `std/*.d.ts` | `declare module` for `origine:@std/errno`, `io`, `fs`, `text`, `debug`, `quansync`, `transformer/oxc` |
+| `globals.d.ts`, `repl.d.ts` | the hardened context's globals; the REPL's global `api` (opt in) |
 
 Things the types cannot say (they are in the JSDoc): a handle consumed by `toEvent()`/`toPull()` is
 still typed usable (it throws `BadHandle` at run time); the sync grant operations report failure
 through `errno[0]` and return `undefined`, so `IoError.check(fs, value)` is the typed way to get the
 value; `Temporal` and `console` exist in the context but are not declared (TypeScript 5.9 has no
-`Temporal` types; V8's `console` is not connected to the terminal; use `print`).
+`Temporal` types; V8's `console` is not connected to the terminal; use `eprintln` from `origine:@std/debug`).
 
 ## `tsconfig.json`, option by option
 

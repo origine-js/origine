@@ -28,6 +28,7 @@ test "managed step 6: immutable maps, scope precedence, virtual URLs and blocked
     try t.expectError(error.ImportMapBacktracking, map.resolve(t.allocator, "pkg/../escape.js", ""));
     try t.expectError(error.ImportMapBacktracking, map.resolve(t.allocator, "pkg/%2e%2e/escape.js", ""));
     try t.expectError(error.UnmappedSpecifier, map.resolve(t.allocator, "missing", ""));
+    try expectMapResolution(&map, "origine:@std/debug", "app:/root/main.js", "origine:@std/debug");
     try expectMapResolution(&map, "app:/a%2eb.js?q=%2e%2f", "", "app:/a%2eb.js?q=%2e%2f");
     for ([_][]const u8{ "[]", "{\"imports\": []}", "{\"imports\": {\"x\":\"bare\"}}", "{\"imports\": {\"x/\":\"./file.js\"}}" }) |invalid| {
         if (m.ImportMap.parseJson(t.allocator, invalid, .{ .base_url = "app:/map.json", .urls = m.virtual_urls })) |good| {

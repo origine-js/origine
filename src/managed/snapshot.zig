@@ -3,7 +3,7 @@
 //! The engine's built-in seed snapshot is deliberately unfrozen, so every fresh
 //! `Context::New` installs features and freezes the intrinsic graph (about 4 ms).
 //! A snapshot created here is already finalized: restoring its default context
-//! takes about 0.2 ms. Scope-specific state (print binding, scope pointer, security
+//! takes about 0.2 ms. Scope-specific state (scope pointer, security
 //! token, import map) is never part of the snapshot; `Scope.create` adds it after
 //! restore. API descriptors, capability methods and network classes are prepared
 //! and frozen here; native authority is bound after restore. The blob depends on

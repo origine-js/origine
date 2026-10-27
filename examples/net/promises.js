@@ -1,5 +1,6 @@
 // Run: zig build run -- examples/net/promises.js
 import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
+import { eprintln } from 'origine:@std/debug';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
@@ -7,7 +8,7 @@ export async function main(api) {
   try {
     // Port 0 chooses a free port. api.net currently allows loopback hosts only.
     const server = api.net.listen(io, { host: '127.0.0.1', port: 0, mode: 'pull', socketMode: 'pull' });
-    print('listening on 127.0.0.1:' + server.port);
+    eprintln('listening on 127.0.0.1:' + server.port);
     const client = await api.net.connect(io, { port: server.port, mode: 'pull' });
     const peer = await server.accept();
     await server.close(); // This demo accepts just one client.
@@ -19,7 +20,7 @@ export async function main(api) {
           if (chunk.length === 0) break; // Empty reads mean end of stream.
           await peer.queued.send(chunk); // send() resolves once every byte is in the kernel.
         }
-        print('server: end of stream');
+        eprintln('server: end of stream');
         // The client's FIN alone leaves the socket open; ending our side too closes it.
         await peer.end('write');
       } finally {
@@ -55,7 +56,7 @@ export async function main(api) {
           }
           if (reply.some((byte, i) => byte !== message[i])) throw new Error('echo mismatch');
           // Decode only after collecting the message: UTF-8 characters can span chunks.
-          print(mode + ':', decodeUtf8(reply));
+          eprintln(mode + ':', decodeUtf8(reply));
         }
       } finally {
         await client.end('write'); // The server's pending read now sees end of stream...

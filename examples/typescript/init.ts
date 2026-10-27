@@ -2,6 +2,7 @@
 // The init scope transforms .ts/.mts/.cts/.tsx/.jsx by default (oxc); types are erased and
 // enums, namespaces and parameter properties become runtime code.
 import { greet, type Greeting } from './greeter.ts';
+import { eprintln } from 'origine:@std/debug';
 
 enum Color {
   Red,
@@ -25,5 +26,5 @@ class Point {
 
 export function main(): void {
   const g: Greeting = greet('origine');
-  print(g.text, Color[Palette.favourite], new Point(3, -4).norm1());
+  eprintln(g.text, Color[Palette.favourite], new Point(3, -4).norm1());
 }

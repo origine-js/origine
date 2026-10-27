@@ -10,6 +10,7 @@ const binding = @import("binding.zig");
 const init_cache = @import("init_cache.zig");
 const func = binding.func;
 const Call = binding.Call;
+const sys = @import("../managed/sys.zig");
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
@@ -118,7 +119,7 @@ pub const Limit = struct {
 /// `[kind, size]` as a JS array.
 const Stat = struct { u32, f64 };
 
-fn kindCode(kind: std.Io.File.Kind) u32 {
+fn kindCode(kind: sys.File.Kind) u32 {
     return switch (kind) {
         .file => 1,
         .directory => 2,
@@ -142,13 +143,13 @@ pub const FsGrant = struct {
     owner: *ScopeState,
     closed: bool = false,
     id: u32,
-    root: std.Io.Dir,
+    root: sys.Dir,
     /// The grant's access (`api.fs.requestSync({ access })`): 'r' reads, 'w' writes, 'rw' both.
     /// Handles are read/write natively, so a write-only grant is enforced here: see `readable`.
     read: bool,
     write: bool,
-    files: std.ArrayList(?std.Io.File) = .empty,
-    dirs: std.ArrayList(?std.Io.Dir) = .empty,
+    files: std.ArrayList(?sys.File) = .empty,
+    dirs: std.ArrayList(?sys.Dir) = .empty,
 
     // Binding State protocol (see binding.zig).
     pub fn errnoCell(self: *FsGrant) *u32 {
@@ -166,16 +167,11 @@ pub const FsGrant = struct {
     pub fn deinit(self: *FsGrant) void {
         if (self.closed) return;
         self.closed = true;
-        const handle_io = self.io();
-        for (self.files.items) |slot| if (slot) |opened| opened.close(handle_io);
-        for (self.dirs.items) |slot| if (slot) |opened| opened.close(handle_io);
-        self.root.close(handle_io);
+        for (self.files.items) |slot| if (slot) |opened| opened.close();
+        for (self.dirs.items) |slot| if (slot) |opened| opened.close();
+        self.root.close();
         self.files.deinit(self.host.allocator);
         self.dirs.deinit(self.host.allocator);
-    }
-
-    fn io(self: *FsGrant) std.Io {
-        return self.host.io;
     }
 
     /// Fails with `PermissionDenied` on a read-only grant.
@@ -191,7 +187,7 @@ pub const FsGrant = struct {
 
     /// The sentinel `{0,0}` names the root; any other descriptor must have been
     /// issued by this grant and still be open.
-    fn dir(self: *FsGrant, ref: DirRef) !std.Io.Dir {
+    fn dir(self: *FsGrant, ref: DirRef) !sys.Dir {
         if (ref.fs == 0 and ref.id == 0) return self.root;
         if (ref.fs != self.id) return error.BadHandle;
         if (ref.id == 0) return self.root;
@@ -199,12 +195,12 @@ pub const FsGrant = struct {
         return self.dirs.items[ref.id - 1] orelse error.BadHandle;
     }
 
-    fn file(self: *FsGrant, ref: FileRef) !std.Io.File {
+    fn file(self: *FsGrant, ref: FileRef) !sys.File {
         if (ref.fs != self.id or ref.id == 0 or ref.id > self.files.items.len) return error.BadHandle;
         return self.files.items[ref.id - 1] orelse error.BadHandle;
     }
 
-    fn storeFile(self: *FsGrant, value: std.Io.File) !u32 {
+    fn storeFile(self: *FsGrant, value: sys.File) !u32 {
         for (self.files.items, 0..) |slot, index| if (slot == null) {
             self.files.items[index] = value;
             return @intCast(index + 1);
@@ -213,7 +209,7 @@ pub const FsGrant = struct {
         return @intCast(self.files.items.len);
     }
 
-    fn storeDir(self: *FsGrant, value: std.Io.Dir) !u32 {
+    fn storeDir(self: *FsGrant, value: sys.Dir) !u32 {
         for (self.dirs.items, 0..) |slot, index| if (slot == null) {
             self.dirs.items[index] = value;
             return @intCast(index + 1);
@@ -243,8 +239,8 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Ob
     if (!config.sync) return error.PermissionDenied;
     if (access & access_write != 0 and !config.write) return error.PermissionDenied;
     const sub = if (root) |path| path.bytes else "";
-    const opened = try config.root.openDir(host.io, if (sub.len == 0) "." else sub, .{ .iterate = true });
-    errdefer opened.close(host.io);
+    const opened = try config.root.openDir(if (sub.len == 0) "." else sub, .{ .iterate = true });
+    errdefer opened.close();
     const grant = try alloc.create(FsGrant);
     errdefer alloc.destroy(grant);
     grant.* = .{ .host = host, .owner = state, .id = host.next_fs_id, .root = opened, .read = access & access_read != 0, .write = access & access_write != 0 };
@@ -285,17 +281,17 @@ fn openFile(g: *FsGrant, dir: DirRef, path: EntryPath, bits: u32) !u32 {
     if (bits & 0b1111 != 0) try g.writable() else try g.readable();
     const parent = try g.dir(dir);
     const opened = if (bits & 2 != 0)
-        try parent.createFile(g.io(), path.bytes, .{ .read = true, .truncate = bits & 4 != 0, .exclusive = bits & 8 != 0 })
+        try parent.createFile(path.bytes, .{ .read = true, .truncate = bits & 4 != 0, .exclusive = bits & 8 != 0 })
     else
-        try parent.openFile(g.io(), path.bytes, .{ .mode = if (bits & 1 != 0) .read_write else .read_only, .allow_directory = false });
-    errdefer opened.close(g.io());
+        try parent.openFile(path.bytes, .{ .mode = if (bits & 1 != 0) .read_write else .read_only, .allow_directory = false });
+    errdefer opened.close();
     return g.storeFile(opened);
 }
 
 fn openDir(g: *FsGrant, dir: DirRef, path: Path) !u32 {
     const parent = try g.dir(dir);
-    const opened = try parent.openDir(g.io(), if (path.bytes.len == 0) "." else path.bytes, .{ .iterate = true });
-    errdefer opened.close(g.io());
+    const opened = try parent.openDir(if (path.bytes.len == 0) "." else path.bytes, .{ .iterate = true });
+    errdefer opened.close();
     return g.storeDir(opened);
 }
 
@@ -313,7 +309,7 @@ fn symlinkStat(g: *FsGrant, dir: DirRef, path: Path) !Stat {
 fn statOf(g: *FsGrant, dir: DirRef, path: Path, follow: bool) !Stat {
     try g.readable();
     const parent = try g.dir(dir);
-    const info = if (path.bytes.len == 0) try parent.stat(g.io()) else parent.statFile(g.io(), path.bytes, .{ .follow_symlinks = follow }) catch |err| switch (err) {
+    const info = if (path.bytes.len == 0) try parent.stat() else parent.statFile(path.bytes, .{ .follow_symlinks = follow }) catch |err| switch (err) {
         error.FileNotFound => return missing(g, parent, path.bytes),
         else => |other| return other,
     };
@@ -323,14 +319,14 @@ fn statOf(g: *FsGrant, dir: DirRef, path: Path, follow: bool) !Stat {
 /// Zig's `statFile` reports ENOTDIR (a file used as a directory) as `FileNotFound`, while the
 /// async backend, like Rust, says `NotADirectory`. On that error path only: when a leading component
 /// of `path` exists and is not a directory, report `NotDir` so both backends agree.
-fn missing(g: *FsGrant, parent: std.Io.Dir, path: []const u8) error{ NotDir, FileNotFound } {
+fn missing(_: *FsGrant, parent: sys.Dir, path: []const u8) error{ NotDir, FileNotFound } {
     var from: usize = 0;
     while (std.mem.indexOfScalarPos(u8, path, from, '/')) |slash| {
         from = slash + 1;
         var stop = slash;
         while (stop > 0 and path[stop - 1] == '/') stop -= 1;
         if (stop == 0) continue;
-        const info = parent.statFile(g.io(), path[0..stop], .{}) catch continue;
+        const info = parent.statFile(path[0..stop], .{}) catch continue;
         if (info.kind != .directory) return error.NotDir;
     }
     return error.FileNotFound;
@@ -338,12 +334,12 @@ fn missing(g: *FsGrant, parent: std.Io.Dir, path: []const u8) error{ NotDir, Fil
 
 fn createDir(g: *FsGrant, dir: DirRef, path: EntryPath) !void {
     try g.writable();
-    try (try g.dir(dir)).createDir(g.io(), path.bytes, .default_dir);
+    try (try g.dir(dir)).createDir(path.bytes, .default_dir);
 }
 
 fn deleteFile(g: *FsGrant, dir: DirRef, path: EntryPath) !void {
     try g.writable();
-    try (try g.dir(dir)).deleteFile(g.io(), path.bytes);
+    try (try g.dir(dir)).deleteFile(path.bytes);
 }
 
 /// Returns a flat array `[name0, kind0, name1, kind1, ...]`.
@@ -351,7 +347,7 @@ fn readDir(g: *FsGrant, call: *Call, dir: DirRef) !v8.Value {
     try g.readable();
     var list = call.array();
     var iterator = (try g.dir(dir)).iterate();
-    while (try iterator.next(g.io())) |entry| {
+    while (try iterator.next()) |entry| {
         try list.push(entry.name);
         try list.push(kindCode(entry.kind));
     }
@@ -366,7 +362,7 @@ fn readAll(g: *FsGrant, call: *Call, file_ref: FileRef, limit: Limit) !v8.Value 
     var buffer: [16 * 1024]u8 = undefined;
     while (list.items.len < limit.bytes) {
         const want = @min(buffer.len, limit.bytes - list.items.len);
-        const count = handle.readStreaming(g.io(), &.{buffer[0..want]}) catch |err| switch (err) {
+        const count = handle.readStreaming(&.{buffer[0..want]}) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
         };
@@ -381,45 +377,45 @@ fn writeAll(g: *FsGrant, file_ref: FileRef, data: []u8) !void {
     try g.writable();
     const handle = try g.file(file_ref);
     var offset: usize = 0;
-    while (offset < data.len) offset += try handle.writeStreaming(g.io(), "", &.{data[offset..]}, 1);
+    while (offset < data.len) offset += try handle.writeStreaming("", &.{data[offset..]}, 1);
 }
 
 fn close(g: *FsGrant, file_ref: FileRef) !void {
     const handle = try g.file(file_ref);
-    handle.close(g.io());
+    handle.close();
     g.files.items[file_ref.id - 1] = null;
 }
 
 fn closeDir(g: *FsGrant, dir: DirRef) !void {
     if (dir.id == 0) return error.BadHandle; // the root stays open for the grant's lifetime
     const handle = try g.dir(dir);
-    handle.close(g.io());
+    handle.close();
     g.dirs.items[dir.id - 1] = null;
 }
 
 fn createDirPath(g: *FsGrant, dir: DirRef, path: SubPath) !void {
     try g.writable();
-    try (try g.dir(dir)).createDirPath(g.io(), path.bytes);
+    try (try g.dir(dir)).createDirPath(path.bytes);
 }
 
 fn deleteDir(g: *FsGrant, dir: DirRef, path: SubPath) !void {
     try g.writable();
-    try (try g.dir(dir)).deleteDir(g.io(), path.bytes);
+    try (try g.dir(dir)).deleteDir(path.bytes);
 }
 
 fn deleteTree(g: *FsGrant, dir: DirRef, path: SubPath) !void {
     try g.writable();
-    try (try g.dir(dir)).deleteTree(g.io(), path.bytes);
+    try (try g.dir(dir)).deleteTree(path.bytes);
 }
 
 fn rename(g: *FsGrant, dir: DirRef, old_path: SubPath, new_dir: DirRef, new_path: SubPath) !void {
     try g.writable();
-    try std.Io.Dir.rename(try g.dir(dir), old_path.bytes, try g.dir(new_dir), new_path.bytes, g.io());
+    try sys.Dir.rename(try g.dir(dir), old_path.bytes, try g.dir(new_dir), new_path.bytes);
 }
 
 fn fileStat(g: *FsGrant, file_ref: FileRef) !Stat {
     try g.readable();
-    const info = try (try g.file(file_ref)).stat(g.io());
+    const info = try (try g.file(file_ref)).stat();
     return .{ kindCode(info.kind), try exactSize(info.size) };
 }
 
@@ -428,7 +424,7 @@ fn fileRead(g: *FsGrant, file_ref: FileRef, buffer: []u8) !usize {
     try g.readable();
     const handle = try g.file(file_ref);
     if (buffer.len == 0) return 0;
-    return handle.readStreaming(g.io(), &.{buffer}) catch |err| switch (err) {
+    return handle.readStreaming(&.{buffer}) catch |err| switch (err) {
         error.EndOfStream => 0,
         else => err,
     };
@@ -438,7 +434,7 @@ fn filePread(g: *FsGrant, file_ref: FileRef, buffer: []u8, offset: u64) !usize {
     try g.readable();
     const handle = try g.file(file_ref);
     if (buffer.len == 0) return 0;
-    return handle.readPositional(g.io(), &.{buffer}, offset);
+    return handle.readPositional(&.{buffer}, offset);
 }
 
 /// Streaming write that may be partial; returns the byte count written.
@@ -446,19 +442,19 @@ fn fileWrite(g: *FsGrant, file_ref: FileRef, data: []u8) !usize {
     try g.writable();
     const handle = try g.file(file_ref);
     if (data.len == 0) return 0;
-    return handle.writeStreaming(g.io(), "", &.{data}, 1);
+    return handle.writeStreaming("", &.{data}, 1);
 }
 
 fn filePwriteAll(g: *FsGrant, file_ref: FileRef, data: []u8, offset: u64) !void {
     try g.writable();
-    try (try g.file(file_ref)).writePositionalAll(g.io(), data, offset);
+    try (try g.file(file_ref)).writePositionalAll(data, offset);
 }
 
 fn fileSetLength(g: *FsGrant, file_ref: FileRef, length: u64) !void {
     try g.writable();
-    try (try g.file(file_ref)).setLength(g.io(), length);
+    try (try g.file(file_ref)).setLength(length);
 }
 
 fn fileSync(g: *FsGrant, file_ref: FileRef) !void {
-    try (try g.file(file_ref)).sync(g.io());
+    try (try g.file(file_ref)).sync();
 }

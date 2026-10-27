@@ -17,7 +17,6 @@ const v8 = @import("@v8");
 const Runtime = @import("runtime.zig").Runtime;
 const Scope = @import("scope.zig").Scope;
 const ImportAttribute = @import("module_types.zig").ImportAttribute;
-const print_binding = @import("print.zig");
 const api_glue = @import("../api/glue.zig");
 
 pub const alignment: std.mem.Alignment = .@"16";
@@ -40,9 +39,7 @@ pub const Identity = struct {
 /// removing an entry invalidates existing blobs. Null-terminated.
 /// The references managed's own heap objects need; hosts with native callbacks of their own
 /// append to these (see `Host.externalReferences`) and null-terminate.
-pub const base_references = [_]?*const anyopaque{
-    @ptrCast(&print_binding.callback),
-};
+pub const base_references = [_]?*const anyopaque{};
 const default_references = base_references ++ [_]?*const anyopaque{null};
 
 /// The table V8 expects in `CreateParams.external_references` when the host adds none.

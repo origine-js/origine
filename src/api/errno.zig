@@ -5,7 +5,7 @@
 //! Two error domains feed it, both concrete Zig error sets resolved at compile time:
 //! - **Binding errors** (`Error`): everything natives raise themselves (env, scope,
 //!   argument decoding, encoding). A closed set; `of` maps it strictly.
-//! - **fs errors**: whatever `std.Io` returns. These sets are large and shifting, so
+//! - **fs errors**: whatever the host file-system layer (`managed/sys.zig`) returns. These sets are large and shifting, so
 //!   `ofFs` maps them by name and sends the unknown to `Unexpected`.
 //!
 //! `error.OutOfMemory` is never an errno: it panics where it is mapped. Non-fs code
@@ -78,7 +78,7 @@ comptime {
     }
 }
 
-/// The Zig std names (`std.Io` fs and net errors) that are not `Errno` names, by canonical member.
+/// The Zig std names (Zig std fs errors, kept for tests and callers that still use them) that are not `Errno` names, by canonical member.
 /// Anything else is `Unexpected`. This is the Zig half of the one table; the Rust half is
 /// `errno_of` in rust/crates/origine_api_core/src/errno.rs, and `src/tests/managed/api.zig`
 /// provokes the same failures through both backends and compares.
@@ -141,7 +141,7 @@ pub fn isPending(err: anytype) bool {
     return std.mem.eql(u8, @errorName(err), "JavaScriptException");
 }
 
-/// Maps a `std.Io` fs error to an `Errno`. Takes a concrete error set, resolved at
+/// Maps a file-system error (`sys.Error` or a std one) to an `Errno`. Takes a concrete error set, resolved at
 /// compile time for every member (`anyerror` is rejected); a member without a code
 /// becomes `Unexpected`, and `error.OutOfMemory` panics.
 pub fn ofFs(err: anytype) Errno {

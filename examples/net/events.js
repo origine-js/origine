@@ -1,5 +1,7 @@
 // Run: zig build run -- examples/net/events.js
 // Stream a finite payload using events, exact-size receive leases, and send-queue backpressure.
+import { eprintln } from 'origine:@std/debug';
+
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
   const io = api.io.create();
@@ -68,7 +70,7 @@ export async function main(api) {
     await running; // Resolves once all flowing handles have closed.
     if (failure) throw failure;
     if (received !== total) throw new Error('incomplete transfer');
-    print('events: received and verified', received, 'bytes');
+    eprintln('events: received and verified', received, 'bytes');
   } finally {
     await io.close();
   }

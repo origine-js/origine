@@ -49,10 +49,9 @@ const Fixture = struct {
         self.rt = try m.Runtime.create(t.allocator, .{});
         errdefer self.rt.destroy();
         self.host = try m.Api.Host.create(t.allocator, .{
-            .io = t.io,
             .args = args,
             .env = &.{ .{ .name = "HOME", .value = "/home/test" }, .{ .name = "PATH", .value = "/bin" } },
-            .fs = if (grant_fs) .{ .root = self.tmp.dir, .write = fs_write } else null,
+            .fs = if (grant_fs) .{ .root = .{ .handle = self.tmp.dir.handle }, .write = fs_write } else null,
             .modules = modules,
             .transformers = transformers,
             .runtime = runtime,
@@ -150,9 +149,9 @@ test "api: getters load and harden capabilities once and retain separate disk co
     for (0..2) |run| {
         const rt = try m.Runtime.create(t.allocator, .{});
         defer rt.destroy();
-        const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .runtime = .{}, .fs = .{ .root = tmp.dir, .async = false } });
+        const host = try m.Api.Host.create(t.allocator, .{ .runtime = .{}, .fs = .{ .root = .{ .handle = tmp.dir.handle }, .async = false } });
         defer host.destroy();
-        var cache = m.Api.init_cache.CodeCacheState.init(t.io, host, tmp.dir);
+        var cache = m.Api.init_cache.CodeCacheState.init(host, .{ .handle = tmp.dir.handle });
         var probe: GlueCacheProbe = .{ .inner = cache.hook() };
         defer probe.deinit();
         var options = host.initOptions();
@@ -203,9 +202,9 @@ test "api: snapshot restores immutable getters and network classes without compi
     defer tmp.cleanup();
     const rt = try m.Runtime.create(t.allocator, .{ .snapshot = blob });
     defer rt.destroy();
-    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .runtime = .{}, .fs = .{ .root = tmp.dir, .async = false } });
+    const host = try m.Api.Host.create(t.allocator, .{ .runtime = .{}, .fs = .{ .root = .{ .handle = tmp.dir.handle }, .async = false } });
     defer host.destroy();
-    var cache = m.Api.init_cache.CodeCacheState.init(t.io, host, tmp.dir);
+    var cache = m.Api.init_cache.CodeCacheState.init(host, .{ .handle = tmp.dir.handle });
     var probe: GlueCacheProbe = .{ .inner = cache.hook() };
     defer probe.deinit();
     var options = host.initOptions();
@@ -248,7 +247,7 @@ test "api: snapshot restores immutable getters and network classes without compi
     try check(a, "globalThis.sync = api.fs.requestSync({ access: 'r' }); sync.fileStat({}); sync.errno[0] !== 0");
     try check(b, "api.fs.requestSync({ access: 'r' }).errno[0] === 0");
     try check(a, "sync.errno[0] !== 0");
-    const restricted_host = try m.Api.Host.create(t.allocator, .{ .io = t.io });
+    const restricted_host = try m.Api.Host.create(t.allocator, .{});
     defer restricted_host.destroy();
     const restricted = try rt.createScope(options);
     const restricted_api = try restricted_host.install(restricted, null);
@@ -303,11 +302,11 @@ test "api: init snapshot retains prepared network classes and their runtime bind
     defer image.deinit();
     const rt = try m.Runtime.create(t.allocator, .{ .snapshot = image.blob });
     defer rt.destroy();
-    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io, .runtime = .{} });
+    const host = try m.Api.Host.create(t.allocator, .{ .runtime = .{} });
     defer host.destroy();
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var cache = m.Api.init_cache.CodeCacheState.init(t.io, host, tmp.dir);
+    var cache = m.Api.init_cache.CodeCacheState.init(host, .{ .handle = tmp.dir.handle });
     var probe: GlueCacheProbe = .{ .inner = cache.hook() };
     defer probe.deinit();
     var options = host.initOptions();

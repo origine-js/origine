@@ -7,16 +7,14 @@ const m = @import("@managed");
 const eu = @import("@util");
 const Engine = @import("@engine").Engine;
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const alloc = eu.alloc;
-    const args = try init.minimal.args.toSlice(alloc);
+    const args = try init.args.toSlice(alloc);
     defer alloc.free(args);
     if (args.len != 2) return error.UsageOutputPath;
-    var io_runtime: std.Io.Threaded = .init(alloc, .{});
-    defer io_runtime.deinit();
     var engine = Engine.init(.{});
     defer engine.deinit();
     const blob = try m.snapshot.create(std.heap.page_allocator);
     defer std.heap.page_allocator.free(blob);
-    try std.Io.Dir.cwd().writeFile(io_runtime.io(), .{ .sub_path = args[1], .data = blob });
+    try m.sys.Dir.cwd().writeFile(.{ .sub_path = args[1], .data = blob });
 }

@@ -4,6 +4,8 @@
 //
 // The guest has no high-resolution clock (only `Date.now()`), so this prints throughput and mean
 // round-trip latency (conns / rps) but not p50/p99.
+import { eprintln } from 'origine:@std/debug';
+
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
   const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto', mode = 'copy'] = api.env.args();
@@ -66,7 +68,7 @@ export async function main(api) {
       });
     await Promise.all(clients.map(drive));
     const rps = Math.round(rounds / (MEAS / 1000));
-    print(
+    eprintln(
       JSON.stringify({
         impl: 'origine-js',
         backend,
@@ -152,7 +154,7 @@ export async function main(api) {
   };
   await Promise.all(clients.map(client));
   const rps = Math.round(rounds / (MEAS / 1000));
-  print(
+  eprintln(
     JSON.stringify({
       impl: 'origine-js',
       backend,

@@ -1,13 +1,14 @@
 // utf8 micro-benchmark: `zig build run -Doptimize=ReleaseFast -- bench/text.js`
 // Compares the plain JS implementation in std/text.js with the exported (native) one.
 import { encodeUtf8, decodeUtf8, utf8Js } from 'origine:@std/text';
+import { eprintln } from 'origine:@std/debug';
 
 function time(name, iterations, fn) {
   for (let i = 0; i < Math.min(iterations, 200); i++) fn(); // warm up
   const start = Date.now();
   for (let i = 0; i < iterations; i++) fn();
   const ms = Date.now() - start;
-  print(name.padEnd(34), String(Math.round((ms * 1e6) / iterations)).padStart(10), 'ns/op');
+  eprintln(name.padEnd(34), String(Math.round((ms * 1e6) / iterations)).padStart(10), 'ns/op');
 }
 
 const samples = {

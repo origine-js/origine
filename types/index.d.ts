@@ -1,12 +1,13 @@
 // `@origine/types`: declarations for origine programs. See README.md.
 //
 // Importing this file (or listing the package in `types`) also declares the ambient modules
-// `origine:@std/errno|io|fs|text|quansync|transformer/oxc` and the global `print`.
+// `origine:@std/errno|io|fs|text|debug|quansync|transformer/oxc`.
 /// <reference path="./globals.d.ts" />
 /// <reference path="./std/errno.d.ts" />
 /// <reference path="./std/io.d.ts" />
 /// <reference path="./std/fs.d.ts" />
 /// <reference path="./std/text.d.ts" />
+/// <reference path="./std/debug.d.ts" />
 /// <reference path="./std/quansync.d.ts" />
 /// <reference path="./std/transformer-oxc.d.ts" />
 

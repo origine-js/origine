@@ -57,7 +57,7 @@ test "init snapshot: an evaluated graph restores without evaluating again" {
     options.init_snapshot = &image.table;
     const scope = try rt.createScope(options);
     // The init body already ran, once, inside the snapshot.
-    try check(scope, "globalThis.runs === 1 && typeof print === 'function' && Object.isFrozen(Array.prototype)");
+    try check(scope, "globalThis.runs === 1 && Object.isFrozen(Array.prototype)");
     try exposeModule(scope, "init", "init_ns");
     try t.expectEqual(@as(usize, 0), restored.loads);
     try check(scope, "init_ns.answer === 42 && init_ns.runs() === 1 && globalThis.runs === 1 && init_ns.url === 'init'");

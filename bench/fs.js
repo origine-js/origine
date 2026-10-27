@@ -3,6 +3,7 @@
 // the only clock the hardened context keeps, so every case loops long enough.
 import { Dir, Limit } from 'origine:@std/io';
 import { fs as rustFs } from 'origine:@std/fs';
+import { eprintln } from 'origine:@std/debug';
 
 const bytes = n => new Uint8Array(n).fill(97);
 
@@ -11,7 +12,7 @@ function time(name, iterations, fn) {
   const start = Date.now();
   for (let i = 0; i < iterations; i++) fn();
   const ms = Date.now() - start;
-  print(name.padEnd(34), String(Math.round((ms * 1e6) / iterations)).padStart(9), 'ns/op');
+  eprintln(name.padEnd(34), String(Math.round((ms * 1e6) / iterations)).padStart(9), 'ns/op');
 }
 
 /** @param {import('@origine/types').Api} api */
@@ -58,14 +59,14 @@ export async function main(api) {
   const ars = rustFs(aio, Dir.cwd());
   const start = Date.now();
   for (let i = 0; i < 2000; i++) await ars.read('bench/work/small.txt');
-  print('Rust read async (512 B)'.padEnd(34), String(Math.round(((Date.now() - start) * 1e6) / 2000)).padStart(9), 'ns/op');
+  eprintln('Rust read async (512 B)'.padEnd(34), String(Math.round(((Date.now() - start) * 1e6) / 2000)).padStart(9), 'ns/op');
   // Async 1 MiB reads of big.bin: copy-out (`readPositional`), BYOB (`readInto`, zero-copy) and
   // host-allocated (`readAlloc`, zero-copy).
   const big = await Dir.cwd().openFile(aio, 'bench/work/big.bin');
   const asyncTime = async (name, iterations, fn) => {
     const t0 = Date.now();
     for (let i = 0; i < iterations; i++) await fn();
-    print(name.padEnd(34), String(Math.round(((Date.now() - t0) * 1e6) / iterations)).padStart(9), 'ns/op');
+    eprintln(name.padEnd(34), String(Math.round(((Date.now() - t0) * 1e6) / iterations)).padStart(9), 'ns/op');
   };
   const MiB = 1 << 20;
   const copyBuf = new Uint8Array(MiB);

@@ -16,7 +16,7 @@ test "snapshot: runtime restores finalized scopes that behave like fresh ones" {
     const a = try rt.createScope(memory.options());
     const b = try rt.createScope(.{});
     try check(a, "Object.isFrozen(Array.prototype) && !Reflect.set(globalThis, 'Array', () => {})");
-    try check(a, "typeof print === 'function' && typeof Date.now === 'function'");
+    try check(a, "typeof Date.now === 'function'");
     // Per-scope state is added after restore: scopes stay distinct and share hardened values.
     const cap = try a.eval("new (class Counter { #n = 0; inc() { return ++this.#n; } })()", "test:counter", null);
     defer cap.deinit();

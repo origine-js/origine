@@ -12,7 +12,7 @@
 //! # Two domains
 //! * `IoErrno`: everything Rust's `std::io::ErrorKind` has a name for, plus the two OS errors Rust
 //!   leaves uncategorized (`TooManyOpenFiles`, `Io`). Names are Rust's. Raised by fs and net, by
-//!   both backends (Zig `std.Io`, Rust).
+//!   both backends (Zig `sys`, Rust).
 //! * `HostErrno`: origine's own runtime concepts, which exist only because of the runtime (a handle
 //!   that is gone, a canceled operation). Raised by any native.
 //! Rule for a new code: if Rust's `ErrorKind` has a name for it, it is an `IoErrno` with that name;

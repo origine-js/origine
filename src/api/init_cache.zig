@@ -16,6 +16,7 @@ const managed = struct {
     const runtime = @import("../managed/runtime.zig");
     const Scope = @import("../managed/scope.zig").Scope;
 };
+const sys = @import("../managed/sys.zig");
 const Host = @import("host.zig").Host;
 const Blake3 = std.crypto.hash.Blake3;
 
@@ -44,16 +45,16 @@ pub const Entry = struct {
 /// another run can be reused: the V8 build and flags, this executable (identity, size and
 /// modification time, which stands in for hashing it on every start) and the host's embedded
 /// modules. Borrows host through return.
-pub fn engineKey(io: std.Io, host: *const Host) Hash {
+pub fn engineKey(host: *const Host) Hash {
     var hasher = Blake3.init(.{});
     hasher.update(&.{format_version});
     hasher.update(v8.V8.getVersion());
     hasher.update(std.mem.asBytes(&v8.ScriptCompiler.cachedDataVersionTag()));
-    var exe_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.process.executablePath(io, &exe_buffer)) |len| {
+    var exe_buffer: [sys.max_path_bytes]u8 = undefined;
+    if (sys.executablePath(&exe_buffer)) |len| {
         const exe = exe_buffer[0..len];
         hasher.update(exe);
-        if (std.Io.Dir.cwd().statFile(io, exe, .{})) |stat| {
+        if (sys.Dir.cwd().statFile(exe, .{})) |stat| {
             hasher.update(std.mem.asBytes(&stat.size));
             hasher.update(std.mem.asBytes(&stat.mtime.nanoseconds));
         } else |_| {}
@@ -92,8 +93,8 @@ fn cachePath(alloc: std.mem.Allocator, path: []const u8, tag: [12]u8, ext: []con
 
 /// Derives the snapshot entry for `init_specifier` (as the host imports it): the engine key
 /// plus the specifier. Borrows host and specifier through return.
-pub fn entryFor(alloc: std.mem.Allocator, io: std.Io, host: *const Host, init_specifier: []const u8) !Entry {
-    return entryWithKey(alloc, engineKey(io, host), init_specifier);
+pub fn entryFor(alloc: std.mem.Allocator, host: *const Host, init_specifier: []const u8) !Entry {
+    return entryWithKey(alloc, engineKey(host), init_specifier);
 }
 
 /// `entryFor` with an `engineKey` the caller already computed (it hashes every embedded
@@ -112,14 +113,14 @@ pub fn entryWithKey(alloc: std.mem.Allocator, engine: Hash, init_specifier: []co
 /// Matches `managed.init_snapshot.SourceHasher`. `data` is the `*Host`.
 pub fn hashSource(data: ?*anyopaque, id: []const u8) anyerror!?Hash {
     if (std.mem.startsWith(u8, id, managed.module_types.origine_prefix)) return null;
-    const host: *Host = @ptrCast(@alignCast(data.?));
-    const file = try std.Io.Dir.cwd().openFile(host.io, id, .{});
-    defer file.close(host.io);
+    _ = data;
+    const file = try sys.Dir.cwd().openFile(id, .{});
+    defer file.close();
     var hasher = Blake3.init(.{});
     var buffer: [16 * 1024]u8 = undefined;
     var offset: u64 = 0;
     while (true) {
-        const n = try file.readPositionalAll(host.io, &buffer, offset);
+        const n = try file.readPositionalAll(&buffer, offset);
         if (n == 0) break;
         hasher.update(buffer[0..n]);
         offset += n;
@@ -152,9 +153,9 @@ pub const Miss = enum {
 /// relative to; the working directory in the CLI). Returns null on any miss and says why in
 /// `why` when given; files from another version are rejected, never migrated. Borrows root,
 /// entry and hasher through return; the result owns its bytes (release with `Image.deinit`).
-pub fn load(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, entry: *const Entry, hasher: managed.init_snapshot.SourceHasher, why: ?*Miss) ?managed.init_snapshot.Image {
+pub fn load(alloc: std.mem.Allocator, root: sys.Dir, entry: *const Entry, hasher: managed.init_snapshot.SourceHasher, why: ?*Miss) ?managed.init_snapshot.Image {
     var label: [128]u8 = undefined;
-    const bytes = readSnapshot(alloc, io, root, entry.path) catch |err| {
+    const bytes = readSnapshot(alloc, root, entry.path) catch |err| {
         if (why) |out| out.* = if (err == error.FileNotFound) .no_file else .bad_file;
         return null;
     };
@@ -180,27 +181,27 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, entry: *cons
 /// root/path through return; closes the file on every path and frees partial reads
 /// on failure. The copy remains stable if the cache file is later changed/truncated.
 /// Retains the 1 GiB limit and rejects size changes detected during the read.
-fn readSnapshot(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, path: []const u8) ![]align(16) u8 {
-    const file = try root.openFile(io, path, .{});
-    defer file.close(io);
-    const stat = try file.stat(io);
+fn readSnapshot(alloc: std.mem.Allocator, root: sys.Dir, path: []const u8) ![]align(16) u8 {
+    const file = try root.openFile(path, .{});
+    defer file.close();
+    const stat = try file.stat();
     if (stat.kind != .file) return error.InvalidSnapshotFile;
     if (stat.size >= 1 << 30) return error.FileTooBig;
     const size = std.math.cast(usize, stat.size) orelse return error.FileTooBig;
     const bytes = try alloc.alignedAlloc(u8, managed.init_snapshot.alignment, size);
     errdefer alloc.free(bytes);
-    if (try file.readPositionalAll(io, bytes, 0) != size) return error.SnapshotFileChanged;
+    if (try file.readPositionalAll(bytes, 0) != size) return error.SnapshotFileChanged;
     var extra: [1]u8 = undefined;
-    if (try file.readPositionalAll(io, &extra, stat.size) != 0) return error.SnapshotFileChanged;
+    if (try file.readPositionalAll(&extra, stat.size) != 0) return error.SnapshotFileChanged;
     return bytes;
 }
 
 /// Writes the snapshot file under `root` atomically (temporary file in the same directory,
 /// then rename) so a concurrent or interrupted run never sees a partial file. Creates
 /// `__oricache__` on demand. Borrows everything; the caller keeps the image.
-pub fn store(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, entry: *const Entry, image: *const managed.init_snapshot.Image) !void {
-    try writeAtomic(alloc, io, root, entry.path, image.bytes);
-    sweepStale(io, root, entry.path);
+pub fn store(alloc: std.mem.Allocator, root: sys.Dir, entry: *const Entry, image: *const managed.init_snapshot.Image) !void {
+    try writeAtomic(alloc, root, entry.path, image.bytes);
+    sweepStale(root, entry.path);
 }
 
 /// Deletes every cache file in the directory of `current_path` that another engine made:
@@ -208,17 +209,17 @@ pub fn store(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, entry: *con
 /// from the one in `current_path`. Files of other sources are swept too, so rebuilding or
 /// upgrading origine does not leave caches that can never be read again. Anything else in the
 /// directory is left alone. Best effort; borrows root and path for the call.
-fn sweepStale(io: std.Io, root: std.Io.Dir, current_path: []const u8) void {
+fn sweepStale(root: sys.Dir, current_path: []const u8) void {
     const dir_path = std.fs.path.dirname(current_path) orelse return;
     const current_tag = tagOfName(std.fs.path.basename(current_path)) orelse return;
-    var dir = root.openDir(io, dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(io);
+    var dir = root.openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
     var it = dir.iterate();
-    while (it.next(io) catch return) |item| {
+    while (it.next() catch return) |item| {
         if (item.kind != .file) continue;
         const tag = tagOfName(item.name) orelse continue;
         if (std.mem.eql(u8, tag, current_tag)) continue;
-        dir.deleteFile(io, item.name) catch {};
+        dir.deleteFile(item.name) catch {};
     }
 }
 
@@ -239,13 +240,13 @@ fn tagOfName(name: []const u8) ?[]const u8 {
 
 /// Writes `data` to `path` under `root` atomically (a temporary file beside it, then rename),
 /// creating the directory on demand. The pid keeps concurrent writers from sharing a temporary.
-fn writeAtomic(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, path: []const u8, data: []const u8) !void {
-    try root.createDirPath(io, std.fs.path.dirname(path).?);
+fn writeAtomic(alloc: std.mem.Allocator, root: sys.Dir, path: []const u8, data: []const u8) !void {
+    try root.createDirPath(std.fs.path.dirname(path).?);
     const temporary = try std.fmt.allocPrint(alloc, "{s}.{d}.tmp", .{ path, std.c.getpid() });
     defer alloc.free(temporary);
-    errdefer root.deleteFile(io, temporary) catch {};
-    try root.writeFile(io, .{ .sub_path = temporary, .data = data });
-    try root.rename(temporary, root, path, io);
+    errdefer root.deleteFile(temporary) catch {};
+    try root.writeFile(.{ .sub_path = temporary, .data = data });
+    try root.rename(temporary, root, path);
 }
 
 // Code cache: one file per source module, `dir/__oricache__/name.<tag>.v8-code-cache`.
@@ -263,14 +264,14 @@ comptime {
 pub const CodeCacheState = struct {
     host: *Host,
     tag: [12]u8,
-    root: std.Io.Dir,
+    root: sys.Dir,
 
-    pub fn init(io: std.Io, host: *Host, root: std.Io.Dir) CodeCacheState {
-        return initWithKey(engineKey(io, host), host, root);
+    pub fn init(host: *Host, root: sys.Dir) CodeCacheState {
+        return initWithKey(engineKey(host), host, root);
     }
 
     /// `init` with an `engineKey` the caller already computed.
-    pub fn initWithKey(engine: Hash, host: *Host, root: std.Io.Dir) CodeCacheState {
+    pub fn initWithKey(engine: Hash, host: *Host, root: sys.Dir) CodeCacheState {
         return .{ .host = host, .tag = tagOf(engine), .root = root };
     }
 
@@ -293,7 +294,7 @@ fn loadCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest) ?
     const state: *CodeCacheState = @ptrCast(@alignCast(data.?));
     if (!cacheable(request.module_id)) return null;
     const path = cachePath(request.allocator, request.module_id, state.tag, code_cache_extension) catch return null;
-    const bytes = state.root.readFileAllocOptions(state.host.io, path, request.allocator, .limited(1 << 28), .@"8", null) catch return null;
+    const bytes = state.root.readFileAllocOptions(path, request.allocator, .limited(1 << 28), .@"8", null) catch return null;
     if (bytes.len <= code_header_len or !std.mem.eql(u8, bytes[0..code_magic.len], code_magic)) return null;
     const stored = bytes[code_magic.len..][0..hash_len];
     if (!std.mem.eql(u8, stored, &sourceHash(request.source))) return null;
@@ -328,6 +329,6 @@ fn storeCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest, 
     @memcpy(file[code_magic.len..][0..hash_len], &sourceHash(request.source));
     std.mem.writeInt(u64, file[code_magic.len + hash_len ..][0..8], bytes.len, .little);
     @memcpy(file[code_header_len..], bytes);
-    writeAtomic(alloc, state.host.io, state.root, path, file) catch return;
-    sweepStale(state.host.io, state.root, path);
+    writeAtomic(alloc, state.root, path, file) catch return;
+    sweepStale(state.root, path);
 }

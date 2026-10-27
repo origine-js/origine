@@ -1,10 +1,11 @@
 import { Dir, IoError, Limit } from 'origine:@std/io';
+import { eprintln } from 'origine:@std/debug';
 
 const text = bytes => String.fromCharCode(...bytes);
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  print('args:', api.env.args().join(' '));
+  eprintln('args:', api.env.args().join(' '));
   /** @type {import('@origine/types').FsRequest} */
   const grant = { root: 'examples/draft-1/work', access: 'rw' };
   const sync = api.fs.requestSync(grant);
@@ -14,19 +15,20 @@ export async function main(api) {
   sync.fileWriteAll(file, Uint8Array.from([104, 105, 10]));
   sync.fileClose(file);
   const again = await async.dirOpenFile(Dir.cwd(), 'hello.txt', 'r');
-  print('read back:', JSON.stringify(text(await async.fileReadAll(again, { limit: Limit.unlimited }))));
+  eprintln('read back:', JSON.stringify(text(await async.fileReadAll(again, { limit: Limit.unlimited }))));
   await io.close();
   try {
     IoError.check(sync, sync.dirOpenFile(Dir.cwd(), '../escape.txt', 'r'));
   } catch (e) {
     // Failures are `{ errno, name }` values, not Errors: narrow with IoError.is.
     if (!IoError.is(e, IoError.PermissionDenied)) throw e;
-    print('escape rejected:', e.name);
+    eprintln('escape rejected:', e.name);
   }
   const child = await api.scope.create({
     main: 'app:/main.js',
+    origineNamespace: true,
     importMap: { imports: { dep: 'app:/dep.js' } },
-    loader: async id => (id === 'app:/main.js' ? "import { v } from 'dep'; print('child sees', v + preloaded)" : 'export const v = 40;'),
+    loader: async id => (id === 'app:/main.js' ? "import { eprintln } from 'origine:@std/debug'; import { v } from 'dep'; eprintln('child sees', v + preloaded)" : 'export const v = 40;'),
     preload: [{ source: '(values) => { globalThis.preloaded = values.n }', values: { n: 2 } }],
   });
   await child.run();

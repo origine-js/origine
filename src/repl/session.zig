@@ -15,7 +15,6 @@ const max_source = 64 * 1024;
 
 pub const Options = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
     platform: v8.Platform,
     /// Line editing with prompts; false reads plain lines from stdin.
     interactive: bool,
@@ -54,10 +53,10 @@ const Session = struct {
     options: Options,
     helpers: Helpers,
     engine: Engine,
-    reader: std.Io.File.Reader,
+    reader: m.sys.File.Reader,
 
-    fn print(self: *Session, comptime format: []const u8, args: anytype) void {
-        display.print(self.options.io, format, args);
+    fn print(_: *Session, comptime format: []const u8, args: anytype) void {
+        display.print(format, args);
     }
 
     fn prompt(self: *const Session) []const u8 {
@@ -105,7 +104,7 @@ const Session = struct {
                     return .skip;
                 };
                 defer matches.deinit();
-                display.show(self.options.io, self.scope, matches);
+                display.show(self.scope, matches);
             },
             .invalid => self.print("Unknown command or invalid arguments; use .help.\n", .{}),
             .source => {
@@ -158,7 +157,7 @@ const Session = struct {
             if (error_info.exception) |value| {
                 self.helpers.remember(typed, value, true) catch {};
                 if (colors) self.print("\x1b[31m", .{});
-                display.show(self.options.io, self.scope, value);
+                display.show(self.scope, value);
                 if (colors) self.print("\x1b[0m", .{});
             } else if (err == error.Stalled) {
                 self.print("Promise never settled: nothing left that could resolve it.\n", .{});
@@ -172,7 +171,7 @@ const Session = struct {
             return;
         };
         defer formatted.deinit();
-        display.show(self.options.io, self.scope, formatted);
+        display.show(self.scope, formatted);
     }
 
     /// Evaluates `source`; code that was rewritten for top-level `await` or static `import` is an
@@ -265,7 +264,7 @@ pub fn run(scope: *m.Scope, options: Options) !void {
         .options = options,
         .helpers = helpers,
         .engine = engine,
-        .reader = std.Io.File.stdin().reader(options.io, buffer),
+        .reader = m.sys.File.stdin().reader(buffer),
     };
     if (options.host) |host| try session.installApi(host);
     try session.loop();

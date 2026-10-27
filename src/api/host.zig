@@ -31,6 +31,7 @@ const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
 
 const glue_script = @import("glue.zig");
 const io_lib = @import("@io");
+const sys = @import("../managed/sys.zig");
 const startup_trace = @import("@diagnostics").scope;
 
 // Rust natives (rust/crates/origine_api), linked from liborigine_native. CONTRACT (docs/contracts.md,
@@ -50,7 +51,7 @@ const origine_api_wake = abi.origine_api_wake;
 /// What the host grants to `fs.requestSync` / `fs.requestAsync`. `root` is borrowed and must
 /// outlive the Host.
 pub const FsConfig = struct {
-    root: std.Io.Dir,
+    root: sys.Dir,
     write: bool = true,
     sync: bool = true,
     /// Async fs also needs `Config.runtime` (the guest creates its runtimes through `api.io`).
@@ -88,7 +89,6 @@ pub const RuntimeConfig = struct {
 const platform_poll_ns: i64 = 100 * std.time.ns_per_ms;
 
 pub const Config = struct {
-    io: std.Io,
     args: []const []const u8 = &.{},
     env: []const env_api.Pair = &.{},
     fs: ?FsConfig = null,
@@ -175,7 +175,6 @@ const ModuleState = struct { id: []const u8, bindings: module_api.Bindings, ptr:
 
 pub const Host = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
     args: []const []const u8,
     env: []const env_api.Pair,
     fs: ?FsConfig,
@@ -202,7 +201,7 @@ pub const Host = struct {
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
     pub fn create(allocator: std.mem.Allocator, config: Config) !*Host {
         const host = try allocator.create(Host);
-        host.* = .{ .allocator = allocator, .io = config.io, .args = config.args, .env = config.env, .fs = config.fs, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers } };
+        host.* = .{ .allocator = allocator, .args = config.args, .env = config.env, .fs = config.fs, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers } };
         return host;
     }
 

@@ -1,0 +1,1239 @@
+const builtin = @import("builtin");
+const Os = std.builtin.Os;
+const native_os = builtin.os.tag;
+const is_windows = native_os == .windows;
+
+const File = @This();
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const posix = @import("posix.zig");
+const math = std.math;
+const assert = std.debug.assert;
+const linux = std.os.linux;
+const windows = @import("windows.zig");
+const maxInt = std.math.maxInt;
+const Alignment = std.mem.Alignment;
+
+/// The OS-specific file descriptor or file handle.
+handle: Handle,
+
+pub const Handle = posix.fd_t;
+pub const Mode = posix.mode_t;
+pub const INode = posix.ino_t;
+pub const Uid = posix.uid_t;
+pub const Gid = posix.gid_t;
+
+pub const Kind = enum {
+    block_device,
+    character_device,
+    directory,
+    named_pipe,
+    sym_link,
+    file,
+    unix_domain_socket,
+    whiteout,
+    door,
+    event_port,
+    unknown,
+};
+
+/// This is the default mode given to POSIX operating systems for creating
+/// files. `0o666` is "-rw-rw-rw-" which is counter-intuitive at first,
+/// since most people would expect "-rw-r--r--", for example, when using
+/// the `touch` command, which would correspond to `0o644`. However, POSIX
+/// libc implementations use `0o666` inside `fopen` and then rely on the
+/// process-scoped "umask" setting to adjust this number for file creation.
+pub const default_mode = switch (builtin.os.tag) {
+    .windows => 0,
+    .wasi => 0,
+    else => 0o666,
+};
+
+pub const OpenError = error{
+    SharingViolation,
+    PathAlreadyExists,
+    FileNotFound,
+    AccessDenied,
+    PipeBusy,
+    NoDevice,
+    NameTooLong,
+    /// WASI-only; file paths must be valid UTF-8.
+    InvalidUtf8,
+    /// Windows-only; file paths provided by the user must be valid WTF-8.
+    /// https://simonsapin.github.io/wtf-8/
+    InvalidWtf8,
+    /// On Windows, file paths cannot contain these characters:
+    /// '/', '*', '?', '"', '<', '>', '|'
+    BadPathName,
+    Unexpected,
+    /// On Windows, `\\server` or `\\server\share` was not found.
+    NetworkNotFound,
+    ProcessNotFound,
+    /// On Windows, antivirus software is enabled by default. It can be
+    /// disabled, but Windows Update sometimes ignores the user's preference
+    /// and re-enables it. When enabled, antivirus software on Windows
+    /// intercepts file system operations and makes them significantly slower
+    /// in addition to possibly failing with this error code.
+    AntivirusInterference,
+} || posix.OpenError || posix.FlockError;
+
+pub const OpenMode = enum {
+    read_only,
+    write_only,
+    read_write,
+};
+
+pub const Lock = enum {
+    none,
+    shared,
+    exclusive,
+};
+
+pub const OpenFlags = struct {
+    mode: OpenMode = .read_only,
+
+    /// Open the file with an advisory lock to coordinate with other processes
+    /// accessing it at the same time. An exclusive lock will prevent other
+    /// processes from acquiring a lock. A shared lock will prevent other
+    /// processes from acquiring a exclusive lock, but does not prevent
+    /// other process from getting their own shared locks.
+    ///
+    /// The lock is advisory, except on Linux in very specific circumstances[1].
+    /// This means that a process that does not respect the locking API can still get access
+    /// to the file, despite the lock.
+    ///
+    /// On these operating systems, the lock is acquired atomically with
+    /// opening the file:
+    /// * Darwin
+    /// * DragonFlyBSD
+    /// * FreeBSD
+    /// * Haiku
+    /// * NetBSD
+    /// * OpenBSD
+    /// On these operating systems, the lock is acquired via a separate syscall
+    /// after opening the file:
+    /// * Linux
+    /// * Windows
+    ///
+    /// [1]: https://www.kernel.org/doc/Documentation/filesystems/mandatory-locking.txt
+    lock: Lock = .none,
+
+    /// Sets whether or not to wait until the file is locked to return. If set to true,
+    /// `error.WouldBlock` will be returned. Otherwise, the file will wait until the file
+    /// is available to proceed.
+    lock_nonblocking: bool = false,
+
+    /// Set this to allow the opened file to automatically become the
+    /// controlling TTY for the current process.
+    allow_ctty: bool = false,
+
+    pub fn isRead(self: OpenFlags) bool {
+        return self.mode != .write_only;
+    }
+
+    pub fn isWrite(self: OpenFlags) bool {
+        return self.mode != .read_only;
+    }
+};
+
+pub const CreateFlags = struct {
+    /// Whether the file will be created with read access.
+    read: bool = false,
+
+    /// If the file already exists, and is a regular file, and the access
+    /// mode allows writing, it will be truncated to length 0.
+    truncate: bool = true,
+
+    /// Ensures that this open call creates the file, otherwise causes
+    /// `error.PathAlreadyExists` to be returned.
+    exclusive: bool = false,
+
+    /// Open the file with an advisory lock to coordinate with other processes
+    /// accessing it at the same time. An exclusive lock will prevent other
+    /// processes from acquiring a lock. A shared lock will prevent other
+    /// processes from acquiring a exclusive lock, but does not prevent
+    /// other process from getting their own shared locks.
+    ///
+    /// The lock is advisory, except on Linux in very specific circumstances[1].
+    /// This means that a process that does not respect the locking API can still get access
+    /// to the file, despite the lock.
+    ///
+    /// On these operating systems, the lock is acquired atomically with
+    /// opening the file:
+    /// * Darwin
+    /// * DragonFlyBSD
+    /// * FreeBSD
+    /// * Haiku
+    /// * NetBSD
+    /// * OpenBSD
+    /// On these operating systems, the lock is acquired via a separate syscall
+    /// after opening the file:
+    /// * Linux
+    /// * Windows
+    ///
+    /// [1]: https://www.kernel.org/doc/Documentation/filesystems/mandatory-locking.txt
+    lock: Lock = .none,
+
+    /// Sets whether or not to wait until the file is locked to return. If set to true,
+    /// `error.WouldBlock` will be returned. Otherwise, the file will wait until the file
+    /// is available to proceed.
+    lock_nonblocking: bool = false,
+
+    /// For POSIX systems this is the file system mode the file will
+    /// be created with. On other systems this is always 0.
+    mode: Mode = default_mode,
+};
+
+pub fn stdout() File {
+    return .{ .handle = if (is_windows) windows.peb().ProcessParameters.hStdOutput else posix.STDOUT_FILENO };
+}
+
+pub fn stderr() File {
+    return .{ .handle = if (is_windows) windows.peb().ProcessParameters.hStdError else posix.STDERR_FILENO };
+}
+
+pub fn stdin() File {
+    return .{ .handle = if (is_windows) windows.peb().ProcessParameters.hStdInput else posix.STDIN_FILENO };
+}
+
+/// Upon success, the stream is in an uninitialized state. To continue using it,
+/// you must use the open() function.
+pub fn close(self: File) void {
+    if (is_windows) {
+        windows.CloseHandle(self.handle);
+    } else {
+        posix.close(self.handle);
+    }
+}
+
+pub const SyncError = posix.SyncError;
+
+/// Blocks until all pending file contents and metadata modifications
+/// for the file have been synchronized with the underlying filesystem.
+///
+/// Note that this does not ensure that metadata for the
+/// directory containing the file has also reached disk.
+pub fn sync(self: File) SyncError!void {
+    return posix.fsync(self.handle);
+}
+
+/// Test whether the file refers to a terminal.
+/// See also `getOrEnableAnsiEscapeSupport` and `supportsAnsiEscapeCodes`.
+pub fn isTty(self: File) bool {
+    return posix.isatty(self.handle);
+}
+
+pub fn isCygwinPty(file: File) bool {
+    if (builtin.os.tag != .windows) return false;
+
+    const handle = file.handle;
+
+    // If this is a MSYS2/cygwin pty, then it will be a named pipe with a name in one of these formats:
+    //   msys-[...]-ptyN-[...]
+    //   cygwin-[...]-ptyN-[...]
+    //
+    // Example: msys-1888ae32e00d56aa-pty0-to-master
+
+    // First, just check that the handle is a named pipe.
+    // This allows us to avoid the more costly NtQueryInformationFile call
+    // for handles that aren't named pipes.
+    {
+        var io_status: windows.IO_STATUS_BLOCK = undefined;
+        var device_info: windows.FILE_FS_DEVICE_INFORMATION = undefined;
+        const rc = windows.ntdll.NtQueryVolumeInformationFile(handle, &io_status, &device_info, @sizeOf(windows.FILE_FS_DEVICE_INFORMATION), .FileFsDeviceInformation);
+        switch (rc) {
+            .SUCCESS => {},
+            else => return false,
+        }
+        if (device_info.DeviceType != windows.FILE_DEVICE_NAMED_PIPE) return false;
+    }
+
+    const name_bytes_offset = @offsetOf(windows.FILE_NAME_INFO, "FileName");
+    // `NAME_MAX` UTF-16 code units (2 bytes each)
+    // This buffer may not be long enough to handle *all* possible paths
+    // (PATH_MAX_WIDE would be necessary for that), but because we only care
+    // about certain paths and we know they must be within a reasonable length,
+    // we can use this smaller buffer and just return false on any error from
+    // NtQueryInformationFile.
+    const num_name_bytes = windows.MAX_PATH * 2;
+    var name_info_bytes align(@alignOf(windows.FILE_NAME_INFO)) = std.mem.zeroes([name_bytes_offset + num_name_bytes]u8);
+
+    var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+    const rc = windows.ntdll.NtQueryInformationFile(handle, &io_status_block, &name_info_bytes, @intCast(name_info_bytes.len), .FileNameInformation);
+    switch (rc) {
+        .SUCCESS => {},
+        .INVALID_PARAMETER => unreachable,
+        else => return false,
+    }
+
+    const name_info: *const windows.FILE_NAME_INFO = @ptrCast(&name_info_bytes);
+    const name_bytes = name_info_bytes[name_bytes_offset .. name_bytes_offset + name_info.FileNameLength];
+    const name_wide = std.mem.bytesAsSlice(u16, name_bytes);
+    // The name we get from NtQueryInformationFile will be prefixed with a '\', e.g. \msys-1888ae32e00d56aa-pty0-to-master
+    return (std.mem.startsWith(u16, name_wide, &[_]u16{ '\\', 'm', 's', 'y', 's', '-' }) or
+        std.mem.startsWith(u16, name_wide, &[_]u16{ '\\', 'c', 'y', 'g', 'w', 'i', 'n', '-' })) and
+        std.mem.indexOf(u16, name_wide, &[_]u16{ '-', 'p', 't', 'y' }) != null;
+}
+
+/// Returns whether or not ANSI escape codes will be treated as such,
+/// and attempts to enable support for ANSI escape codes if necessary
+/// (on Windows).
+///
+/// Returns `true` if ANSI escape codes are supported or support was
+/// successfully enabled. Returns false if ANSI escape codes are not
+/// supported or support was unable to be enabled.
+///
+/// See also `supportsAnsiEscapeCodes`.
+pub fn getOrEnableAnsiEscapeSupport(self: File) bool {
+    if (builtin.os.tag == .windows) {
+        var original_console_mode: windows.DWORD = 0;
+
+        // For Windows Terminal, VT Sequences processing is enabled by default.
+        if (windows.kernel32.GetConsoleMode(self.handle, &original_console_mode) != 0) {
+            if (original_console_mode & windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0) return true;
+
+            // For Windows Console, VT Sequences processing support was added in Windows 10 build 14361, but disabled by default.
+            // https://devblogs.microsoft.com/commandline/tmux-support-arrives-for-bash-on-ubuntu-on-windows/
+            //
+            // Note: In Microsoft's example for enabling virtual terminal processing, it
+            // shows attempting to enable `DISABLE_NEWLINE_AUTO_RETURN` as well:
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#example-of-enabling-virtual-terminal-processing
+            // This is avoided because in the old Windows Console, that flag causes \n (as opposed to \r\n)
+            // to behave unexpectedly (the cursor moves down 1 row but remains on the same column).
+            // Additionally, the default console mode in Windows Terminal does not have
+            // `DISABLE_NEWLINE_AUTO_RETURN` set, so by only enabling `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+            // we end up matching the mode of Windows Terminal.
+            const requested_console_modes = windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            const console_mode = original_console_mode | requested_console_modes;
+            if (windows.kernel32.SetConsoleMode(self.handle, console_mode) != 0) return true;
+        }
+
+        return self.isCygwinPty();
+    }
+    return self.supportsAnsiEscapeCodes();
+}
+
+/// Test whether ANSI escape codes will be treated as such without
+/// attempting to enable support for ANSI escape codes.
+///
+/// See also `getOrEnableAnsiEscapeSupport`.
+pub fn supportsAnsiEscapeCodes(self: File) bool {
+    if (builtin.os.tag == .windows) {
+        var console_mode: windows.DWORD = 0;
+        if (windows.kernel32.GetConsoleMode(self.handle, &console_mode) != 0) {
+            if (console_mode & windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0) return true;
+        }
+
+        return self.isCygwinPty();
+    }
+    if (builtin.os.tag == .wasi) {
+        // WASI sanitizes stdout when fd is a tty so ANSI escape codes
+        // will not be interpreted as actual cursor commands, and
+        // stderr is always sanitized.
+        return false;
+    }
+    if (self.isTty()) {
+        if (self.handle == posix.STDOUT_FILENO or self.handle == posix.STDERR_FILENO) {
+            if (posix.getenvZ("TERM")) |term| {
+                if (std.mem.eql(u8, term, "dumb"))
+                    return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+pub const SetEndPosError = posix.TruncateError;
+
+/// Shrinks or expands the file.
+/// The file offset after this call is left unchanged.
+pub fn setEndPos(self: File, length: u64) SetEndPosError!void {
+    try posix.ftruncate(self.handle, length);
+}
+
+pub const SeekError = posix.SeekError;
+
+/// Repositions read/write file offset relative to the current offset.
+/// TODO: integrate with async I/O
+pub fn seekBy(self: File, offset: i64) SeekError!void {
+    return posix.lseek_CUR(self.handle, offset);
+}
+
+/// Repositions read/write file offset relative to the end.
+/// TODO: integrate with async I/O
+pub fn seekFromEnd(self: File, offset: i64) SeekError!void {
+    return posix.lseek_END(self.handle, offset);
+}
+
+/// Repositions read/write file offset relative to the beginning.
+/// TODO: integrate with async I/O
+pub fn seekTo(self: File, offset: u64) SeekError!void {
+    return posix.lseek_SET(self.handle, offset);
+}
+
+pub const GetSeekPosError = posix.SeekError || StatError;
+
+/// TODO: integrate with async I/O
+pub fn getPos(self: File) GetSeekPosError!u64 {
+    return posix.lseek_CUR_get(self.handle);
+}
+
+pub const GetEndPosError = @import("windows.zig").GetFileSizeError || StatError;
+
+/// TODO: integrate with async I/O
+pub fn getEndPos(self: File) GetEndPosError!u64 {
+    if (builtin.os.tag == .windows) {
+        return windows.GetFileSizeEx(self.handle);
+    }
+    return (try self.stat()).size;
+}
+
+pub const ModeError = StatError;
+
+/// TODO: integrate with async I/O
+pub fn mode(self: File) ModeError!Mode {
+    if (builtin.os.tag == .windows) {
+        return 0;
+    }
+    return (try self.stat()).mode;
+}
+
+pub const Stat = struct {
+    /// A number that the system uses to point to the file metadata. This
+    /// number is not guaranteed to be unique across time, as some file
+    /// systems may reuse an inode after its file has been deleted. Some
+    /// systems may change the inode of a file over time.
+    ///
+    /// On Linux, the inode is a structure that stores the metadata, and
+    /// the inode _number_ is what you see here: the index number of the
+    /// inode.
+    ///
+    /// The FileIndex on Windows is similar. It is a number for a file that
+    /// is unique to each filesystem.
+    inode: INode,
+    size: u64,
+    /// This is available on POSIX systems and is always 0 otherwise.
+    mode: Mode,
+    kind: Kind,
+
+    /// Last access time in nanoseconds, relative to UTC 1970-01-01.
+    atime: i128,
+    /// Last modification time in nanoseconds, relative to UTC 1970-01-01.
+    mtime: i128,
+    /// Last status/metadata change time in nanoseconds, relative to UTC 1970-01-01.
+    ctime: i128,
+
+    pub fn fromPosix(st: posix.Stat) Stat {
+        const atime = st.atime();
+        const mtime = st.mtime();
+        const ctime = st.ctime();
+        return .{
+            .inode = st.ino,
+            .size = @bitCast(st.size),
+            .mode = st.mode,
+            .kind = k: {
+                const m = st.mode & posix.S.IFMT;
+                switch (m) {
+                    posix.S.IFBLK => break :k .block_device,
+                    posix.S.IFCHR => break :k .character_device,
+                    posix.S.IFDIR => break :k .directory,
+                    posix.S.IFIFO => break :k .named_pipe,
+                    posix.S.IFLNK => break :k .sym_link,
+                    posix.S.IFREG => break :k .file,
+                    posix.S.IFSOCK => break :k .unix_domain_socket,
+                    else => {},
+                }
+                if ((builtin.os.tag == .illumos)) switch (m) {
+                    posix.S.IFDOOR => break :k .door,
+                    posix.S.IFPORT => break :k .event_port,
+                    else => {},
+                };
+
+                break :k .unknown;
+            },
+            .atime = @as(i128, atime.sec) * std.time.ns_per_s + atime.nsec,
+            .mtime = @as(i128, mtime.sec) * std.time.ns_per_s + mtime.nsec,
+            .ctime = @as(i128, ctime.sec) * std.time.ns_per_s + ctime.nsec,
+        };
+    }
+
+    pub fn fromLinux(stx: linux.Statx) Stat {
+        const atime = stx.atime;
+        const mtime = stx.mtime;
+        const ctime = stx.ctime;
+
+        return .{
+            .inode = stx.ino,
+            .size = stx.size,
+            .mode = stx.mode,
+            .kind = switch (stx.mode & linux.S.IFMT) {
+                linux.S.IFDIR => .directory,
+                linux.S.IFCHR => .character_device,
+                linux.S.IFBLK => .block_device,
+                linux.S.IFREG => .file,
+                linux.S.IFIFO => .named_pipe,
+                linux.S.IFLNK => .sym_link,
+                linux.S.IFSOCK => .unix_domain_socket,
+                else => .unknown,
+            },
+            .atime = @as(i128, atime.sec) * std.time.ns_per_s + atime.nsec,
+            .mtime = @as(i128, mtime.sec) * std.time.ns_per_s + mtime.nsec,
+            .ctime = @as(i128, ctime.sec) * std.time.ns_per_s + ctime.nsec,
+        };
+    }
+
+    pub fn fromWasi(st: std.os.wasi.filestat_t) Stat {
+        return .{
+            .inode = st.ino,
+            .size = @bitCast(st.size),
+            .mode = 0,
+            .kind = switch (st.filetype) {
+                .BLOCK_DEVICE => .block_device,
+                .CHARACTER_DEVICE => .character_device,
+                .DIRECTORY => .directory,
+                .SYMBOLIC_LINK => .sym_link,
+                .REGULAR_FILE => .file,
+                .SOCKET_STREAM, .SOCKET_DGRAM => .unix_domain_socket,
+                else => .unknown,
+            },
+            .atime = st.atim,
+            .mtime = st.mtim,
+            .ctime = st.ctim,
+        };
+    }
+};
+
+pub const StatError = posix.FStatError;
+
+/// Returns `Stat` containing basic information about the `File`.
+/// TODO: integrate with async I/O
+pub fn stat(self: File) StatError!Stat {
+    if (builtin.os.tag == .windows) {
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        var info: windows.FILE_ALL_INFORMATION = undefined;
+        const rc = windows.ntdll.NtQueryInformationFile(self.handle, &io_status_block, &info, @sizeOf(windows.FILE_ALL_INFORMATION), .FileAllInformation);
+        switch (rc) {
+            .SUCCESS => {},
+            // Buffer overflow here indicates that there is more information available than was able to be stored in the buffer
+            // size provided. This is treated as success because the type of variable-length information that this would be relevant for
+            // (name, volume name, etc) we don't care about.
+            .BUFFER_OVERFLOW => {},
+            .INVALID_PARAMETER => unreachable,
+            .ACCESS_DENIED => return error.AccessDenied,
+            else => return windows.unexpectedStatus(rc),
+        }
+        return .{
+            .inode = info.InternalInformation.IndexNumber,
+            .size = @as(u64, @bitCast(info.StandardInformation.EndOfFile)),
+            .mode = 0,
+            .kind = if (info.BasicInformation.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) reparse_point: {
+                var tag_info: windows.FILE_ATTRIBUTE_TAG_INFO = undefined;
+                const tag_rc = windows.ntdll.NtQueryInformationFile(self.handle, &io_status_block, &tag_info, @sizeOf(windows.FILE_ATTRIBUTE_TAG_INFO), .FileAttributeTagInformation);
+                switch (tag_rc) {
+                    .SUCCESS => {},
+                    // INFO_LENGTH_MISMATCH and ACCESS_DENIED are the only documented possible errors
+                    // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/d295752f-ce89-4b98-8553-266d37c84f0e
+                    .INFO_LENGTH_MISMATCH => unreachable,
+                    .ACCESS_DENIED => return error.AccessDenied,
+                    else => return windows.unexpectedStatus(rc),
+                }
+                if (tag_info.ReparseTag & windows.reparse_tag_name_surrogate_bit != 0) {
+                    break :reparse_point .sym_link;
+                }
+                // Unknown reparse point
+                break :reparse_point .unknown;
+            } else if (info.BasicInformation.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0)
+                .directory
+            else
+                .file,
+            .atime = windows.fromSysTime(info.BasicInformation.LastAccessTime),
+            .mtime = windows.fromSysTime(info.BasicInformation.LastWriteTime),
+            .ctime = windows.fromSysTime(info.BasicInformation.ChangeTime),
+        };
+    }
+
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
+        const st = try std.os.fstat_wasi(self.handle);
+        return Stat.fromWasi(st);
+    }
+
+    if (builtin.os.tag == .linux) {
+        var stx = std.mem.zeroes(linux.Statx);
+
+        const rc = linux.statx(
+            self.handle,
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .TYPE = true, .MODE = true, .NLINK = true, .ATIME = true, .MTIME = true, .CTIME = true, .INO = true, .SIZE = true },
+            &stx,
+        );
+
+        return switch (linux.errno(rc)) {
+            .SUCCESS => Stat.fromLinux(stx),
+            .ACCES => unreachable,
+            .BADF => unreachable,
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .LOOP => unreachable,
+            .NAMETOOLONG => unreachable,
+            .NOENT => unreachable,
+            .NOMEM => error.SystemResources,
+            .NOTDIR => unreachable,
+            else => |err| posix.unexpectedErrno(err),
+        };
+    }
+
+    const st = try posix.fstat(self.handle);
+    return Stat.fromPosix(st);
+}
+
+pub const ChmodError = posix.FChmodError;
+
+/// Changes the mode of the file.
+/// The process must have the correct privileges in order to do this
+/// successfully, or must have the effective user ID matching the owner
+/// of the file.
+pub fn chmod(self: File, new_mode: Mode) ChmodError!void {
+    try posix.fchmod(self.handle, new_mode);
+}
+
+pub const ChownError = posix.FChownError;
+
+/// Changes the owner and group of the file.
+/// The process must have the correct privileges in order to do this
+/// successfully. The group may be changed by the owner of the file to
+/// any group of which the owner is a member. If the owner or group is
+/// specified as `null`, the ID is not changed.
+pub fn chown(self: File, owner: ?Uid, group: ?Gid) ChownError!void {
+    try posix.fchown(self.handle, owner, group);
+}
+
+/// Cross-platform representation of permissions on a file.
+/// The `readonly` and `setReadonly` are the only methods available across all platforms.
+/// Platform-specific functionality is available through the `inner` field.
+pub const Permissions = struct {
+    /// You may use the `inner` field to use platform-specific functionality
+    inner: switch (builtin.os.tag) {
+        .windows => PermissionsWindows,
+        else => PermissionsUnix,
+    },
+
+    const Self = @This();
+
+    /// Returns `true` if permissions represent an unwritable file.
+    /// On Unix, `true` is returned only if no class has write permissions.
+    pub fn readOnly(self: Self) bool {
+        return self.inner.readOnly();
+    }
+
+    /// Sets whether write permissions are provided.
+    /// On Unix, this affects *all* classes. If this is undesired, use `unixSet`.
+    /// This method *DOES NOT* set permissions on the filesystem: use `File.setPermissions(permissions)`
+    pub fn setReadOnly(self: *Self, read_only: bool) void {
+        self.inner.setReadOnly(read_only);
+    }
+};
+
+pub const PermissionsWindows = struct {
+    attributes: windows.DWORD,
+
+    const Self = @This();
+
+    /// Returns `true` if permissions represent an unwritable file.
+    pub fn readOnly(self: Self) bool {
+        return self.attributes & windows.FILE_ATTRIBUTE_READONLY != 0;
+    }
+
+    /// Sets whether write permissions are provided.
+    /// This method *DOES NOT* set permissions on the filesystem: use `File.setPermissions(permissions)`
+    pub fn setReadOnly(self: *Self, read_only: bool) void {
+        if (read_only) {
+            self.attributes |= windows.FILE_ATTRIBUTE_READONLY;
+        } else {
+            self.attributes &= ~@as(windows.DWORD, windows.FILE_ATTRIBUTE_READONLY);
+        }
+    }
+};
+
+pub const PermissionsUnix = struct {
+    mode: Mode,
+
+    const Self = @This();
+
+    /// Returns `true` if permissions represent an unwritable file.
+    /// `true` is returned only if no class has write permissions.
+    pub fn readOnly(self: Self) bool {
+        return self.mode & 0o222 == 0;
+    }
+
+    /// Sets whether write permissions are provided.
+    /// This affects *all* classes. If this is undesired, use `unixSet`.
+    /// This method *DOES NOT* set permissions on the filesystem: use `File.setPermissions(permissions)`
+    pub fn setReadOnly(self: *Self, read_only: bool) void {
+        if (read_only) {
+            self.mode &= ~@as(Mode, 0o222);
+        } else {
+            self.mode |= @as(Mode, 0o222);
+        }
+    }
+
+    pub const Class = enum(u2) {
+        user = 2,
+        group = 1,
+        other = 0,
+    };
+
+    pub const Permission = enum(u3) {
+        read = 0o4,
+        write = 0o2,
+        execute = 0o1,
+    };
+
+    /// Returns `true` if the chosen class has the selected permission.
+    /// This method is only available on Unix platforms.
+    pub fn unixHas(self: Self, class: Class, permission: Permission) bool {
+        const mask = @as(Mode, @backingInt(permission)) << @as(u3, @backingInt(class)) * 3;
+        return self.mode & mask != 0;
+    }
+
+    /// Sets the permissions for the chosen class. Any permissions set to `null` are left unchanged.
+    /// This method *DOES NOT* set permissions on the filesystem: use `File.setPermissions(permissions)`
+    pub fn unixSet(self: *Self, class: Class, permissions: struct {
+        read: ?bool = null,
+        write: ?bool = null,
+        execute: ?bool = null,
+    }) void {
+        const shift = @as(u3, @backingInt(class)) * 3;
+        if (permissions.read) |r| {
+            if (r) {
+                self.mode |= @as(Mode, 0o4) << shift;
+            } else {
+                self.mode &= ~(@as(Mode, 0o4) << shift);
+            }
+        }
+        if (permissions.write) |w| {
+            if (w) {
+                self.mode |= @as(Mode, 0o2) << shift;
+            } else {
+                self.mode &= ~(@as(Mode, 0o2) << shift);
+            }
+        }
+        if (permissions.execute) |x| {
+            if (x) {
+                self.mode |= @as(Mode, 0o1) << shift;
+            } else {
+                self.mode &= ~(@as(Mode, 0o1) << shift);
+            }
+        }
+    }
+
+    /// Returns a `Permissions` struct representing the permissions from the passed mode.
+    pub fn unixNew(new_mode: Mode) Self {
+        return Self{
+            .mode = new_mode,
+        };
+    }
+};
+
+pub const SetPermissionsError = ChmodError;
+
+/// Sets permissions according to the provided `Permissions` struct.
+/// This method is *NOT* available on WASI
+pub fn setPermissions(self: File, permissions: Permissions) SetPermissionsError!void {
+    switch (builtin.os.tag) {
+        .windows => {
+            var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+            var info = windows.FILE_BASIC_INFORMATION{
+                .CreationTime = 0,
+                .LastAccessTime = 0,
+                .LastWriteTime = 0,
+                .ChangeTime = 0,
+                .FileAttributes = permissions.inner.attributes,
+            };
+            const rc = windows.ntdll.NtSetInformationFile(
+                self.handle,
+                &io_status_block,
+                &info,
+                @sizeOf(windows.FILE_BASIC_INFORMATION),
+                .FileBasicInformation,
+            );
+            switch (rc) {
+                .SUCCESS => return,
+                .INVALID_HANDLE => unreachable,
+                .ACCESS_DENIED => return error.AccessDenied,
+                else => return windows.unexpectedStatus(rc),
+            }
+        },
+        .wasi => @compileError("Unsupported OS"), // Wasi filesystem does not *yet* support chmod
+        else => {
+            try self.chmod(permissions.inner.mode);
+        },
+    }
+}
+
+pub const UpdateTimesError = posix.FutimensError || windows.SetFileTimeError;
+
+/// The underlying file system may have a different granularity than nanoseconds,
+/// and therefore this function cannot guarantee any precision will be stored.
+/// Further, the maximum value is limited by the system ABI. When a value is provided
+/// that exceeds this range, the value is clamped to the maximum.
+/// TODO: integrate with async I/O
+pub fn updateTimes(
+    self: File,
+    /// access timestamp in nanoseconds
+    atime: i128,
+    /// last modification timestamp in nanoseconds
+    mtime: i128,
+) UpdateTimesError!void {
+    if (builtin.os.tag == .windows) {
+        const atime_ft = windows.nanoSecondsToFileTime(atime);
+        const mtime_ft = windows.nanoSecondsToFileTime(mtime);
+        return windows.SetFileTime(self.handle, null, &atime_ft, &mtime_ft);
+    }
+    const times = [2]posix.timespec{
+        posix.timespec{
+            .sec = math.cast(isize, @divFloor(atime, std.time.ns_per_s)) orelse maxInt(isize),
+            .nsec = math.cast(isize, @mod(atime, std.time.ns_per_s)) orelse maxInt(isize),
+        },
+        posix.timespec{
+            .sec = math.cast(isize, @divFloor(mtime, std.time.ns_per_s)) orelse maxInt(isize),
+            .nsec = math.cast(isize, @mod(mtime, std.time.ns_per_s)) orelse maxInt(isize),
+        },
+    };
+    try posix.futimens(self.handle, &times);
+}
+
+pub const ReadError = posix.ReadError;
+pub const PReadError = posix.PReadError;
+
+pub fn read(self: File, buffer: []u8) ReadError!usize {
+    if (is_windows) {
+        return windows.ReadFile(self.handle, buffer, null);
+    }
+
+    return posix.read(self.handle, buffer);
+}
+
+/// Reads to the end of the file into newly allocated memory. `error.FileTooBig` past `max_bytes`.
+pub fn readToEndAllocOptions(
+    self: File,
+    allocator: Allocator,
+    max_bytes: usize,
+    size_hint: ?usize,
+    comptime alignment: std.mem.Alignment,
+    comptime optional_sentinel: ?u8,
+) !(if (optional_sentinel) |s| [:s]align(alignment.toByteUnits()) u8 else []align(alignment.toByteUnits()) u8) {
+    var list: std.ArrayListAligned(u8, alignment) = .empty;
+    errdefer list.deinit(allocator);
+    try list.ensureTotalCapacityPrecise(allocator, (size_hint orelse 0) + 1);
+    while (true) {
+        try list.ensureUnusedCapacity(allocator, 4096);
+        const count = try self.read(list.unusedCapacitySlice());
+        if (count == 0) break;
+        list.items.len += count;
+        if (list.items.len > max_bytes) return error.FileTooBig;
+    }
+    if (optional_sentinel) |sentinel| return try list.toOwnedSliceSentinel(allocator, sentinel);
+    return try list.toOwnedSlice(allocator);
+}
+
+/// Deprecated in favor of `Reader`.
+pub fn readAll(self: File, buffer: []u8) ReadError!usize {
+    var index: usize = 0;
+    while (index != buffer.len) {
+        const amt = try self.read(buffer[index..]);
+        if (amt == 0) break;
+        index += amt;
+    }
+    return index;
+}
+
+/// On Windows, this function currently does alter the file pointer.
+/// https://github.com/ziglang/zig/issues/12783
+pub fn pread(self: File, buffer: []u8, offset: u64) PReadError!usize {
+    if (is_windows) {
+        return windows.ReadFile(self.handle, buffer, offset);
+    }
+
+    return posix.pread(self.handle, buffer, offset);
+}
+
+/// Deprecated in favor of `Reader`.
+pub fn preadAll(self: File, buffer: []u8, offset: u64) PReadError!usize {
+    var index: usize = 0;
+    while (index != buffer.len) {
+        const amt = try self.pread(buffer[index..], offset + index);
+        if (amt == 0) break;
+        index += amt;
+    }
+    return index;
+}
+
+/// See https://github.com/ziglang/zig/issues/7699
+pub fn readv(self: File, iovecs: []const posix.iovec) ReadError!usize {
+    if (is_windows) {
+        if (iovecs.len == 0) return 0;
+        const first = iovecs[0];
+        return windows.ReadFile(self.handle, first.base[0..first.len], null);
+    }
+
+    return posix.readv(self.handle, iovecs);
+}
+
+/// Deprecated in favor of `Reader`.
+pub fn readvAll(self: File, iovecs: []posix.iovec) ReadError!usize {
+    if (iovecs.len == 0) return 0;
+
+    // We use the address of this local variable for all zero-length
+    // vectors so that the OS does not complain that we are giving it
+    // addresses outside the application's address space.
+    var garbage: [1]u8 = undefined;
+    for (iovecs) |*v| {
+        if (v.len == 0) v.base = &garbage;
+    }
+
+    var i: usize = 0;
+    var off: usize = 0;
+    while (true) {
+        var amt = try self.readv(iovecs[i..]);
+        var eof = amt == 0;
+        off += amt;
+        while (amt >= iovecs[i].len) {
+            amt -= iovecs[i].len;
+            i += 1;
+            if (i >= iovecs.len) return off;
+            eof = false;
+        }
+        if (eof) return off;
+        iovecs[i].base += amt;
+        iovecs[i].len -= amt;
+    }
+}
+
+/// See https://github.com/ziglang/zig/issues/7699
+/// On Windows, this function currently does alter the file pointer.
+/// https://github.com/ziglang/zig/issues/12783
+pub fn preadv(self: File, iovecs: []const posix.iovec, offset: u64) PReadError!usize {
+    if (is_windows) {
+        if (iovecs.len == 0) return 0;
+        const first = iovecs[0];
+        return windows.ReadFile(self.handle, first.base[0..first.len], offset);
+    }
+
+    return posix.preadv(self.handle, iovecs, offset);
+}
+
+/// Deprecated in favor of `Reader`.
+pub fn preadvAll(self: File, iovecs: []posix.iovec, offset: u64) PReadError!usize {
+    if (iovecs.len == 0) return 0;
+
+    var i: usize = 0;
+    var off: usize = 0;
+    while (true) {
+        var amt = try self.preadv(iovecs[i..], offset + off);
+        var eof = amt == 0;
+        off += amt;
+        while (amt >= iovecs[i].len) {
+            amt -= iovecs[i].len;
+            i += 1;
+            if (i >= iovecs.len) return off;
+            eof = false;
+        }
+        if (eof) return off;
+        iovecs[i].base += amt;
+        iovecs[i].len -= amt;
+    }
+}
+
+pub const WriteError = posix.WriteError;
+pub const PWriteError = posix.PWriteError;
+
+pub fn write(self: File, bytes: []const u8) WriteError!usize {
+    if (is_windows) {
+        return windows.WriteFile(self.handle, bytes, null);
+    }
+
+    return posix.write(self.handle, bytes);
+}
+
+/// Deprecated in favor of `Writer`.
+pub fn writeAll(self: File, bytes: []const u8) WriteError!void {
+    var index: usize = 0;
+    while (index < bytes.len) {
+        index += try self.write(bytes[index..]);
+    }
+}
+
+/// On Windows, this function currently does alter the file pointer.
+/// https://github.com/ziglang/zig/issues/12783
+pub fn pwrite(self: File, bytes: []const u8, offset: u64) PWriteError!usize {
+    if (is_windows) {
+        return windows.WriteFile(self.handle, bytes, offset);
+    }
+
+    return posix.pwrite(self.handle, bytes, offset);
+}
+
+/// Deprecated in favor of `Writer`.
+pub fn pwriteAll(self: File, bytes: []const u8, offset: u64) PWriteError!void {
+    var index: usize = 0;
+    while (index < bytes.len) {
+        index += try self.pwrite(bytes[index..], offset + index);
+    }
+}
+
+/// See https://github.com/ziglang/zig/issues/7699
+pub fn writev(self: File, iovecs: []const posix.iovec_const) WriteError!usize {
+    if (is_windows) {
+        // TODO improve this to use WriteFileScatter
+        if (iovecs.len == 0) return 0;
+        const first = iovecs[0];
+        return windows.WriteFile(self.handle, first.base[0..first.len], null);
+    }
+
+    return posix.writev(self.handle, iovecs);
+}
+
+/// Deprecated in favor of `Writer`.
+pub fn writevAll(self: File, iovecs: []posix.iovec_const) WriteError!void {
+    if (iovecs.len == 0) return;
+
+    // We use the address of this local variable for all zero-length
+    // vectors so that the OS does not complain that we are giving it
+    // addresses outside the application's address space.
+    var garbage: [1]u8 = undefined;
+    for (iovecs) |*v| {
+        if (v.len == 0) v.base = &garbage;
+    }
+
+    var i: usize = 0;
+    while (true) {
+        var amt = try self.writev(iovecs[i..]);
+        while (amt >= iovecs[i].len) {
+            amt -= iovecs[i].len;
+            i += 1;
+            if (i >= iovecs.len) return;
+        }
+        iovecs[i].base += amt;
+        iovecs[i].len -= amt;
+    }
+}
+
+/// See https://github.com/ziglang/zig/issues/7699
+/// On Windows, this function currently does alter the file pointer.
+/// https://github.com/ziglang/zig/issues/12783
+pub fn pwritev(self: File, iovecs: []posix.iovec_const, offset: u64) PWriteError!usize {
+    if (is_windows) {
+        if (iovecs.len == 0) return 0;
+        const first = iovecs[0];
+        return windows.WriteFile(self.handle, first.base[0..first.len], offset);
+    }
+
+    return posix.pwritev(self.handle, iovecs, offset);
+}
+
+/// Deprecated in favor of `Writer`.
+pub fn pwritevAll(self: File, iovecs: []posix.iovec_const, offset: u64) PWriteError!void {
+    if (iovecs.len == 0) return;
+    var i: usize = 0;
+    var off: u64 = 0;
+    while (true) {
+        var amt = try self.pwritev(iovecs[i..], offset + off);
+        off += amt;
+        while (amt >= iovecs[i].len) {
+            amt -= iovecs[i].len;
+            i += 1;
+            if (i >= iovecs.len) return;
+        }
+        iovecs[i].base += amt;
+        iovecs[i].len -= amt;
+    }
+}
+
+pub const CopyRangeError = posix.CopyFileRangeError;
+
+/// Deprecated in favor of `Writer`.
+pub fn copyRange(in: File, in_offset: u64, out: File, out_offset: u64, len: u64) CopyRangeError!u64 {
+    const adjusted_len = math.cast(usize, len) orelse maxInt(usize);
+    const result = try posix.copy_file_range(in.handle, in_offset, out.handle, out_offset, adjusted_len, 0);
+    return result;
+}
+
+/// Deprecated in favor of `Writer`.
+pub fn copyRangeAll(in: File, in_offset: u64, out: File, out_offset: u64, len: u64) CopyRangeError!u64 {
+    var total_bytes_copied: u64 = 0;
+    var in_off = in_offset;
+    var out_off = out_offset;
+    while (total_bytes_copied < len) {
+        const amt_copied = try copyRange(in, in_off, out, out_off, len - total_bytes_copied);
+        if (amt_copied == 0) return total_bytes_copied;
+        total_bytes_copied += amt_copied;
+        in_off += amt_copied;
+        out_off += amt_copied;
+    }
+    return total_bytes_copied;
+}
+
+const range_off: windows.LARGE_INTEGER = 0;
+const range_len: windows.LARGE_INTEGER = 1;
+
+pub const LockError = error{
+    SystemResources,
+    FileLocksNotSupported,
+} || posix.UnexpectedError;
+
+/// Blocks when an incompatible lock is held by another process.
+/// A process may hold only one type of lock (shared or exclusive) on
+/// a file. When a process terminates in any way, the lock is released.
+///
+/// Assumes the file is unlocked.
+///
+/// TODO: integrate with async I/O
+pub fn lock(file: File, l: Lock) LockError!void {
+    if (is_windows) {
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        const exclusive = switch (l) {
+            .none => return,
+            .shared => false,
+            .exclusive => true,
+        };
+        return windows.LockFile(
+            file.handle,
+            null,
+            null,
+            null,
+            &io_status_block,
+            &range_off,
+            &range_len,
+            null,
+            windows.FALSE, // non-blocking=false
+            @intFromBool(exclusive),
+        ) catch |err| switch (err) {
+            error.WouldBlock => unreachable, // non-blocking=false
+            else => |e| return e,
+        };
+    } else {
+        return posix.flock(file.handle, switch (l) {
+            .none => posix.LOCK.UN,
+            .shared => posix.LOCK.SH,
+            .exclusive => posix.LOCK.EX,
+        }) catch |err| switch (err) {
+            error.WouldBlock => unreachable, // non-blocking=false
+            else => |e| return e,
+        };
+    }
+}
+
+/// Assumes the file is locked.
+pub fn unlock(file: File) void {
+    if (is_windows) {
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        return windows.UnlockFile(
+            file.handle,
+            &io_status_block,
+            &range_off,
+            &range_len,
+            null,
+        ) catch |err| switch (err) {
+            error.RangeNotLocked => unreachable, // Function assumes unlocked.
+            error.Unexpected => unreachable, // Resource deallocation must succeed.
+        };
+    } else {
+        return posix.flock(file.handle, posix.LOCK.UN) catch |err| switch (err) {
+            error.WouldBlock => unreachable, // unlocking can't block
+            error.SystemResources => unreachable, // We are deallocating resources.
+            error.FileLocksNotSupported => unreachable, // We already got the lock.
+            error.Unexpected => unreachable, // Resource deallocation must succeed.
+        };
+    }
+}
+
+/// Attempts to obtain a lock, returning `true` if the lock is
+/// obtained, and `false` if there was an existing incompatible lock held.
+/// A process may hold only one type of lock (shared or exclusive) on
+/// a file. When a process terminates in any way, the lock is released.
+///
+/// Assumes the file is unlocked.
+///
+/// TODO: integrate with async I/O
+pub fn tryLock(file: File, l: Lock) LockError!bool {
+    if (is_windows) {
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        const exclusive = switch (l) {
+            .none => return,
+            .shared => false,
+            .exclusive => true,
+        };
+        windows.LockFile(
+            file.handle,
+            null,
+            null,
+            null,
+            &io_status_block,
+            &range_off,
+            &range_len,
+            null,
+            windows.TRUE, // non-blocking=true
+            @intFromBool(exclusive),
+        ) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            else => |e| return e,
+        };
+    } else {
+        posix.flock(file.handle, switch (l) {
+            .none => posix.LOCK.UN,
+            .shared => posix.LOCK.SH | posix.LOCK.NB,
+            .exclusive => posix.LOCK.EX | posix.LOCK.NB,
+        }) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            else => |e| return e,
+        };
+    }
+    return true;
+}
+
+/// Assumes the file is already locked in exclusive mode.
+/// Atomically modifies the lock to be in shared mode, without releasing it.
+///
+/// TODO: integrate with async I/O
+pub fn downgradeLock(file: File) LockError!void {
+    if (is_windows) {
+        // On Windows it works like a semaphore + exclusivity flag. To implement this
+        // function, we first obtain another lock in shared mode. This changes the
+        // exclusivity flag, but increments the semaphore to 2. So we follow up with
+        // an NtUnlockFile which decrements the semaphore but does not modify the
+        // exclusivity flag.
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        windows.LockFile(
+            file.handle,
+            null,
+            null,
+            null,
+            &io_status_block,
+            &range_off,
+            &range_len,
+            null,
+            windows.TRUE, // non-blocking=true
+            windows.FALSE, // exclusive=false
+        ) catch |err| switch (err) {
+            error.WouldBlock => unreachable, // File was not locked in exclusive mode.
+            else => |e| return e,
+        };
+        return windows.UnlockFile(
+            file.handle,
+            &io_status_block,
+            &range_off,
+            &range_len,
+            null,
+        ) catch |err| switch (err) {
+            error.RangeNotLocked => unreachable, // File was not locked.
+            error.Unexpected => unreachable, // Resource deallocation must succeed.
+        };
+    } else {
+        return posix.flock(file.handle, posix.LOCK.SH | posix.LOCK.NB) catch |err| switch (err) {
+            error.WouldBlock => unreachable, // File was not locked in exclusive mode.
+            else => |e| return e,
+        };
+    }
+}

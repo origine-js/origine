@@ -5,7 +5,6 @@ const Runtime = @import("runtime.zig").Runtime;
 const modules = @import("module_map.zig");
 const module_types = @import("module_types.zig");
 const import_map = @import("import_map.zig");
-const print_binding = @import("print.zig");
 const ErrorInfo = @import("errors.zig").ErrorInfo;
 const captureException = @import("errors.zig").captureException;
 const init_snapshot = @import("init_snapshot.zig");
@@ -71,12 +70,9 @@ pub const Scope = struct {
         tc_scope.init(isolate);
         defer tc_scope.deinit();
         startup_trace.mark(&timing, "scope_host_setup");
-        // A restored context already has `print` and the bootstrap helpers; only the helpers'
+        // A restored context already has the bootstrap helpers; only the helpers'
         // handles and the module map are per-scope Zig state.
-        const helpers = if (options.init_snapshot) |table| try scope.restore(ctx, table) else blk: {
-            try print_binding.install(isolate, ctx);
-            break :blk try scope.bootstrap(ctx, &timing);
-        };
+        const helpers = if (options.init_snapshot) |table| try scope.restore(ctx, table) else try scope.bootstrap(ctx, &timing);
         scope.hardener = helpers.hardener;
         errdefer scope.hardener.deinit();
         scope.unsupported_prototype = helpers.unsupported_prototype;

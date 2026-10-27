@@ -4,7 +4,7 @@ import { ts, tsx } from 'origine:@std/transformer/oxc';
 
 export async function main(api: any): Promise<void> {
   const sources: Record<string, string> = {
-    'app:/main.ts': "import { h } from './view.tsx'; const n: number = 2; print(h('b', null, n * 21));",
+    'app:/main.ts': "import { eprintln } from 'origine:@std/debug'; import { h } from './view.tsx'; const n: number = 2; eprintln(h('b', null, n * 21));",
     // Classic JSX runtime with a custom factory, so no jsx-runtime module is needed.
     'app:/view.tsx':
       "export const h = (tag: string, _p: unknown, ...kids: unknown[]) => `<${tag}>${kids.join('')}</${tag}>`;" +
@@ -12,6 +12,7 @@ export async function main(api: any): Promise<void> {
   };
   const child = await api.scope.create({
     main: 'app:/main.ts',
+    origineNamespace: true,
     importMap: { imports: { './view.tsx': 'app:/view.tsx' } },
     loader: (id: string) => sources[id],
     transformers: {

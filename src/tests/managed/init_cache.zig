@@ -26,21 +26,21 @@ fn hashId(data: ?*anyopaque, id: []const u8) anyerror!?Hash {
 }
 
 test "init cache: the entry path follows the __pycache__ layout and tracks the specifier" {
-    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io });
+    const host = try m.Api.Host.create(t.allocator, .{});
     defer host.destroy();
     ensureV8();
-    var nested = try cache.entryFor(t.allocator, t.io, host, "app/init.js");
+    var nested = try cache.entryFor(t.allocator, host, "app/init.js");
     defer nested.deinit();
-    var bare = try cache.entryFor(t.allocator, t.io, host, "init.js");
+    var bare = try cache.entryFor(t.allocator, host, "init.js");
     defer bare.deinit();
-    var other = try cache.entryFor(t.allocator, t.io, host, "app/other.js");
+    var other = try cache.entryFor(t.allocator, host, "app/other.js");
     defer other.deinit();
     try t.expect(std.mem.startsWith(u8, nested.path, "app/__oricache__/init.js."));
     try t.expect(std.mem.endsWith(u8, nested.path, ".v8-snapshot"));
     try t.expect(std.mem.startsWith(u8, bare.path, "__oricache__/init.js."));
     try t.expect(!std.mem.eql(u8, &nested.key, &bare.key));
     try t.expect(!std.mem.eql(u8, &nested.key, &other.key));
-    var again = try cache.entryFor(t.allocator, t.io, host, "app/init.js");
+    var again = try cache.entryFor(t.allocator, host, "app/init.js");
     defer again.deinit();
     try t.expectEqualStrings(nested.path, again.path);
     try t.expectEqualSlices(u8, &nested.key, &again.key);
@@ -48,9 +48,9 @@ test "init cache: the entry path follows the __pycache__ layout and tracks the s
 
 test "init cache: store then load round-trips; every kind of staleness is a miss" {
     ensureV8();
-    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io });
+    const host = try m.Api.Host.create(t.allocator, .{});
     defer host.destroy();
-    var entry = try cache.entryFor(t.allocator, t.io, host, "app/init.js");
+    var entry = try cache.entryFor(t.allocator, host, "app/init.js");
     defer entry.deinit();
     var salt: u8 = 1;
     const hasher: m.init_snapshot.SourceHasher = .{ .data = &salt, .hash = hashId };
@@ -67,7 +67,7 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var why: cache.Miss = undefined;
-    try t.expect(cache.load(t.allocator, t.io, tmp.dir, &entry, hasher, &why) == null);
+    try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.no_file, why);
 
     // Files of other engines are swept, whatever source they belong to; files of this engine
@@ -82,7 +82,7 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
     try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/notes.txt", .data = "mine" });
     try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/odd.zzzzzzzzzzzz.v8-snapshot", .data = "not a tag" });
     try tmp.dir.writeFile(t.io, .{ .sub_path = keep, .data = "keep" });
-    try cache.store(t.allocator, t.io, tmp.dir, &entry, &image);
+    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image);
     for ([_][]const u8{ "init.js.aaaaaaaaaaaa.v8-snapshot", "other.js.bbbbbbbbbbbb.v8-snapshot", "dep.js.cccccccccccc.v8-code-cache" }) |gone| {
         const path = try std.fmt.allocPrint(t.allocator, "app/__oricache__/{s}", .{gone});
         defer t.allocator.free(path);
@@ -99,27 +99,27 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
     while (try it.next(t.io)) |_| count += 1;
     try t.expectEqual(@as(usize, 4), count);
 
-    var hit = cache.load(t.allocator, t.io, tmp.dir, &entry, hasher, null) orelse return error.TestExpectedHit;
+    var hit = cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, null) orelse return error.TestExpectedHit;
     defer hit.deinit();
     try t.expectEqual(image.table.modules.len, hit.table.modules.len);
     try t.expectEqualSlices(u8, image.blob, hit.blob);
 
     // A changed module (here: a different salt, so every hash differs) is a miss.
     var changed_salt: u8 = 2;
-    try t.expect(cache.load(t.allocator, t.io, tmp.dir, &entry, .{ .data = &changed_salt, .hash = hashId }, &why) == null);
+    try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, .{ .data = &changed_salt, .hash = hashId }, &why) == null);
     try t.expectEqual(cache.Miss.source_changed, why);
     // A different engine/specifier key is a miss even at the same path.
-    var foreign = try cache.entryFor(t.allocator, t.io, host, "app/init.js");
+    var foreign = try cache.entryFor(t.allocator, host, "app/init.js");
     defer foreign.deinit();
     foreign.key[0] ^= 1;
-    try t.expect(cache.load(t.allocator, t.io, tmp.dir, &foreign, hasher, &why) == null);
+    try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &foreign, hasher, &why) == null);
     try t.expectEqual(cache.Miss.key_changed, why);
     // Truncated and garbage files are misses, not errors.
     try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = image.bytes[0 .. image.bytes.len / 2] });
-    try t.expect(cache.load(t.allocator, t.io, tmp.dir, &entry, hasher, &why) == null);
+    try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
     try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = "not a snapshot" });
-    try t.expect(cache.load(t.allocator, t.io, tmp.dir, &entry, hasher, &why) == null);
+    try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
     // A loaded image owns stable, aligned bytes even after the file is overwritten
     // and truncated. Restoring V8 must keep working, without a live file or mapping.
@@ -135,11 +135,11 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
 
 test "init cache: code caches are stored beside the source and only served for identical text" {
     ensureV8();
-    const host = try m.Api.Host.create(t.allocator, .{ .io = t.io });
+    const host = try m.Api.Host.create(t.allocator, .{});
     defer host.destroy();
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var state = cache.CodeCacheState.init(t.io, host, tmp.dir);
+    var state = cache.CodeCacheState.init(host, .{ .handle = tmp.dir.handle });
     const hook = state.hook();
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();

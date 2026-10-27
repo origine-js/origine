@@ -217,7 +217,11 @@ pub const ImportMap = struct {
     /// resolved results, and the enclosing scratch arena releases them.
     fn resolveTemporary(self: *ImportMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8) ![]const u8 {
         const base = if (referrer.len == 0) self.base_url else try self.urls.normalize(self.urls.data, alloc, referrer, self.base_url);
-        const normalized = if (urlLike(specifier)) try self.urls.normalize(self.urls.data, alloc, specifier, base) else specifier;
+        // The host's `origine:` ids are opaque, not hierarchical virtual URLs: leave them as written.
+        const normalized = if (urlLike(specifier) and !std.mem.startsWith(u8, specifier, modules.origine_prefix))
+            try self.urls.normalize(self.urls.data, alloc, specifier, base)
+        else
+            specifier;
         for (self.scopes) |scope| {
             if (std.mem.eql(u8, scope.prefix, base) or (std.mem.endsWith(u8, scope.prefix, "/") and std.mem.startsWith(u8, base, scope.prefix))) {
                 if (try self.match(alloc, scope.mappings, normalized)) |value| return value;

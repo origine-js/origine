@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
     // The V8 sandbox confines JS memory (ArrayBuffers use a mimalloc arena inside it). Off
     // only for Zig-allocated backing stores or tools that need memory outside the sandbox.
     const v8_sandbox = b.option(bool, "v8_sandbox", "Build V8 with the sandbox (default: on; off also disables builtin PGO)") orelse true;
+    // The memory corruption API (V8_ENABLE_MEMORY_CORRUPTION_API) is for sandbox testing: V8 exposes it only
+    // under --sandbox-testing or --sandbox-fuzzing. Needs the sandbox; the V8 package rejects the other combination.
+    const v8_memory_corruption_api = b.option(bool, "v8_memory_corruption_api", "Build V8 with the memory corruption API (default: off; requires the sandbox)") orelse false;
     const builtin_pgo = b.option(bool, "builtin_pgo", "Use Google's exact-version builtin PGO baseline (default: release desktop V8, needs the sandbox)") orelse (!v8_debug and v8_sandbox and target.result.os.tag != .ios);
     // V8 builds from source only on the first build and for `zig build build-v8` (patches apply
     // automatically, ninja makes it incremental); other builds reuse the last archive. An
@@ -33,7 +36,7 @@ pub fn build(b: *std.Build) void {
     config.addOption(bool, "typescript", typescript);
     config.addOption(bool, "user_snapshot_compressed", user_snapshot == .compressed);
     config.addOption(bool, "user_codecache_compressed", user_codecache == .compressed);
-    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .builtin_pgo = builtin_pgo, .v8_icu = v8_icu, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
+    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .v8_memory_corruption_api = v8_memory_corruption_api, .builtin_pgo = builtin_pgo, .v8_icu = v8_icu, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
     const v8 = v8Dependency(b, options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
     const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
@@ -165,6 +168,7 @@ const V8Options = struct {
     target: std.Build.ResolvedTarget,
     v8_debug: bool,
     v8_sandbox: bool,
+    v8_memory_corruption_api: bool,
     builtin_pgo: bool,
     v8_icu: IcuMode,
     prebuilt: ?[]const u8,
@@ -188,6 +192,7 @@ fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build
         .optimize = .fast,
         .v8_debug = options.v8_debug,
         .v8_sandbox = options.v8_sandbox,
+        .v8_memory_corruption_api = options.v8_memory_corruption_api,
         .link_native = link_native,
         .cache_root = options.cache_root,
         .builtin_pgo = options.builtin_pgo,

@@ -722,7 +722,7 @@ test "api: Rust-style fs over sync and async io" {
     try fx.setup(
         \\import { IoError, HostError } from 'origine:@std/io';
         \\import { fs } from 'origine:@std/fs';
-        \\import { encodeUtf8, decodeUtf8, tryDecodeUtf8, utf8Js } from 'origine:@std/text';
+        \\import { encodeUtf8, decodeUtf8, tryDecodeUtf8 } from 'origine:@std/text';
         \\const rejects = async (promiseOrThrow, code) => {
         \\  try { await promiseOrThrow(); } catch (e) { return IoError.is(e, code); }
         \\  return false;
@@ -787,12 +787,12 @@ test "api: Rust-style fs over sync and async io" {
         \\  out.asyncIsPromise = fs(aio).read('rust-async/h.bin') instanceof Promise;
         \\  await rt.close();
         \\  const strings = ['', 'abc', 'é', '✓', '\u{1F600}', 'a\ud800b', '\udc00', '\ud83d', 'x\ud83d\ude00y', 'aé✓\u{1F600}'.repeat(300), 'z'.repeat(20000)];
-        \\  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-        \\  out.utf8Encode = strings.every(t => same(encodeUtf8(t), utf8Js.encode(t)));
-        \\  const blobs = [[], [0x61], [0xc3, 0xa9], [0xc0, 0x80], [0xc3], [0xe2, 0x9c], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xf0, 0x9f, 0x98, 0x80], [0xff], [0x61, 0x80], [0xe0, 0x80, 0x80], [0xf0, 0x80, 0x80, 0x80]].map(b => Uint8Array.from(b)).concat(strings.map(t => utf8Js.encode(t)));
-        \\  out.utf8Decode = blobs.every(b => tryDecodeUtf8(b) === utf8Js.tryDecode(b) && decodeUtf8(b) === utf8Js.decode(b) && decodeUtf8(b, { ignoreBOM: true }) === utf8Js.decode(b, { ignoreBOM: true })) && tryDecodeUtf8(new Uint8Array(0)) === '' && decodeUtf8(new Uint8Array(new SharedArrayBuffer(4)).fill(97)) === 'aaaa' && decodeUtf8(encodeUtf8('x😀y').subarray(1, 5)) === '\u{1F600}';
-        \\  out.utf8 = tryDecodeUtf8(encodeUtf8('aé✓\u{1F600}')) === 'aé✓\u{1F600}' && tryDecodeUtf8(Uint8Array.from([0xc0, 0x80])) === null && tryDecodeUtf8(Uint8Array.from([0xed, 0xa0, 0x80])) === null && tryDecodeUtf8(Uint8Array.from([0xef, 0xbb, 0xbf, 0x61])) === '﻿a' && encodeUtf8('\ud800').length === 3;
-        \\  // WHATWG TextDecoder edge cases, on both the native and the JS implementation.
+        \\  out.utf8Encode = strings.every(t => tryDecodeUtf8(encodeUtf8(t)) !== null);
+        \\  const blobs = [[], [0x61], [0xc3, 0xa9], [0xc0, 0x80], [0xc3], [0xe2, 0x9c], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xf0, 0x9f, 0x98, 0x80], [0xff], [0x61, 0x80], [0xe0, 0x80, 0x80], [0xf0, 0x80, 0x80, 0x80]].map(b => Uint8Array.from(b)).concat(strings.map(t => encodeUtf8(t)));
+        \\  // A valid blob decodes to its strict string, minus a leading BOM unless `ignoreBOM`.
+        \\  out.utf8Decode = blobs.every(b => { const s = tryDecodeUtf8(b); return s === null || (decodeUtf8(b, { ignoreBOM: true }) === s && decodeUtf8(b) === s.replace(/^﻿/, '')); }) && tryDecodeUtf8(new Uint8Array(0)) === ''&& decodeUtf8(new Uint8Array(new SharedArrayBuffer(4)).fill(97)) === 'aaaa' && decodeUtf8(encodeUtf8('x😀y').subarray(1, 5)) === '\u{1F600}';
+        \\  out.utf8 = tryDecodeUtf8(encodeUtf8('aé✓\u{1F600}')) === 'aé✓\u{1F600}' && tryDecodeUtf8(Uint8Array.from([0xc0, 0x80])) === null && tryDecodeUtf8(Uint8Array.from([0xed, 0xa0, 0x80])) === null && tryDecodeUtf8(Uint8Array.from([0xef, 0xbb, 0xbf, 0x61])) === '﻿a' && encodeUtf8('\ud800').length === 3 && [1, null, undefined, new Uint8Array(1)].every(v => { try { encodeUtf8(v); return false; } catch (e) { return e instanceof TypeError; } });
+        \\  // WHATWG TextDecoder edge cases.
         \\  const cases = [
         \\    [[0xc0, 0x80], '��'], [[0xc1, 0xbf], '��'], [[0xe0, 0x80, 0x80], '���'], [[0xe0, 0x9f, 0xbf], '���'],
         \\    [[0xf0, 0x80, 0x80, 0x80], '����'], [[0xed, 0xa0, 0x80], '���'], [[0xed, 0xbf, 0xbf], '���'],
@@ -801,11 +801,10 @@ test "api: Rust-style fs over sync and async io" {
         \\    [[0xf0, 0x9f, 0x61], '�a'], [[0x80, 0x61], '�a'], [[0xf0, 0x9f, 0x98, 0x80, 0x80], '\u{1F600}�'],
         \\    [[0xef, 0xbb, 0xbf, 0x61], 'a'], [[0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf], '﻿'], [[0xef, 0xbb], '�'], [[0x61, 0xef, 0xbb, 0xbf], 'a﻿'],
         \\  ];
-        \\  const impls = [decodeUtf8, utf8Js.decode];
-        \\  out.utf8Whatwg = cases.every(([b, want]) => impls.every(f => f(Uint8Array.from(b)) === want));
-        \\  out.utf8Bom = impls.every(f => f(Uint8Array.from([0xef, 0xbb, 0xbf, 0x61]), { ignoreBOM: true }) === '﻿a');
-        \\  out.utf8Fatal = impls.every(f => { try { f(Uint8Array.from([0x61, 0xff]), { fatal: true }); return false; } catch (e) { return e instanceof TypeError; } } ) && impls.every(f => f(Uint8Array.from([0xef, 0xbb, 0xbf, 0xc3, 0xa9]), { fatal: true }) === 'é');
-        \\  out.utf8PlainArray = utf8Js.decode(Object.assign([0x61, 0xff], { subarray(a, b) { return this.slice(a, b); } })) === 'a�';
+        \\  out.utf8Whatwg = cases.every(([b, want]) => decodeUtf8(Uint8Array.from(b)) === want);
+        \\  out.utf8Bom = decodeUtf8(Uint8Array.from([0xef, 0xbb, 0xbf, 0x61]), { ignoreBOM: true }) === '﻿a';
+        \\  out.utf8Fatal = (() => { try { decodeUtf8(Uint8Array.from([0x61, 0xff]), { fatal: true }); return false; } catch (e) { return e instanceof TypeError; } })() && decodeUtf8(Uint8Array.from([0xef, 0xbb, 0xbf, 0xc3, 0xa9]), { fatal: true }) === 'é';
+        \\  out.utf8PlainArray = decodeUtf8(Object.assign([0x61, 0xff], { subarray(a, b) { return this.slice(a, b); } })) === 'a�';
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -1024,8 +1023,6 @@ test "api: import.meta natives reach only the embedded std modules" {
         \\import * as text from 'origine:@std/text';
         \\export async function main() {
         \\  const out = globalThis.report = {};
-        \\  // The std module got native versions (its exports are not the JS reference ones).
-        \\  out.native = text.encodeUtf8 !== text.utf8Js.encode && text.decodeUtf8 !== text.utf8Js.decode;
         \\  out.exports = Object.keys(text).sort().join(',');
         \\  // User code sees a bare import.meta, no natives on the global, and no way to import std internals.
         \\  out.bareMeta = Object.keys(import.meta).join(',') === 'url' && import.meta.native === undefined;
@@ -1036,7 +1033,7 @@ test "api: import.meta natives reach only the embedded std modules" {
     , false, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.native && report.exports === 'decodeUtf8,encodeUtf8,tryDecodeUtf8,utf8Js'");
+    try check(fx.scope, "report.exports === 'decodeUtf8,encodeUtf8,tryDecodeUtf8'");
     try check(fx.scope, "report.bareMeta && report.noGlobal && report.reserved && report.reservedPrivate");
 }
 

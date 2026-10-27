@@ -32,9 +32,9 @@ const counter_module: m.Api.module.Module = .{
 const modules = m.Api.std_modules ++ [_]m.Api.module.Module{counter_module};
 
 const init_source =
-    \\import { encodeUtf8, utf8Js } from 'origine:@std/text';
+    \\import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
     \\import { bump, native } from 'origine:test/counter';
-    \\globalThis.atInit = { text: encodeUtf8 !== utf8Js.encode, counter: native, first: bump(), bytes: encodeUtf8('é').length };
+    \\globalThis.atInit = { text: decodeUtf8(encodeUtf8('é')) === 'é', counter: native, first: bump(), bytes: encodeUtf8('é').length };
     \\globalThis.runs = (globalThis.runs ?? 0) + 1;
     \\export const encode = s => encodeUtf8(s);
     \\export const again = () => bump();

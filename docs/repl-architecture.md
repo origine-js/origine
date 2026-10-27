@@ -43,7 +43,7 @@ V8 handle, so it is tested without a terminal or an engine, and it runs under Mi
    it runs as written, **Ready**;
 4. neither parses and the first error is at the end of the input (or an unterminated comment or
    template): **Incomplete**, the REPL reads another line;
-5. otherwise **Error** with `repl.ts:line:col: error: message`.
+5. otherwise **Error** with `<repl>:line:col: error: message`.
 
 The old design asked V8 "does this compile?" several times per line and combined three
 independent heuristics (V8's message text, a regex tokenizer in `helpers.js`, a `callsAwait`

@@ -197,8 +197,7 @@ fn text(ptr: *const u8, len: usize) -> Option<String> {
     if raw.is_empty() { None } else { std::str::from_utf8(raw).ok().map(str::to_owned) }
 }
 
-/// For other Rust crates (the REPL): erases the types of `source` (`filename` selects TypeScript
-/// or JavaScript) without any JSX handling. With `verbatim_imports`, imports that only carry
+/// For other Rust crates (the REPL): erases TypeScript types from `source` without JSX handling. With `verbatim_imports`, imports that only carry
 /// types are kept. Ok(js) or Err(rendered diagnostics).
 pub fn erase_types(source: &str, filename: &str, verbatim_imports: bool) -> Result<String, String> {
     let options = OxcOptions {
@@ -211,7 +210,7 @@ pub fn erase_types(source: &str, filename: &str, verbatim_imports: bool) -> Resu
         pragma_frag: std::ptr::null(),
         pragma_frag_len: 0,
     };
-    transform(source, filename, Some(&options))
+    transform_with_type(source, filename, Some(&options), SourceType::ts().with_module(true))
 }
 
 /// Ok(js) or Err(rendered diagnostics).
@@ -221,8 +220,11 @@ fn transform(source: &str, filename: &str, options: Option<&OxcOptions>) -> Resu
         return Err(format!("{filename}:1:1: error: unsupported file extension"));
     };
     // origine only runs ES modules.
-    let source_type = source_type.with_module(true);
+    transform_with_type(source, filename, options, source_type.with_module(true))
+}
 
+fn transform_with_type(source: &str, filename: &str, options: Option<&OxcOptions>, source_type: SourceType) -> Result<String, String> {
+    let path = Path::new(filename);
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() {

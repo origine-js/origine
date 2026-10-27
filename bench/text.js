@@ -1,6 +1,6 @@
 // utf8 micro-benchmark: `zig build run -Doptimize=ReleaseFast -- bench/text.js`
-// Compares the plain JS implementation in std/text.js with the exported (native) one.
-import { encodeUtf8, decodeUtf8, utf8Js } from 'origine:@std/text';
+// Times the exported encodeUtf8 and decodeUtf8.
+import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 import { eprintln } from 'origine:@std/debug';
 
 function time(name, iterations, fn) {
@@ -21,14 +21,11 @@ const samples = {
 
 /** @param {import('@origine/types').Api} _api */
 export async function main(_api) {
-  const impls = { js: utf8Js, native: { encode: encodeUtf8, decode: decodeUtf8 } };
   for (const [label, text] of Object.entries(samples)) {
     const bytes = encodeUtf8(text);
     const n = bytes.length > 256 << 10 ? 40 : bytes.length > 256 ? 20000 : 200000;
-    for (const [impl, { encode, decode }] of Object.entries(impls)) {
-      if (decode(encode(text)) !== text) throw new Error(`${impl} roundtrip failed for ${label}`);
-      time(`${impl} encode ${label}`, n, () => encode(text));
-      time(`${impl} decode ${label}`, n, () => decode(bytes));
-    }
+    if (decodeUtf8(bytes) !== text) throw new Error(`roundtrip failed for ${label}`);
+    time(`encode ${label}`, n, () => encodeUtf8(text));
+    time(`decode ${label}`, n, () => decodeUtf8(bytes));
   }
 }

@@ -8,7 +8,7 @@ declare module "origine:@std/text" {
     readonly ignoreBOM?: boolean;
   }
 
-  /** Encodes a string as UTF-8 into a new `Uint8Array`. Lone surrogates become U+FFFD, like `TextEncoder`. */
+  /** Encodes a string as UTF-8 into a new `Uint8Array`. Lone surrogates become U+FFFD, like `TextEncoder`. Throws a `TypeError` for a non-string. */
   export function encodeUtf8(text: string): Uint8Array<ArrayBuffer>;
 
   /**
@@ -24,11 +24,4 @@ declare module "origine:@std/text" {
    * (`fs.read_to_string` fails with `InvalidData`).
    */
   export function tryDecodeUtf8(bytes: Uint8Array): string | null;
-
-  /** The plain JavaScript implementations (also the fallback when the natives are absent): the reference for tests and benchmarks. */
-  export const utf8Js: {
-    readonly encode: (text: string) => Uint8Array<ArrayBuffer>;
-    readonly decode: (bytes: Uint8Array, options?: DecodeOptions) => string;
-    readonly tryDecode: (bytes: Uint8Array) => string | null;
-  };
 }

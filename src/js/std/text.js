@@ -2,24 +2,23 @@
 // TextEncoder/TextDecoder; fs helpers use these for strings. The host hands this module
 // native versions (V8 string conversion and simdutf) through `import.meta.native`, which
 // only the embedded `origine:` modules get. They are captured here and deleted from `import.meta`,
-// never exported, and only reachable through the wrappers below. `utf8Js` is the plain
-// JS implementation used when they are absent, and the reference for tests and benchmarks.
-const { encode: nativeEncode, decode: nativeDecode } = import.meta.native ?? {};
+// never exported, and only reachable through the wrappers below.
+const { encode: nativeEncode, decode: nativeDecode } = import.meta.native;
 
-/// Encodes a string as UTF-8. Lone surrogates become U+FFFD, like TextEncoder.
-export const encodeUtf8 = nativeEncode === undefined ? encodeJs : text => (typeof text === 'string' ? nativeEncode(text) : encodeJs(text));
+/// Encodes a string as UTF-8. Lone surrogates become U+FFFD, like TextEncoder. Throws a TypeError for anything but a string.
+export const encodeUtf8 = text => {
+  if (typeof text !== 'string') throw new TypeError('encodeUtf8 expects a string');
+  return nativeEncode(text);
+};
 
 /// Returns the string for strictly valid UTF-8, or `null` for anything else (overlong forms,
 /// surrogates, > U+10FFFF and truncation included). No BOM handling, no replacement, never throws.
-export const tryDecodeUtf8 = nativeDecode === undefined ? tryDecodeJs : bytes => (bytes instanceof Uint8Array ? (nativeDecode(bytes) ?? null) : tryDecodeJs(bytes));
+export const tryDecodeUtf8 = bytes => (bytes instanceof Uint8Array ? (nativeDecode(bytes) ?? null) : tryDecodeJs(bytes));
 
 /// Decodes UTF-8 bytes like `new TextDecoder('utf-8', { fatal, ignoreBOM }).decode(bytes)`: invalid
 /// sequences become U+FFFD (maximal subpart rule), a leading BOM is dropped unless `ignoreBOM`, and
 /// `fatal` throws a TypeError instead of substituting.
 export const decodeUtf8 = makeDecode(tryDecodeUtf8);
-
-/// The JS implementations, whether or not natives are installed.
-export const utf8Js = Object.freeze({ encode: encodeJs, decode: makeDecode(tryDecodeJs), tryDecode: tryDecodeJs });
 
 function makeDecode(tryDecode) {
   return (bytes, options) => {
@@ -31,49 +30,6 @@ function makeDecode(tryDecode) {
     if (fatal) throw new TypeError('The encoded data was not valid UTF-8');
     return decodeJs(view, true);
   };
-}
-
-function encodeJs(text) {
-  const length = text.length;
-  let size = 0;
-  for (let i = 0; i < length; i++) {
-    const unit = text.charCodeAt(i);
-    if (unit < 0x80) size += 1;
-    else if (unit < 0x800) size += 2;
-    else if (unit >= 0xd800 && unit <= 0xdbff && i + 1 < length && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-      size += 4;
-      i++;
-    } else size += 3;
-  }
-  const out = new Uint8Array(size);
-  let at = 0;
-  for (let i = 0; i < length; i++) {
-    let point = text.charCodeAt(i);
-    if (point < 0x80) {
-      out[at++] = point;
-      continue;
-    }
-    if (point < 0x800) {
-      out[at++] = 0xc0 | (point >> 6);
-      out[at++] = 0x80 | (point & 63);
-      continue;
-    }
-    if (point >= 0xd800 && point <= 0xdfff) {
-      if (point <= 0xdbff && i + 1 < length && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-        point = 0x10000 + ((point & 0x3ff) << 10) + (text.charCodeAt(++i) & 0x3ff);
-        out[at++] = 0xf0 | (point >> 18);
-        out[at++] = 0x80 | ((point >> 12) & 63);
-        out[at++] = 0x80 | ((point >> 6) & 63);
-        out[at++] = 0x80 | (point & 63);
-        continue;
-      }
-      point = 0xfffd;
-    }
-    out[at++] = 0xe0 | (point >> 12);
-    out[at++] = 0x80 | ((point >> 6) & 63);
-    out[at++] = 0x80 | (point & 63);
-  }
-  return out;
 }
 
 const CHUNK = 8192;

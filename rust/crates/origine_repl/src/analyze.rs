@@ -13,10 +13,7 @@ use oxc_span::SourceType;
 
 use crate::rewrite;
 
-#[cfg(feature = "typescript")]
-pub const FILENAME: &str = "repl.ts";
-#[cfg(not(feature = "typescript"))]
-pub const FILENAME: &str = "repl.js";
+pub const FILENAME: &str = "<repl>";
 
 /// Whitespace the REPL ignores at the end of its input.
 const BLANKS: [char; 4] = [' ', '\t', '\r', '\n'];
@@ -197,7 +194,7 @@ mod tests {
             assert!(matches!(prepare(source), Prepared::Error(_)), "{source}: {:?}", prepare(source));
         }
         let Prepared::Error(text) = prepare("let = = 1") else { panic!() };
-        assert!(text.starts_with(&format!("{FILENAME}:1:")), "{text}");
+        assert!(text.starts_with("<repl>:1:"), "{text}");
     }
 
     #[test]

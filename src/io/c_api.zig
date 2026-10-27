@@ -66,7 +66,7 @@ pub export fn oio_loop_active(loop: *Loop) u32 {
 }
 
 pub export fn oio_loop_caps(loop: *Loop) u64 {
-    return loop.caps();
+    return @bitCast(loop.caps());
 }
 
 pub export fn oio_nop(loop: *Loop, op: *Op, cb: op_mod.Callback) c_int {

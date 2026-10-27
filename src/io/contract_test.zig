@@ -320,8 +320,8 @@ fn checkStruct(h: *const Header, comptime c_name: []const u8, comptime T: type) 
     return fail("struct {s} is not defined in origine_io.h", .{c_name});
 }
 
-/// Constants of a Zig enum (`field_names`/`field_values`) or struct of `u64` decls, with their
-/// names upper-cased.
+/// Constants of a Zig enum (`field_names`/`field_values`), a packed struct of flags (one bit per
+/// non-padding field) or a struct of `u64` decls, with their names upper-cased.
 fn zigConsts(comptime T: type) []const Const {
     comptime {
         var out: []const Const = &.{};
@@ -329,7 +329,11 @@ fn zigConsts(comptime T: type) []const Const {
             .@"enum" => |e| for (e.field_names, e.field_values) |n, v| {
                 out = out ++ [_]Const{.{ .name = upper(n), .value = v }};
             },
-            .@"struct" => |s| for (s.decl_names) |n| {
+            .@"struct" => |s| if (s.layout == .@"packed") {
+                for (s.field_names) |n| {
+                    if (n[0] != '_') out = out ++ [_]Const{.{ .name = upper(n), .value = 1 << @bitOffsetOf(T, n) }};
+                }
+            } else for (s.decl_names) |n| {
                 const v = @field(T, n);
                 if (@TypeOf(v) == u64) out = out ++ [_]Const{.{ .name = upper(n), .value = v }};
             },

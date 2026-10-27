@@ -234,4 +234,4 @@ All socket ops use native types: the library does not translate addresses, flags
 | unknown `kind` | kqueue, threaded | op completes with `-ENOSYS` |
 | backend selection | `uring` off Linux, `kqueue_gcd` off Darwin, `iocp` anywhere | `Loop.create` error `Unsupported` (`oio_loop_create` returns `-ENOSYS`) |
 
-Check `loop.caps()` before relying on an optional kind. The bits are `Caps` in `backend.zig` (`OIO_CAP_*` in C): `nop, file_io, timeout, cancel, pollable, vectored, sockets, futex, sendfile, fallocate, link, sync, readdir, ftruncate`, bit 0 to 13 in that order.
+Check `loop.caps()` before relying on an optional kind (`Caps` is a `packed struct(u64)` of bools, so `loop.caps().futex`). The bits are `Caps` in `backend.zig` (`OIO_CAP_*` in C): `nop, file_io, timeout, cancel, pollable, vectored, sockets, futex, sendfile, fallocate, link, sync, readdir, ftruncate`, bit 0 to 13 in that order.

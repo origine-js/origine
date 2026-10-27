@@ -38,21 +38,27 @@ pub const Drained = struct {
 
 pub const Mode = enum(c_int) { once = 0, nowait = 1, until_idle = 2 };
 
-pub const Caps = struct {
-    pub const nop: u64 = 1 << 0;
-    pub const file_io: u64 = 1 << 1;
-    pub const timeout: u64 = 1 << 2;
-    pub const cancel: u64 = 1 << 3;
-    pub const pollable: u64 = 1 << 4;
-    pub const vectored: u64 = 1 << 5; // readv/writev
-    pub const sockets: u64 = 1 << 6; // send/recv/sendmsg/recvmsg/connect/accept
-    pub const futex: u64 = 1 << 7;
-    pub const sendfile: u64 = 1 << 8;
-    pub const fallocate: u64 = 1 << 9;
-    pub const link: u64 = 1 << 10;
-    pub const sync: u64 = 1 << 11; // fsync
-    pub const readdir: u64 = 1 << 12;
-    pub const ftruncate: u64 = 1 << 13;
+/// What a backend can execute. Bit `n` is `OIO_CAP_*` in include/origine_io.h; `oio_loop_caps` hands the
+/// `u64` out as-is.
+pub const Caps = packed struct(u64) {
+    nop: bool = false,
+    file_io: bool = false,
+    timeout: bool = false,
+    cancel: bool = false,
+    pollable: bool = false,
+    /// readv/writev
+    vectored: bool = false,
+    /// send/recv/sendmsg/recvmsg/connect/accept
+    sockets: bool = false,
+    futex: bool = false,
+    sendfile: bool = false,
+    fallocate: bool = false,
+    link: bool = false,
+    /// fsync
+    sync: bool = false,
+    readdir: bool = false,
+    ftruncate: bool = false,
+    _reserved: u50 = 0,
 };
 
 pub const VTable = struct {
@@ -68,7 +74,7 @@ pub const VTable = struct {
     post: *const fn (ctx: *anyopaque, func: PostFn, ud: ?*anyopaque) anyerror!void,
     /// Pollable OS handle for embedding in a foreign loop, or -1.
     pollable: *const fn (ctx: *anyopaque) isize,
-    caps: u64,
+    caps: Caps,
     /// Stops workers and completes everything outstanding (-ECANCELED) into `out`, then frees.
     destroy: *const fn (ctx: *anyopaque, out: *Drained) void,
 };

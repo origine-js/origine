@@ -47,7 +47,7 @@ pub fn create(allocator: std.mem.Allocator) ![]align(16) u8 {
             creator.setDefaultContext(context);
         }
         // CreateBlob must run outside all handle scopes.
-        break :make creator.createBlob(0);
+        break :make creator.createBlob(.Clear);
     };
     defer blob.deinit();
     const bytes = blob.slice();

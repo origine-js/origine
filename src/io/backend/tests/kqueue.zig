@@ -566,7 +566,7 @@ test "futex wait/wake" {
     if (!supported) return error.SkipZigTest;
     if (!os_sync.available()) return error.SkipZigTest;
     const b = try create(testing.allocator, .{});
-    try testing.expect(b.vtable.caps & backend.Caps.futex != 0);
+    try testing.expect(b.vtable.caps.futex);
     futex_word = 0;
 
     var mism: Op = .{ .kind = .futex_wait, .buf = &futex_word, .aux = 1, .offset = -1 };

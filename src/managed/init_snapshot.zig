@@ -327,7 +327,7 @@ pub fn create(alloc: std.mem.Allocator, options: CreateOptions) !Image {
             rt.destroy();
         }
         // CreateBlob must run outside all handle scopes.
-        break :make creator.createBlob(0);
+        break :make creator.createBlob(.Clear);
     };
     defer blob.deinit();
     if (blob.slice().len == 0) return error.SnapshotFailed;

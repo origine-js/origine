@@ -115,7 +115,7 @@ Contract:
 - **post nodes.** `PostNode` must be allocated by the backend with `std.heap.c_allocator`. The loop copies `func`/`ud`, destroys the node with `c_allocator`, then calls `func(ud)`. Posts pending at `destroy` must be moved into `out` so they still run. Preserve FIFO order.
 - **pollable.** Return an OS handle (fd) that becomes readable when `poll(false)` would make progress, or `-1` and leave the `pollable` cap unset.
 - **destroy(out).** Stop workers, make every outstanding op complete with `-ECANCELED` (or its real result if it already finished) into `out.done`, move leftover posts into `out`, free all resources including `ctx`. After it returns the loop dispatches `out` and frees itself.
-- **caps.** Report only what the backend truly supports; `Caps` bits are public API (`oio_loop_caps`). Per-instance capabilities (kernel probes) can be set by copying a base vtable into the state, as `uring.zig` does.
+- **caps.** Report only what the backend truly supports; `Caps` bits are public API (`oio_loop_caps`). Per-instance capabilities (kernel probes) can be set by copying a base vtable into the state and setting the field, as `uring.zig` does (`vt.caps.futex = probe`).
 - **Tests.** Drive the vtable directly in the backend file (see [testing.md](testing.md)) and add the backend to the `backends` list in `tests.zig`.
 
 ## Ideas taken from uSockets

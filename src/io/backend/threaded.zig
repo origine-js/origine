@@ -82,11 +82,22 @@ const vtable: backend.VTable = .{
     .wake = wake,
     .post = post,
     .pollable = pollable,
-    .caps = backend.Caps.nop | backend.Caps.file_io | backend.Caps.timeout | backend.Caps.cancel |
-        backend.Caps.vectored | backend.Caps.sockets | backend.Caps.sendfile | backend.Caps.fallocate |
-        backend.Caps.link | backend.Caps.sync | backend.Caps.pollable |
-        (if (readdir_supported) backend.Caps.readdir else 0) | backend.Caps.ftruncate |
-        (if (builtin.os.tag == .linux or builtin.os.tag.isDarwin()) backend.Caps.futex else 0),
+    .caps = .{
+        .nop = true,
+        .file_io = true,
+        .timeout = true,
+        .cancel = true,
+        .vectored = true,
+        .sockets = true,
+        .sendfile = true,
+        .fallocate = true,
+        .link = true,
+        .sync = true,
+        .pollable = true,
+        .readdir = readdir_supported,
+        .ftruncate = true,
+        .futex = builtin.os.tag == .linux or builtin.os.tag.isDarwin(),
+    },
     .destroy = destroy,
 };
 
@@ -1669,7 +1680,7 @@ test "pollable fd: worker completion, poll drains, wake and post" {
     defer be.vtable.destroy(be.ctx, &sink);
     const pfd = be.vtable.pollable(be.ctx);
     try testing.expect(pfd >= 0);
-    try testing.expect(be.vtable.caps & backend.Caps.pollable != 0);
+    try testing.expect(be.vtable.caps.pollable);
     try testing.expect(!try fdReadable(pfd, 0));
 
     // A worker op that completes after a delay (read from a pipe written by another thread).

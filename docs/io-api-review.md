@@ -29,7 +29,7 @@ pub const Loop = struct {
     pub fn wake(loop: *Loop) void                     // any thread: makes a blocked run(.once) return
     pub fn post(loop: *Loop, func: PostFn, ud: ?*anyopaque) !void   // any thread: runs func(ud) on the loop thread during run
     pub fn pollable(loop: *Loop) isize                // fd readable when run(.nowait) would progress; -1 if none
-    pub fn caps(loop: *Loop) u64                      // Caps bits
+    pub fn caps(loop: *Loop) Caps                     // packed struct(u64)
     // typed submit helpers: fill `op` from the arguments and submit
     pub fn start(loop, op, fields: Op, cb, user) !void             // generic
     nop, open, close, read, write, readv, writev, fstat, stat, fsync, fallocate, ftruncate,

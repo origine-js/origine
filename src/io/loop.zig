@@ -106,7 +106,7 @@ pub const Loop = struct {
         return loop.backend.vtable.pollable(loop.backend.ctx);
     }
 
-    pub fn caps(loop: *Loop) u64 {
+    pub fn caps(loop: *Loop) backend_mod.Caps {
         return loop.backend.vtable.caps;
     }
 

@@ -17,10 +17,20 @@ pub const supported = builtin.os.tag == .linux;
 /// Caps every io_uring backend reports. `futex` is added per instance only when the kernel probe
 /// (IORING_REGISTER_PROBE) lists IORING_OP_FUTEX_WAIT/WAKE (Linux >= 6.7), `ftruncate` likewise for
 /// IORING_OP_FTRUNCATE (Linux >= 6.9). `readdir` runs on a small helper thread pool (no opcode).
-pub const caps: u64 = backend.Caps.nop | backend.Caps.file_io | backend.Caps.timeout |
-    backend.Caps.cancel | backend.Caps.pollable | backend.Caps.vectored | backend.Caps.sockets |
-    backend.Caps.sendfile | backend.Caps.fallocate | backend.Caps.link | backend.Caps.sync |
-    backend.Caps.readdir;
+pub const caps: backend.Caps = .{
+    .nop = true,
+    .file_io = true,
+    .timeout = true,
+    .cancel = true,
+    .pollable = true,
+    .vectored = true,
+    .sockets = true,
+    .sendfile = true,
+    .fallocate = true,
+    .link = true,
+    .sync = true,
+    .readdir = true,
+};
 
 /// `allocator` is used on the loop thread only; post nodes come from std.heap.c_allocator.
 pub fn create(allocator: std.mem.Allocator, opts: backend.Options) !backend.Backend {
@@ -162,8 +172,8 @@ const Impl = if (supported) struct {
             s.has_ftruncate = probe.is_supported(.FTRUNCATE);
         } else |_| {}
         s.vt = base_vtable;
-        if (s.has_futex) s.vt.caps |= backend.Caps.futex;
-        if (s.has_ftruncate) s.vt.caps |= backend.Caps.ftruncate;
+        s.vt.caps.futex = s.has_futex;
+        s.vt.caps.ftruncate = s.has_ftruncate;
         try armWake(s);
         return .{ .ctx = s, .vtable = &s.vt };
     }
@@ -1519,7 +1529,7 @@ test "uring: sendmsg and recvmsg" {
 }
 
 fn needFutex(e: *TestEnv) !void {
-    if (e.b.vtable.caps & backend.Caps.futex == 0) {
+    if (!e.b.vtable.caps.futex) {
         finishEnv(e);
         return error.SkipZigTest;
     }
@@ -1661,7 +1671,7 @@ test "uring: sendfile file to socket" {
 test "uring: ftruncate shrink and grow" {
     if (comptime !supported) return error.SkipZigTest;
     var e = try TestEnv.init();
-    if (e.b.vtable.caps & backend.Caps.ftruncate == 0) {
+    if (!e.b.vtable.caps.ftruncate) {
         var pb0: [128]u8 = undefined;
         const p0 = testPath(&pb0, "trunc0");
         const fd0 = try openRw(&e, p0);

@@ -994,9 +994,27 @@ fn destroy(ctx: *anyopaque, out: *Drained) void {
     k.allocator.destroy(k);
 }
 
-const base_caps = backend.Caps.nop | backend.Caps.file_io | backend.Caps.timeout | backend.Caps.cancel |
-    backend.Caps.pollable | backend.Caps.vectored | backend.Caps.sockets | backend.Caps.sendfile |
-    backend.Caps.fallocate | backend.Caps.link | backend.Caps.sync | backend.Caps.readdir | backend.Caps.ftruncate;
+const base_caps: backend.Caps = .{
+    .nop = true,
+    .file_io = true,
+    .timeout = true,
+    .cancel = true,
+    .pollable = true,
+    .vectored = true,
+    .sockets = true,
+    .sendfile = true,
+    .fallocate = true,
+    .link = true,
+    .sync = true,
+    .readdir = true,
+    .ftruncate = true,
+};
+
+fn withFutex(caps: backend.Caps) backend.Caps {
+    var out = caps;
+    out.futex = true;
+    return out;
+}
 
 const vtable: backend.VTable = .{
     .submit = submit,
@@ -1017,7 +1035,7 @@ const vtable_futex: backend.VTable = .{
     .wake = wake,
     .post = post,
     .pollable = pollable,
-    .caps = base_caps | backend.Caps.futex,
+    .caps = withFutex(base_caps),
     .destroy = destroy,
 };
 

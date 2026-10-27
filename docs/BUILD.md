@@ -133,6 +133,10 @@ Pass these to `zig build` at the root unless noted.
 | `-Dcargo-offline` | Pass `--offline` to cargo |
 | `-Dbuiltin_pgo=false` | Skip Google's builtin PGO baseline (default on for non-debug desktop V8) |
 | `-Dv8_sandbox=false` | Build V8 without the sandbox (default on). A sandboxed V8 gets ArrayBuffer memory from a mimalloc arena inside the sandbox; without it, from the Zig allocator. Also turns builtin PGO off. Exported to Zig as `build_options.v8_sandbox` |
+| `-Dv8_icu=compressed\|raw` | How the executable carries ICU's data (default `compressed`). `compressed`: one zstd frame (3.8 MB) expanded into a 10.8 MB heap copy on the first `Intl` use. `raw`: the package as it is, about 7 MB more executable (46.45 MB against 39.45 MB measured), nothing to expand, the pages are read in place. ICU is its own link object (`libv8_icu.a`, built from `lib/v8_zig/build/icu.build.zig`), not part of `libv8_zig.a` |
+| `-Dengine_snapshot=compressed` | LZ4-compress ([lib/lz4](../lib/lz4/README.md)) the engine snapshot embedded in the executable (default raw): 0.38 MB smaller (39,123,440 against 39,453,248 bytes), about 0.1 ms to expand at startup and 0.5 MB more resident memory |
+| `-Duser_snapshot=compressed` | Store the init snapshot cache files in `__oricache__` LZ4-compressed (default raw): about 70% smaller on disk (665,632 to 197,334 bytes for a small init), expanded on a cache hit. Every file starts with a little-endian u32 `meta` word (bits 0-3 layout version, always 0; bits 4-30 features, bit 4 = LZ4; bit 31 even parity), so a file says how it is stored: a reader rejects an unknown version, a bad parity, or a feature it was built without (a build without an LZ4 option cannot read packed files) as a cache miss |
+| `-Duser_codecache=compressed` | The same for the per-module `.v8-code-cache` files (default raw) |
 
 `lib/v8_zig` additionally accepts `-Dthin_lto`, `-Dexclude_unwind_tables`,
 `-Dtemporal`, `-Dsymbol_level`, `-Dis_asan`, `-Dis_tsan`,

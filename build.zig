@@ -23,9 +23,17 @@ pub fn build(b: *std.Build) void {
     // whether the oxc transformer is compiled into it.
     const typescript = b.option(bool, "typescript", "Include the oxc TypeScript/JSX transformer in the Rust library (default true)") orelse true;
     const cargo_offline = b.option(bool, "cargo-offline", "Run cargo with --offline") orelse false;
+    // Size over startup, opt in per blob: LZ4 HC (lib/lz4) shrinks the executable or the caches on
+    // disk and costs a decode (about 0.1 ms for the 0.5 MB engine snapshot) plus the expanded copy on the heap.
+    const v8_icu = b.option(IcuMode, "v8_icu", "ICU data in the executable: compressed (zstd, expanded on first Intl use; default) or raw (about 7 MB larger, no expansion)") orelse .compressed;
+    const engine_snapshot = b.option(Embedding, "engine_snapshot", "Engine snapshot embedded in the executable: raw (default) or compressed (LZ4 HC, expanded at startup)") orelse .raw;
+    const user_snapshot = b.option(Embedding, "user_snapshot", "Init snapshot cache files in __oricache__: raw (default) or compressed (LZ4 HC)") orelse .raw;
+    const user_codecache = b.option(Embedding, "user_codecache", "Code cache files in __oricache__: raw (default) or compressed (LZ4 HC)") orelse .raw;
     const config = b.addOptions();
     config.addOption(bool, "typescript", typescript);
-    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .builtin_pgo = builtin_pgo, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
+    config.addOption(bool, "user_snapshot_compressed", user_snapshot == .compressed);
+    config.addOption(bool, "user_codecache_compressed", user_codecache == .compressed);
+    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .builtin_pgo = builtin_pgo, .v8_icu = v8_icu, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
     const v8 = v8Dependency(b, options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
     const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
@@ -51,9 +59,10 @@ pub fn build(b: *std.Build) void {
     const io_lib = ioLibrary(b, target, io_module);
     const lz4_dep = b.dependency("lz4", .{ .target = target, .optimize = .ReleaseSmall });
     const lz4_lib = lz4_dep.artifact("lz4");
+    const icu_lib: ?*std.Build.Step.Compile = if (prebuilt == null) v8.artifact("v8_icu") else null;
     root.addImport("@io", io_module);
     root.addImport("@lz4", lz4_dep.module("@lz4"));
-    const modules = hostModules(b, v8, io_module, target, optimize, config);
+    const modules = hostModules(b, v8, io_module, lz4_dep.module("@lz4"), target, optimize, config);
     root.addImport("@managed", modules.managed);
     root.addImport("@engine", modules.engine);
 
@@ -63,6 +72,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     const embed_snapshot = target.query.isNative();
     build_options.addOption(bool, "has_snapshot", embed_snapshot);
+    build_options.addOption(bool, "engine_snapshot_compressed", engine_snapshot == .compressed);
     build_options.addOption(bool, "v8_sandbox", v8_sandbox);
     root.addOptions("build_options", build_options);
     if (embed_snapshot) {
@@ -78,15 +88,16 @@ pub fn build(b: *std.Build) void {
         tool_module.addImport("@lz4", lz4_dep.module("@lz4"));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib, icu_lib);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg(tool);
-        // The tool LZ4-compresses the blob (`lib/lz4`); main.zig expands it at startup.
-        const blob = generate.addOutputFileArg("engine.snapshot.lz4");
+        const blob = generate.addOutputFileArg(if (engine_snapshot == .compressed) "engine.snapshot.lz4" else "engine.snapshot");
+        // LZ4-compressed (`lib/lz4`) when asked; main.zig expands it at startup.
+        if (engine_snapshot == .compressed) generate.addArg("lz4");
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib, icu_lib);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -116,7 +127,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the V8 package tests and the managed runtime tests");
     test_step.dependOn(&test_v8.builder.top_level_steps.get("test").?.step);
 
-    const test_modules = hostModules(b, test_v8, io_module, target, optimize, config);
+    const test_modules = hostModules(b, test_v8, io_module, lz4_dep.module("@lz4"), target, optimize, config);
     const test_root = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
@@ -144,11 +155,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
+/// How a blob is stored: as it is, or LZ4-compressed (lib/lz4).
+const Embedding = enum { raw, compressed };
+
+/// How the V8 package embeds ICU's data (lib/v8_zig/build/icu.build.zig).
+const IcuMode = enum { compressed, raw };
+
 const V8Options = struct {
     target: std.Build.ResolvedTarget,
     v8_debug: bool,
     v8_sandbox: bool,
     builtin_pgo: bool,
+    v8_icu: IcuMode,
     prebuilt: ?[]const u8,
     clang_bin: []const u8,
     cache_root: []const u8,
@@ -173,6 +191,7 @@ fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build
         .link_native = link_native,
         .cache_root = options.cache_root,
         .builtin_pgo = options.builtin_pgo,
+        .v8_icu = options.v8_icu,
         .v8_clang_dir = options.clang_bin,
     });
 }
@@ -205,7 +224,7 @@ const HostModules = struct { engine: *std.Build.Module, managed: *std.Build.Modu
 
 /// Borrows b and dependency through build teardown; returns build-owned modules importing the
 /// dependency's @v8 and @diagnostics. Retains no runtime state.
-fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, config: *std.Build.Step.Options) HostModules {
+fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std.Build.Module, lz4_module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, config: *std.Build.Step.Options) HostModules {
     const engine = b.createModule(.{ .root_source_file = b.path("src/engine.zig"), .target = target, .optimize = optimize });
     const managed = b.createModule(.{ .root_source_file = b.path("src/managed.zig"), .target = target, .optimize = optimize });
     for ([_]*std.Build.Module{ engine, managed }) |module| {
@@ -215,6 +234,7 @@ fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std
     // Embedding helpers (`eu.v` constructors, the process allocator) for the managed runtime and API.
     managed.addImport("@util", dependency.module("@util"));
     managed.addImport("@io", io_module);
+    managed.addImport("@lz4", lz4_module);
     managed.addOptions("origine_config", config);
     return .{ .engine = engine, .managed = managed };
 }
@@ -230,6 +250,7 @@ fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, args: 
         run.addFileArg(b.path("rust/scripts/cargo-v8.sh"));
         run.addFileArg(dep.namedLazyPath("v8"));
         run.addFileArg(dep.artifact("mimalloc").getEmittedBin());
+        run.addFileArg(dep.artifact("v8_icu").getEmittedBin());
         run.addFileArg(dep.namedLazyPath("v8_root"));
         run.addFileArg(dep.namedLazyPath("gn_compile_commands"));
         run.addFileArg(dep.namedLazyPath("binding"));
@@ -311,7 +332,7 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, t
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         const link = b.addSystemCommand(&.{"/usr/bin/clang++"});
@@ -322,6 +343,9 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         const binary = link.addOutputFileArg(name);
         link.addArtifactArg(object);
         link.addFileArg(v8.namedLazyPath("v8"));
+        // The ICU data provider is its own link object (the archive refers to it); a prebuilt
+        // archive brings its own.
+        if (icu_lib) |lib| link.addArtifactArg(lib);
         link.addArtifactArg(v8.artifact("mimalloc"));
         link.addArtifactArg(io_lib);
         link.addArtifactArg(lz4_lib);

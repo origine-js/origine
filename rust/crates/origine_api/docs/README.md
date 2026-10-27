@@ -197,7 +197,7 @@ Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions 
 ## Building
 
 Plain `cargo build -p origine_api` does not work: the vendored `v8` crate's `build.rs` needs the
-`V8_ZIG_*` environment (`V8_ZIG_ARCHIVE`, `V8_ZIG_MIMALLOC`, `V8_ZIG_V8_ROOT`, `V8_ZIG_GN_OUT`,
+`V8_ZIG_*` environment (`V8_ZIG_ARCHIVE`, `V8_ZIG_MIMALLOC`, `V8_ZIG_ICU`, `V8_ZIG_V8_ROOT`, `V8_ZIG_GN_OUT`,
 `V8_ZIG_BINDING`) pointing at the exact V8 archive Zig builds and links. `rust/scripts/cargo-v8.sh`
 sets them (plus `LIBCLANG_PATH` for bindgen on macOS when it is unset) and `cd`s to `rust/` so the
 toolchain pin applies; `build.zig`'s `cargoCommand` calls it with the V8 dependency's paths.

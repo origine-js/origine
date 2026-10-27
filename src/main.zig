@@ -7,6 +7,7 @@ const StartupTrace = @import("@diagnostics").StartupTrace;
 const Engine = @import("@engine").Engine;
 const build_options = @import("build_options");
 const repl = @import("repl.zig");
+const lz4 = @import("@lz4");
 
 pub const panic = std.debug.FullPanic(libcPanic);
 
@@ -43,7 +44,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const environ = &environ_map;
     var engine = Engine.init(.{ .trace = &trace });
     defer engine.deinit();
-    const snapshot = embeddedSnapshot(environ);
+    const snapshot = embeddedSnapshot(alloc, environ);
     // The V8 sandbox only accepts ArrayBuffer memory inside itself, so a sandboxed V8 gets
     // backing stores from its own pages; builds without it use the Zig allocator.
     const buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator") =
@@ -224,14 +225,15 @@ fn initSnapshot(
 }
 
 /// The frozen-intrinsics startup snapshot generated at build time (see build.zig and
-/// snapshot_tool.zig). `align(16)` as V8 requires; empty when the build could not
-/// generate one (cross builds).
-const embedded_snapshot: [if (build_options.has_snapshot) @embedFile("engine_snapshot").len else 0]u8 align(16) =
-    if (build_options.has_snapshot) @embedFile("engine_snapshot").* else .{};
+/// snapshot_tool.zig), LZ4-compressed (`lib/lz4`); empty when the build could not generate one
+/// (cross builds).
+const embedded_snapshot = if (build_options.has_snapshot) @embedFile("engine_snapshot") else "";
 
-/// Returns the embedded snapshot, or null to use V8's built-in seed (no embedded
-/// blob, or ORIGINE_NO_SNAPSHOT is set for comparison runs).
-fn embeddedSnapshot(environ: *const std.process.Environ.Map) ?[]align(16) const u8 {
+/// Expands the embedded snapshot into a 16-byte aligned buffer (as V8 requires) that lives for
+/// the rest of the process, or returns null to use V8's built-in seed (no embedded blob, or
+/// ORIGINE_NO_SNAPSHOT is set for comparison runs). The data is produced by the build, so a
+/// blob that fails to expand is a build defect and aborts.
+fn embeddedSnapshot(alloc: std.mem.Allocator, environ: *const std.process.Environ.Map) ?[]align(16) const u8 {
     if (embedded_snapshot.len == 0 or environ.get("ORIGINE_NO_SNAPSHOT") != null) return null;
-    return &embedded_snapshot;
+    return lz4.unpack(alloc, embedded_snapshot) catch |err| std.debug.panic("embedded engine snapshot: {s}", .{@errorName(err)});
 }

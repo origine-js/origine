@@ -49,7 +49,10 @@ pub fn build(b: *std.Build) void {
     // every program that links the Rust library must compile it in (see `io_module`).
     const io_module = ioModule(b, target);
     const io_lib = ioLibrary(b, target, io_module);
+    const lz4_dep = b.dependency("lz4", .{ .target = target, .optimize = .ReleaseSmall });
+    const lz4_lib = lz4_dep.artifact("lz4");
     root.addImport("@io", io_module);
+    root.addImport("@lz4", lz4_dep.module("@lz4"));
     const modules = hostModules(b, v8, io_module, target, optimize, config);
     root.addImport("@managed", modules.managed);
     root.addImport("@engine", modules.engine);
@@ -72,16 +75,18 @@ pub fn build(b: *std.Build) void {
         });
         for ([_][]const u8{ "@v8", "@util", "@diagnostics" }) |name| tool_module.addImport(name, v8.module(name));
         tool_module.addImport("@io", io_module);
+        tool_module.addImport("@lz4", lz4_dep.module("@lz4"));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg(tool);
-        const blob = generate.addOutputFileArg("engine.snapshot");
+        // The tool LZ4-compresses the blob (`lib/lz4`); main.zig expands it at startup.
+        const blob = generate.addOutputFileArg("engine.snapshot.lz4");
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -120,6 +125,8 @@ pub fn build(b: *std.Build) void {
     });
     test_root.addImport("@io", io_module);
     test_root.linkLibrary(io_lib);
+    test_root.linkLibrary(lz4_lib);
+    test_step.dependOn(&lz4_dep.builder.top_level_steps.get("test").?.step);
     for ([_][]const u8{ "@v8", "@util", "@mimalloc" }) |name| {
         test_root.addImport(name, test_v8.module(name));
     }
@@ -304,7 +311,7 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, t
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         const link = b.addSystemCommand(&.{"/usr/bin/clang++"});
@@ -317,12 +324,14 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         link.addFileArg(v8.namedLazyPath("v8"));
         link.addArtifactArg(v8.artifact("mimalloc"));
         link.addArtifactArg(io_lib);
+        link.addArtifactArg(lz4_lib);
         if (rust_lib) |lib| link.addFileArg(lib);
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
     }
     if (rust_lib) |lib| module.addObjectFile(lib);
     module.linkLibrary(io_lib);
+    module.linkLibrary(lz4_lib);
     const exe = b.addExecutable(.{ .name = name, .root_module = module });
     if (optimize != .debug) {
         exe.use_llvm = true;

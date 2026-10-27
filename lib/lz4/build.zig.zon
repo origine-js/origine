@@ -1,0 +1,13 @@
+.{
+    .name = .lz4,
+    .version = "1.10.0",
+    .fingerprint = 0x4ae88e9f92151517,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .source = .{
+            .url = "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz",
+            .hash = "N-V-__8AAPaNGQD6bmfRjArvYAnsL8DYxbXiNxVE_B6HRpUx",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+}

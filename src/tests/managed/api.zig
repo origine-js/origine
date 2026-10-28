@@ -1246,6 +1246,53 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
     try check(fx.scope, "report.exotic.length === 8 && report.exotic.every(n => n === 'InvalidInput') && report.closedAsync === 'InvalidInput' && report.stillSync === 'ok'");
 }
 
+test "graph: load() goes one level at a time, through dependency references, three levels deep" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const sources = {
+        \\    'b.js': "import './c.js'; export const b = 1;",
+        \\    'c.js': "import './d.js'; import './e.js'; export const c = 2;",
+        \\    'd.js': "export const d = 3;",
+        \\    'e.js': "import './b.js'; export const e = 4;",
+        \\  };
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fromLoader(id => sources[id])] });
+        \\  const root = ModuleRecipe({ source: ModuleSource.text("import './b.js'; export const a = 0;"), import: handler, name: 'a.js' }).create(api.graph);
+        \\  await root.load();
+        \\  const names = ref => ref.requests.map(r => r.reference.name + '/' + r.reference.status).join(',');
+        \\  out.level1 = names(root);
+        \\  const b = root.requests[0].reference;
+        \\  out.beforeB = b.requests === undefined;
+        \\  // A dependency loads the same way, and a second call (also one that overlaps the first) shares it.
+        \\  await Promise.all([b.load(), b.load()]);
+        \\  out.level2 = names(b);
+        \\  const c = b.requests[0].reference;
+        \\  await c.load();
+        \\  out.level3 = names(c);
+        \\  const e = c.requests[1].reference;
+        \\  await e.load();
+        \\  out.level4 = names(e);
+        \\  // d imports nothing; loading it twice changes nothing.
+        \\  const d = c.requests[0].reference;
+        \\  await d.load();
+        \\  await d.load();
+        \\  out.leaf = names(d) === '' && d.status === 'loaded';
+        \\  out.status = [root, b, c, e].map(ref => ref.status).join(',');
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.level1 === 'b.js/declared' && report.beforeB && report.level2 === 'c.js/declared' && report.level3 === 'd.js/declared,e.js/declared' && report.level4 === 'b.js/declared'");
+    try check(fx.scope, "report.leaf && report.status === 'loaded,loaded,loaded,loaded'");
+}
+
 test "graph: a source larger than the graph's limit fails the import, never cut short, for sync and async grants" {
     var fx: Fixture = undefined;
     try fx.setup(

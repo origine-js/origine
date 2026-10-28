@@ -469,12 +469,26 @@
     get context() {
       return this.#state.context === null ? undefined : this.#state.contextObject;
     }
-    async load() {
+    /// Reads, transforms and compiles the module and makes a `declared` reference for each of its imports
+    /// (one level: call `load()` on those to go deeper). A reference found as a dependency has its source
+    /// already, so it loads the same way. Calls that overlap share one load.
+    load() {
       const state = this.#state;
-      if (state.released) throw named(errors.BadHandle, 'released');
-      if (state.status !== 'declared') return this;
+      if (state.released) return Promise.reject(named(errors.BadHandle, 'released'));
+      if (state.status !== 'declared') return Promise.resolve(this);
+      state.loading ??= this.#load(state).finally(() => {
+        state.loading = undefined;
+      });
+      return state.loading;
+    }
+    async #load(state) {
       await ensureText(state);
-      if (state.recipe === null) return this;
+      // A module with no source text of its own (nothing was read for it) imports nothing.
+      if (state.text === undefined) {
+        state.requests = freeze([]);
+        state.status = 'loaded';
+        return this;
+      }
       const requests = host(native.graph.compileRequests, state.text, state.name);
       const out = [];
       for (const [specifier, attributes, phase] of requests) {
@@ -557,7 +571,7 @@
 
   /// The text of a reference made from a recipe (read, transformed) once.
   const ensureText = async state => {
-    if (state.text !== undefined) return;
+    if (state.text !== undefined || state.recipe === null) return;
     state.text = await sourceText(state.recipe.source, graphId(state.graph), state.name);
   };
 
@@ -574,6 +588,7 @@
       contextObject: extra?.contextObject,
       meta: undefined,
       pin: 0,
+      loading: undefined,
       evaluation: undefined,
       released: false,
     };

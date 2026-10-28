@@ -28,7 +28,11 @@ export interface ModuleReference extends Disposable {
   readonly requests: readonly ModuleRequest[] | undefined;
   /** The context the reference is bound to; `undefined` while it is not. */
   readonly context: Context | undefined;
-  /** Reads, transforms and compiles the module and loads its static imports. Resolves the reference itself. */
+  /**
+   * Reads, transforms and compiles the module and makes a `declared` reference for each static import
+   * (`requests`). One level at a time: call `load()` on those references to go deeper; it works the same
+   * on a dependency. Overlapping calls share one load. Resolves the reference itself.
+   */
   load(): Promise<ModuleReference>;
   /**
    * Binds the reference to `ctx` and evaluates it there (top-level await included). Rejects with a

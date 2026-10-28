@@ -16,7 +16,7 @@ All of it is implemented except what the last row lists. Tests: `src/tests/manag
 | `Import.link` | `'hardened'` over `Content.exports`, `'shared'` over `Content.module`; the spike below showed V8 accepts the latter. |
 | Refcounted module table | `retain: 'all' \| 'used'`, pins (`ModuleMap.pin`), `delete`, `clear`, `entries` cap, `ModuleMap.sweep`. |
 | Code caches | `none`, `memory`, `dir` (the `__oricache__` format) and `custom` (stores only). |
-| `Snapshot.prepare` and baked contexts | Deferred; coordinated with the `api.isolate` snapshot work. |
+| `Snapshot.prepare` and baked contexts (multi-context `init_snapshot`) | Later, and the module graph's: the `api.isolate` snapshot step stays single-context. |
 | Source and defer phases | Not implemented; `ModuleImportPhase` names them, only `Evaluation` works. |
 
 ## Deviations from the first design
@@ -91,7 +91,7 @@ There is no `origineNamespace` flag. `origine()` only canonicalises `origine:` i
 
 ### Native plans
 
-`ImportHandler.make` classifies each element: a host descriptor (frozen `{ host, kind, ... }`) is validated against the graph's grants and compiled to a native step; a function is a JS barrier. Consecutive native steps are fused into one plan exposed through the existing managed `Resolver` and `Loader`; a barrier parks the entry, runs in the creating realm during the load stage, and resumes the native steps. A fully native handler never enters JS (`init_loader.zig` is that chain written by hand today). `ImportCache` and `ResolveCache` are native only: they sit behind V8's synchronous link. The cost is visible: `handler.plan` and `handler.native`. A recipe with `native === true` is plain data and can cross to another isolate.
+`ImportHandler.make` classifies each element: a host descriptor (frozen `{ host, kind, ... }`) is validated against the graph's grants and compiled to a native step; a function is a JS barrier. Consecutive native steps are fused into one plan exposed through the existing managed `Resolver` and `Loader`; a barrier parks the entry, runs in the creating realm during the load stage, and resumes the native steps. A fully native handler never enters JS (`init_loader.zig` is that chain written by hand today). `ImportCache` and `ResolveCache` are native only: they sit behind V8's synchronous link. The cost is visible: `handler.plan` and `handler.native`. A handler with `native === true` is plain data and can be cloned to a child isolate as its `import` option.
 
 ### Cross-context imports
 
@@ -122,7 +122,8 @@ Artifacts (source, transform output, code-cache bytes) are evictable and bounded
 ## Snapshots
 
 - **Code cache** (works today in the init scope): `CodeCache` over `src/api/init_cache.zig`; `graph.flush()` writes what compiled without a usable cache.
-- **Baked contexts** (deferred): N contexts per boot blob, so a child context restores in about 0.2 ms with no parse or evaluation. Needs a multi-context `init_snapshot`; owned jointly with the `api.isolate` snapshot work, whose `Snapshot` class and `snapshot({ init })` would take a recipe and a handler instead of a specifier and an import map.
+- **Baked contexts** (later): N contexts per boot blob, so a child context restores in about 0.2 ms with no parse or evaluation. Needs a multi-context `init_snapshot`; that change belongs to this design, not to `api.isolate`, whose snapshot step stays single-context.
+- **Child isolates** (the `api.isolate` design): `api.isolate.Snapshot.create(options)` (with `Snapshot.fromRaw`, `Snapshot.fromOrigineDataBlob`, `.blob()`, `.origineDataBlob(options)`) takes `init: string | ModuleRecipe`, `import: ImportHandler` and `graph?` instead of a specifier and an import map (`importMap` and `meta` are dropped). No graph or grant crosses to a child isolate: its init script decides everything, and the parent controls that by choosing the init script. Only a handler with `handler.native === true` (plain data) is cloneable, as part of the child's `import` option; one with JS hooks, layers or makers is `Unsupported`, and `handler.plan` names the element.
 
 ## Name decisions
 
@@ -167,4 +168,3 @@ Question 1: what the name promises. 2: hidden cost. 3: another way. 4: shed word
 - How a declared dependency reference is adopted when the evaluating context's table already holds its key (today `evaluate` of the dependency's reference would fail `InvalidInput` for the taken name).
 - Prefetching `CodeCache.custom` loads in the driver (would need a source hash in JS).
 - Async fs grants for native reads (would complete on the io runtime).
-- Who owns the multi-context `init_snapshot` change (shared with the isolate design).

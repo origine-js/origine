@@ -50,7 +50,7 @@ pub const FileRef = struct {
 /// (snapshots and code caches are trusted by V8, so a guest must not be able to plant them).
 /// Lexical only: symlinks inside the root are not resolved here, so following one can leave the
 /// root (docs/api-design.md). The Rust twin is `clean` in rust/crates/origine_api_fs.
-fn cleanPath(path: []const u8) !void {
+pub fn cleanPath(path: []const u8) !void {
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidInput;
     if (path.len != 0 and path[0] == '/') return error.PermissionDenied;
     var parts = std.mem.splitScalar(u8, path, '/');

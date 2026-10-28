@@ -1,4 +1,5 @@
-// `origine:@std/transformer/oxc`: host transformers for `api.scope.create({ transformers })`.
+// `origine:@std/transformer/oxc`: host transformers for the module graph (`ModuleSource#withTransformer`,
+// `Transform.byExtension`, the maker of an `ImportHandler`).
 declare module "origine:@std/transformer/oxc" {
   /** Options of the oxc transformers (all optional). */
   export interface OxcOptions {
@@ -18,15 +19,22 @@ declare module "origine:@std/transformer/oxc" {
     readonly inlineSourceMap?: boolean;
   }
 
-  type HostTransformer = import("../scope.d.ts").HostTransformer;
+  /** A frozen descriptor the host runs natively on module source: no JS is entered to transform. */
+  export interface OxcTransformer {
+    readonly host: "oxc";
+    readonly kind: "transformer";
+    readonly transform: "ts" | "tsx" | "jsx";
+    readonly options: OxcOptions;
+  }
 
   /**
    * A TypeScript transformer: types are stripped, nothing is type-checked and no type-directed
-   * emit happens. Throws a `SyntaxError` with `file:line:col: error: message` diagnostics.
+   * emit happens. A source it rejects fails the import with `file:line:col: error: message` diagnostics.
+   * Throws a `TypeError` for an option of the wrong type.
    */
-  export function ts(options?: OxcOptions): HostTransformer;
+  export function ts(options?: OxcOptions): OxcTransformer;
   /** The same factory, named for `.tsx`. */
-  export function tsx(options?: OxcOptions): HostTransformer;
+  export function tsx(options?: OxcOptions): OxcTransformer;
   /** The same factory, named for `.jsx`. */
-  export function jsx(options?: OxcOptions): HostTransformer;
+  export function jsx(options?: OxcOptions): OxcTransformer;
 }

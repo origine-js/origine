@@ -156,8 +156,8 @@ export const MakeRecipe = freeze({
 
 /// One element of the plan: which stage it belongs to and whether it runs natively.
 const planEntry = (stage, element) => {
-  if (typeof element === 'function') return freeze({ stage, kind: 'js' });
-  if (typeof element.host === 'string' && element.native !== false) return freeze({ stage, kind: 'native', name: element.host });
+  if (typeof element !== 'function' && typeof element.host === 'string' && element.native !== false)
+    return freeze({ stage, kind: 'native', name: element.host });
   return freeze({ stage, kind: 'js' });
 };
 

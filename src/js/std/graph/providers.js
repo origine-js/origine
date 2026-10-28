@@ -57,7 +57,7 @@ export const fsProvider = options => {
 /// Serves `type: 'json'` imports as an ES module whose default export is the parsed value.
 export const json = () => provider('json');
 
-/// Adapts the loader of `api.scope.create` to a hook: `loader(id, attributes)` returns the source
+/// Adapts a loader function to a hook: `loader(id, attributes)` returns the source
 /// text, `{ source }`, or a promise of either.
 export const fromLoader = loader => {
   if (typeof loader !== 'function') throw invalid('fromLoader: expected a function');

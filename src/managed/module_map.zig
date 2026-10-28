@@ -41,12 +41,26 @@ const Entry = struct {
     preparing: bool = true,
     visited: bool = false,
     pending: ?LoadToken = null,
+    /// The module belongs to another context and was linked in as it is (`Content.module`).
+    shared: bool = false,
     /// Requests of this module still waiting for an asynchronous resolver. While any is left the
     /// entry stays `preparing`, so no import that depends on it can start linking.
     unresolved: std.ArrayList(Unresolved) = .empty,
     /// Source copy kept until `flushCodeCache` for a module compiled without a usable code
-    /// cache. Null once flushed, for modules that consumed a cache, and without a hook.
+    /// cache (owned by the runtime allocator). Null once flushed, for modules that consumed a
+    /// cache, and without a hook.
     cache_source: ?[]const u8 = null,
+    /// Holders outside the map that keep this module alive (see `pin`): a pinned module is never
+    /// swept, and neither is anything it imports.
+    pins: u32 = 0,
+    /// Names the entry for `unpin`; assigned when first pinned.
+    serial: u32 = 0,
+    /// The root of an import that just settled: survives the next sweep so that the host can pin it
+    /// once the import's promise reaches it.
+    grace: bool = false,
+    /// Swept: every handle is released and the entry is out of every index. Its storage stays in
+    /// the map's arena until the map is destroyed.
+    dead: bool = false,
 };
 /// The map's view of a resolver answer: the id, or the token to wait for.
 const Resolved = union(enum) { id: []const u8, pending: LoadToken };
@@ -77,6 +91,8 @@ pub const ModuleMap = struct {
     tasks: std.ArrayList(Task) = .empty,
     driving: bool = false,
     preparing_depth: usize = 0,
+    sweeping: bool = false,
+    next_serial: u32 = 0,
 
     /// Insert/replace a resolved-specifier mapping using source or synthetic exports.
     /// Borrows key/content and all nested slices/handles only through return, on
@@ -144,6 +160,7 @@ pub const ModuleMap = struct {
             if (entry.pending) |token| if (self.scope.options.loader) |loader| if (loader.cancel) |cancel| cancel(loader.data, token);
             if (self.scope.options.resolver) |resolver| if (resolver.cancel) |cancel| for (entry.unresolved.items) |request| cancel(resolver.data, request.token);
             entry.unresolved.deinit(self.scope.runtime.allocator);
+            if (entry.cache_source) |source| self.scope.runtime.allocator.free(source);
             if (entry.module) |value| value.deinit();
             if (entry.failure) |value| value.deinit();
             if (entry.evaluation) |value| value.deinit();
@@ -291,6 +308,7 @@ pub const ModuleMap = struct {
         switch (try loader.load(loader.data, .{ .allocator = self.arenaAllocator(), .context = self.ctx(), .scope_id = self.scope.id, .module_id = entry.id, .token = token, .import_attributes = entry.attributes })) {
             .source => |source| try self.compile(entry, .{ .source = source }),
             .exports => |exports| try self.compile(entry, .{ .exports = exports }),
+            .module => |linked| try self.compile(entry, .{ .module = linked }),
             .pending => entry.pending = token,
             .exception => |exception| self.fail(entry, exception),
         }
@@ -307,6 +325,7 @@ pub const ModuleMap = struct {
                 .failure => |err| self.fail(entry, self.errorValue(err)),
                 .exception => |exception| self.fail(entry, exception.deref()),
                 .syntax_error => |text| self.fail(entry, self.syntaxErrorValue(text)),
+                .message => |text| self.fail(entry, eu.v.err(eu.v.str_utf8(self.isolate(), text)).?),
                 .content => |content| self.compile(entry, content) catch |err| self.fail(entry, tc_scope.getException() orelse self.errorValue(err)),
             }
             return true;
@@ -334,7 +353,7 @@ pub const ModuleMap = struct {
                 defer source.deinit();
                 const module = v8.ScriptCompiler.compileModule(iso, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
                 const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
-                if (self.scope.options.code_cache != null and !accepted) entry.cache_source = try self.arenaAllocator().dupe(u8, text);
+                if (self.scope.options.code_cache != null and !accepted) entry.cache_source = try self.scope.runtime.allocator.dupe(u8, text);
                 entry.module = .new(iso, module);
                 try self.indexModule(entry);
                 const requests = module.getModuleRequests().?;
@@ -360,6 +379,11 @@ pub const ModuleMap = struct {
                         },
                     }
                 }
+            },
+            .module => |linked| {
+                entry.module = .new(iso, linked);
+                entry.shared = true;
+                try self.indexModule(entry);
             },
             .exports => |exports| {
                 const owned = try self.arenaAllocator().alloc(Export, exports.len);
@@ -439,7 +463,7 @@ pub const ModuleMap = struct {
                 return alloc.dupe(u8, id);
             },
             .failure => |err| return err,
-            .exception => return error.ResolverFailed,
+            .exception, .message => return error.ResolverFailed,
         }
     }
 
@@ -447,6 +471,7 @@ pub const ModuleMap = struct {
     fn settledFailure(self: *ModuleMap, completion: ResolveCompletion, tc_scope: *v8.TryCatch, err: anyerror) v8.Value {
         return switch (completion) {
             .exception => |exception| exception.deref(),
+            .message => |text| eu.v.err(eu.v.str_utf8(self.isolate(), text)).?,
             else => tc_scope.getException() orelse self.errorValue(err),
         };
     }
@@ -460,6 +485,7 @@ pub const ModuleMap = struct {
         var stored: usize = 0;
         for (self.all_entries.items) |entry| {
             const source = entry.cache_source orelse continue;
+            defer self.scope.runtime.allocator.free(source);
             entry.cache_source = null;
             const module = (entry.module orelse continue).deref();
             const unbound = module.getUnboundModuleScript() orelse continue;
@@ -486,7 +512,7 @@ pub const ModuleMap = struct {
         for (self.all_entries.items) |entry| {
             if (!entry.cached) continue;
             const module = entry.module orelse return error.NotSnapshottable;
-            if (entry.failure != null or entry.pending != null or entry.preparing or entry.exports.len != 0) return error.NotSnapshottable;
+            if (entry.failure != null or entry.pending != null or entry.preparing or entry.exports.len != 0 or entry.shared) return error.NotSnapshottable;
             if (!module.deref().isSourceTextModule()) return error.NotSnapshottable;
             try active.append(alloc, entry);
         }
@@ -542,6 +568,139 @@ pub const ModuleMap = struct {
                 entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, dependency.specifier), .attributes = target.attributes, .entry = target });
             }
         }
+    }
+
+    /// The id of the cached module whose namespace object is `namespace`, or null. Requires the
+    /// entered context and a live HandleScope; the id stays valid until map deinit.
+    pub fn idOfNamespace(self: *ModuleMap, namespace: v8.Value) ?[]const u8 {
+        for (self.all_entries.items) |entry| {
+            if (!entry.cached) continue;
+            const module = (entry.module orelse continue).deref();
+            if (entry.failure != null or entry.preparing) continue;
+            const candidate = module.getModuleNamespace() orelse continue;
+            if (candidate.strictEquals(namespace)) return entry.id;
+        }
+        return null;
+    }
+
+    /// How many modules the table holds (`delete` and `clear` drop entries from it).
+    pub fn cachedCount(self: *const ModuleMap) usize {
+        return self.entries.count();
+    }
+
+    /// Keeps the module `id` (attributes none) alive until `unpin` of the returned serial: a
+    /// holder outside the map (a reference handle) pins what it uses. Returns 0 when the table
+    /// has no such module. Requires the entered context.
+    pub fn pin(self: *ModuleMap, id: []const u8) !u32 {
+        var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
+        defer scratch.deinit();
+        const encoded = try cacheKey(scratch.allocator(), id, &.{});
+        const entry = self.entries.get(encoded) orelse return 0;
+        if (entry.serial == 0) {
+            self.next_serial += 1;
+            entry.serial = self.next_serial;
+        }
+        entry.pins += 1;
+        return entry.serial;
+    }
+
+    /// Drops one pin of the entry `serial` names; an unpinned module the table no longer holds
+    /// (or never held, under `retain: used`) is freed at once. Unknown serials are ignored.
+    pub fn unpin(self: *ModuleMap, serial: u32) void {
+        if (serial == 0) return;
+        for (self.all_entries.items) |entry| {
+            if (entry.serial != serial or entry.pins == 0) continue;
+            entry.pins -= 1;
+            break;
+        }
+        self.sweep();
+    }
+
+    /// Frees the modules nothing holds. A module is held while the table keeps it (always with
+    /// `retain: all`, never with `retain: used`), while it is pinned, while an import or load is
+    /// in flight for it, and while a held module imports it. Evicts the oldest unpinned entries
+    /// first when the table is over `Options.table_limit`. A no-op while a callback is running.
+    /// Requires the entered context and a live HandleScope.
+    pub fn sweep(self: *ModuleMap) void {
+        if (self.driving or self.preparing_depth != 0 or self.sweeping) return;
+        self.sweeping = true;
+        defer self.sweeping = false;
+        const used = self.scope.options.retain == .used;
+        if (self.scope.options.table_limit) |limit| {
+            var cached = self.entries.count();
+            for (self.all_entries.items) |entry| {
+                if (cached <= limit) break;
+                if (entry.cached and entry.pins == 0 and !entry.preparing and entry.pending == null) {
+                    _ = self.entries.remove(entry.cache_key);
+                    entry.cached = false;
+                    cached -= 1;
+                }
+            }
+        }
+        self.resetVisited();
+        for (self.all_entries.items) |entry| {
+            const held = entry.pins != 0 or entry.grace or entry.preparing or entry.pending != null or entry.unresolved.items.len != 0 or (entry.cached and !used);
+            if (held) self.mark(entry);
+        }
+        for (self.tasks.items) |task| if (task.root) |root| self.mark(root);
+        var kept: usize = 0;
+        for (self.all_entries.items) |entry| {
+            if (entry.visited) {
+                self.all_entries.items[kept] = entry;
+                kept += 1;
+                continue;
+            }
+            self.release(entry);
+        }
+        self.all_entries.shrinkRetainingCapacity(kept);
+        for (self.all_entries.items) |entry| entry.grace = false;
+        self.resetVisited();
+    }
+
+    fn mark(self: *ModuleMap, entry: *Entry) void {
+        if (entry.visited) return;
+        entry.visited = true;
+        for (entry.dependencies.items) |dependency| self.mark(dependency.entry);
+    }
+
+    /// Releases one swept entry: out of the table and the identity index, every handle dropped.
+    fn release(self: *ModuleMap, entry: *Entry) void {
+        const alloc = self.scope.runtime.allocator;
+        if (entry.cached) {
+            _ = self.entries.remove(entry.cache_key);
+            entry.cached = false;
+        }
+        if (entry.module) |module| {
+            const hash = module.deref().getIdentityHash();
+            if (self.by_identity.getPtr(hash)) |head| {
+                if (head.* == entry) {
+                    if (entry.identity_next) |next| head.* = next else _ = self.by_identity.remove(hash);
+                } else {
+                    var cursor = head.*;
+                    while (cursor.identity_next) |next| : (cursor = next) {
+                        if (next == entry) {
+                            cursor.identity_next = entry.identity_next;
+                            break;
+                        }
+                    }
+                }
+            }
+            module.deinit();
+            entry.module = null;
+        }
+        if (entry.failure) |value| value.deinit();
+        entry.failure = null;
+        if (entry.evaluation) |value| value.deinit();
+        entry.evaluation = null;
+        for (entry.exports) |exp| exp.value.deinit();
+        entry.exports = &.{};
+        entry.dependencies.deinit(alloc);
+        entry.dependencies = .empty;
+        if (entry.cache_source) |source| alloc.free(source);
+        entry.cache_source = null;
+        entry.unresolved.deinit(alloc);
+        entry.unresolved = .empty;
+        entry.dead = true;
     }
 
     /// Adds `entry` (whose module is set) to the identity index. Allocation failure leaves the
@@ -688,7 +847,9 @@ pub const ModuleMap = struct {
         const attributes = try normalizeAttributes(scratch.allocator(), key.import_attributes);
         const encoded = try cacheKey(scratch.allocator(), key.module_id, attributes);
         const target = self.entries.get(encoded) orelse return 0;
-        return self.invalidate(target);
+        const count = self.invalidate(target);
+        self.sweep();
+        return count;
     }
     /// Borrows target through return; retires dependent cache entries without
     /// freeing their storage/handles, which remain owned by the map until deinit.
@@ -726,6 +887,7 @@ pub const ModuleMap = struct {
         const count = self.entries.count();
         self.entries.clearRetainingCapacity();
         for (self.all_entries.items) |entry| entry.cached = false;
+        self.sweep();
         return count;
     }
     /// Borrows key/content, nested names and handles through return, including error
@@ -820,6 +982,7 @@ pub const ModuleMap = struct {
                 .Pending => {},
                 .Fulfilled => {
                     self.tasks.items[index].settled = true;
+                    root.grace = true;
                     _ = resolver.resolve(self.ctx(), root.module.?.deref().getModuleNamespace().?);
                     progress = true;
                 },
@@ -837,6 +1000,9 @@ pub const ModuleMap = struct {
                 _ = self.tasks.swapRemove(finished);
             } else finished += 1;
         }
+        self.driving = false;
+        if (progress) self.sweep();
+        self.driving = true;
         return progress;
     }
 };

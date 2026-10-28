@@ -161,7 +161,7 @@ test "api: getters load and harden capabilities once and retain separate disk co
         defer api.deinit();
         try exposeApi(scope, api);
         try check(scope,
-            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,env,scope,io,net' &&
+            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,env,graph,context,io,net' &&
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );
@@ -176,21 +176,21 @@ test "api: getters load and harden capabilities once and retain separate disk co
             \\  const sync = api.fs.requestSync({ access: 'r' });
             \\  sync.fileStat({});
             \\  const code = sync.errno[0];
-            \\  return code !== 0 && api.scope === api.scope && Object.isFrozen(api.scope.create) && sync.errno[0] === code;
+            \\  return code !== 0 && api.context === api.context && Object.isFrozen(api.context.create) && sync.errno[0] === code;
             \\})()
         );
         try t.expect(host.rust_isolate == null);
         try check(scope, "api.io === api.io && Object.isFrozen(api.io.create)");
         try t.expect(host.rust_isolate != null);
         try check(scope, "api.net === api.net && Object.isFrozen(api.net.Socket.prototype) && Object.isFrozen(api.net.PullSocket.prototype)");
-        try t.expectEqual(@as(usize, 6), probe.loads.count());
+        try t.expectEqual(@as(usize, 7), probe.loads.count());
         var counts = probe.loads.valueIterator();
         while (counts.next()) |count| try t.expectEqual(@as(usize, 1), count.*);
         host.flushGlueCache(scope);
-        try t.expectEqual(@as(usize, if (run == 0) 6 else 0), probe.stores);
-        try t.expectEqual(@as(usize, if (run == 0) 0 else 6), probe.hits);
+        try t.expectEqual(@as(usize, if (run == 0) 7 else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0) 0 else 7), probe.hits);
         host.flushGlueCache(scope);
-        try t.expectEqual(@as(usize, if (run == 0) 6 else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0) 7 else 0), probe.stores);
     }
 }
 
@@ -223,7 +223,7 @@ test "api: snapshot restores immutable getters and network classes without compi
         \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
         \\  typeof d.get === 'function' && Object.isFrozen(d.get) && !d.configurable && d.set === undefined)
     );
-    try check(a, "Object.isFrozen(api.fs) && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.env.args) && Object.isFrozen(api.scope.create)");
+    try check(a, "Object.isFrozen(api.fs) && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.env.args) && Object.isFrozen(api.context.create)");
     try t.expect(host.rust_isolate == null);
     try check(a,
         \\[api.net.Handle, api.net.Server, api.net.PullServer, api.net.EventServer, api.net.Socket, api.net.PullSocket, api.net.EventSocket].every(C =>
@@ -253,7 +253,7 @@ test "api: snapshot restores immutable getters and network classes without compi
     const restricted_api = try restricted_host.install(restricted, null);
     defer restricted_api.deinit();
     try exposeApi(restricted, restricted_api);
-    try check(restricted, "Object.keys(api).join(',') === 'fs,env,scope' && api.io === undefined && api.net === undefined && Object.isFrozen(api)");
+    try check(restricted, "Object.keys(api).join(',') === 'fs,env,graph,context' && api.io === undefined && api.net === undefined && Object.isFrozen(api)");
     try check(restricted, "(() => { try { api.fs.requestSync({ access: 'r' }); return false; } catch (e) { return e.name === 'PermissionDenied'; } })()");
     try t.expect(restricted_host.rust_isolate == null);
     host.flushGlueCache(a);
@@ -423,7 +423,7 @@ test "api: io and env narrowing are monotonic" {
         \\  out.home = one.get('HOME'); out.path = one.get('PATH');
         \\  const none = one.narrow({ allow: ['PATH'] });
         \\  out.widened = none.get('PATH') !== undefined || none.get('HOME') !== undefined;
-        \\  out.noScopeNarrow = api.scope.narrow === undefined;
+        \\  out.noContextNarrow = api.context.narrow === undefined && api.graph.narrow !== undefined;
         \\  out.frozen = Object.isFrozen(api) && Object.isFrozen(api.fs) && api.fs.narrow === undefined;
         \\}
     , true, &.{});
@@ -431,7 +431,7 @@ test "api: io and env narrowing are monotonic" {
     try fx.run();
     try check(fx.scope, "report.narrowedBackend === 'threaded' && report.countCapped && report.backendCapped");
     try check(fx.scope, "report.home === '/home/test' && report.path === undefined && report.widened === false");
-    try check(fx.scope, "report.noScopeNarrow === true && report.frozen === true && report.closeShared && report.closeHeld && report.closeAfter");
+    try check(fx.scope, "report.noContextNarrow === true && report.frozen === true && report.closeShared && report.closeHeld && report.closeAfter");
 }
 
 test "api: without a host grant fs is denied" {
@@ -450,20 +450,26 @@ test "api: without a host grant fs is denied" {
     try check(fx.scope, "denied === true && asyncDenied === true");
 }
 
-test "api: child scopes with import map, sync and async loaders and preload values" {
+test "api: contexts with an import map layer, sync and async hooks and preload values" {
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const loader = id => id === 'app:/main.js' ? "import { v } from 'dep'; globalThis.seen = v + preloaded" : { source: 'export const v = 40' };
-        \\  const spec = { main: 'app:/main.js', importMap: { imports: { dep: 'app:/dep.js' } }, preload: [{ source: '(values) => { globalThis.preloaded = values.n }', values: { n: 2 } }] };
-        \\  const a = await api.scope.create({ ...spec, loader });
-        \\  const b = await api.scope.create({ ...spec, loader: async id => loader(id) });
-        \\  await a.run();
-        \\  await b.run();
-        \\  const c = await api.scope.create({ main: 'app:/missing.js', loader: () => { throw new Error('nope') } });
-        \\  await c.run().catch(e => { globalThis.failed = e.name; });
+        \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { dep: 'app:/dep.js', main: 'app:/main.js' } })), hooks: [fromLoader(load)] });
+        \\  const preload = [{ source: '(values) => { globalThis.preloaded = values.n }', values: { n: 2 } }];
+        \\  const a = await api.context.create({ import: handlerFor(loader), preload });
+        \\  const b = await api.context.create({ import: handlerFor(async id => loader(id)), preload });
+        \\  await a.import('main');
+        \\  await b.import('main');
+        \\  const c = await api.context.create({ import: handlerFor(() => { throw new Error('nope') }) });
+        \\  await c.import('main').catch(e => { globalThis.failed = e.name; });
         \\  c.close();
-        \\  try { await c.run() } catch (e) { globalThis.closed = e.errno }
+        \\  try { await c.import('main') } catch (e) { globalThis.closed = e.errno }
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -473,42 +479,47 @@ test "api: child scopes with import map, sync and async loaders and preload valu
     try check(fx.scope, "failed === 'ModuleError' && closed === 3");
 }
 
-test "typescript: child scopes get only the transformers the init passes" {
+test "typescript: contexts get only the transformers the handler names" {
     if (!m.Api.oxc.enabled) return error.SkipZigTest;
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { Transform, ImportHandler, MakeRecipe } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\import { ts } from 'origine:@std/transformer/oxc';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const transform = ts();
         \\  const sources = id => id === 'app:/main.ts' ? "import { n } from 'dep'; const x: number = n + 1; globalThis.seen = x;" : 'export const n: number = 41;';
-        \\  const spec = { main: 'app:/main.ts', importMap: { imports: { dep: 'app:/dep.ts' } } };
+        \\  const map = { dep: 'app:/dep.ts', main: 'app:/main.ts', note: 'app:/note.txt', bad: 'app:/bad.ts', x: 'app:/x.txt', plain: 'app:/plain.ts' };
+        \\  const handlerFor = (load, transformer) => ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(importMap({ imports: map })),
+        \\    hooks: [fromLoader(load)],
+        \\    maker: MakeRecipe.inherit(transformer === undefined ? {} : { transformer }),
+        \\  });
+        \\  const load = async (load, transformer, specifier = 'main') => {
+        \\    const ctx = await api.context.create({ import: handlerFor(load, transformer) });
+        \\    return ctx.import(specifier);
+        \\  };
+        \\  const byTs = Transform.byExtension({ '.ts': transform });
         \\  // 1: a host transformer with a synchronous loader; 2: the same with an asynchronous one.
-        \\  await (await api.scope.create({ ...spec, loader: sources, transformers: { '.ts': transform } })).run();
-        \\  await (await api.scope.create({ ...spec, loader: async id => sources(id), transformers: { '.ts': transform } })).run();
-        \\  // 3: a guest function as transformer (parent realm, synchronous).
+        \\  await load(sources, byTs);
+        \\  await load(async id => sources(id), byTs);
+        \\  // 3: a guest function as transformer (creating realm; it may now be async).
         \\  const ids = [];
-        \\  await (await api.scope.create({ main: 'app:/note.txt', loader: () => 'hello', transformers: { '.txt': (source, id) => { ids.push(id); return 'globalThis.seen = ' + JSON.stringify(source.toUpperCase()); } } })).run();
+        \\  await load(() => 'hello', Transform.byExtension({ '.txt': async (source, id) => { ids.push(id); return 'globalThis.seen = ' + JSON.stringify(source.toUpperCase()); } }), 'note');
         \\  out.ids = ids.join(',');
         \\  // Failures reach the importer as a ModuleError whose message holds the diagnostics.
-        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: () => 'const x: number = ;', transformers: { '.ts': transform } })).run().catch(e => { out.hostError = e.message; });
-        \\  await (await api.scope.create({ main: 'app:/bad.ts', loader: async () => 'const x: number = ;', transformers: { '.ts': transform } })).run().catch(e => { out.asyncError = e.message; });
-        \\  await (await api.scope.create({ main: 'app:/x.txt', loader: () => 'x', transformers: { '.txt': () => { throw new Error('boom'); } } })).run().catch(e => { out.jsError = e.message; });
-        \\  // Without a map the TypeScript source reaches V8 as it is.
-        \\  await (await api.scope.create({ main: 'app:/plain.ts', loader: () => 'const x: number = 1;' })).run().catch(e => { out.plain = e.message; });
-        \\  // Malformed maps are rejected: bad extension syntax, non-functions, no loader.
-        \\  const rejects = options => api.scope.create({ main: 'app:/m.ts', ...options }).then(() => false, () => true);
-        \\  out.rejected = [
-        \\    await rejects({ loader: () => '', transformers: { transform } }),
-        \\    await rejects({ loader: () => '', transformers: { '.a/b': transform } }),
-        \\    await rejects({ loader: () => '', transformers: { '.': transform } }),
-        \\    await rejects({ loader: () => '', transformers: { '.ts': 1 } }),
-        \\    await rejects({ transformers: { '.ts': transform } }),
-        \\    await rejects({ loader: () => '', transformers: 'nope' }),
-        \\  ].join(',');
-        \\  // A host transformer is also a plain function (source, id) => string.
-        \\  out.direct = transform('const a: number = 1; export { a }', 'x.ts').includes('const a = 1');
-        \\  out.options = typeof ts({ jsx: 'classic', pragma: 'h' }) === 'function' && (() => { try { ts({ jsx: 'bogus' }); return false; } catch (e) { return e instanceof TypeError; } })();
+        \\  await load(() => 'const x: number = ;', byTs, 'bad').catch(e => { out.hostError = e.message; });
+        \\  await load(async () => 'const x: number = ;', byTs, 'bad').catch(e => { out.asyncError = e.message; });
+        \\  await load(() => 'x', Transform.byExtension({ '.txt': () => { throw new Error('boom'); } }), 'x').catch(e => { out.jsError = e.message; });
+        \\  // Without a transformer the TypeScript source reaches V8 as it is.
+        \\  await load(() => 'const x: number = 1;', undefined, 'plain').catch(e => { out.plain = e.message; });
+        \\  // Malformed tables are rejected: bad extension syntax, non-transformers.
+        \\  const rejects = table => { try { Transform.byExtension(table); return false; } catch (e) { return e.name === 'InvalidInput'; } };
+        \\  out.rejected = [rejects({ ts: transform }), rejects({ '.a/b': transform }), rejects({ '.': transform }), rejects({ '.ts': 1 }), rejects(null)].join(',');
+        \\  out.options = typeof ts({ jsx: 'classic', pragma: 'h' }) === 'object' && (() => { try { ts({ jsx: 'bogus' }); return false; } catch (e) { return e instanceof TypeError; } })();
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -519,20 +530,21 @@ test "typescript: child scopes get only the transformers the init passes" {
     try check(fx.scope, "report.ids === 'app:/note.txt'");
     try check(fx.scope, "report.hostError.includes('app:/bad.ts:1:') && report.asyncError.includes('app:/bad.ts:1:')");
     try check(fx.scope, "report.jsError.includes('boom') && report.plain.includes('SyntaxError') ");
-    try check(fx.scope, "report.rejected === 'true,true,true,true,true,true' && report.direct && report.options");
+    try check(fx.scope, "report.rejected === 'true,true,true,true,true' && report.options");
 }
 
-test "leaks: oxc transformers free options, diagnostics and instances on every path" {
+test "leaks: oxc descriptors validate options and run their diagnostics through every path" {
     if (!m.Api.oxc.enabled) return error.SkipZigTest;
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { Transform, ImportHandler, MakeRecipe } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\import { ts } from 'origine:@std/transformer/oxc';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  // Instances with owned strings, kept until Host.destroy.
-        \\  const kept = [];
-        \\  for (let i = 0; i < 8; i++) kept.push(ts({ jsx: 'classic', importSource: 'preact' + i, pragma: 'h', pragmaFrag: 'Fragment' }));
-        \\  // Strings allocated, then a later option is invalid: the half-built instance is released.
+        \\  // Option bags are validated in JS: nothing is allocated for a bad one.
         \\  let bad = 0;
         \\  for (let i = 0; i < 4; i++) {
         \\    try { ts({ importSource: 'x', pragma: 'y', pragmaFrag: 'z', development: 'nope' }); } catch (e) { if (e instanceof TypeError) bad++; }
@@ -540,42 +552,41 @@ test "leaks: oxc transformers free options, diagnostics and instances on every p
         \\    try { ts({ importSource: 'x', jsx: 'bogus' }); } catch (e) { if (e instanceof TypeError) bad++; }
         \\  }
         \\  out.bad = bad;
-        \\  // Direct calls: success and failure (the failure string is copied, thrown and freed).
-        \\  let failures = 0;
-        \\  for (let i = 0; i < 4; i++) {
-        \\    if (!kept[i].call(undefined, 'const a: number = 1; export { a }', 'a.ts').includes('const a = 1')) throw new Error('transform');
-        \\    try { kept[i].call(undefined, 'const x: number = ;', 'bad.ts'); } catch (e) { if (e instanceof SyntaxError) failures++; }
-        \\  }
-        \\  out.failures = failures;
-        \\  // Through child scopes, sync and async, ok and failing.
-        \\  const transform = ts();
+        \\  // Through contexts, sync and async hooks, ok and failing, over a native maker.
+        \\  const transformer = Transform.byExtension({ '.ts': ts({ jsx: 'classic', importSource: 'preact', pragma: 'h', pragmaFrag: 'Fragment' }) });
         \\  for (const source of ['export const n: number = 1', 'const x: number = ;']) {
-        \\    for (const loader of [() => source, async () => source]) {
-        \\      const child = await api.scope.create({ main: 'app:/m.ts', loader, transformers: { '.ts': transform } });
-        \\      await child.run().catch(() => { out.childFailed = (out.childFailed ?? 0) + 1; });
-        \\      child.close();
+        \\    for (const load of [() => source, async () => source]) {
+        \\      const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.ts' } })), hooks: [fromLoader(load)], maker: MakeRecipe.inherit({ transformer }) });
+        \\      const ctx = await api.context.create({ import: handler });
+        \\      await ctx.import('m').catch(() => { out.childFailed = (out.childFailed ?? 0) + 1; });
+        \\      ctx.close();
         \\    }
         \\  }
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.bad === 12 && report.failures === 4 && report.childFailed === 2");
+    try check(fx.scope, "report.bad === 12 && report.childFailed === 2");
 }
 
-test "leaks: a rejecting child settles the parent's run promise, repeatedly" {
+test "leaks: a rejecting context settles the parent's import promise, repeatedly" {
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const names = [];
+        \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js' } })), hooks: [fromLoader(load)] });
         \\  for (let i = 0; i < 5; i++) {
-        \\    const child = await api.scope.create({ main: 'app:/m.js', loader: () => 'throw new Error("boom")' });
-        \\    await child.run().catch(e => { names.push(e.name + ':' + e.message.includes('boom')); });
+        \\    const child = await api.context.create({ import: handlerFor(() => 'throw new Error("boom")') });
+        \\    await child.import('m').catch(e => { names.push(e.name + ':' + e.message.includes('boom')); });
         \\    child.close();
         \\  }
         \\  // A child whose module graph fails to load rejects through the same path.
-        \\  const missing = await api.scope.create({ main: 'app:/m.js', loader: async () => { throw new Error('nope'); } });
-        \\  await missing.run().catch(e => { names.push(e.name); });
+        \\  const missing = await api.context.create({ import: handlerFor(async () => { throw new Error('nope'); }) });
+        \\  await missing.import('m').catch(e => { names.push(e.name); });
         \\  globalThis.names = names.join(',');
         \\}
     , false, &.{});
@@ -587,15 +598,20 @@ test "leaks: a rejecting child settles the parent's run promise, repeatedly" {
 test "leaks: loads that never settle are freed with the host" {
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) {
-        \\  // Never-settling loader promises; their runs are deliberately not awaited.
+        \\  const handlerFor = (load, map) => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: map })), hooks: [fromLoader(load)] });
+        \\  // Never-settling hook promises; their imports are deliberately not awaited.
         \\  for (let i = 0; i < 3; i++) {
-        \\    const child = await api.scope.create({ main: 'app:/m' + i + '.js', importMap: { imports: { dep: 'app:/dep.js' } }, loader: () => new Promise(() => {}) });
-        \\    child.run().catch(() => {});
+        \\    const child = await api.context.create({ import: handlerFor(() => new Promise(() => {}), { m: 'app:/m' + i + '.js', dep: 'app:/dep.js' }) });
+        \\    child.import('m').catch(() => {});
         \\  }
-        \\  // One load that settles (released from `pendings`) next to one that does not.
-        \\  const mixed = await api.scope.create({ main: 'app:/main.js', loader: id => id === 'app:/main.js' ? Promise.resolve("import 'app:/hang.js'") : new Promise(() => {}) });
-        \\  mixed.run().catch(() => {});
+        \\  // One load that settles next to one that does not.
+        \\  const mixed = await api.context.create({ import: handlerFor(id => id === 'app:/main.js' ? Promise.resolve("import 'app:/hang.js'") : new Promise(() => {}), { main: 'app:/main.js', hang: 'app:/hang.js' }) });
+        \\  mixed.import('main').catch(() => {});
         \\  globalThis.started = true;
         \\}
     , false, &.{});
@@ -604,12 +620,20 @@ test "leaks: loads that never settle are freed with the host" {
     try check(fx.scope, "started === true");
 }
 
-test "api: child scopes inherit no authority and no scope capability" {
+test "api: contexts inherit no authority and no capability" {
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) {
-        \\  const child = await api.scope.create({ main: 'app:/main.js', loader: () => "globalThis.keys = Object.getOwnPropertyNames(globalThis).filter(k => k === 'api' || k === 'scope').length" });
-        \\  await child.run();
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(importMap({ imports: { main: 'app:/main.js' } })),
+        \\    hooks: [fromLoader(() => "globalThis.keys = Object.getOwnPropertyNames(globalThis).filter(k => k === 'api' || k === 'context' || k === 'graph' || k === 'scope').length")],
+        \\  });
+        \\  const child = await api.context.create({ import: handler });
+        \\  await child.import('main');
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -816,6 +840,350 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
     try check(fx.scope, "report.recipe && report.recipeBad && report.getter");
     try check(fx.scope, "report.verdicts && report.reject && report.link && report.byExt");
     try check(fx.scope, "report.providers && report.fromLoader && report.caches && report.custom");
+}
+
+test "graph: a native handler reads, links and evaluates modules without entering JS" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  out.native = handler.native;
+        \\  const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
+        \\  const ref = recipe.create(graph);
+        \\  out.declared = ref.status + ':' + ref.requests;
+        \\  await ref.load();
+        \\  out.loaded = ref.status + ':' + ref.requests.map(r => r.specifier + '=' + r.reference.name + '/' + r.reference.status + '/' + r.phase).join(',');
+        \\  const ctx = await api.context.create({ import: handler, graph });
+        \\  await ref.evaluate(ctx);
+        \\  out.evaluated = ref.status + ':' + (ref.context === ctx) + ':' + ctx.references.length;
+        \\  const dep = await ctx.import('./dep.js');
+        \\  out.imported = dep.name + ':' + dep.status;
+        \\  out.again = await ref.evaluate(ctx).then(() => 'ok');
+        \\  const other = await api.context.create({ import: handler, graph });
+        \\  out.bound = await ref.evaluate(other).then(() => 'no', e => e.name);
+        \\  const fresh = recipe.create(graph);
+        \\  await fresh.evaluate(other);
+        \\  out.second = fresh.status;
+        \\  const doomed = await api.context.create({ import: handler, graph });
+        \\  doomed.close();
+        \\  out.closed = await doomed.import('./dep.js').then(() => 'no', e => e.name);
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "dep.js", .data = "export const value = 41;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.js", .data = "import { value } from './dep.js'; globalThis.answer = value + 1; globalThis.runs = (globalThis.runs ?? 0) + 1;" });
+    try fx.run();
+    try check(fx.scope, "report.native === true && report.declared === 'declared:undefined'");
+    try check(fx.scope, "report.loaded === 'loaded:./dep.js=dep.js/declared/evaluation'");
+    try check(fx.scope, "report.evaluated === 'evaluated:true:1' && report.imported === 'dep.js:evaluated' && report.again === 'ok'");
+    try check(fx.scope, "report.bound === 'InvalidInput' && report.second === 'evaluated'");
+    try check(fx.scope, "report.closed === 'StaleHandle'");
+    try check(fx.rt.scopes.items[1], "answer === 42 && runs === 1");
+    try check(fx.rt.scopes.items[2], "answer === 42 && runs === 1");
+    // A handler with no JS function in it never calls the driver.
+    try t.expectEqual(@as(usize, 0), fx.host.driver_calls);
+}
+
+test "graph: JS layers, hooks, makers and transformers run in the creating realm" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import, ImportError, MakeRecipe } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative, importMap } from 'origine:@std/graph/resolve/layers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const calls = [];
+        \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered()
+        \\      .layer(importMap({ imports: { alias: 'app:/value.js' } }))
+        \\      .layer(async ({ specifier, referrer }) => { calls.push(specifier); return specifier.startsWith('mem:') ? { id: specifier } : undefined; })
+        \\      .layer(relative()),
+        \\    hooks: [
+        \\      async resolved => {
+        \\        if (resolved.id === 'mem:secret') return Import.reject(ImportError.PermissionDenied);
+        \\        if (resolved.id === 'mem:gone') return Import.reject(ImportError.other('gone for good'));
+        \\        if (resolved.id === 'app:/value.js') return Import.provide(ModuleSource.text('export const value = 40;'));
+        \\        if (resolved.id === 'mem:ts') return Import.provide(ModuleSource.text('export const t = 1;').withTransformer(async s => s + ' export const u = 2;'));
+        \\        if (resolved.id === 'mem:recipe') return Import.provide(ModuleRecipe({ source: ModuleSource.text('export const r = "recipe"; export const where = import.meta.url;'), import: leaf, name: 'mem:recipe' }));
+        \\        if (resolved.id === 'mem:accept') return Import.accept();
+        \\        return Import.next();
+        \\      },
+        \\    ],
+        \\    maker: MakeRecipe.fn(({ id }) => ({ transformer: text => text + `\n/* made ${id} */` })),
+        \\    meta: ({ id }) => ({ id, n: 7, nested: { ok: true } }),
+        \\  });
+        \\  out.mixed = handler.native === false;
+        \\  const graph = api.graph;
+        \\  const ctx = await api.context.create({ import: handler, graph });
+        \\  const text = (name, source) => ModuleRecipe({ source: ModuleSource.text(source), import: handler, name }).create(graph);
+        \\  await text('main', "import { value } from 'alias'; import { t, u } from 'mem:ts'; import { r, where } from 'mem:recipe'; globalThis.sum = value + t + u; globalThis.r = r + where; globalThis.here = import.meta.id + import.meta.n + import.meta.nested.ok;").evaluate(ctx);
+        \\  out.denied = await text('d1', "import 'mem:secret'").evaluate(ctx).then(() => 'no', e => e.message);
+        \\  out.other = await text('d2', "import 'mem:gone'").evaluate(ctx).then(() => 'no', e => e.message);
+        \\  out.accept = await text('d3', "import 'mem:accept'").evaluate(ctx).then(() => 'no', e => e.message);
+        \\  out.missing = await text('d4', "import 'nowhere'").evaluate(ctx).then(() => 'no', e => e.message);
+        \\  out.calls = calls.includes('mem:ts') && calls.includes('nowhere');
+        \\  const scratch = await api.context.create({ import: handler, graph });
+        \\  out.failed = await ctx.import('mem:secret').then(() => 'no', e => e.name);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.mixed && report.calls");
+    try check(fx.scope, "report.denied.includes('PermissionDenied') && report.other.includes('gone for good')");
+    try check(fx.scope, "report.accept.includes('PermissionDenied') && report.missing.includes('NotFound') && report.failed === 'ModuleError'");
+    try check(fx.rt.scopes.items[1], "sum === 43");
+    try check(fx.rt.scopes.items[1], "r === 'recipemem:recipe'");
+    try check(fx.rt.scopes.items[1], "here === 'main7true'");
+    try t.expect(fx.host.driver_calls > 0);
+}
+
+test "graph: origineProvider serves an allowlist and JS cannot forge origine: modules" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { origine } from 'origine:@std/graph/resolve/layers';
+        \\import { origineProvider } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const make = hooks => ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()), hooks });
+        \\  const text = origineProvider({ std: { include: ['text'] } });
+        \\  const forging = make([async resolved => (resolved.id === 'origine:evil' || resolved.id === 'origine:@std/text' ? Import.provide(ModuleSource.text('export const encodeUtf8 = () => ({ length: 99 }); export const x = 1;')) : Import.next())]);
+        \\  const handler = make([text]);
+        \\  out.native = handler.native;
+        \\  const run = async (h, name, source) => {
+        \\    const ctx = await api.context.create({ import: h });
+        \\    return ModuleRecipe({ source: ModuleSource.text(source), import: h, name }).create(api.graph).evaluate(ctx).then(() => 'ok', e => e.message);
+        \\  };
+        \\  out.served = await run(handler, 'a', "import { encodeUtf8 } from 'origine:@std/text'; globalThis.len = encodeUtf8('héllo').length;");
+        \\  out.excluded = await run(handler, 'b', "import 'origine:@std/fs'");
+        \\  const everything = make([origineProvider({ std: { exclude: [] } })]);
+        \\  out.unknown = await run(everything, 'c', "import 'origine:nothing'");
+        \\  out.unlisted = await run(handler, 'c2', "import 'origine:nothing'");
+        \\  out.forged = await run(forging, 'd', "import 'origine:evil'");
+        \\  out.forgedStd = await run(forging, 'e', "import { encodeUtf8 } from 'origine:@std/text'; globalThis.len = encodeUtf8('x').length;");
+        \\  const all = make([origineProvider({ std: { exclude: ['fs'] } })]);
+        \\  out.excludeServed = await run(all, 'f', "import { eprintln } from 'origine:@std/debug'; globalThis.debugOk = typeof eprintln;");
+        \\  out.excludeDenied = await run(all, 'g', "import 'origine:@std/fs'");
+        \\  const bad = await api.context.create({ import: handler }).then(() => 'ok');
+        \\  out.bad = bad;
+        \\  out.empty = await run(make([]), 'h', "import 'origine:@std/text'");
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.native === true && report.served === 'ok'");
+    try check(fx.scope, "report.excluded.includes('PermissionDenied') && report.unlisted.includes('PermissionDenied') && report.unknown.includes('NotFound')");
+    try check(fx.scope, "report.forged.includes('PermissionDenied') && report.forgedStd.includes('PermissionDenied')");
+    try check(fx.scope, "report.excludeServed === 'ok' && report.excludeDenied.includes('PermissionDenied') && report.empty.includes('NotFound')");
+    try check(fx.rt.scopes.items[1], "len === 6");
+    // Only the two imports through the handler with a JS hook entered the driver (resolve and load each).
+    try t.expectEqual(@as(usize, 4), fx.host.driver_calls);
+}
+
+test "graph: link shares or hardens the module of another context" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const graph = api.graph;
+        \\  const layer = ({ specifier }) => (specifier.startsWith('link:') ? { id: specifier } : undefined);
+        \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
+        \\  const a = await api.context.create({ import: leaf });
+        \\  const source = ModuleRecipe({ source: ModuleSource.text('export let n = 1; export function inc() { n++; } export const obj = { tag: "a" };'), import: leaf, name: 'a-mod' }).create(graph);
+        \\  out.unbound = await (async () => { try { Import.link(source, { mode: 'shared' }); return 'made'; } catch (e) { return e.name; } })();
+        \\  await source.evaluate(a);
+        \\  const linker = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(layer),
+        \\    hooks: [async r => (r.id === 'link:hard' ? Import.link(source, { mode: 'hardened' }) : r.id === 'link:shared' ? Import.link(source, { mode: 'shared' }) : r.id === 'link:alias' ? Import.link(source, { mode: 'shared' }) : Import.next())],
+        \\  });
+        \\  const b = await api.context.create({ import: linker });
+        \\  const run = (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: linker, name }).create(graph).evaluate(b).then(() => 'ok', e => e.message);
+        \\  out.shared = await run('s', "import { n, inc, obj } from 'link:shared'; inc(); globalThis.shared = [n, obj.tag];");
+        \\  out.hard = await run('h', "import { n, inc, obj } from 'link:hard'; globalThis.hard = [n, typeof inc, Object.isFrozen(obj), obj.tag];");
+        \\  const stale = ModuleRecipe({ source: ModuleSource.text('export const z = 1;'), import: leaf, name: 'declared-only' }).create(graph);
+        \\  const unbound = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [async () => Import.link(stale, { mode: 'shared' })] });
+        \\  const c = await api.context.create({ import: unbound });
+        \\  out.notBound = await ModuleRecipe({ source: ModuleSource.text("import 'link:x'"), import: unbound, name: 'u' }).create(graph).evaluate(c).then(() => 'ok', e => e.message);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.unbound === 'made' && report.shared === 'ok' && report.hard === 'ok' && report.notBound.includes('InvalidInput')");
+    try check(fx.rt.scopes.items[2], "shared[0] === 2 && shared[1] === 'a'");
+    try check(fx.rt.scopes.items[2], "hard[0] === 2 && hard[1] === 'function' && hard[2] === true && hard[3] === 'a'");
+}
+
+test "graph: native plans with oxc, json, import maps and accept never enter JS" {
+    if (!m.Api.oxc.enabled) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import, MakeRecipe, Transform } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative, importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider, json } from 'origine:@std/graph/providers';
+        \\import { ts } from 'origine:@std/transformer/oxc';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const fs = api.fs.requestSync({ access: 'r' });
+        \\  const graph = api.graph.narrow({ fs });
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(importMap({ imports: { dep: './dep.js' } })).layer(relative()),
+        \\    hooks: [json(), fsProvider({ read: 'mmap' })],
+        \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.ts': ts() }) }),
+        \\  });
+        \\  out.native = handler.native + ':' + handler.plan.map(e => e.kind).join(',');
+        \\  const ctx = await api.context.create({ import: handler, graph });
+        \\  const main = ModuleRecipe({ source: ModuleSource.file('main.ts').withTransformer(ts()), import: handler }).create(graph);
+        \\  out.recipeNative = main.status;
+        \\  await main.load();
+        \\  out.requests = main.requests.map(r => r.specifier + '=' + r.reference.name).join(',');
+        \\  await main.evaluate(ctx);
+        \\  out.evaluated = main.status;
+        \\  const closed = api.graph.narrow({});
+        \\  const noFs = await api.context.create({ import: handler, graph: closed });
+        \\  out.noFs = await ModuleRecipe({ source: ModuleSource.text('import "./a.ts"'), import: handler, name: 'nofs' }).create(closed).evaluate(noFs).then(() => 'ok', e => e.message);
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.createDirPath(t.io, "app:");
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "app:/dep.js", .data = "export const k = 1;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "a.ts", .data = "export const n: number = 40;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "data.json", .data = "{\"k\": 1}" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.ts", .data = "import { n } from './a.ts'; import { k } from 'dep'; import data from './data.json' with { type: 'json' }; const total: number = n + k + data.k; globalThis.answer = total;" });
+    try fx.run();
+    try check(fx.scope, "report.native === 'true:native,native,native,native,native,native,native'");
+    try check(fx.scope, "report.requests === './a.ts=a.ts,dep=app:/dep.js,./data.json=data.json' && report.evaluated === 'evaluated'");
+    try check(fx.scope, "report.noFs.includes('PermissionDenied')");
+    try check(fx.rt.scopes.items[1], "answer === 42");
+    try t.expectEqual(@as(usize, 0), fx.host.driver_calls);
+}
+
+test "graph: a second reference of one recipe reuses the code cache; dir and custom persist it" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider } from 'origine:@std/graph/providers';
+        \\import { CodeCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const ro = api.fs.requestSync({ access: 'r' });
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  const run = async (graph, count) => {
+        \\    const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
+        \\    const a = await api.context.create({ import: handler, graph });
+        \\    await recipe.create(graph).evaluate(a);
+        \\    const first = await graph.flush();
+        \\    const b = await api.context.create({ import: handler, graph });
+        \\    await recipe.create(graph).evaluate(b);
+        \\    return [first, await graph.flush()];
+        \\  };
+        \\  out.memory = (await run(api.graph.narrow({ fs: ro, codeCache: CodeCache.memory() }))).join(':');
+        \\  out.none = (await run(api.graph.narrow({ fs: ro }))).join(':');
+        \\  const stored = [];
+        \\  const custom = CodeCache.custom({ load: () => undefined, store: (key, bytes) => { stored.push(key.id + ':' + (bytes instanceof Uint8Array) + ':' + (bytes.length > 0)); } });
+        \\  out.custom = (await run(api.graph.narrow({ fs: ro, codeCache: custom }))).join(':');
+        \\  out.stored = stored.join(',');
+        \\  const rw = api.fs.requestSync({ access: 'rw' });
+        \\  out.dir = (await run(api.graph.narrow({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
+        \\  out.dirAgain = (await run(api.graph.narrow({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "dep.js", .data = "export function add(a, b) { return a + b; }" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.js", .data = "import { add } from './dep.js'; globalThis.sum = add(20, 22);" });
+    try fx.run();
+    // Two modules compile without a cache in the first context; the second one finds both cached.
+    try check(fx.scope, "report.memory === '2:0'");
+    try check(fx.scope, "report.none === '0:0'");
+    try check(fx.scope, "report.custom === '2:0' && report.stored.split(',').length === 2 && report.stored.includes('dep.js:true:true')");
+    try check(fx.scope, "report.dir === '2:0' && report.dirAgain === '0:0'");
+    var cache_dir = try fx.tmp.dir.openDir(t.io, "__oricache__", .{ .iterate = true });
+    defer cache_dir.close(t.io);
+    var seen: usize = 0;
+    var it = cache_dir.iterate();
+    while (try it.next(t.io)) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".v8-code-cache")) seen += 1;
+    }
+    try t.expect(seen >= 2);
+}
+
+test "graph: retain used frees unused modules, delete resets identity, release unpins" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { ImportCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const handlerFor = cache => ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => Import.provide(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const id = '${r.id}';`))],
+        \\    cache,
+        \\  });
+        \\  // retain 'used': a module lives while a reference holds it.
+        \\  const used = ImportCache.native({ retain: 'used' });
+        \\  const handler = handlerFor(used);
+        \\  const ctx = await api.context.create({ import: handler });
+        \\  const first = await ctx.import('m1');
+        \\  out.held = used.in(ctx).size + ':' + ctx.references.length;
+        \\  const same = await ctx.import('m1');
+        \\  out.same = same === first;
+        \\  first.release();
+        \\  out.released = used.in(ctx).size + ':' + ctx.references.length + ':' + first.status;
+        \\  await ctx.import('m1').then(r => r.release());
+        \\  out.afterRelease = used.in(ctx).size;
+        \\  // retain 'all': delete is an identity reset.
+        \\  const all = ImportCache.native({ retain: 'all' });
+        \\  const keep = await api.context.create({ import: handlerFor(all) });
+        \\  const one = await keep.import('m2');
+        \\  out.table = all.in(keep).size;
+        \\  out.deleted = all.in(keep).delete('m2');
+        \\  out.afterDelete = all.in(keep).size;
+        \\  const two = await keep.import('m2');
+        \\  out.reimported = (two !== one) + ':' + all.in(keep).size;
+        \\  out.cleared = all.in(keep).clear() + ':' + all.in(keep).size;
+        \\  out.bad = (() => { try { all.in({}); } catch (e) { return e.name; } })();
+        \\  // a cap on the table drops the oldest unpinned modules.
+        \\  const capped = ImportCache.native({ retain: 'all', entries: 2 });
+        \\  const small = await api.context.create({ import: handlerFor(capped) });
+        \\  for (const id of ['a', 'b', 'c', 'd']) (await small.import(id)).release();
+        \\  out.capped = capped.in(small).size <= 2;
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.held === '1:1' && report.same && report.released === '0:0:evaluated' && report.afterRelease === 0");
+    try check(fx.scope, "report.table === 1 && report.deleted === 1 && report.afterDelete === 0 && report.reimported === 'true:1'");
+    try check(fx.scope, "report.cleared === '1:0' && report.bad === 'InvalidInput' && report.capped");
+    // 'used': the module was evaluated again after the release; 'all': once, then again after delete.
+    try check(fx.rt.scopes.items[1], "count === 2");
+    try check(fx.rt.scopes.items[2], "count === 2");
 }
 
 test "api: Rust-style fs over sync and async io" {
@@ -2636,59 +3004,73 @@ test "json modules embed the file as an escaped string literal for JSON.parse" {
     try t.expect(!json.requested(&.{}));
 }
 
-test "api: closing a child scope disposes it, including one with a load in flight" {
+test "api: closing a context disposes it, including one with a load in flight" {
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const ids = [];
+        \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js', late: 'app:/late.js' } })), hooks: [fromLoader(load)] });
         \\  for (let n = 0; n < 20; n++) {
-        \\    const child = await api.scope.create({ main: 'm.js', loader: id => 'export const x = ' + id.length });
-        \\    await child.run();
+        \\    const child = await api.context.create({ import: handlerFor(id => 'export const x = ' + id.length) });
+        \\    await child.import('m');
         \\    child.close();
         \\    try { child.close(); ids.push('twice'); } catch (e) { ids.push('stale'); }
         \\  }
-        \\  // A child whose loader promise settles only after the child was closed.
+        \\  const disposable = await api.context.create({ import: handlerFor(() => '') });
+        \\  disposable[Symbol.dispose]();
+        \\  disposable[Symbol.dispose]();
+        \\  ids.push(await disposable.import('m').then(() => 'imported', e => e.name));
+        \\  // A context whose hook promise settles only after the context was closed.
         \\  let release;
         \\  const gate = new Promise(resolve => { release = resolve; });
-        \\  const late = await api.scope.create({ main: 'late.js', loader: () => gate.then(() => 'export const y = 1') });
-        \\  const running = late.run().then(() => 'ran', () => 'rejected');
+        \\  const late = await api.context.create({ import: handlerFor(() => gate.then(() => 'export const y = 1')) });
+        \\  const running = late.import('late').then(() => 'ran', () => 'rejected');
         \\  await Promise.resolve();
         \\  late.close();
         \\  release('export const y = 1');
-        \\  globalThis.report = { stale: ids.every(entry => entry === 'stale'), late: await running };
+        \\  globalThis.report = { stale: ids.slice(0, 20).every(entry => entry === 'stale'), disposed: ids[20], late: await running };
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.stale === true && report.late === 'rejected'");
+    try check(fx.scope, "report.stale === true && report.late === 'rejected' && report.disposed === 'StaleHandle'");
     fx.rt.pump();
-    // Only the init scope is left: every child was freed, not just closed.
+    // Only the init scope is left: every context was freed, not just closed.
     try t.expectEqual(@as(usize, 1), fx.rt.scopes.items.len);
 }
 
-test "api: module preloads, with the origine namespace enabled per child" {
+test "api: module preloads, with the origine allowlist per context" {
     var fx: Fixture = undefined;
     try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { origine, importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { origineProvider, fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const report = {};
-        \\  // A module preload imports host modules when the child asks for the namespace, and its
-        \\  // default export receives the (frozen) values.
-        \\  const child = await api.scope.create({
-        \\    main: 'm.js',
-        \\    origineNamespace: true,
-        \\    loader: () => "if (globalThis.seen !== 5) throw new Error('seen ' + globalThis.seen);",
+        \\  const resolver = ImportResolver.layered().layer(origine()).layer(importMap({ imports: { m: 'app:/m.js' } }));
+        \\  const withText = ImportHandler.make({ resolver, hooks: [origineProvider({ std: { include: ['text'] } }), fromLoader(() => "if (globalThis.seen !== 5) throw new Error('seen ' + globalThis.seen);")] });
+        \\  const without = ImportHandler.make({ resolver, hooks: [fromLoader(() => '')] });
+        \\  // A module preload imports host modules when the handler serves them, and its default
+        \\  // export receives the (frozen) values.
+        \\  const child = await api.context.create({
+        \\    import: withText,
         \\    preload: [
         \\      { source: '(values) => { globalThis.first = values.n; }', values: { n: 2 } },
         \\      { module: "import { encodeUtf8 } from 'origine:@std/text'; export default async (values) => { await null; globalThis.seen = encodeUtf8('abc').length + first; };", values: {} },
         \\    ],
         \\  });
-        \\  await child.run();
+        \\  await child.import('m');
         \\  child.close();
         \\  report.ok = true;
-        \\  // Without the flag the same import is refused, and a failing preload rejects create.
-        \\  report.refused = await api.scope.create({ main: 'm.js', loader: () => '', preload: [{ module: "import 'origine:@std/text';" }] }).then(() => false, () => true);
-        \\  report.thrown = await api.scope.create({ main: 'm.js', loader: () => '', preload: [{ module: 'export default () => { throw new Error("boom"); };', values: {} }] }).then(() => false, e => e.name === 'ModuleError');
-        \\  report.both = await api.scope.create({ main: 'm.js', loader: () => '', preload: [{ source: '() => 1', module: 'export {}' }] }).then(() => false, () => true);
+        \\  // Without a provider the same import is refused, and a failing preload rejects create.
+        \\  report.refused = await api.context.create({ import: without, preload: [{ module: "import 'origine:@std/text';" }] }).then(() => false, () => true);
+        \\  report.thrown = await api.context.create({ import: without, preload: [{ module: 'export default () => { throw new Error("boom"); };', values: {} }] }).then(() => false, e => e.name === 'ModuleError');
+        \\  report.both = await api.context.create({ import: without, preload: [{ source: '() => 1', module: 'export {}' }] }).then(() => false, () => true);
         \\  globalThis.report = report;
         \\}
     , false, &.{});
@@ -2696,7 +3078,7 @@ test "api: module preloads, with the origine namespace enabled per child" {
     try fx.run();
     try check(fx.scope, "report.ok && report.refused && report.thrown && report.both");
     fx.rt.pump();
-    // The closed child and the three whose preloads failed (create closes them) are all freed.
+    // The closed context and the three whose preloads failed (create closes them) are all freed.
     try t.expectEqual(@as(usize, 1), fx.rt.scopes.items.len);
 }
 

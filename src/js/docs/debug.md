@@ -14,4 +14,4 @@ import { eprintln } from 'origine:@std/debug';
 
 Cost (checklist 2): the line is built as a JS string, copied once into the call arena and written with
 libc `write` through a 512-byte stack buffer (longer lines take several `write` calls). Nothing is
-retained, and there is no global: a child scope needs `origineNamespace: true` to import it.
+retained, and there is no global: a context imports it only when its handler has an `origineProvider` that includes `debug`.

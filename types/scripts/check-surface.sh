@@ -59,9 +59,10 @@ missing "net member" "$here/net.d.ts" $(awk '/Base of every handle/ {on=1} /cons
 missing "net cap member" "$here/net.d.ts" listen connect Handle Server PullServer EventServer Socket PullSocket EventSocket
 
 # Capabilities of api.*.
-missing "api capability" "$here/api.d.ts" fs env scope io net
+missing "api capability" "$here/api.d.ts" fs env graph context io net
 missing "env member" "$here/env.d.ts" args get list narrow
 missing "io cap member" "$here/io.d.ts" create narrow close run now timer timerAt sleep sleepUntil
-missing "scope option" "$here/scope.d.ts" main importMap loader preload transformers origineNamespace run close create
+missing "context member" "$here/context.d.ts" import graph preload references close create
+missing "graph member" "$here/graph.d.ts" narrow flush load evaluate release requests status name context
 
 exit $status

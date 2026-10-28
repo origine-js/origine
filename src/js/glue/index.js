@@ -9,7 +9,8 @@
   const options = {
     fs: { root: undefined, write: true, async: true, sync: true },
     env: null,
-    scope: undefined,
+    graph: undefined,
+    context: undefined,
     io: { parent: null, backends: undefined, max: Infinity, live: 0 },
     net: undefined,
   };
@@ -18,23 +19,27 @@
   };
   const full = {};
   const basic = {};
-  for (const name of ['fs', 'env', 'scope', 'io', 'net']) {
-    const get = freeze(() => {
-      if (!bound[name]) {
-        // Accessing a capability must preserve a pending synchronous fs error.
-        const previous = util.errno[0];
-        try {
-          const factory = native.load(name, native, capabilities[name] === undefined);
-          const code = util.take();
-          if (code !== 0) throw util.failure(code);
-          if (factory !== undefined) prepare(name, factory);
-          bound[name] = true;
-        } finally {
-          util.errno[0] = previous;
-        }
+  // `context` is built on the parts `graph` publishes, so binding it binds `graph` first.
+  const needs = { context: 'graph' };
+  const access = name => {
+    if (needs[name] !== undefined) access(needs[name]);
+    if (!bound[name]) {
+      // Accessing a capability must preserve a pending synchronous fs error.
+      const previous = util.errno[0];
+      try {
+        const factory = native.load(name, native, capabilities[name] === undefined);
+        const code = util.take();
+        if (code !== 0) throw util.failure(code);
+        if (factory !== undefined) prepare(name, factory);
+        bound[name] = true;
+      } finally {
+        util.errno[0] = previous;
       }
-      return capabilities[name];
-    });
+    }
+    return capabilities[name];
+  };
+  for (const name of ['fs', 'env', 'graph', 'context', 'io', 'net']) {
+    const get = freeze(() => access(name));
     const descriptor = { get, enumerable: true, configurable: false };
     Object.defineProperty(full, name, descriptor);
     if (name !== 'io' && name !== 'net') Object.defineProperty(basic, name, descriptor);

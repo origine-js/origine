@@ -2,11 +2,12 @@ import type { EnvCap } from "./env.d.ts";
 import type { FsCap } from "./fs.d.ts";
 import type { IoCap } from "./io.d.ts";
 import type { NetCap } from "./net.d.ts";
-import type { ScopeCap } from "./scope.d.ts";
+import type { ContextCap } from "./context.d.ts";
+import type { ModuleGraph } from "./graph.d.ts";
 
 /**
  * The host API handed to `main`: every permission a program has. Frozen. Narrow a capability
- * (`api.env.narrow`, `api.io.narrow`) to hand a slice to a child scope; nothing widens one.
+ * (`api.env.narrow`, `api.io.narrow`) to hand a slice to a context; nothing widens one.
  * `api.io` and `api.net` exist where the embedder gave the program a runtime ceiling (the
  * `origine` shell does); see {@link BasicApi} for code that must also run without it.
  */
@@ -19,12 +20,14 @@ export interface Api {
   readonly net: NetCap;
   /** Arguments and environment variables. */
   readonly env: EnvCap;
-  /** Child scopes. */
-  readonly scope: ScopeCap;
+  /** Module graph: sources, code caches and the authority modules are produced with. */
+  readonly graph: ModuleGraph;
+  /** Realms whose imports run through an import handler. */
+  readonly context: ContextCap;
 }
 
 /** The part of {@link Api} every embedder provides. */
-export type BasicApi = Pick<Api, "fs" | "env" | "scope">;
+export type BasicApi = Pick<Api, "fs" | "env" | "graph" | "context">;
 
 /**
  * The entry point: an init module exports `main`. It may be `async`; the program runs until the

@@ -1,6 +1,17 @@
 # `origine:@std/graph/*`
 
-Source: [std/graph/](../std/graph/). The data side of the module graph: frozen descriptions of modules, import pipelines and caches. **Nothing loads or evaluates a recipe yet**: `api.graph` and `api.context` are designed in [docs/graph-api.md](../../../docs/graph-api.md) and not implemented, and `api.scope` is unchanged. Everything here is authority-free, pure JS and snapshot-safe; a builder reads no file and calls no native.
+Source: [std/graph/](../std/graph/) (data), [glue/graph.js](../glue/graph.js) and [glue/context.js](../glue/context.js) (`api.graph`, `api.context`). The module graph: frozen descriptions of modules, import pipelines and caches, and the capabilities that load and evaluate them ([docs/graph-api.md](../../../docs/graph-api.md) has the design, the deviations and the checklist). The builders below are authority-free, pure JS and snapshot-safe; reading files, compiling and evaluating happen in `api.graph` and `api.context`.
+
+```js
+const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }), codeCache: CodeCache.memory() });
+const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
+using ctx = await api.context.create({ import: handler, graph });
+const reference = recipe.create(graph);            // declared; nothing read yet
+await reference.load();                            // loaded; reference.requests lists its imports
+await reference.evaluate(ctx);                     // bound to ctx and evaluated
+await graph.flush();                               // persists the code caches
+```
 
 Types: [types/std/graph.d.ts](../../../types/std/graph.d.ts). Every builder throws a frozen `{ errno, name: 'InvalidInput', message }` for a malformed argument. Option bags are read as own data properties (a getter counts as missing) and copied.
 
@@ -35,7 +46,7 @@ const recipe = ModuleRecipe({ source: ModuleSource.file('./main.js'), import: ha
 
 ## Cost and errors, by name
 
-Nothing here blocks, allocates natively, detaches or retains a host resource. The costs a call site cannot see are made options.
+The builders block nothing, allocate nothing natively, detach nothing and retain no host resource; the costs a call site cannot see are made options. `api.graph` and `api.context` read files with the graph's sync grant inside the load stage, which blocks the isolate thread like `requestSync` does.
 
 ### `module`
 
@@ -62,10 +73,17 @@ Nothing here blocks, allocates natively, detaches or retains a host resource. Th
 - `origineProvider({ std: { include } | { exclude } })`: serves `origine:@std/*` modules (names without the prefix, for example `'text'`, `'transformer/oxc'`). `std` is required and exactly one of `include`/`exclude`: there is no "everything" default. It can only narrow the creating context's own set.
 - `fsProvider({ read })`: `read` is required, `'copy'` or `'mmap'`. `'mmap'` avoids a copy for ASCII/Latin-1 text, but a file changed while mapped changes under V8.
 - `json()`: `type: 'json'` imports as a module whose default export is the parsed value.
-- `fromLoader(loader)`: adapts the `loader(id, attributes)` of `api.scope.create` (a string, `{ source }`, or a promise of either) to a hook; anything else rejects `InvalidData`.
+- `fromLoader(loader)`: adapts a loader `loader(id, attributes)` (a string, `{ source }`, or a promise of either) to a hook; anything else rejects `InvalidData`.
 
 ### `cache`
 
 - `ImportCache.native({ retain, entries? })`: `retain` is required. `'all'` keeps entries for the context's lifetime; `'used'` drops an entry once nothing holds it, so a later import evaluates the module again. `entries` caps the table.
 - `ResolveCache.native({ entries? })`.
 - `CodeCache.none`, `CodeCache.memory({ bytes? })`, `CodeCache.dir(fs, { bytes? })` (the `__oricache__` format; touches the disk when used), `CodeCache.custom({ load, store })` (yours, may be async, run in the creating realm).
+
+### `api.graph` and `api.context`
+
+- `api.graph.narrow({ fs?, codeCache? })`: a graph with those replaced. `fs` is a sync grant (`api.fs.requestSync`); the root `api.graph` has none, so it can only supply text sources and `origine:` modules. `graph.flush()` resolves how many modules' code caches were stored.
+- `recipe.create(graph)` returns a `ModuleReference`: `name`, `status` (`declared`, `loaded`, `evaluating`, `evaluated`, `errored`), `requests` (`undefined` until loaded; each `{ specifier, attributes, phase, reference }`), `context` (the context it is bound to), `load()`, `evaluate(ctx)` (binds to one context; evaluating in a second is `InvalidInput`), `release()` / `Symbol.dispose` (unpins the module).
+- `api.context.create({ import, graph?, preload? })` returns a `Context`: `import(specifier, { attributes? })` (a reference to the evaluated module), `references`, `graph`, `close()` / `Symbol.dispose`. `import` is required. `preload` entries are `{ source, values }` or `{ module, values }`, run before anything is imported; `values` is deep-frozen plain data and functions only. A context gets no capability unless you pass one through `values`, and never sees the graph.
+- `ImportCache#in(ctx)` is the context's module table: `size`, `delete(id)` (the next import makes and evaluates a new module), `clear()`.

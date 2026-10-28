@@ -24,6 +24,16 @@ const capacity = (what, name, value) => {
 };
 const withCapacity = (host, kind, name, value, rest) => freeze({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
 
+const TABLE = Symbol.for('origine:@std/graph/table');
+/// The identity table of a context: `{ size, delete(id), clear() }`. `delete(id)` forgets the module
+/// (and what imported it), so the next import of it makes and evaluates a new one, while the old one
+/// keeps working; `clear()` forgets every module. All the handlers of a context share this one table.
+function inContext(ctx) {
+  const view = ctx?.[TABLE];
+  if (typeof view !== 'function') throw invalid('ImportCache#in: expected a context');
+  return view();
+}
+
 export const ImportCache = freeze({
   /// The native table. `retain` is required because it changes what re-importing does:
   /// `'all'` keeps every entry for the context's lifetime (module identity as in ESM);
@@ -32,7 +42,10 @@ export const ImportCache = freeze({
   native(options) {
     const retain = own(options, 'retain');
     if (retain !== 'all' && retain !== 'used') throw invalid("ImportCache.native: retain must be 'all' or 'used'");
-    return withCapacity('importCache', 'cache', 'entries', capacity('ImportCache.native', 'entries', own(options, 'entries')), { retain });
+    const descriptor = withCapacity('importCache', 'cache', 'entries', capacity('ImportCache.native', 'entries', own(options, 'entries')), {
+      retain,
+    });
+    return freeze({ ...descriptor, in: inContext });
   },
 });
 

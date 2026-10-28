@@ -43,5 +43,8 @@ native => {
   const ioHandles = new WeakSet();
   const closedIo = new WeakSet();
 
-  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo };
+  // Parts one factory publishes for another (the graph glue for the context glue).
+  const shared = {};
+
+  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo, shared };
 };

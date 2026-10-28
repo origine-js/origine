@@ -79,6 +79,11 @@ declare module "origine:@std/graph/module" {
     readonly codeCache: import("origine:@std/graph/cache").CodeCache | null;
     /** True when neither the source's transformers nor the import handler need the JS realm: the recipe is then plain data. */
     readonly native: boolean;
+    /**
+     * A reference to this module in `graph` (`api.graph` or a narrowed one). Nothing is read or compiled
+     * until `reference.load()` or `reference.evaluate(ctx)`.
+     */
+    create(graph: import("../graph.d.ts").ModuleGraph): import("../graph.d.ts").ModuleReference;
   }
   export const ModuleRecipe: {
     /** Throws `InvalidInput` for a missing or mistyped option. Options are read as own data properties (a getter counts as missing). */
@@ -285,7 +290,7 @@ declare module "origine:@std/graph/providers" {
   export function fsProvider(options: { readonly read: "copy" | "mmap" }): Provider & { readonly read: "copy" | "mmap" };
   /** Serves `type: 'json'` imports as a module whose default export is the parsed value. */
   export function json(): Provider;
-  /** Adapts the loader of `api.scope.create`: `loader(id, attributes)` returns source text, `{ source }`, or a promise of either. */
+  /** Adapts a loader function to a hook: `loader(id, attributes)` returns source text, `{ source }`, or a promise of either. */
   export function fromLoader(
     loader: (id: string, attributes: Readonly<Record<string, string>>) => string | { readonly source: string } | Promise<string | { readonly source: string }>,
   ): (resolved: ResolvedImport) => Promise<Verdict>;
@@ -296,6 +301,13 @@ declare module "origine:@std/graph/cache" {
   export type ImportCache = {
     readonly host: "importCache";
     readonly kind: "cache";
+    /**
+     * The identity table of `ctx`: `size` is how many modules it holds, `delete(id)` forgets a module (and
+     * what imported it) so the next import makes and evaluates a new one while the old one keeps working,
+     * `clear()` forgets all. Every handler of a context shares this one table. Both return how many
+     * modules they dropped. Throws `InvalidInput` for a non-context.
+     */
+    in(ctx: import("../context.d.ts").Context): { readonly size: number; delete(id: string): number; clear(): number };
     /** `'all'`: entries live as long as the context. `'used'`: dropped once nothing holds them, so a later import evaluates the module again. */
     readonly retain: "all" | "used";
     /** Cap on the table, in entries. */

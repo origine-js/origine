@@ -16,14 +16,13 @@ const binding = @import("binding.zig");
 const func = binding.func;
 const env_api = @import("env.zig");
 const fs_api = @import("fs.zig");
-const scope_api = @import("scope.zig");
+const graph_api = @import("graph.zig");
+const context_api = @import("context.zig");
 const init_loader = @import("init_loader.zig");
 const origine_modules = @import("std/modules.zig");
 const module_api = @import("module.zig");
 const transformer_api = @import("transform/transformer.zig");
 const transformers = @import("transform/transformers.zig");
-const js_loader = @import("js_loader.zig");
-const JsLoader = js_loader.JsLoader;
 const Runtime = @import("../managed/runtime.zig").Runtime;
 const Scope = @import("../managed/scope.zig").Scope;
 const init_snapshot = @import("../managed/init_snapshot.zig");
@@ -141,6 +140,9 @@ pub const ScopeState = struct {
     /// While the scope is being evaluated for a snapshot: module natives are built over
     /// static markers, not over this record's address.
     snapshotting: bool = false,
+    /// The JS driver of the module graph (src/js/glue/graph.js) that answers non-native import
+    /// handlers for the contexts this realm creates. Set by `native.graph.bind`.
+    driver: ?Driver = null,
 
     // Binding State protocol (see binding.zig).
     pub const Core = ScopeCore;
@@ -171,6 +173,8 @@ pub const ScopeState = struct {
     }
 };
 
+pub const Driver = struct { resolve: v8.Global.Of(v8.Function), load: v8.Global.Of(v8.Function) };
+
 const ModuleState = struct { id: []const u8, bindings: module_api.Bindings, ptr: *anyopaque };
 
 pub const Host = struct {
@@ -183,11 +187,16 @@ pub const Host = struct {
     transformers: transformer_api.Registry,
     grants: std.ArrayList(*fs_api.FsGrant) = .empty,
     states: std.ArrayList(*ScopeState) = .empty,
-    children: std.ArrayList(scope_api.Child) = .empty,
-    loaders: std.ArrayList(*JsLoader) = .empty,
-    /// Loads still pending when their loader was released; freed as their promises settle, or by `destroy`.
-    orphaned_loads: std.ArrayList(*js_loader.Pending) = .empty,
-    runs: std.ArrayList(*scope_api.RunState) = .empty,
+    /// The module graph: graphs, registered import handlers, contexts and their imports in flight.
+    /// Ids are `index + 1` and never reused; everything is freed by `destroy`.
+    graphs: std.ArrayList(*graph_api.Graph) = .empty,
+    handlers: std.ArrayList(*graph_api.Handler) = .empty,
+    contexts: std.ArrayList(*context_api.Context) = .empty,
+    imports: std.ArrayList(*context_api.ImportState) = .empty,
+    preloads: std.ArrayList(*context_api.PreloadState) = .empty,
+    /// How many times a context called into the JS driver of the module graph. A handler with no JS
+    /// function in it never does (tests assert it).
+    driver_calls: usize = 0,
     next_fs_id: u32 = 1,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
     rust_isolate: ?v8.Isolate = null,
@@ -217,24 +226,32 @@ pub const Host = struct {
         self.grants.deinit(alloc);
         for (self.states.items) |state| self.releaseState(state);
         self.states.deinit(alloc);
-        for (self.children.items) |child| alloc.free(child.main);
-        self.children.deinit(alloc);
-        for (self.loaders.items) |loader| {
-            loader.deinit();
-            alloc.destroy(loader);
-        }
-        self.loaders.deinit(alloc);
-        for (self.orphaned_loads.items) |pending| {
-            alloc.free(pending.module_id);
+        for (self.imports.items) |pending| {
+            if (!pending.done) pending.resolver.deinit();
             alloc.destroy(pending);
         }
-        self.orphaned_loads.deinit(alloc);
-        for (self.runs.items) |pending| {
+        self.imports.deinit(alloc);
+        for (self.preloads.items) |pending| {
             if (!pending.done) pending.resolver.deinit();
             if (pending.values) |held| held.deinit();
             alloc.destroy(pending);
         }
-        self.runs.deinit(alloc);
+        self.preloads.deinit(alloc);
+        for (self.contexts.items) |context| {
+            context.deinit();
+            alloc.destroy(context);
+        }
+        self.contexts.deinit(alloc);
+        for (self.handlers.items) |item| {
+            item.deinit();
+            alloc.destroy(item);
+        }
+        self.handlers.deinit(alloc);
+        for (self.graphs.items) |item| {
+            item.deinit();
+            alloc.destroy(item);
+        }
+        self.graphs.deinit(alloc);
         for (self.glue_unbound) |pending| if (pending) |script| script.deinit();
         alloc.destroy(self);
     }
@@ -326,6 +343,14 @@ pub const Host = struct {
         };
     }
 
+    /// The `origine:` modules code running in `scope` may serve to others: the allowlist of its
+    /// context, nothing for a scope without the namespace, everything for the init scope.
+    pub fn ceilingOf(self: *Host, scope: *Scope) ?graph_api.StdFilter {
+        for (self.contexts.items) |context| if (context.scope == scope) return context.ceiling;
+        if (!scope.options.origine_namespace) return .{ .include = &.{} };
+        return null;
+    }
+
     /// The `Scope.Options.on_dispose` hook for scopes of this host.
     pub fn disposer(self: *Host) Scope.Disposer {
         return .{ .data = self, .call = onDispose };
@@ -335,14 +360,9 @@ pub const Host = struct {
     fn onDispose(data: ?*anyopaque, scope: *Scope) void {
         const self: *Host = @ptrCast(@alignCast(data.?));
         self.release(scope);
-        const loader = scope.options.loader orelse return;
-        for (self.loaders.items, 0..) |owned, index| {
-            if (@as(?*anyopaque, owned) != loader.data) continue;
-            owned.deinit();
-            self.allocator.destroy(owned);
-            _ = self.loaders.swapRemove(index);
-            return;
-        }
+        for (self.contexts.items) |context| if (context.scope == scope) {
+            context.closed = true;
+        };
     }
 
     /// Creates `scope`'s native-state record and makes it reachable from the scope's context
@@ -416,6 +436,10 @@ pub const Host = struct {
             owned.bindings.destroy(state, owned.ptr);
         }
         state.module_states.deinit(alloc);
+        if (state.driver) |driver| {
+            driver.resolve.deinit();
+            driver.load.deinit();
+        }
         if (state.errno_buffer) |buffer| buffer.deinit();
         alloc.destroy(state);
     }
@@ -545,19 +569,50 @@ pub const Host = struct {
             .fs => try call.object(ScopeState, state, .{
                 .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
             }),
-            .scope => try call.object(ScopeState, state, .{
-                .scope = .{
-                    .create = func(scope_api.create, .{ .side_effect = .any }),
-                    .preload = func(scope_api.preload, .{ .side_effect = .any }),
-                    .preloadModule = func(scope_api.preloadModule, .{ .side_effect = .any }),
-                    .run = func(scope_api.run, .{ .side_effect = .any }),
-                    .close = func(scope_api.close, .{ .side_effect = .any }),
-                },
-            }),
+            .graph, .context => blk: {
+                const object = try call.object(ScopeState, state, .{
+                    .graph = .{
+                        .create = func(graph_api.graphCreate, .{ .side_effect = .any }),
+                        .handler = func(graph_api.handler, .{ .side_effect = .any }),
+                        .layer = func(graph_api.layer, .{ .side_effect = .any }),
+                        .hook = func(graph_api.hook, .{ .side_effect = .any }),
+                        .transform = func(graph_api.transform, .{ .side_effect = .any }),
+                        .readSource = func(graph_api.readSource, .{ .side_effect = .any }),
+                        .compileRequests = func(graph_api.compileRequests, .{ .side_effect = .any }),
+                        .bind = func(graph_api.bind, .{ .side_effect = .any }),
+                        .pipelineResolve = func(graph_api.pipelineResolve, .{ .side_effect = .any }),
+                        .pipelineLoad = func(graph_api.pipelineLoad, .{ .side_effect = .any }),
+                    },
+                    .context = .{
+                        .create = func(context_api.create, .{ .side_effect = .any }),
+                        .importSpecifier = func(context_api.importSpecifier, .{ .side_effect = .any }),
+                        .evaluateSource = func(context_api.evaluateSource, .{ .side_effect = .any }),
+                        .close = func(context_api.close, .{ .side_effect = .any }),
+                        .tableSize = func(context_api.tableSize, .{ .side_effect = .any }),
+                        .tableDelete = func(context_api.tableDelete, .{ .side_effect = .any }),
+                        .tableClear = func(context_api.tableClear, .{ .side_effect = .any }),
+                        .flush = func(context_api.flush, .{ .side_effect = .any }),
+                        .cachePut = func(context_api.cachePut, .{ .side_effect = .any }),
+                        .pin = func(context_api.pin, .{ .side_effect = .any }),
+                        .unpin = func(context_api.unpin, .{ .side_effect = .any }),
+                        .preload = func(context_api.preloadScript, .{ .side_effect = .any }),
+                        .preloadModule = func(context_api.preloadModule, .{ .side_effect = .any }),
+                    },
+                });
+                // The two capabilities share one set of natives; install it once.
+                const present = native.get(env.ctx, binding.string(env.isolate, "graph")) orelse return error.JavaScriptException;
+                if (present.isUndefined()) {
+                    inline for (.{ "graph", "context" }) |property| {
+                        const value = object.get(env.ctx, binding.string(env.isolate, property)) orelse return error.JavaScriptException;
+                        try binding.set(env, native, property, value);
+                    }
+                }
+                break :blk object;
+            },
             .io, .net => eu.v.object(env.isolate),
         };
         const key: ?[]const u8 = switch (module) {
-            .env, .scope => name,
+            .env => name,
             .fs => "fsRequest",
             else => null,
         };

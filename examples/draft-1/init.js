@@ -1,5 +1,9 @@
 import { Dir, IoError, Limit } from 'origine:@std/io';
 import { eprintln } from 'origine:@std/debug';
+import { ImportHandler } from 'origine:@std/graph/import';
+import { ImportResolver } from 'origine:@std/graph/resolve';
+import { importMap, origine } from 'origine:@std/graph/resolve/layers';
+import { fromLoader, origineProvider } from 'origine:@std/graph/providers';
 
 const text = bytes => String.fromCharCode(...bytes);
 
@@ -24,12 +28,23 @@ export async function main(api) {
     if (!IoError.is(e, IoError.PermissionDenied)) throw e;
     eprintln('escape rejected:', e.name);
   }
-  const child = await api.scope.create({
-    main: 'app:/main.js',
-    origineNamespace: true,
-    importMap: { imports: { dep: 'app:/dep.js' } },
-    loader: async id => (id === 'app:/main.js' ? "import { eprintln } from 'origine:@std/debug'; import { v } from 'dep'; eprintln('child sees', v + preloaded)" : 'export const v = 40;'),
+  // A context loads through an import handler: here an import map, the host's debug module and a loader.
+  const handler = ImportHandler.make({
+    resolver: ImportResolver.layered()
+      .layer(origine())
+      .layer(importMap({ imports: { main: 'app:/main.js', dep: 'app:/dep.js' } })),
+    hooks: [
+      origineProvider({ std: { include: ['debug'] } }),
+      fromLoader(async id =>
+        id === 'app:/main.js'
+          ? "import { eprintln } from 'origine:@std/debug'; import { v } from 'dep'; eprintln('child sees', v + preloaded)"
+          : 'export const v = 40;',
+      ),
+    ],
+  });
+  const child = await api.context.create({
+    import: handler,
     preload: [{ source: '(values) => { globalThis.preloaded = values.n }', values: { n: 2 } }],
   });
-  await child.run();
+  await child.import('main');
 }

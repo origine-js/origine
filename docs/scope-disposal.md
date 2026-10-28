@@ -1,6 +1,6 @@
 # Scope disposal
 
-Status: implemented (managed layer, host, `api.scope.close`). Deviations from the original design:
+Status: implemented (managed layer, host, `context.close`; `api.scope` was replaced by `api.context`, see graph-api.md). Deviations from the original design:
 
 * Natives of a disposed scope fail with the existing `StaleHandle` errno, not a new `ScopeDisposed` one (the errno set is a closed contract). The managed layer's own methods still return `error.ScopeDisposed`.
 * `ScopeCore` is a field of `ScopeState`; both stay allocated until `Host.destroy`.
@@ -10,7 +10,7 @@ Status: implemented (managed layer, host, `api.scope.close`). Deviations from th
 ## Problem
 
 A `Scope` (one V8 context, its module map, capabilities and import map) is created by
-`Runtime.createScope` and freed only by `Runtime.destroy`. `api.scope.create()` therefore leaks a
+`Runtime.createScope` and freed only by `Runtime.destroy`. `api.context.create()` therefore leaks a
 context per child for the life of the runtime, and `scope.close()` only revokes the guest handle and
 clears the import cache (`src/api/scope.zig`, `docs/api-design.md`). A host that creates short-lived
 scopes (per-request sandboxes, plugin reloads, a REPL `.reset`) grows without bound.
@@ -115,7 +115,7 @@ already, which limits what escapes.
 A native must not fail merely because its scope is gone. Pure natives (text encoding, path and
 string helpers, errno tables, anything with `side_effect = .none` that touches no resource) keep
 working, so a closure that escaped a disposed scope still computes. Natives that need a resource the
-disposal released (fs grants, io runtimes, std-module state, child scopes) fail.
+disposal released (fs grants, io runtimes, std-module state, child contexts) fail.
 
 The obstacle is lifetime, not policy. Every native is bound to its `ScopeState` through a V8
 `External` and reads `state.allocator()` and `state.errnoCell()` on every call, pure ones
@@ -163,7 +163,7 @@ disposal.
   child and, recursively, its descendants. `run()` promises still pending reject with
   `Canceled`.
 * Handles gain `[Symbol.dispose]` (calls `close()`), and `[Symbol.asyncDispose]` that closes and
-  resolves after the next reap, so `await using scope = await api.scope.create(...)` is a complete
+  resolves after the next reap, so `using ctx = await api.context.create(...)` is a complete
   pattern.
 * `host.children` keeps tombstones (`closed = true`, `scope = null`) so ids stay stable; the stale
   id error (`StaleHandle`) is unchanged.
@@ -222,6 +222,6 @@ disposal.
 3. Split `ScopeState` into `ScopeCore` and `ScopeResources`; add the `.detached` binding option and
    audit the pure natives that should opt in.
 4. `disposeScope` / `reap` / teardown order, with tests 1 to 6.
-5. `api.scope.close` becomes dispose, tombstones, cascade, `Symbol.dispose`; update
+5. `context.close` becomes dispose, tombstones, cascade, `Symbol.dispose`; update
    `docs/api-design.md` (the line that says `Runtime` cannot destroy a single scope).
 6. Optional: weak-callback freeing of `ScopeCore`; REPL `.reset` using a fresh scope.

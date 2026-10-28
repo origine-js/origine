@@ -2,7 +2,7 @@
 
 origine runs JavaScript with no ambient authority. A program is an *init module* that exports
 `main(api)`; `api` carries every permission, and everything else (Node compatibility, sandboxes,
-test runners) is built in JavaScript by narrowing `api` and handing slices to child scopes. This
+test runners) is built in JavaScript by narrowing `api` and handing slices to contexts. This
 page is the design reference: the model, the guarantees, what is implemented and what is still
 open. Reference documentation for the guest modules is in [src/js/docs](../src/js/docs/README.md),
 the Zig/Rust agreement is in [async-host-contract.md](async-host-contract.md).
@@ -16,17 +16,16 @@ Rust natives in `rust/crates/origine_api*`. Tests: `src/tests/managed/api.zig`. 
 | Area | State |
 |---|---|
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. The evaluated init graph is snapshotted lazily: the first run of `dir/init.js` evaluates it in a throwaway `SnapshotCreator` isolate (no host natives, so only `source` modules and pure-JS `origine:@std/*`; `import.meta.native` is absent) and stores `dir/__oricache__/init.js.<engine>.v8-snapshot`; later runs restore it, skip evaluation and call `main`. Valid while the engine tag, the init specifier and every file-backed module's content hash are unchanged (`src/api/init_cache.zig`, `src/managed/init_snapshot.zig`). An init that throws, awaits I/O or fails to load runs the normal path instead. Modules that run outside the snapshot (lazy imports, or every module when the init cannot be snapshotted) also get a V8 code cache, `name.<engine>.v8-code-cache` in the same `__oricache__`, written after the program ran and served only for byte-identical source (V8 itself only compares length); V8 refuses a cache made under a different startup blob, so a rebuilt snapshot costs one round of rejected caches. Snapshot files carry a readable header (file layout version, V8 build and code-cache tag, then the key); a file from another version is rejected with its reason, never migrated, and writing a cache file sweeps the directory of cache files made by other engine tags. `ORIGINE_NO_SNAPSHOT=1` disables both, `ORIGINE_SNAPSHOT_LOG=1` reports snapshot hit/miss (with the reason)/create/skip on stderr. |
-| `origine:@std/*` | `io` (Zig-style `Dir`/`File`/`IoError`/`Limit`), `fs` (Rust `std::fs`-style), `quansync` (write once, run sync or async), `text` (`encodeUtf8`/`decodeUtf8`/`tryDecodeUtf8`, no `TextEncoder`/`TextDecoder` in the context), `errno`, and `transformer/oxc`. Each is documented in [src/js/docs](../src/js/docs/README.md). Native versions (V8 string conversion, simdutf) reach `text` through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. Scopes only see `origine:*` when created with `origine_namespace` (the init scope has it; child scopes never do). |
+| `origine:@std/*` | `io` (Zig-style `Dir`/`File`/`IoError`/`Limit`), `fs` (Rust `std::fs`-style), `quansync` (write once, run sync or async), `text` (`encodeUtf8`/`decodeUtf8`/`tryDecodeUtf8`, no `TextEncoder`/`TextDecoder` in the context), `errno`, `transformer/oxc` (pure JS descriptors the host runs natively) and `graph/*` (the module graph's data). Each is documented in [src/js/docs](../src/js/docs/README.md). Native versions (V8 string conversion, simdutf) reach `text` through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. The init scope sees every `origine:*` module; a context sees only those its import handler's `origineProvider` serves (`api.context`, 4.5). |
 | `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. No `set`. |
 | `api.fs` | `requestSync({root, access})` (blocking, Zig natives, errno cell), `await requestAsync({io, root, access})` (genuinely asynchronous on an `api.io` runtime; Rust natives); `access` is required: `'r'`, `'w'` or `'rw'`, and a request above the host ceiling is denied, never downgraded. No `narrow` on fs for now: `Config.fs` is the only ceiling. Real backend only (no memory/overlay). The two variants have the same op names (`dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirSymlinkStat`, `dirCreateDir`, `dirCreateDirPath`, `dirDeleteFile`, `dirDeleteDir`, `dirDeleteTree`, `dirRename`, `dirRead`, `fileStat`, `fileReadAll`, `fileRead`, `filePread`, `fileWrite`, `fileWriteAll`, `filePwriteAll`, `fileSetLength`, `fileSync`, `fileClose`); async additionally has `fileReadInto`, `filePreadInto`, `fileReadAlloc`, `filePreadAlloc` and the move writes `fileWriteMove`, `fileWriteMoveAll`, `filePwriteMoveAll` (the sync cap has them too, failing `Unsupported`). |
 | `api.io` | Only when the embedder sets `Config.runtime` (the ceiling: backends, `max_runtimes`, `default_entries`). `create({backend?: 'auto'\|'uring'\|'kqueue'\|'threaded', entries?})` (sync) returns a frozen handle with `close()`, `run()`, and the clock and timers `now`, `sleep`, `sleepUntil`, `timer`, `timerAt` ([timers](../src/js/docs/timers.md)); `await io.close()` cancels in-flight operations and destroys the runtime (every call returns the same promise, which settles once the runtime is closed, and `maxRuntimes` slots are freed then); `narrow({backends, maxRuntimes})` only lowers the ceiling. Handles are not transferable across scopes. See 4.4. |
 | `api.net` | Present wherever `api.io` is. Loopback TCP only (`127.0.0.1`, `localhost`, `::1`): `listen`, `connect`, `Server.accept`, `Socket.read/readInto/readCopy/write`, and event-style handles (`register`, `send`, `io.run()`). See [net](../src/js/docs/net.md). UDP, other hosts and an embedder network permission are not implemented. |
 | Errors | Errno in a native-backed `Uint32Array` (one per scope, `sync.errno`; the glue fetches it once as `native.errno`) for the sync cap; the async cap never uses it and rejects with a frozen `{errno, name}`. `IoError.check(fs, value)` turns the state into a throw. The cppgc out-parameter for detailed errors is not implemented. |
-| `api.scope` | `create({main, importMap, loader, preload, transformers, origineNamespace})`, handle has `run()` and `close()`. |
-| Transformers | The init scope transforms `.ts .mts .cts .tsx .jsx` through oxc by default (`Host.Config.transformers`); children get none unless the init passes them. See 4.5. |
+| `api.graph`, `api.context` | The module graph ([graph-api.md](graph-api.md)): `api.graph.narrow({fs, codeCache})`, `recipe.create(graph)` giving a `ModuleReference` (`load`, `evaluate(ctx)`, `release`), and `api.context.create({import, graph?, preload?})` giving a realm with `import(specifier)`, `references` and `close()`. Replaces `api.scope`. See 4.5. |
+| Transformers | The init scope transforms `.ts .mts .cts .tsx .jsx` through oxc by default (`Host.Config.transformers`). Contexts transform what their handler's maker, or a source's `withTransformer`, names; the oxc ones are descriptors run natively (4.5). |
 | Intrinsics snapshot | Done (engine level, below the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. Scope bootstrap helpers are restored from the snapshot instead of recompiled ([startup research](startup-optimization-research.md)). |
 | `isolate` | Absent (reserved name, see 4.6). |
-| Module graph | Designed in [graph-api.md](graph-api.md), replacing the module options of `api.scope` (`api.context`, `api.graph`). Only the data side exists: `origine:@std/graph/*` (recipes, sources, import handlers, resolver layers, providers, cache descriptors), pure JS and not yet used by anything. |
 
 Measured when the engine snapshot landed (release V8, debug app build, one scope; current numbers are in [shell-performance.md](shell-performance.md)): `Context::New` 3.75 ms average (7.6 ms first) with the unfrozen built-in seed, because each context installs features and freezes the intrinsic graph, versus 0.18 ms restored from a finalized custom snapshot. Scope creation drops from about 4.3 ms to about 0.55 ms; the snapshot takes 7.5 ms and about 400 KB and is generated at build time. Isolate creation (about 2.5 ms) is unchanged.
 
@@ -63,7 +62,7 @@ Known limitations:
 
 Origine embeds V8 (`Runtime` owns the isolate, `Scope` is one hardened context). A scope starts with no host I/O; the one debugging output, `eprintln` of `origine:@std/debug`, is an `origine:` module a scope must be given; the engine does not know Node and exposes only authority-bearing primitives. `Scope.installCapability` (`src/managed/scope.zig`), which deep-freezes a value and defines it as a read-only global, is the lower-level mechanism the tests use; the production path hands the `api` object to `main`.
 
-The model: **the engine runs an init file once, snapshots it, then calls its exported `main(api)`. `api` carries every permission. Everything else (node compat, sandboxes, test runners) is built in JS on top of `api` by narrowing it and handing slices to child scopes.**
+The model: **the engine runs an init file once, snapshots it, then calls its exported `main(api)`. `api` carries every permission. Everything else (node compat, sandboxes, test runners) is built in JS on top of `api` by narrowing it and handing slices to contexts.**
 
 The engine knows nothing about Node. It exposes only authority-bearing primitives, and userland composes them.
 
@@ -109,7 +108,8 @@ interface Api {
   io:      IoCap;       // async runtimes, timers (needs the embedder's runtime ceiling)
   net:     NetCap;      // loopback tcp (needs io); fetch and udp are todo
   env:     EnvCap;      // args and environment variables
-  scope:   ScopeCap;    // create child scopes
+  graph:   ModuleGraph; // sources, code caches and the authority modules are produced with
+  context: ContextCap;  // realms whose imports run through an import handler
   isolate: IsolateCap;  // create isolates (not implemented)
 }   // each capability has its own narrow(); there is no api-level narrow
 ```
@@ -158,27 +158,25 @@ await io.close();                                             // cancels in-flig
 - **Linking.** The Rust runtime calls the `oio_*` C ABI of `src/io/c_api.zig`; `build.zig` links the archive `liborigine_io.a` (root `src/io/lib.zig`) into the executable, the test binary and the snapshot tool.
 - Contract between the Zig/JS side and the Rust side: [async-host-contract.md](async-host-contract.md).
 
-### 4.5 `scope`: child scopes
+### 4.5 `graph` and `context`: realms and their modules
 
-```ts
-const child = await api.scope.create({
-  main:      "app:/main.js",        // main module specifier
-  importMap: { imports: {...} },    // data-only, parsed by ImportMap.parseJson
-  loader:    (moduleId) => Content, // basic JS callback loader (may be async)
-  preload:   [{ source, values } | { module, values }],  // run in order before main
-  origineNamespace: false,    // child may import `origine:` modules; only if the parent can
+The full design, its names and the checklist answers are in [graph-api.md](graph-api.md); this is the summary.
+
+```js
+const handler = ImportHandler.make({
+  resolver: ImportResolver.layered().layer(origine()).layer(importMap({ imports: { dep: "app:/dep.js" } })),
+  hooks: [origineProvider({ std: { include: ["debug"] } }), fromLoader(async id => load(id))],
+  maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ ".ts": ts() }) }),
 });
-await child.run();    // evaluate main
-child.close();        // destroy scope, revoke its grants
+using ctx = await api.context.create({ import: handler, graph, preload: [{ source, values }] });
+await recipe.create(graph).evaluate(ctx);   // or: await ctx.import("dep")
 ```
 
-- **`importMap` plus a basic JS callback `loader` (first version, to get things working).** `loader: (moduleId) => Content | Promise<Content>` where `Content` is a source string or `{ source }` (`{ exports }` is not supported in draft-1). It maps onto `Scope.Options.loader`: the native adapter calls the JS function in the **creating scope's** context and returns `.pending`, then finishes with `Runtime.completeLoad(token, ...)` when the result (or promise) settles. A thrown error or rejection becomes `Completion.exception`. A custom `resolver` stays tbd (the import map is the only resolution control). Loader callbacks must not call `createScope` (existing `Runtime.pump` rule), and the callback is not trusted by the child: results are copied in as module source or hardened exports.
-- **`transformers`: extension-keyed source transforms.** `transformers: { ".ts": t, ".tsx": t2 }` maps a file extension (starts with `.`, no `/ \\ ? #`, no trailing dot, no `..`; longest suffix wins, so `.d.ts` beats `.ts`) to a transformer, applied to loader results before compilation. A value is a host transformer from `origine:@std/transformer/oxc` (`ts(options)`, `tsx(options)`, `jsx(options)`: a native function branded with a `v8::Private` symbol, options supplied per transformer) or a plain JS function `(source, id) => string | { source }` (promises are not supported). Requires `loader`; a child gets no transformers unless the init passes them. The init scope itself uses `Host.Config.transformers` (default: `.ts .mts .cts` and `.tsx .jsx` through oxc). Syntax errors are reported as `file:line:col: error: message`; runtime stack positions refer to the transformed text. The JSX automatic runtime needs the runtime module to be importable (`importSource`), or use the classic runtime.
-- **Scope is not exposed to children by default.** A child's preload `values` and globals contain no `scope` capability. Creating a scope requires the init to explicitly request and hand it a narrowed `scope` capability.
-- **Preload scripts and `values`.** Each preload is evaluated in the child before `main`, as `(values) => { ... }`. `values` is a hardened (deep-frozen) value built in the parent. The preload can install globals (`globalThis.process`, `Buffer`, `console`) and close over the received `api` slices. Values that cross a scope boundary follow the existing `Scope.harden` rules: plain data and functions only. No Promise/ArrayBuffer/Proxy/Map/etc. passes through the boundary.
-- **Module preloads.** `{ module, values }` evaluates `module` as an ES module (`preload:<index>`) in the child. If its default export is a function it is called with the hardened `values`, and an async one is awaited; the preload settles after that. Exactly one of `source` and `module` per entry. A failing preload rejects `create` with a `ModuleError` and closes the child.
-- **`origineNamespace`.** Lets the child import the host's `origine:` modules (served from the host table, never by the child's `loader`, with their natives bound to the child). It is the parent's to give: a parent scope without it gets `Unsupported`, so a child cannot widen its authority.
-- **Child authority.** A child gets only what the init passes through preload `values` (already-narrowed capability objects). Nothing is inherited implicitly.
+- **A context is a realm; what it loads is its handler's business.** `api.context.create` makes a V8 context whose `import()` runs through the `ImportHandler` it was given (`resolver` layers, `hooks`, a `maker`). A handler with no JS function in it (`handler.native`) runs entirely in Zig and never calls into JS; otherwise the glue's driver runs the chain in the **creating** realm and the host completes the request through `Runtime.completeResolve`/`completeLoad`, so a child is never waiting inside its own link or evaluate path. Driver callbacks must not create contexts (`Unsupported`, the old `in_loader` rule).
+- **The module table is per context.** A V8 module belongs to one context, so each context has its own identity table (its scope's `ModuleMap`); `ImportCache.native({ retain })` sets how it keeps modules (`'all'`: for the context's lifetime, `'used'`: until nothing holds them) and `cache.in(ctx)` shows `size`, `delete(id)` (an identity reset) and `clear()`. Unlike the first design, all the handlers of a context share this one table.
+- **Authority.** A graph holds a sync fs grant and a code cache; a context gets no capability unless the parent hands it a slice through `preload` values, and never receives the graph. `origine:` modules are served only by the native `origineProvider` within its allowlist; a JS hook cannot produce an `origine:` id.
+- **Preload scripts and `values`.** Each preload is evaluated in the context before it imports anything, as `(values) => { ... }`. `values` is a hardened (deep-frozen) value built in the parent; values that cross a context boundary follow `Scope.harden`: plain data and functions only. `{ module, values }` evaluates an ES module (`preload:<index>`) whose default export, if a function, is called with `values` and awaited. A failing preload rejects `create` with a `ModuleError` and closes the context.
+- **Cross-context imports.** `Import.link(reference, { mode })` makes a context use another context's evaluated module: `'hardened'` links its exports through the hardener, `'shared'` links the V8 module itself (live bindings, the other realm's objects; V8 accepts it, see the spike in graph-api.md).
 
 ### 4.6 `isolate`
 
@@ -186,7 +184,7 @@ Not implemented. Reserved name. Constraints already fixed: it is an `api` capabi
 
 ## 5. Narrowing (monotonic attenuation)
 
-Each capability narrows itself: `api.env.narrow(spec)`, `api.io.narrow(spec)`. (`api.fs` has no `narrow` for now, only the embedder's `Config.fs` ceiling and the `access` of each request; `api.scope` and `api.net` have no `narrow`.) Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
+Each capability narrows itself: `api.env.narrow(spec)`, `api.io.narrow(spec)`. (`api.fs` has no `narrow` for now, only the embedder's `Config.fs` ceiling and the `access` of each request; `api.graph.narrow` replaces the fs grant or code cache it holds, and `api.context` and `api.net` have no `narrow`.) Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
 
 ```js
 const roFs   = api.fs.requestSync({ root: "/data", access: "r" });
@@ -248,15 +246,17 @@ export async function main(api) {
   const nodeFs  = makeNodeFs(fs, Dir);
   const process = makeProcess(api.env.narrow({ allow: ["HOME", "PATH"] }));
 
-  const app = await api.scope.create({
-    main: "file:///app/index.js",
-    importMap: { imports: { "node:fs": "app:/shim/node-fs.js" } },
-    loader: async (id) => id === "app:/shim/node-fs.js"
+  const handler = ImportHandler.make({
+    resolver: ImportResolver.layered().layer(importMap({ imports: { "node:fs": "app:/shim/node-fs.js", index: "app:/index.js" } })),
+    hooks: [fromLoader(async id => id === "app:/shim/node-fs.js"
       ? "export default globalThis.nodeFs"   // installed by the preload below
-      : await readSource(fs, id),
+      : await readSource(fs, id))],
+  });
+  const app = await api.context.create({
+    import: handler,
     preload:  [{ source: PRELOAD_GLOBALS, values: { process, nodeFs } }],
   });
-  await app.run();
+  await app.import("index");
 }
 ```
 
@@ -298,13 +298,13 @@ Layout: `src/api/{host,glue,fs,env,scope,js_loader,init_loader,init_cache,errno,
 
 1. Snapshot plus `main(api)`; `origine:@std/io` descriptors: done.
 2. `fs`: real backend with sync and async variants done (`narrow` dropped for now); memory and overlay backends not started.
-3. `scope.create` with import map, preload `values`, a JS callback loader and transformers: done (custom resolver not started).
+3. `api.context.create` with an import handler (layered, possibly async resolver; hooks; maker; transformers), preload `values`, `api.graph` with code caches, `Import.link`: done (replaces `api.scope`). Source and defer phases: not implemented.
 4. `env`: done. `io`, timers and loopback `net`: done. Wider `net` (fetch, UDP): not started.
 5. `isolate`: not started.
 
 ## 10. Open questions
 
-- **Resolver:** a custom module resolver is not supported; the import map is the only resolution control. Exception routing and reentrancy beyond the no-`createScope`-in-loader rule still need a definition. The module graph design ([graph-api.md](graph-api.md)) answers it with layered, possibly async resolver layers that run in the creating realm during the load stage; it needs `ModuleMap.compile` to park an entry while a request resolves.
+- **Resolver:** done by the module graph ([graph-api.md](graph-api.md)): layered, possibly async resolver layers, with `ModuleMap` parking a module while a request resolves (`Resolver.resolve_async`, `Runtime.completeResolve`). Phase imports (`import source`, `import defer`) are still rejected.
 - **Native narrowing:** which specs get a native intersect layer beyond `root`/`mode` of the dropped fs `narrow` (section 5).
 - **Network permission:** how the embedder grants wider network access than loopback, and whether it follows the request/grant shape (4.3).
 - **Detailed errors:** the cppgc out-parameter (section 6) is unimplemented.
@@ -316,6 +316,6 @@ Decided: the evaluated `init.js` is snapshotted and `main` is not called while s
 
 ## 11. Verification
 
-- `zig build test` runs the managed runtime tests, including `src/tests/managed/capabilities.zig` (brands, hardening) and `src/tests/managed/api.zig` (monotonic narrowing under the host ceiling, child scopes inheriting no authority, loaders and preload values, sync and async fs, `io` lifetime and cancellation, pinned and detached buffers, net echo and events, timers, TypeScript transformers, snapshot restore of the prepared API).
+- `zig build test` runs the managed runtime tests, including `src/tests/managed/capabilities.zig` (brands, hardening) and `src/tests/managed/api.zig` (monotonic narrowing under the host ceiling, contexts inheriting no authority, native and JS import handlers, hooks, makers, transformers, `origineProvider` and its allowlist, `Import.link`, code caches, the refcounted module table, preload values, sync and async fs, `io` lifetime and cancellation, pinned and detached buffers, net echo and events, timers, snapshot restore of the prepared API); `shared_link.zig` and `async_resolve.zig` cover the managed layer.
 - `just check-contracts` and `just check-rust` verify the Zig/Rust/C agreement ([contracts.md](contracts.md)).
 - Manual: `zig build run -- examples/draft-1/init.js`, `examples/timers/init.js`, `examples/net/*.js`, `examples/typescript/init.ts`.

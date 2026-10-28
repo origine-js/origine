@@ -23,6 +23,7 @@ const own = (object, key) => {
 const SOURCE = Symbol.for('origine:@std/graph/source');
 const RECIPE = Symbol.for('origine:@std/graph/recipe');
 const HANDLER = Symbol.for('origine:@std/graph/handler');
+const CREATE = Symbol.for('origine:@std/graph/create');
 
 const isDescriptor = value =>
   value !== null && typeof value === 'object' && typeof value.host === 'string' && typeof value.kind === 'string';
@@ -112,17 +113,25 @@ const make = options => {
   const codeCache = own(options, 'codeCache');
   if (codeCache !== undefined && !(isDescriptor(codeCache) && codeCache.kind === 'codeCache'))
     throw invalid('ModuleRecipe: codeCache must be a CodeCache');
-  return freeze({
+  const recipe = {
     [RECIPE]: true,
     source,
     import: handler,
     name,
-    /// `null`: use the graph's code cache.
+    /// `null`: use the graph's.
     codeCache: codeCache ?? null,
     /// True when neither the source's transformers nor the import handler need the JS realm, which
     /// is what lets the recipe cross to another isolate as plain data.
     native: source.native && handler.native,
-  });
+    /// A reference to this module in `graph` (`api.graph` or a narrowed one). Nothing is read or
+    /// compiled until `reference.load()` or `reference.evaluate(ctx)`.
+    create(graph) {
+      const make = graph?.[CREATE];
+      if (typeof make !== 'function') throw invalid('ModuleRecipe#create: expected an api.graph');
+      return make(recipe);
+    },
+  };
+  return freeze(recipe);
 };
 
 /// An immutable description of a module: its source, the handler that answers its imports and its

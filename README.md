@@ -2,7 +2,7 @@
 
 origine is a capability-based JavaScript runtime shell built on V8, written in Zig and Rust.
 It starts as an empty, hardened engine: a program receives **no ambient authority** and gets
-files, network, environment and child scopes only through an `api` object that the host
+files, network, environment and contexts only through an `api` object that the host
 hands to its exported `main(api)`. Compatibility layers (Node, test runners, sandboxes) are
 meant to be built in JavaScript on top of `api` by narrowing it.
 
@@ -62,10 +62,10 @@ properties are in [docs/api-design.md](docs/api-design.md); the guest modules ar
 
 | Example | Shows |
 | --- | --- |
-| [examples/draft-1](examples/draft-1/init.js) | sync and async fs, `io`, child scopes with a loader and preload |
+| [examples/draft-1](examples/draft-1/init.js) | sync and async fs, `io`, a context with an import handler and preload |
 | [examples/timers](examples/timers/init.js) | `io.sleepUntil`, cancellable timers |
 | [examples/net](examples/net/README.md) | loopback TCP with promises and with events |
-| [examples/typescript](examples/typescript/init.ts) | TypeScript inits; `children.ts` passes transformers to child scopes |
+| [examples/typescript](examples/typescript/init.ts) | TypeScript inits; `children.ts` loads TypeScript and JSX in a context |
 
 ## Repository layout
 

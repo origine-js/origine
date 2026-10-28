@@ -61,6 +61,8 @@ pub const ResolveCompletion = union(enum) {
     id: ModuleId,
     failure: anyerror,
     exception: v8.Global.Of(v8.Value),
+    /// Fails with an `Error` created in the importing module's realm carrying this message.
+    message: []const u8,
 };
 /// name is borrowed UTF-8; value is a borrowed persistent handle from this runtime.
 /// The receiving content API copies the name and retains its own handle.
@@ -68,7 +70,14 @@ pub const Export = struct { name: []const u8, value: v8.Global.Of(v8.Value) };
 /// All slices, nested export names, and handles are borrowed until the receiving
 /// updateImportCache/completeLoad call returns (success or error). No ownership is
 /// transferred. Source is copied into V8; export names and handles are retained.
-pub const Content = union(enum) { source: []const u8, exports: []const Export };
+pub const Content = union(enum) {
+    source: []const u8,
+    exports: []const Export,
+    /// A module already instantiated (and usually evaluated) in another context of the same
+    /// isolate, linked into this graph as it is: live bindings, the other realm's own objects.
+    /// A local handle, retained by the map. Never snapshottable.
+    module: v8.Module,
+};
 pub const LoadRequest = struct {
     /// Runtime-owned arena for result source/exports/names. Do not free result
     /// allocations; use the alloc only synchronously inside this callback.
@@ -91,7 +100,7 @@ pub const LoadRequest = struct {
 /// request.context and is immediately retained. pending retains no result buffers.
 /// Local handles must belong to the enclosing caller's HandleScope; escape values
 /// from any nested HandleScope before returning them.
-pub const LoadResult = union(enum) { source: []const u8, exports: []const Export, exception: v8.Value, pending };
+pub const LoadResult = union(enum) { source: []const u8, exports: []const Export, module: v8.Module, exception: v8.Value, pending };
 /// Borrowed inputs: no input is accessed after completeLoad returns, on success or
 /// error. Accepted content/exceptions are copied/retained independently. Caller
 /// releases its own memory/exception handle. Handles must belong to this runtime.
@@ -102,6 +111,9 @@ pub const Completion = union(enum) {
     /// Fails the load with a `SyntaxError` created in the module's own realm whose message and
     /// stack are this text (for example compiler diagnostics). Borrowed for the call.
     syntax_error: []const u8,
+    /// Fails the load with an `Error` created in the module's own realm carrying this message.
+    /// Borrowed for the call.
+    message: []const u8,
 };
 pub const Loader = struct {
     /// Host-owned state, borrowed without destruction; must outlive Runtime.destroy.

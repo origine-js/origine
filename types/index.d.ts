@@ -71,15 +71,5 @@ export type {
   Socket,
   SocketEvents,
 } from "./net.d.ts";
-export type {
-  HostTransformer,
-  ImportMap,
-  Loader,
-  LoaderResult,
-  Preload,
-  ScopeCap,
-  ScopeHandle,
-  ScopeOptions,
-  SourceTransform,
-  Transformers,
-} from "./scope.d.ts";
+export type { Context, ContextCap, ContextOptions, Preload } from "./context.d.ts";
+export type { GraphOptions, ModuleGraph, ModuleReference, ModuleReferenceStatus, ModuleRequest } from "./graph.d.ts";

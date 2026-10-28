@@ -1,16 +1,51 @@
-// `origine:@std/transformer/oxc`: host transformers for `api.scope.create({ transformers })`.
-// `ts(options)` returns a native function `(source, id) => string` (it throws a
-// SyntaxError with `file:line:col` diagnostics) that the host also recognizes, so a child
-// scope runs it without calling back into JavaScript. `tsx` and `jsx` are the same factory
-// under names that read better next to their extensions:
+// `origine:@std/transformer/oxc`: host transformers for the module graph (`ModuleSource#withTransformer`,
+// `Transform.byExtension`, the maker of an `ImportHandler`). `ts(options)` returns a frozen descriptor
+// `{ host: 'oxc', kind: 'transformer', transform, options }` that the host runs natively on module
+// source when a context loads it, so a handler built from these never enters JavaScript. Pure data:
+// it holds no authority and can be built in the init snapshot.
 //
-//   const transform = ts();
-//   await api.scope.create({ main, loader, transformers: { '.ts': transform, '.mts': transform } });
+//   const transformer = Transform.byExtension({ '.ts': ts(), '.tsx': tsx() });
 //
 // Options (all optional): jsx: 'automatic' | 'classic', importSource, pragma, pragmaFrag,
-// development, verbatimImports, inlineSourceMap.
-const native = import.meta.native;
+// development, verbatimImports, inlineSourceMap. Anything of the wrong type throws a TypeError.
+const freeze = Object.freeze;
 
-export const ts = options => native.make(options);
-export const tsx = options => native.make(options);
-export const jsx = options => native.make(options);
+const own = (object, key) => {
+  if (object === null || typeof object !== 'object') return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+};
+
+const STRINGS = ['importSource', 'pragma', 'pragmaFrag'];
+const FLAGS = ['development', 'verbatimImports', 'inlineSourceMap'];
+
+/// The options as plain data, validated.
+const checked = options => {
+  if (options === undefined) return freeze({});
+  if (options === null || typeof options !== 'object') throw new TypeError('options must be an object');
+  const out = {};
+  const jsx = own(options, 'jsx');
+  if (jsx !== undefined) {
+    if (jsx !== 'automatic' && jsx !== 'classic') throw new TypeError("jsx must be 'automatic' or 'classic'");
+    out.jsx = jsx;
+  }
+  for (const name of STRINGS) {
+    const value = own(options, name);
+    if (value === undefined) continue;
+    if (typeof value !== 'string') throw new TypeError('importSource, pragma and pragmaFrag must be strings');
+    out[name] = value;
+  }
+  for (const name of FLAGS) {
+    const value = own(options, name);
+    if (value === undefined) continue;
+    if (typeof value !== 'boolean') throw new TypeError('development, verbatimImports and inlineSourceMap must be booleans');
+    out[name] = value;
+  }
+  return freeze(out);
+};
+
+const make = (transform, options) => freeze({ host: 'oxc', kind: 'transformer', transform, options: checked(options) });
+
+export const ts = options => make('ts', options);
+export const tsx = options => make('tsx', options);
+export const jsx = options => make('jsx', options);

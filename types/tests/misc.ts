@@ -1,8 +1,12 @@
-// api.env, api.io, api.scope, quansync, errno, globals. Type-checked only, never run.
+// api.env, api.io, api.context, quansync, errno, globals. Type-checked only, never run.
 import type { Api, Main } from "@origine/types";
 import { ERRNO } from "origine:@std/errno";
 import { quansync, run } from "origine:@std/quansync";
 import { ts } from "origine:@std/transformer/oxc";
+import { ImportHandler, MakeRecipe, Transform } from "origine:@std/graph/import";
+import { ImportResolver } from "origine:@std/graph/resolve";
+import { importMap } from "origine:@std/graph/resolve/layers";
+import { fromLoader } from "origine:@std/graph/providers";
 import { eprintln } from "origine:@std/debug";
 
 export const main: Main = async (api: Api) => {
@@ -20,20 +24,19 @@ export const main: Main = async (api: Api) => {
   await io.sleepUntil(io.now() + 5);
   void stopped;
 
-  await using child = {
-    scope: await api.scope.create({
-      main: "app:/main.js",
-      loader: id => (id === "app:/main.js" ? "export function main() {}" : { source: "" }),
-      transformers: { ".ts": ts({ jsx: "automatic" }), ".txt": (source, id) => `/* ${id} */ ${source}` },
-      preload: [{ source: "(values) => {}", values: { n: 1 } }, { module: "export default () => {}" }],
-      importMap: { imports: { a: "app:/a.js" } },
-      origineNamespace: false,
-    }),
-    async [Symbol.asyncDispose]() {
-      this.scope.close();
-    },
-  };
-  await child.scope.run();
+  const handler = ImportHandler.make({
+    resolver: ImportResolver.layered().layer(importMap({ imports: { a: "app:/a.js" } })),
+    hooks: [fromLoader(id => (id === "app:/a.js" ? "export function main() {}" : { source: "" }))],
+    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ ".ts": ts({ jsx: "automatic" }), ".txt": (source, id) => `/* ${id} */ ${source}` }) }),
+  });
+  using child = await api.context.create({
+    import: handler,
+    graph: api.graph.narrow({ fs: api.fs.requestSync({ access: "r" }) }),
+    preload: [{ source: "(values) => {}", values: { n: 1 } }, { module: "export default () => {}" }],
+  });
+  const imported = await child.import("a");
+  const status: string = imported.status;
+  void status;
 
   // The types of ERRNO come from errno_codes.zig: two domains, each with its own names.
   const notFound: 10 = ERRNO.io.NotFound;
@@ -55,14 +58,14 @@ export const main: Main = async (api: Api) => {
   const viaRun: number = run("sync", total(2));
   void [s, p, viaRun];
 
-  // @ts-expect-error `transformers` need a `loader`
-  await api.scope.create({ main: "a.js", transformers: { ".ts": ts() } });
-  // @ts-expect-error `main` is required
-  await api.scope.create({ loader: () => "" });
+  // @ts-expect-error `import` is required: it decides what the realm can load
+  await api.context.create({});
   // @ts-expect-error a preload is a script or a module, not both
-  await api.scope.create({ main: "a.js", preload: [{ source: "", module: "" }] });
+  await api.context.create({ import: handler, preload: [{ source: "", module: "" }] });
   // @ts-expect-error misspelled option
-  await api.scope.create({ main: "a.js", origineNamespce: true });
+  await api.context.create({ import: handler, grph: api.graph });
+  // @ts-expect-error `context` has no `narrow`
+  api.context.narrow({});
   // @ts-expect-error `narrow` needs `allow`
   api.env.narrow({});
   // @ts-expect-error `narrow` takes the same `backends`, no `max`

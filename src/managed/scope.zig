@@ -170,7 +170,16 @@ pub const Scope = struct {
         /// and before its module map goes: the host releases what it keeps for the scope. Not
         /// called by `Runtime.destroy`, which hosts tear down first. Callback data is host-owned.
         on_dispose: ?Disposer = null,
+        /// What the module table keeps of a module nothing else holds: `all` keeps every module for
+        /// the scope's lifetime (module identity as in ESM), `used` frees a module once no pin,
+        /// import in flight or held module reaches it, so a later import evaluates it again.
+        retain: Retain = .all,
+        /// Cap on the table, in modules: over it, the oldest unpinned entries are dropped from the
+        /// table (and freed if nothing else holds them).
+        table_limit: ?usize = null,
     };
+
+    pub const Retain = enum { all, used };
 
     pub const Disposer = struct {
         data: ?*anyopaque = null,

@@ -212,6 +212,27 @@ pub const ImportMap = struct {
         defer scratch.deinit();
         return alloc.dupe(u8, try self.resolveTemporary(scratch.allocator(), specifier, referrer));
     }
+    /// The target the map gives `specifier` (for the module `referrer`), or null when no entry
+    /// applies. Unlike `resolve`, an unmapped specifier is not an error and is never normalized into
+    /// an answer: a map used as one layer of a resolver passes what it does not know. Specifiers or
+    /// referrers the URL normalizer rejects are matched as written. Result owned by `alloc`.
+    pub fn lookup(self: *ImportMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8) !?[]const u8 {
+        var scratch = std.heap.ArenaAllocator.init(alloc);
+        defer scratch.deinit();
+        const temp = scratch.allocator();
+        const base = if (referrer.len == 0) self.base_url else self.urls.normalize(self.urls.data, temp, referrer, self.base_url) catch self.base_url;
+        const normalized = if (urlLike(specifier) and !std.mem.startsWith(u8, specifier, modules.origine_prefix))
+            self.urls.normalize(self.urls.data, temp, specifier, base) catch specifier
+        else
+            specifier;
+        for (self.scopes) |scope| {
+            if (std.mem.eql(u8, scope.prefix, base) or (std.mem.endsWith(u8, scope.prefix, "/") and std.mem.startsWith(u8, base, scope.prefix))) {
+                if (try self.match(temp, scope.mappings, normalized)) |value| return try alloc.dupe(u8, value);
+            }
+        }
+        if (try self.match(temp, self.imports, normalized)) |value| return try alloc.dupe(u8, value);
+        return null;
+    }
     /// Borrows map/input slices and alloc through return. Returned data aliases
     /// an input only for an unchanged bare specifier; alloc owns normalized or
     /// resolved results, and the enclosing scratch arena releases them.

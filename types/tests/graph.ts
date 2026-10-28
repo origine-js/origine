@@ -43,6 +43,18 @@ const recipe: Recipe = ModuleRecipe({
 });
 const inline = ModuleRecipe({ source: ModuleSource.text("export {}", SourceMap.text("{}")), import: handler, name: "inline" });
 const pure: boolean = recipe.native && inline.native;
+export async function graphUse(api: import("@origine/types").Api): Promise<void> {
+  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: "r" }), codeCache: CodeCache.memory() });
+  const reference = recipe.create(graph);
+  await reference.load();
+  const requests: number = reference.requests?.length ?? 0;
+  await using ctx = { context: await api.context.create({ import: handler, graph }), async [Symbol.asyncDispose]() { this.context.close(); } };
+  await reference.evaluate(ctx.context);
+  const stored: number = await graph.flush();
+  const view = ImportCache.native({ retain: "used" }).in(ctx.context);
+  void [requests, stored, view.size, view.delete("a"), view.clear()];
+  reference.release();
+}
 const provided: Verdict = Import.provide(recipe);
 const sourced: Verdict = Import.provide(ModuleSource.text("export default 1"));
 const linked: Verdict = Import.link({}, { mode: "hardened" });
@@ -60,6 +72,8 @@ ImportHandler.make({ hooks: [] });
 ImportCache.native({});
 // @ts-expect-error `retain` is 'all' or 'used'
 ImportCache.native({ retain: "some" });
+// @ts-expect-error a graph is not a recipe
+recipe.create({});
 // @ts-expect-error `read` is required (it has a cost)
 fsProvider({});
 // @ts-expect-error `std` is required, there is no "everything" default

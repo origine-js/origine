@@ -592,7 +592,7 @@
     const graph = {
       /// A graph with the same authority except what `options` replaces: `fs` (a grant of `api.fs.requestSync`)
       /// and `codeCache` (`origine:@std/graph/cache`). It cannot hold more than the realm already does.
-      narrow(options) {
+      derive(options) {
         const fs = own(options, 'fs') ?? config.fs;
         const codeCache = own(options, 'codeCache') ?? config.codeCache;
         return build(fs, codeCache, own(options, 'sourceBytes') ?? config.sourceBytes);
@@ -631,7 +631,7 @@
     return freeze(graph);
   };
 
-  /// The largest source file a graph reads unless `narrow({ sourceBytes })` says otherwise.
+  /// The largest source file a graph reads unless `derive({ sourceBytes })` says otherwise.
   const DEFAULT_SOURCE_BYTES = 64 * 1024 * 1024;
 
   const build = (fs, codeCache, sourceBytes = DEFAULT_SOURCE_BYTES) => {
@@ -694,7 +694,7 @@
   const makeGraphCap = () => {
     // The root graph is made on first use: building it calls the host, which a snapshot cannot.
     const cap = {
-      narrow: options => rootGraph().narrow(options),
+      derive: options => rootGraph().derive(options),
       flush: () => rootGraph().flush(),
       sourceBytes: DEFAULT_SOURCE_BYTES,
       [CREATE]: recipe => rootGraph()[CREATE](recipe),

@@ -40,7 +40,7 @@ export interface ModuleReference extends Disposable {
   release(): void;
 }
 
-/** What {@link ModuleGraph.narrow} may replace. */
+/** What {@link ModuleGraph.derive} may replace. */
 export interface GraphOptions {
   /**
    * A grant `api.fs` made: the only authority sources are read with. A sync grant (`requestSync`) is read
@@ -59,16 +59,17 @@ export interface GraphOptions {
 }
 
 /**
- * `api.graph`, and what {@link ModuleGraph.narrow} returns: the artifacts shared by the contexts
+ * `api.graph`, and what {@link ModuleGraph.derive} returns: the artifacts shared by the contexts
  * that use it (sources, V8 code caches) and the authority they are produced with (an fs grant, a
- * code cache store). `api.graph` itself holds no fs grant: narrow it to read files.
+ * code cache store). `api.graph` itself holds no fs grant: derive one with an fs grant to read files.
  */
 export interface ModuleGraph {
   /**
-   * A graph with `options` replacing the fs grant or the code cache. It holds nothing the realm does
+   * A new graph derived from this one, with `options` replacing the fs grant, the code cache or the source
+   * limit. Deriving can only narrow authority, never widen it: the graph holds nothing the realm does
    * not already hold. Throws `InvalidInput` for a grant that is not sync or a malformed cache.
    */
-  narrow(options?: GraphOptions): NarrowedGraph;
+  derive(options?: GraphOptions): DerivedGraph;
   /** The largest source file the graph reads through its fs grant, in bytes. */
   readonly sourceBytes: number;
   /**
@@ -79,10 +80,10 @@ export interface ModuleGraph {
 }
 
 /**
- * What {@link ModuleGraph.narrow} returns: a graph the caller owns. `api.graph` has no `close`: it lives
+ * What {@link ModuleGraph.derive} returns: a graph the caller owns. `api.graph` has no `close`: it lives
  * as long as the realm.
  */
-export interface NarrowedGraph extends ModuleGraph, Disposable {
+export interface DerivedGraph extends ModuleGraph, Disposable {
   /**
    * Ends the graph. It takes no more contexts or references (`StaleHandle`), and the host frees what it
    * kept, the code caches among them, once the contexts using it are gone. Code caches that were not

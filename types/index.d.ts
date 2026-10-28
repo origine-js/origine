@@ -75,4 +75,4 @@ export type {
   SocketEvents,
 } from "./net.d.ts";
 export type { Context, ContextCap, ContextOptions, Preload } from "./context.d.ts";
-export type { GraphOptions, ModuleGraph, NarrowedGraph, ModuleReference, ModuleReferenceStatus, ModuleRequest } from "./graph.d.ts";
+export type { GraphOptions, ModuleGraph, DerivedGraph, ModuleReference, ModuleReferenceStatus, ModuleRequest } from "./graph.d.ts";

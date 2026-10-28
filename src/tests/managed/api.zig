@@ -436,7 +436,7 @@ test "api: io and env narrowing are monotonic" {
         \\  out.home = one.get('HOME'); out.path = one.get('PATH');
         \\  const none = one.narrow({ allow: ['PATH'] });
         \\  out.widened = none.get('PATH') !== undefined || none.get('HOME') !== undefined;
-        \\  out.noContextNarrow = api.context.narrow === undefined && api.graph.narrow !== undefined;
+        \\  out.noContextNarrow = api.context.narrow === undefined && api.graph.derive !== undefined;
         \\  out.frozen = Object.isFrozen(api) && Object.isFrozen(api.fs) && api.fs.narrow === undefined;
         \\}
     , true, &.{});
@@ -866,7 +866,7 @@ test "graph: a native handler reads, links and evaluates modules without enterin
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }) });
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
         \\  out.native = handler.native;
         \\  const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
@@ -1051,7 +1051,7 @@ test "graph: a handler with functions in it runs its host elements natively and 
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }) });
         \\  const calls = [];
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(relative()).layer(({ specifier }) => { calls.push('layer:' + specifier); return specifier === 'virtual' ? { id: 'virtual' } : undefined; }),
@@ -1176,7 +1176,7 @@ test "graph: a file of the graph never serves an origine: id, not even as json" 
         \\import { fsProvider, json } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }) });
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()).layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const run = (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(graph).evaluate(ctx).then(() => 'ok', e => e.message);
@@ -1219,24 +1219,24 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
         \\    new Proxy(grant, {}),
         \\    new Proxy(grant, { getOwnPropertyDescriptor: (target, key) => Reflect.getOwnPropertyDescriptor(target, key), get: (target, key) => target[key] }),
         \\  ];
-        \\  out.forged = [...copies(real), ...copies(remote)].map(copy => name(() => api.graph.narrow({ fs: copy })));
-        \\  out.forgedCache = copies(rw).map(copy => name(() => api.graph.narrow({ codeCache: CodeCache.dir(copy) })));
-        \\  out.notObjects = [1, 'sync', () => {}, 0n].map(value => name(() => api.graph.narrow({ fs: value })));
-        \\  // A real grant still works, across narrow, as the graph's fs and as the cache's.
-        \\  out.real = name(() => api.graph.narrow({ fs: real, codeCache: CodeCache.dir(rw) }));
-        \\  out.async = name(() => api.graph.narrow({ fs: remote }));
-        \\  out.chained = name(() => api.graph.narrow({ fs: real }).narrow({ codeCache: CodeCache.memory() }).narrow({ fs: remote }));
+        \\  out.forged = [...copies(real), ...copies(remote)].map(copy => name(() => api.graph.derive({ fs: copy })));
+        \\  out.forgedCache = copies(rw).map(copy => name(() => api.graph.derive({ codeCache: CodeCache.dir(copy) })));
+        \\  out.notObjects = [1, 'sync', () => {}, 0n].map(value => name(() => api.graph.derive({ fs: value })));
+        \\  // A real grant still works, across derive, as the graph's fs and as the cache's.
+        \\  out.real = name(() => api.graph.derive({ fs: real, codeCache: CodeCache.dir(rw) }));
+        \\  out.async = name(() => api.graph.derive({ fs: remote }));
+        \\  out.chained = name(() => api.graph.derive({ fs: real }).derive({ codeCache: CodeCache.memory() }).derive({ fs: remote }));
         \\  // An async grant cannot be a cache directory (the cache is written with the host's own file calls).
-        \\  out.asyncCache = name(() => api.graph.narrow({ codeCache: CodeCache.dir(remote) }));
+        \\  out.asyncCache = name(() => api.graph.derive({ codeCache: CodeCache.dir(remote) }));
         \\  // Subclasses, prototypes and clones of a real grant are not grants either.
         \\  class Sub { constructor(grant) { return Object.defineProperties(Object.create(grant), { kind: { value: grant.kind }, id: { value: grant.id } }); } }
         \\  class Derived extends Object { constructor(grant) { super(); Object.defineProperties(this, Object.getOwnPropertyDescriptors(grant)); } }
         \\  const clone = grant => { try { return structuredClone(grant); } catch (e) { return { ...grant, cloneFailed: e.name }; } };
-        \\  out.exotic = [real, remote].flatMap(grant => [new Sub(grant), new Derived(grant), Object.setPrototypeOf({ kind: grant.kind, id: grant.id }, grant), clone(grant)]).map(copy => name(() => api.graph.narrow({ fs: copy })));
+        \\  out.exotic = [real, remote].flatMap(grant => [new Sub(grant), new Derived(grant), Object.setPrototypeOf({ kind: grant.kind, id: grant.id }, grant), clone(grant)]).map(copy => name(() => api.graph.derive({ fs: copy })));
         \\  // Closing the io runtime ends the async grants opened on it: the host refuses them as an authority.
         \\  await io.close();
-        \\  out.closedAsync = name(() => api.graph.narrow({ fs: remote }));
-        \\  out.stillSync = name(() => api.graph.narrow({ fs: real }));
+        \\  out.closedAsync = name(() => api.graph.derive({ fs: remote }));
+        \\  out.stillSync = name(() => api.graph.derive({ fs: real }));
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -1268,11 +1268,11 @@ test "graph: a source larger than the graph's limit fails the import, never cut 
         \\    ctx.close();
         \\    return answers;
         \\  };
-        \\  const sync = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }), sourceBytes: 40 });
+        \\  const sync = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }), sourceBytes: 40 });
         \\  out.syncLimit = sync.sourceBytes;
         \\  out.sync = await tryImport(sync);
-        \\  out.async = await tryImport(api.graph.narrow({ fs: await api.fs.requestAsync({ io, access: 'r' }), sourceBytes: 40 }));
-        \\  out.bad = [0, 1.5, -1, '9'].map(n => { try { api.graph.narrow({ sourceBytes: n }); return 'ok'; } catch (e) { return e.name; } }).join(',');
+        \\  out.async = await tryImport(api.graph.derive({ fs: await api.fs.requestAsync({ io, access: 'r' }), sourceBytes: 40 }));
+        \\  out.bad = [0, 1.5, -1, '9'].map(n => { try { api.graph.derive({ sourceBytes: n }); return 'ok'; } catch (e) { return e.name; } }).join(',');
         \\  await io.close();
         \\}
     , true, &.{});
@@ -1298,7 +1298,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create({});
         \\  const ro = await api.fs.requestAsync({ io, access: 'r' });
-        \\  const graph = api.graph.narrow({ fs: ro });
+        \\  const graph = api.graph.derive({ fs: ro });
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
         \\  out.native = handler.native;
         \\  const ctx = await api.context.create({ import: handler, graph });
@@ -1312,7 +1312,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  out.missing = await run(graph, ctx, "import './nope.js'", 'm1');
         \\  out.codecache = await run(graph, ctx, "import './__codecache__/x.js'", 'm2');
         \\  const wo = await api.fs.requestAsync({ io, access: 'w' });
-        \\  const writeOnly = api.graph.narrow({ fs: wo });
+        \\  const writeOnly = api.graph.derive({ fs: wo });
         \\  const wctx = await api.context.create({ import: handler, graph: writeOnly });
         \\  out.writeOnly = await run(writeOnly, wctx, "import './dep.js'", 'm3');
         \\  out.accept = await (async () => {
@@ -1486,7 +1486,7 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const fs = api.fs.requestSync({ access: 'r' });
-        \\  const graph = api.graph.narrow({ fs });
+        \\  const graph = api.graph.derive({ fs });
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(importMap({ imports: { dep: './dep.js' } })).layer(relative()),
         \\    hooks: [json(), fsProvider({ read: 'mmap' })],
@@ -1500,7 +1500,7 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
         \\  out.requests = main.requests.map(r => r.specifier + '=' + r.reference.name).join(',');
         \\  await main.evaluate(ctx);
         \\  out.evaluated = main.status;
-        \\  const closed = api.graph.narrow({});
+        \\  const closed = api.graph.derive({});
         \\  const noFs = await api.context.create({ import: handler, graph: closed });
         \\  out.noFs = await ModuleRecipe({ source: ModuleSource.text('import "./a.ts"'), import: handler, name: 'nofs' }).create(closed).evaluate(noFs).then(() => 'ok', e => e.message);
         \\}
@@ -1542,15 +1542,15 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
         \\    await recipe.create(graph).evaluate(b);
         \\    return [first, await graph.flush()];
         \\  };
-        \\  out.memory = (await run(api.graph.narrow({ fs: ro, codeCache: CodeCache.memory() }))).join(':');
-        \\  out.none = (await run(api.graph.narrow({ fs: ro }))).join(':');
+        \\  out.memory = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.memory() }))).join(':');
+        \\  out.none = (await run(api.graph.derive({ fs: ro }))).join(':');
         \\  const stored = [];
         \\  const custom = CodeCache.custom({ load: () => undefined, store: (key, bytes) => { stored.push(key.id + ':' + (bytes instanceof Uint8Array) + ':' + (bytes.length > 0)); } });
-        \\  out.custom = (await run(api.graph.narrow({ fs: ro, codeCache: custom }))).join(':');
+        \\  out.custom = (await run(api.graph.derive({ fs: ro, codeCache: custom }))).join(':');
         \\  out.stored = stored.join(',');
         \\  const rw = api.fs.requestSync({ access: 'rw' });
-        \\  out.dir = (await run(api.graph.narrow({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
-        \\  out.dirAgain = (await run(api.graph.narrow({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
+        \\  out.dir = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
+        \\  out.dirAgain = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -1594,7 +1594,7 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
         \\    store: async (key, blob) => { store.set(keyOf(key), blob); },
         \\  });
         \\  const run = async codeCache => {
-        \\    const graph = api.graph.narrow({ fs: ro, codeCache });
+        \\    const graph = api.graph.derive({ fs: ro, codeCache });
         \\    const ctx = await api.context.create({ import: handler, graph });
         \\    await ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler }).create(graph).evaluate(ctx);
         \\    return graph.flush();
@@ -1638,7 +1638,7 @@ test "graph: CodeCache.dir keeps the files of virtual and escaping module ids in
         \\  });
         \\  const ids = ['app:/x.js', '../../escape.js', 'https://example.com/a/b.js', 'mem:y'];
         \\  const run = async () => {
-        \\    const graph = api.graph.narrow({ codeCache: CodeCache.dir(rw) });
+        \\    const graph = api.graph.derive({ codeCache: CodeCache.dir(rw) });
         \\    const ctx = await api.context.create({ import: handler, graph });
         \\    for (const id of ids) await ctx.import(id);
         \\    return graph.flush();
@@ -3707,7 +3707,7 @@ test "api: a closed graph is freed with the last context that uses it" {
         \\  globalThis.phase1 = async () => {
         \\    const names = [];
         \\    for (let n = 0; n < 30; n++) {
-        \\      const graph = api.graph.narrow({ codeCache: CodeCache.memory() });
+        \\      const graph = api.graph.derive({ codeCache: CodeCache.memory() });
         \\      const child = await api.context.create({ import: handler, graph });
         \\      await child.import('m');
         \\      graph.close();
@@ -3718,7 +3718,7 @@ test "api: a closed graph is freed with the last context that uses it" {
         \\      child.close();
         \\    }
         \\    {
-        \\      using scoped = api.graph.narrow();
+        \\      using scoped = api.graph.derive();
         \\      scoped.flush();
         \\    }
         \\    let rootClose;

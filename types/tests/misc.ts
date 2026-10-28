@@ -60,7 +60,7 @@ export const main: Main = async (api: Api) => {
   });
   using child = await api.context.create({
     import: handler,
-    graph: api.graph.narrow({ fs: api.fs.requestSync({ access: "r" }) }),
+    graph: api.graph.derive({ fs: api.fs.requestSync({ access: "r" }) }),
     preload: [{ source: "(values) => {}", values: { n: 1 } }, { module: "export default () => {}" }],
   });
   const imported = await child.import("a");

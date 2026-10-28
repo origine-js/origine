@@ -44,15 +44,15 @@ const recipe: Recipe = ModuleRecipe({
 const inline = ModuleRecipe({ source: ModuleSource.text("export {}", SourceMap.text("{}")), import: handler, name: "inline" });
 const pure: boolean = recipe.native && inline.native;
 export async function graphUse(api: import("@origine/types").Api): Promise<void> {
-  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: "r" }), codeCache: CodeCache.memory() });
+  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: "r" }), codeCache: CodeCache.memory() });
   // An async grant is read on its io runtime, without blocking.
   const io = api.io.create({});
-  const asyncGraph = api.graph.narrow({ fs: await api.fs.requestAsync({ io, access: "r" }) });
+  const asyncGraph = api.graph.derive({ fs: await api.fs.requestAsync({ io, access: "r" }) });
   void asyncGraph;
-  // A narrowed graph is the caller's: it can be closed (or disposed); `api.graph` itself cannot.
+  // A derived graph is the caller's: it can be closed (or disposed); `api.graph` itself cannot.
   asyncGraph.close();
   {
-    using scoped = api.graph.narrow();
+    using scoped = api.graph.derive();
     void scoped;
   }
   // @ts-expect-error api.graph lives as long as the realm

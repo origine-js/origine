@@ -386,7 +386,7 @@ fn newGrant(env: binding.Env, kind: GrantKind, id: u32) !v8.Object {
     return object;
 }
 
-/// The grant `object` is, if the host built it for this realm: what `narrow({ fs })` and
+/// The grant `object` is, if the host built it for this realm: what `derive({ fs })` and
 /// `CodeCache.dir` call to learn what they were handed. Anything else is `InvalidInput`.
 pub fn grantOf(state: *ScopeState, call: *Call, object: v8.Object) !GrantRef {
     const stamp = object.getPrivate(call.ctx, grantKey(call.isolate)) orelse return error.InvalidInput;

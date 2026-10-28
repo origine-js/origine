@@ -123,7 +123,7 @@ const make = options => {
     /// True when neither the source's transformers nor the import handler need the JS realm, which
     /// is what lets the recipe cross to another isolate as plain data.
     native: source.native && handler.native,
-    /// A reference to this module in `graph` (`api.graph` or a narrowed one). Nothing is read or
+    /// A reference to this module in `graph` (`api.graph` or a derived one). Nothing is read or
     /// compiled until `reference.load()` or `reference.evaluate(ctx)`.
     create(graph) {
       const make = graph?.[CREATE];

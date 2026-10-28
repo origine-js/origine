@@ -61,6 +61,9 @@ comptime {
 pub const StdFilter = struct {
     include: ?[]const []const u8 = null,
     exclude: ?[]const []const u8 = null,
+    /// Only while a handler is parsed: "whatever the creating context may import". `handler` replaces
+    /// it by a copy of that context's own set, so a hook can still not widen it.
+    inherit: bool = false,
 
     pub fn allows(self: StdFilter, name: []const u8) bool {
         if (self.include) |list| {
@@ -375,7 +378,11 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
                 .object => |std_object| std_object,
                 else => return error.InvalidInput,
             };
-            slot.* = .{ .origine = .{ .include = try parseStringList(alloc, std_object.get("include")), .exclude = try parseStringList(alloc, std_object.get("exclude")) } };
+            const inherit = if (std_object.get("all")) |flag| switch (flag) {
+                .bool => |value| value,
+                else => return error.InvalidInput,
+            } else false;
+            slot.* = .{ .origine = .{ .include = try parseStringList(alloc, std_object.get("include")), .exclude = try parseStringList(alloc, std_object.get("exclude")), .inherit = inherit } };
         } else if (std.mem.eql(u8, host, "fs")) {
             const read = jsonString(object.get("read")) orelse return error.InvalidInput;
             slot.* = .{ .fs = std.meta.stringToEnum(ReadMode, read) orelse return error.InvalidInput };
@@ -723,11 +730,22 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         parsed.deinit();
         host.allocator.destroy(parsed);
     }
-    for (parsed.hooks) |item| switch (item) {
+    for (parsed.hooks) |*item| switch (item.*) {
         .origine => |filter| {
             const ceiling = host.ceilingOf(state.scope);
             // A realm that serves no `origine:` module has no namespace to give.
             if (ceiling) |limit| if (limit.include) |list| if (list.len == 0) return error.Unsupported;
+            if (filter.inherit) {
+                // Everything the creating context may import: a copy of its own set.
+                const alloc = parsed.arena.allocator();
+                var own_set: StdFilter = .{};
+                if (ceiling) |limit| {
+                    if (limit.include) |list| own_set.include = try duplicateList(alloc, list);
+                    if (limit.exclude) |list| own_set.exclude = try duplicateList(alloc, list);
+                }
+                item.* = .{ .origine = own_set };
+                continue;
+            }
             if (!filter.within(ceiling)) return error.PermissionDenied;
         },
         else => {},

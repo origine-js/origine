@@ -30,10 +30,12 @@ const names = (what, list) => {
 };
 
 /// Serves `origine:@std/*` modules from the host, with their natives bound to the importing
-/// context. `std` is required and says which ones: `{ include: [...] }` or `{ exclude: [...] }`
-/// (exactly one). It can only narrow what the creating context itself may import.
-export const origineProvider = options => {
+/// context. With no options, or `std: true`, it serves every one the creating context itself may
+/// import; `std: { include: [...] }` or `{ exclude: [...] }` (exactly one) names fewer. It can only
+/// narrow what the creating context itself may import, whatever it asks for.
+export const origineProvider = (options = {}) => {
   const std = own(options, 'std');
+  if (std === undefined || std === true) return provider('origine', { std: freeze({ all: true }) });
   const include = own(std, 'include');
   const exclude = own(std, 'exclude');
   if ((include === undefined) === (exclude === undefined)) throw invalid('origineProvider: std needs exactly one of include and exclude');

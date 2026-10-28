@@ -830,7 +830,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  const std = origineProvider({ std: { exclude: ['fs'] } });
         \\  out.providers = std.std.exclude[0] === 'fs' && origineProvider({ std: { include: ['text', 'text'] } }).std.include.length === 1 && fsProvider({ read: 'mmap' }).read === 'mmap'
         \\    && json().kind === 'provider' && invalid(() => origineProvider({ std: {} })) && invalid(() => origineProvider({ std: { include: [], exclude: [] } }))
-        \\    && invalid(() => origineProvider({ std: { include: ['origine:@std/text'] } })) && invalid(() => origineProvider({})) && invalid(() => fsProvider({})) && invalid(() => fsProvider({ read: 'map' }));
+        \\    && invalid(() => origineProvider({ std: { include: ['origine:@std/text'] } })) && origineProvider({}).std.all === true && origineProvider().std.all === true && origineProvider({ std: true }).std.all === true && invalid(() => origineProvider({ std: false })) && invalid(() => fsProvider({})) && invalid(() => fsProvider({ read: 'map' }));
         \\  const hook = fromLoader(async (id, attributes) => id === 'a' ? 'export default 1' : id === 'b' ? { source: 'export default ' + attributes.type } : 42);
         \\  const a = await hook({ id: 'a', attributes: {} });
         \\  const b = await hook({ id: 'b', attributes: { type: 'json' } });
@@ -1114,6 +1114,12 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
         \\  const bad = await api.context.create({ import: handler }).then(() => 'ok');
         \\  out.bad = bad;
         \\  out.empty = await run(make([]), 'h', "import 'origine:@std/text'");
+        \\  // No options, or std: true, serves every origine:@std/* the creating context has.
+        \\  out.defaultServed = await run(make([origineProvider()]), 'i', "import { eprintln } from 'origine:@std/debug'; import { encodeUtf8 } from 'origine:@std/text'; globalThis.both = typeof eprintln + typeof encodeUtf8;");
+        \\  out.trueServed = await run(make([origineProvider({ std: true })]), 'j', "import { encodeUtf8 } from 'origine:@std/text'; globalThis.len2 = encodeUtf8('é').length;");
+        \\  out.unknownStillMissing = await run(make([origineProvider()]), 'k', "import 'origine:nothing'");
+        \\  out.falseBad = (() => { try { origineProvider({ std: false }); return 'ok'; } catch (e) { return e.name; } })();
+        \\  out.emptyStd = (() => { try { origineProvider({ std: {} }); return 'ok'; } catch (e) { return e.name; } })();
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -1122,6 +1128,7 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
     try check(fx.scope, "report.excluded.includes('PermissionDenied') && report.unlisted.includes('PermissionDenied') && report.unknown.includes('NotFound')");
     try check(fx.scope, "report.forged.includes('PermissionDenied') && report.forgedStd.includes('PermissionDenied')");
     try check(fx.scope, "report.excludeServed === 'ok' && report.excludeDenied.includes('PermissionDenied') && report.empty.includes('NotFound')");
+    try check(fx.scope, "report.defaultServed === 'ok' && report.trueServed === 'ok' && report.unknownStillMissing.includes('NotFound') && report.falseBad === 'InvalidInput' && report.emptyStd === 'InvalidInput'");
     try check(fx.rt.scopes.items[1], "len === 6");
     // Only the two imports through the handler with a JS hook entered the driver, and only for the hook
     // (its resolver layer is a host layer).
@@ -1144,6 +1151,8 @@ test "graph: the origine ceiling of a context is the exact union of its hooks" {
         \\    make({ include: ['text', 'fs'] }, { exclude: ['fs', 'io'] }),    // everything but io
         \\    make({ exclude: ['fs', 'io'] }, { exclude: ['fs'] }),            // everything but fs
         \\    make(),                                                          // nothing
+        \\    make(true),                                                      // everything the creator has
+        \\    make(undefined, { include: ['text'] }),                          // the same, plus text
         \\  ];
         \\  for (const handler of contexts) await api.context.create({ import: handler });
         \\}
@@ -1158,12 +1167,57 @@ test "graph: the origine ceiling of a context is the exact union of its hooks" {
         .{ true, true, false },
         .{ true, false, true },
         .{ false, false, false },
+        .{ true, true, true },
+        .{ true, true, true },
     };
     try t.expectEqual(expected.len, fx.host.contexts.count());
     for (fx.host.contexts.values(), expected) |context, row| {
         const ceiling = context.ceiling.?;
         for (names, row) |name, allowed| try t.expectEqual(allowed, ceiling.allows(name));
     }
+}
+
+/// The native-state record of the realm a context runs in (what a guest calling the graph natives from there would use).
+fn stateOfContext(host: *m.Api.Host, context: anytype) @TypeOf(host.states.items[0]) {
+    for (host.states.items) |state| if (state.scope == context.scope) return state;
+    unreachable;
+}
+
+test "graph: an origineProvider with no std serves what its creator has and cannot widen a narrower context" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { origine } from 'origine:@std/graph/resolve/layers';
+        \\import { origineProvider } from 'origine:@std/graph/providers';
+        \\export async function main(api) {
+        \\  const make = std => ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()), hooks: [origineProvider({ std })] });
+        \\  // A context that may import only text and io.
+        \\  await api.context.create({ import: make({ include: ['text', 'io'] }) });
+        \\  // One that may import everything but fs.
+        \\  await api.context.create({ import: make({ exclude: ['fs'] }) });
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    const spec = struct {
+        fn of(comptime filter_json: []const u8) []const u8 {
+            return "{\"layers\":[{\"host\":\"origine\"}],\"hooks\":[{\"host\":\"origine\",\"std\":" ++ filter_json ++ "}],\"maker\":{\"host\":\"maker\",\"import\":0,\"transformer\":null},\"cache\":{\"retain\":\"all\",\"entries\":null},\"meta\":false}";
+        }
+    };
+    const graph_api = m.Api.graph_api;
+    const narrow_state = stateOfContext(fx.host, fx.host.contexts.values()[0]);
+    // The default is the creating context's own set, no more.
+    const inherited = try graph_api.handler(narrow_state, spec.of("{\"all\":true}"));
+    const filter = fx.host.handlers.get(inherited).?.hooks[0].origine;
+    try t.expect(filter.allows("text") and filter.allows("io") and !filter.allows("fs") and !filter.allows("debug"));
+    // Asking for more by name is still refused.
+    try t.expectError(error.PermissionDenied, graph_api.handler(narrow_state, spec.of("{\"include\":[\"fs\"]}")));
+    try t.expectError(error.PermissionDenied, graph_api.handler(narrow_state, spec.of("{\"exclude\":[]}")));
+    // An exclude-style creator passes its exclusions on.
+    const wide_state = stateOfContext(fx.host, fx.host.contexts.values()[1]);
+    const wide = fx.host.handlers.get(try graph_api.handler(wide_state, spec.of("{\"all\":true}"))).?.hooks[0].origine;
+    try t.expect(wide.allows("text") and wide.allows("debug") and !wide.allows("fs"));
 }
 
 test "graph: a file of the graph never serves an origine: id, not even as json" {

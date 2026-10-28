@@ -92,8 +92,11 @@ ImportCache.native({ retain: "some" });
 recipe.create({});
 // @ts-expect-error `read` is required (it has a cost)
 fsProvider({});
-// @ts-expect-error `std` is required, there is no "everything" default
-origineProvider({});
+// With no options, or `std: true`, it serves everything the creating context may import.
+origineProvider();
+origineProvider({ std: true });
+// @ts-expect-error `std: false` is not a spelling: leave the provider out
+origineProvider({ std: false });
 // @ts-expect-error exactly one of include and exclude
 origineProvider({ std: { include: ["text"], exclude: ["fs"] } });
 // @ts-expect-error `mode` is required

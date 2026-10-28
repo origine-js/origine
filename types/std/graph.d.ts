@@ -283,13 +283,14 @@ declare module "origine:@std/graph/providers" {
 
   /**
    * Serves `origine:@std/*` modules from the host, with their natives bound to the importing context.
-   * `std` is required and names modules without the `origine:@std/` prefix (`'text'`,
-   * `'transformer/oxc'`): exactly one of `include` and `exclude`. It can only narrow what the creating
-   * context may import.
+   * With no options, or `std: true`, it serves every one the creating context itself may import. `std`
+   * can name fewer, without the `origine:@std/` prefix (`'text'`, `'transformer/oxc'`): exactly one of
+   * `include` and `exclude`. Whatever it asks for, it can only narrow what the creating context may
+   * import: a hook that names more is `PermissionDenied`, and the default is that context's own set.
    */
-  export function origineProvider(options: {
-    readonly std: { readonly include: readonly string[]; readonly exclude?: never } | { readonly exclude: readonly string[]; readonly include?: never };
-  }): Provider & { readonly std: { readonly include?: readonly string[]; readonly exclude?: readonly string[] } };
+  export function origineProvider(options?: {
+    readonly std?: true | { readonly include: readonly string[]; readonly exclude?: never } | { readonly exclude: readonly string[]; readonly include?: never };
+  }): Provider & { readonly std: { readonly all: true } | { readonly include?: readonly string[]; readonly exclude?: readonly string[] } };
   /** Reads source files with the graph's fs grant. `read` is required: `'mmap'` avoids a copy for ASCII/Latin-1 text, but a file changed while mapped changes under V8. */
   export function fsProvider(options: { readonly read: "copy" | "mmap" }): Provider & { readonly read: "copy" | "mmap" };
   /** Serves `type: 'json'` imports as a module whose default export is the parsed value. */

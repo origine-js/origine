@@ -70,7 +70,7 @@ The builders block nothing, allocate nothing natively, detach nothing and retain
 
 ### `providers`
 
-- `origineProvider({ std: { include } | { exclude } })`: serves `origine:@std/*` modules (names without the prefix, for example `'text'`, `'transformer/oxc'`). `std` is required and exactly one of `include`/`exclude`: there is no "everything" default. It can only narrow the creating context's own set.
+- `origineProvider()`, `origineProvider({ std: true })`, `origineProvider({ std: { include } | { exclude } })`: serves `origine:@std/*` modules (names without the prefix, for example `'text'`, `'transformer/oxc'`). With no options, or `std: true`, it serves every `origine:@std/*` module the creating context itself may import; `std: { include }` or `{ exclude }` (exactly one) names fewer. It can only narrow the creating context's own set: the default is that set, and a hook that names more is `PermissionDenied`.
 - `fsProvider({ read })`: `read` is required, `'copy'` or `'mmap'`. `'mmap'` avoids a copy for ASCII/Latin-1 text, but a file changed while mapped changes under V8.
 - `json()`: `type: 'json'` imports as a module whose default export is the parsed value.
 - `fromLoader(loader)`: adapts a loader `loader(id, attributes)` (a string, `{ source }`, or a promise of either) to a hook; anything else rejects `InvalidData`.

@@ -33,3 +33,5 @@ pub const oxc = @import("api/transform/oxc.zig");
 pub const transformers = @import("api/transform/transformers.zig");
 pub const init_cache = @import("api/init_cache.zig");
 pub const cache_dir = @import("api/cache_dir.zig");
+/// The module graph natives, for tests that drive them without a guest in the realm.
+pub const graph_api = @import("api/graph.zig");

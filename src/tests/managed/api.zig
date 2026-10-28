@@ -3563,6 +3563,69 @@ test "api: a closed context is freed with its imports and driver calls; ids are 
     try t.expectEqual(orphans - 1, fx.host.orphans.items.len);
 }
 
+test "api: a handler no live context reaches is freed, and a handler object registers again when it is used later" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\export async function main(api) {
+        \\  const make = body => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js' } })), hooks: [fromLoader(body)] });
+        \\  const kept = make(() => 'export const x = 1');
+        \\  const ref = ModuleRecipe({ source: ModuleSource.text("import { x } from 'm'; globalThis.seenX = x; export {};"), import: kept, name: 'app:/entry.js' }).create(api.graph);
+        \\  // Many contexts, each with a handler of its own that closes over something; the last pump
+        \\  // of the host frees them when they are closed.
+        \\  globalThis.phase1 = async () => {
+        \\    const first = await api.context.create({ import: kept });
+        \\    await ref.load();
+        \\    first.close();
+        \\    for (let n = 0; n < 40; n++) {
+        \\      const held = new Array(1000).fill(n);
+        \\    const child = await api.context.create({ import: make(() => 'export const x = ' + held.length) });
+        \\      await child.import('m');
+        \\      child.close();
+        \\    }
+        \\  };
+        \\  // The handler of the first context was freed with it; its object works again.
+        \\  globalThis.phase2 = async () => {
+        \\    const second = await api.context.create({ import: kept });
+        \\    const report = { reused: (await second.import('m')).name };
+        \\    await ModuleRecipe({ source: ModuleSource.text("export const y = 2;"), import: kept, name: 'app:/y.js' }).create(api.graph).evaluate(second);
+        \\    await ref.evaluate(second);
+        \\    report.status = ref.status;
+        \\    globalThis.report = report;
+        \\  };
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try runPhase(&fx, "phase1");
+    fx.rt.pump();
+    // Every context is closed and freed, so no handler is reachable.
+    try t.expectEqual(@as(usize, 0), fx.host.contexts.count());
+    try t.expectEqual(@as(usize, 0), fx.host.handlers.count());
+    try runPhase(&fx, "phase2");
+    try check(fx.scope, "report.reused === 'app:/m.js' && report.status === 'evaluated'");
+    // The first context's handler registered again for the second one.
+    try t.expectEqual(@as(usize, 1), fx.host.handlers.count());
+}
+
+/// Starts `globalThis[name]()` and pumps until it settles.
+fn runPhase(fx: *Fixture, name: []const u8) !void {
+    const source = try std.fmt.allocPrint(t.allocator, "(globalThis.phaseDone = false, globalThis.phaseError = undefined, {s}().then(() => {{ phaseDone = true; }}, e => {{ phaseDone = true; phaseError = String(e && e.stack || e); }}), true)", .{name});
+    defer t.allocator.free(source);
+    try check(fx.scope, source);
+    var turns: usize = 0;
+    while (turns < 50) : (turns += 1) {
+        fx.rt.pump();
+        check(fx.scope, "phaseDone") catch continue;
+        break;
+    }
+    try check(fx.scope, "phaseDone && phaseError === undefined");
+}
+
 test "api: module preloads, with the origine allowlist per context" {
     var fx: Fixture = undefined;
     try fx.setup(

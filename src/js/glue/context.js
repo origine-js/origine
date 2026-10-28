@@ -47,7 +47,7 @@
             const imported = makeReference(graph, null, {
               name,
               text: undefined,
-              record,
+              handler,
               status: 'evaluated',
               context: id,
               contextObject: context,

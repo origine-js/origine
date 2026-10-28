@@ -48,6 +48,9 @@ comptime {
     errno.requireBinding(jsonModule);
     errno.requireBinding(pipelineResolve);
     errno.requireBinding(pipelineLoad);
+    errno.requireBinding(handlerPin);
+    errno.requireBinding(handlerUnpin);
+    errno.requireBinding(handlersFreed);
 }
 
 // ---- std allowlist ---------------------------------------------------------
@@ -236,6 +239,9 @@ pub const Maker = union(enum) {
 pub const Retain = enum { all, used };
 
 pub const Handler = struct {
+    id: u32 = 0,
+    /// Held by the JS side while an operation that is not a context (a `reference.load()`) uses it.
+    pins: u32 = 0,
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     layers: []Layer,
@@ -697,8 +703,85 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         else => {},
     };
     const id = try host.handlers.issue();
+    parsed.id = id;
     try host.handlers.put(host.allocator, id, parsed);
     return id;
+}
+
+/// `handlerPin(handler)` / `handlerUnpin(handler)`: keep a handler through an operation that spans
+/// ticks and is not a context's.
+pub fn handlerPin(state: *ScopeState, id: u32) Error!void {
+    const found = handlerFor(state.host, id) catch |err| return errno.narrow(err);
+    found.pins += 1;
+}
+
+pub fn handlerUnpin(state: *ScopeState, id: u32) Error!void {
+    const found = state.host.handlers.get(id) orelse return;
+    if (found.pins > 0) found.pins -= 1;
+}
+
+/// `handlersFreed()`: the ids of handlers freed since the last call, so the JS side drops their records.
+pub fn handlersFreed(state: *ScopeState, call: *Call) Error!v8.Value {
+    const host = state.host;
+    var out = call.array();
+    for (host.freed_handlers.items) |id| out.push(@as(f64, @floatFromInt(id))) catch |err| return errno.narrow(err);
+    host.freed_handlers.clearRetainingCapacity();
+    return out.finish();
+}
+
+/// Frees the handlers nothing can reach: the ones no live context names (as its handler, for a module
+/// it made, in a call in flight, or through the `maker` of another such handler) and no operation pins.
+/// Best effort: it gives up when it cannot allocate.
+pub fn sweepHandlers(host: *Host) void {
+    const alloc = host.allocator;
+    var marked: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer marked.deinit(alloc);
+    var stack: std.ArrayList(u32) = .empty;
+    defer stack.deinit(alloc);
+    const push = struct {
+        fn call(list: *std.ArrayList(u32), set: *std.AutoHashMapUnmanaged(u32, void), a: std.mem.Allocator, id: u32) !void {
+            if (id == 0) return;
+            const slot = try set.getOrPut(a, id);
+            if (!slot.found_existing) try list.append(a, id);
+        }
+    }.call;
+    sweepRoots(host, &stack, &marked, push) catch return;
+    while (stack.pop()) |id| {
+        const found = host.handlers.get(id) orelse continue;
+        switch (found.maker) {
+            .inherit => |inherit| push(&stack, &marked, alloc, inherit.import) catch return,
+            .js => {},
+        }
+    }
+    var doomed: std.ArrayList(u32) = .empty;
+    defer doomed.deinit(alloc);
+    for (host.handlers.values()) |found| {
+        if (found.pins == 0 and !marked.contains(found.id)) doomed.append(alloc, found.id) catch return;
+    }
+    host.freed_handlers.ensureUnusedCapacity(alloc, doomed.items.len) catch return;
+    for (doomed.items) |id| {
+        const found = host.handlers.get(id).?;
+        host.handlers.remove(id);
+        found.deinit();
+        alloc.destroy(found);
+        host.freed_handlers.appendAssumeCapacity(id);
+    }
+}
+
+fn sweepRoots(host: *Host, stack: *std.ArrayList(u32), marked: *std.AutoHashMapUnmanaged(u32, void), push: anytype) !void {
+    const alloc = host.allocator;
+    for (host.handlers.values()) |found| if (found.pins > 0) try push(stack, marked, alloc, found.id);
+    for (host.contexts.values()) |context| {
+        try push(stack, marked, alloc, context.import_handler);
+        var of = context.handler_of.valueIterator();
+        while (of.next()) |id| try push(stack, marked, alloc, id.*);
+        var resolved = context.resolved.valueIterator();
+        while (resolved.next()) |info| try push(stack, marked, alloc, info.handler);
+        for (context.pendings.items) |pending| {
+            try push(stack, marked, alloc, pending.handler);
+            try push(stack, marked, alloc, pending.import);
+        }
+    }
 }
 
 pub fn handlerFor(host: *Host, id: u32) !*Handler {

@@ -224,6 +224,8 @@ pub const Host = struct {
     /// Calls into the JS driver whose context was freed before the promise settled; each is freed by
     /// its callback, or by `destroy` when the promise never settles.
     orphans: std.ArrayList(*context_api.PendingJs) = .empty,
+    /// Ids of handlers freed since the JS side last asked (`graph.handlersFreed`).
+    freed_handlers: std.ArrayList(u32) = .empty,
     preloads: std.ArrayList(*context_api.PreloadState) = .empty,
     /// How many times a context called into the JS driver of the module graph. A handler with no JS
     /// function in it never does (tests assert it).
@@ -293,6 +295,7 @@ pub const Host = struct {
             alloc.destroy(item);
         }
         self.handlers.deinit(alloc);
+        self.freed_handlers.deinit(alloc);
         for (self.graphs.values()) |item| {
             item.deinit();
             alloc.destroy(item);
@@ -672,6 +675,9 @@ pub const Host = struct {
                         .jsonModule = func(graph_api.jsonModule, .{ .side_effect = .any }),
                         .pipelineResolve = func(graph_api.pipelineResolve, .{ .side_effect = .any }),
                         .pipelineLoad = func(graph_api.pipelineLoad, .{ .side_effect = .any }),
+                        .handlerPin = func(graph_api.handlerPin, .{ .side_effect = .any }),
+                        .handlerUnpin = func(graph_api.handlerUnpin, .{ .side_effect = .any }),
+                        .handlersFreed = func(graph_api.handlersFreed, .{ .side_effect = .any }),
                     },
                     .context = .{
                         .create = func(context_api.create, .{ .side_effect = .any }),

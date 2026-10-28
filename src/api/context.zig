@@ -1020,6 +1020,7 @@ pub fn free(host: *Host, context: *Context) void {
     host.contexts.remove(context.id);
     context.deinit();
     alloc.destroy(context);
+    graph_api.sweepHandlers(host);
 }
 
 // ---- natives ---------------------------------------------------------------

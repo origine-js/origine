@@ -33,9 +33,29 @@
 
   // ---- import handlers -------------------------------------------------------------------------
 
-  /// handler object -> its record, and id -> record.
+  /// handler object -> its record, and id -> record. The host frees a handler no live context reaches
+  /// (when a context is freed); `register` then drops its record and makes a new one on the next use. So
+  /// code that waits keeps the handler object, never an id, unless it pins the record (`pinned`).
   const handlers = new WeakMap();
-  const byId = [];
+  const byId = new Map();
+  const prune = () => {
+    for (const id of host(native.graph.handlersFreed)) {
+      const record = byId.get(id);
+      if (record === undefined) continue;
+      byId.delete(id);
+      if (handlers.get(record.handler) === record) handlers.delete(record.handler);
+    }
+  };
+  /// Runs `fn` with the host keeping the handler of `record` (and what its maker names) alive.
+  const pinned = async (record, fn) => {
+    host(native.graph.handlerPin, record.id);
+    try {
+      return await fn();
+    } finally {
+      native.graph.handlerUnpin(record.id);
+      take();
+    }
+  };
 
   const descriptorHost = value => value !== null && typeof value === 'object' && typeof value.host === 'string';
   /// The part of a transformer the host needs, as plain data: the oxc ones are descriptors that
@@ -111,8 +131,9 @@
 
   const register = handler => {
     if (handler === null || typeof handler !== 'object' || handler[HANDLER] !== true) throw invalid('expected an ImportHandler');
+    prune();
     const known = handlers.get(handler);
-    if (known !== undefined) return known;
+    if (known !== undefined && byId.get(known.id) === known) return known;
     bindDriver();
     const { spec, layerFns, hookFns, hookHosts, transformerFns } = flatten(handler);
     const id = host(native.graph.handler, JSON.stringify(spec));
@@ -128,7 +149,7 @@
       entries: handler.cache.entries,
     });
     handlers.set(handler, record);
-    byId[id] = record;
+    byId.set(id, record);
     return record;
   };
 
@@ -258,7 +279,7 @@
     layer: async (hid, ctxId, index, specifier, referrer, attributes) => {
       await settled();
       const request = freeze({ specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
-      const answer = await byId[hid].layerFns[index](request);
+      const answer = await byId.get(hid).layerFns[index](request);
       if (answer === undefined) return undefined;
       const id = typeof answer === 'string' ? answer : own(answer, 'id');
       if (typeof id !== 'string' || id === '') throw named(InvalidData, 'a resolver layer must answer an id');
@@ -268,7 +289,7 @@
     hook: async (hid, ctxId, graphId, index, id, attributes, specifier, referrer) => {
       await settled();
       const resolved = freeze({ id, attributes: freeze({ ...attributes }), specifier, referrer, phase: 'evaluation' });
-      const verdict = await byId[hid].hookFns[index](resolved);
+      const verdict = await byId.get(hid).hookFns[index](resolved);
       if (verdict === null || typeof verdict !== 'object' || typeof verdict.kind !== 'string')
         throw named(InvalidData, 'a hook must return an Import verdict');
       switch (verdict.kind) {
@@ -306,21 +327,22 @@
     /// A maker that is a function: the made module's source and the handler of its imports.
     maker: async (hid, ctxId, id, text) => {
       await settled();
-      const record = byId[hid];
+      const record = byId.get(hid);
       const source = freeze({ kind: 'text', text, map: freeze({ kind: 'none' }), transformers: freeze([]), native: true });
       const options = (await record.handler.maker.fn(freeze({ id, source }))) ?? {};
+      const made = await applyTransformer(options.transformer, id, text);
       const child = options.import !== undefined ? register(options.import) : record;
-      return freeze({ text: await applyTransformer(options.transformer, id, text), handler: child.id });
+      return freeze({ text: made, handler: child.id });
     },
     /// A transformer function the host's maker reached (the `index`th of the handler's).
     transform: async (hid, index, id, text) => {
       await settled();
-      return applyTransformer(byId[hid].transformerFns[index], id, text);
+      return applyTransformer(byId.get(hid).transformerFns[index], id, text);
     },
     /// The `import.meta` data of a made module, as JSON.
     meta: async (hid, id) => {
       await settled();
-      return metaOf(byId[hid], id);
+      return metaOf(byId.get(hid), id);
     },
     /// The graph's `custom` code cache gets to load what it kept for the final source of `id`.
     cacheload: async (graphId, id, hash, text) => {
@@ -333,7 +355,7 @@
   /// The pipeline of a handler with functions in it, run from JS: for `reference.load()`, which asks
   /// for the sources of a module's dependencies and has no request to park.
   const resolveInJs = async (hid, specifier, referrer, attributes) => {
-    const record = byId[hid];
+    const record = byId.get(hid);
     for (let index = 0; index < record.layerFns.length; index++) {
       const id =
         record.layerFns[index] !== null
@@ -344,9 +366,13 @@
     throw named(NotFound, `cannot resolve ${specifier}`);
   };
 
+  /// The `source` reply of `reference.load()`: `handler` is the handler object that governs the module's own imports.
+  const finished = (child, source, id) =>
+    pinned(child, async () => freeze({ kind: 'source', source, handler: child.handler, meta: await metaOf(child, id) }));
+
   /// Answers `{ kind: 'source', source, handler, meta }` or the `link` reply of a hook.
   const loadInJs = async (hid, graphId, id, attributes, specifier, referrer) => {
-    const record = byId[hid];
+    const record = byId.get(hid);
     const json = attributesJson(attributes);
     let supplied;
     for (let index = 0; index < record.hookFns.length && supplied === undefined; index++) {
@@ -368,8 +394,7 @@
       }
       if (reply.kind === 'accept') supplied = await readText(graphId, id);
       else if (reply.kind === 'provide') supplied = reply.source;
-      else if (reply.kind === 'final')
-        return freeze({ kind: 'source', source: reply.source, handler: reply.handler, meta: await metaOf(byId[reply.handler], id) });
+      else if (reply.kind === 'final') return finished(byId.get(reply.handler), reply.source, id);
       else if (reply.kind === 'link') return reply;
     }
     if (supplied === undefined) throw named(NotFound, `${id} is not provided`);
@@ -379,12 +404,12 @@
     if (typeof maker.fn === 'function') {
       const made = await steps.maker(hid, 0, id, supplied);
       text = made.text;
-      child = byId[made.handler];
+      child = byId.get(made.handler);
     } else {
-      child = maker.import !== undefined ? register(maker.import) : record;
       text = await applyTransformer(maker.transformer, id, supplied);
+      child = maker.import !== undefined ? register(maker.import) : register(record.handler);
     }
-    return freeze({ kind: 'source', source: text, handler: child.id, meta: await metaOf(child, id) });
+    return finished(child, text, id);
   };
 
   let bound = false;
@@ -397,17 +422,20 @@
 
   /// The native pipeline of a `native` handler, or the driver, for code that is not a context
   /// (`reference.load()` asks for the sources of a module's dependencies this way).
-  const pipeline = async (record, graphId, specifier, referrer, attributes) => {
+  const pipeline = async (handler, graphId, specifier, referrer, attributes) => {
+    const record = register(handler);
     if (record.native && graphFs.get(graphId)?.kind !== 'async') {
       const id = host(native.graph.pipelineResolve, record.id, specifier, referrer);
       if (id === undefined) throw named(NotFound, `cannot resolve ${specifier}`);
       const loaded = host(native.graph.pipelineLoad, record.id, graphId, id, attributesJson(attributes));
       if (loaded.diagnostics !== undefined) throw new SyntaxError(loaded.diagnostics);
-      return { id, source: loaded.source, handler: loaded.handler, meta: undefined };
+      return { id, source: loaded.source, handler: byId.get(loaded.handler).handler, meta: undefined };
     }
-    const id = await resolveInJs(record.id, specifier, referrer, attributes);
-    const answer = await loadInJs(record.id, graphId, id, attributes, specifier, referrer);
-    return { id, answer };
+    return pinned(record, async () => {
+      const id = await resolveInJs(record.id, specifier, referrer, attributes);
+      const answer = await loadInJs(record.id, graphId, id, attributes, specifier, referrer);
+      return { id, answer };
+    });
   };
 
   // ---- references -------------------------------------------------------------------------------
@@ -445,7 +473,7 @@
       const requests = host(native.graph.compileRequests, state.text, state.name);
       const out = [];
       for (const [specifier, attributes, phase] of requests) {
-        const answer = await pipeline(state.record, graphId(state.graph), specifier, state.name, attributes);
+        const answer = await pipeline(state.handler, graphId(state.graph), specifier, state.name, attributes);
         let reference;
         if (answer.answer !== undefined && answer.answer.kind === 'link') {
           for (const candidate of refsById.get(answer.answer.context) ?? []) {
@@ -454,7 +482,7 @@
         } else {
           const source = answer.answer !== undefined ? answer.answer.source : answer.source;
           const handler = answer.answer !== undefined ? answer.answer.handler : answer.handler;
-          reference = makeReference(state.graph, null, { name: answer.id, text: source, record: byId[handler], status: 'declared' });
+          reference = makeReference(state.graph, null, { name: answer.id, text: source, handler, status: 'declared' });
         }
         out.push(freeze({ specifier, attributes: freeze({ ...attributes }), phase, reference }));
       }
@@ -479,10 +507,10 @@
       state.evaluation = (async () => {
         try {
           await ensureText(state);
-          const meta = state.meta ?? (await metaOf(state.record, state.name));
+          const meta = state.meta ?? (await metaOf(register(state.handler), state.name));
           const cacheGraph = graphId(state.graph);
           if (graphCache.has(cacheGraph)) await loadCache(cacheGraph, state.name, host(native.graph.sourceHash, state.text), state.text);
-          await native.context.evaluateSource(contextId, state.name, state.text, state.record.id, meta ?? '');
+          await native.context.evaluateSource(contextId, state.name, state.text, register(state.handler).id, meta ?? '');
           const code = take();
           if (code !== 0) throw failure(code);
           state.pin = host(native.context.pin, contextId, state.name);
@@ -533,7 +561,7 @@
       graph,
       recipe,
       name: recipe !== null ? recipe.name : extra.name,
-      record: recipe !== null ? register(recipe.import) : extra.record,
+      handler: recipe !== null ? recipe.import : extra.handler,
       status: extra?.status ?? 'declared',
       requests: undefined,
       text: recipe === null ? extra?.text : undefined,

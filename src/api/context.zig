@@ -76,8 +76,10 @@ pub const Context = struct {
     graph: *Graph,
     import_handler: u32,
     /// `origine:` ids a handler of this context may still reach: the ceiling for handlers
-    /// registered by code running inside it. Null: unrestricted.
-    ceiling: ?StdFilter,
+    /// registered by code running inside it. Null: unrestricted. Its lists live in `ceiling_arena`
+    /// (or in the handler, which outlives the context).
+    ceiling: ?StdFilter = null,
+    ceiling_arena: std.heap.ArenaAllocator,
     /// Module id -> id of the handler that answers its own imports. Keys are owned.
     handler_of: std.StringHashMapUnmanaged(u32) = .empty,
     /// `id ++ 0 ++ attributes` -> how it was resolved. Keys and values are owned.
@@ -96,32 +98,46 @@ pub const Context = struct {
     link_modules: std.ArrayList(v8.Global.Of(v8.Module)) = .empty,
     closed: bool = false,
 
-    fn ceilingOfHandler(h: *const Handler) ?StdFilter {
-        var any = false;
-        var result: StdFilter = .{ .include = &.{} };
+    /// What the `origine` hooks of `h` serve together: the union of their filters, built in `arena`
+    /// (the lists it points at are owned by the handler and outlive the context). Nothing when the
+    /// handler has none.
+    fn ceilingOfHandler(arena: std.mem.Allocator, h: *const Handler) !?StdFilter {
+        var result: ?StdFilter = null;
         for (h.hooks) |item| switch (item) {
-            .origine => |filter| {
-                if (!any) {
-                    result = filter;
-                    any = true;
-                } else result = union_(result, filter);
-            },
+            .origine => |filter| result = if (result) |so_far| try unionOf(arena, so_far, filter) else filter,
             else => {},
         };
-        return if (any) result else StdFilter{ .include = &.{} };
+        return result orelse StdFilter{ .include = &.{} };
     }
 
-    /// The filter allowing what either allows (include+include joins, an exclude keeps what
-    /// the other does not exclude).
-    fn union_(a: StdFilter, b: StdFilter) StdFilter {
-        if (a.include != null and b.include != null) {
-            // Both lists live in handler arenas that outlive the context; joining needs storage,
-            // so the join is the larger list when one contains the other, else the unrestricted one.
-            if (a.include.?.len == 0) return b;
-            if (b.include.?.len == 0) return a;
-            return .{ .include = if (a.include.?.len >= b.include.?.len) a.include else b.include };
+    /// The filter allowing exactly what `a` or `b` allows. An include list is a set of names, an
+    /// exclude list (empty: everything) the complement of one, so the three cases are a union, an
+    /// intersection of the excluded sets, and the excluded set minus the included one.
+    fn unionOf(arena: std.mem.Allocator, a: StdFilter, b: StdFilter) !StdFilter {
+        const a_include = a.include != null;
+        const b_include = b.include != null;
+        const a_list = a.include orelse a.exclude orelse &[_][]const u8{};
+        const b_list = b.include orelse b.exclude orelse &[_][]const u8{};
+        var out: std.ArrayList([]const u8) = .empty;
+        if (a_include and b_include) {
+            for ([_][]const []const u8{ a_list, b_list }) |list| for (list) |name| {
+                if (!listHas(out.items, name)) try out.append(arena, name);
+            };
+            return .{ .include = try out.toOwnedSlice(arena) };
         }
-        return .{};
+        if (!a_include and !b_include) {
+            for (a_list) |name| if (listHas(b_list, name)) try out.append(arena, name);
+            return .{ .exclude = try out.toOwnedSlice(arena) };
+        }
+        const included = if (a_include) a_list else b_list;
+        const excluded = if (a_include) b_list else a_list;
+        for (excluded) |name| if (!listHas(included, name)) try out.append(arena, name);
+        return .{ .exclude = try out.toOwnedSlice(arena) };
+    }
+
+    fn listHas(list: []const []const u8, name: []const u8) bool {
+        for (list) |item| if (std.mem.eql(u8, item, name)) return true;
+        return false;
     }
 
     fn releaseLinks(self: *Context) void {
@@ -133,6 +149,7 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         const alloc = self.host.allocator;
+        self.ceiling_arena.deinit();
         self.releaseLinks();
         self.link_values.deinit(alloc);
         self.link_modules.deinit(alloc);
@@ -684,9 +701,10 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
         .scope = undefined,
         .graph = graph,
         .import_handler = import_handler,
-        .ceiling = Context.ceilingOfHandler(h),
+        .ceiling_arena = .init(alloc),
     };
     errdefer context.deinit();
+    context.ceiling = try Context.ceilingOfHandler(context.ceiling_arena.allocator(), h);
     var options: Scope.Options = .{
         .origine_namespace = true,
         .resolver = .{ .data = context, .resolve_async = resolveAsync, .cancel = cancel },

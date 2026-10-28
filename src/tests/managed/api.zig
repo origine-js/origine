@@ -1045,6 +1045,44 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
     try t.expectEqual(@as(usize, 4), fx.host.driver_calls);
 }
 
+test "graph: the origine ceiling of a context is the exact union of its hooks" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { origine } from 'origine:@std/graph/resolve/layers';
+        \\import { origineProvider } from 'origine:@std/graph/providers';
+        \\export async function main(api) {
+        \\  const make = (...std) => ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()), hooks: std.map(s => origineProvider({ std: s })) });
+        \\  const contexts = [
+        \\    make({ include: ['text'] }, { exclude: ['fs'] }),                // everything but fs
+        \\    make({ exclude: ['fs'] }, { exclude: ['io'] }),                  // everything
+        \\    make({ include: ['text'] }, { include: ['io'] }),                // text and io
+        \\    make({ include: ['text', 'fs'] }, { exclude: ['fs', 'io'] }),    // everything but io
+        \\    make({ exclude: ['fs', 'io'] }, { exclude: ['fs'] }),            // everything but fs
+        \\    make(),                                                          // nothing
+        \\  ];
+        \\  for (const handler of contexts) await api.context.create({ import: handler });
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    const names = [_][]const u8{ "text", "fs", "io" };
+    const expected = [_][3]bool{
+        .{ true, false, true },
+        .{ true, true, true },
+        .{ true, false, true },
+        .{ true, true, false },
+        .{ true, false, true },
+        .{ false, false, false },
+    };
+    try t.expectEqual(expected.len, fx.host.contexts.items.len);
+    for (fx.host.contexts.items, expected) |context, row| {
+        const ceiling = context.ceiling.?;
+        for (names, row) |name, allowed| try t.expectEqual(allowed, ceiling.allows(name));
+    }
+}
+
 test "graph: link shares or hardens the module of another context" {
     var fx: Fixture = undefined;
     try fx.setup(

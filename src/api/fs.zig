@@ -228,8 +228,8 @@ const access_read: u32 = 1;
 const access_write: u32 = 2;
 
 /// `native.fsRequest(root?, access)`: opens a sync grant over the host directory (or a
-/// subdirectory of it) and returns `[grant, ops]`: the grant object the host built (see `newGrant`) and
-/// the natives bound to it. The host config is the ceiling:
+/// subdirectory of it) and returns the grant the host built: its operations, `kind`, `id` and the secret
+/// (see `stampGrant`). The glue adds the scope's one `errno` array (shared by identity) and freezes it. The host config is the ceiling:
 /// a read-only host rejects a write request with `PermissionDenied` (it is never silently
 /// downgraded), and `sync = false` denies the request. `access` is the bits above; anything else is
 /// `InvalidInput`. (Async grants live in the Rust runtime: `native.fsAsync`.)
@@ -248,35 +248,36 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Va
     grant.* = .{ .host = host, .owner = state, .id = host.next_fs_id, .root = opened, .read = access & access_read != 0, .write = access & access_write != 0 };
     try host.grants.append(alloc, grant);
     host.next_fs_id += 1;
-    const ops = try call.object(FsGrant, grant, .{
-        .openFile = func(openFile, .{ .side_effect = .any }),
-        .openDir = func(openDir, .{ .side_effect = .any }),
-        .stat = func(stat, .{ .side_effect = .none }),
-        .symlinkStat = func(symlinkStat, .{ .side_effect = .none }),
-        .createDir = func(createDir, .{ .side_effect = .any }),
-        .deleteFile = func(deleteFile, .{ .side_effect = .any }),
-        .readDir = func(readDir, .{ .side_effect = .none }),
-        .readAll = func(readAll, .{ .side_effect = .any }),
-        .writeAll = func(writeAll, .{ .side_effect = .any }),
-        .close = func(close, .{ .side_effect = .any }),
-        .closeDir = func(closeDir, .{ .side_effect = .any }),
-        .createDirPath = func(createDirPath, .{ .side_effect = .any }),
-        .deleteDir = func(deleteDir, .{ .side_effect = .any }),
-        .deleteTree = func(deleteTree, .{ .side_effect = .any }),
-        .rename = func(rename, .{ .side_effect = .any }),
-        .fileStat = func(fileStat, .{ .side_effect = .none }),
-        .fileRead = func(fileRead, .{ .side_effect = .any }),
-        .filePread = func(filePread, .{ .side_effect = .none }),
-        .fileWrite = func(fileWrite, .{ .side_effect = .any }),
-        .filePwriteAll = func(filePwriteAll, .{ .side_effect = .any }),
-        .fileSetLength = func(fileSetLength, .{ .side_effect = .any }),
-        .fileSync = func(fileSync, .{ .side_effect = .any }),
+    const env = call.env();
+    const object = try call.object(FsGrant, grant, .{
+        .dirOpenFile = func(grantDirOpenFile, .{ .side_effect = .any }),
+        .dirOpenDir = func(grantDirOpenDir, .{ .side_effect = .any }),
+        .dirClose = func(grantDirClose, .{ .side_effect = .any }),
+        .dirStat = func(grantDirStat, .{ .side_effect = .none }),
+        .dirSymlinkStat = func(grantDirSymlinkStat, .{ .side_effect = .none }),
+        .dirRead = func(grantDirRead, .{ .side_effect = .none }),
+        .dirCreateDir = func(grantDirCreateDir, .{ .side_effect = .any }),
+        .dirCreateDirPath = func(grantDirCreateDirPath, .{ .side_effect = .any }),
+        .dirDeleteFile = func(grantDirDeleteFile, .{ .side_effect = .any }),
+        .dirDeleteDir = func(grantDirDeleteDir, .{ .side_effect = .any }),
+        .dirDeleteTree = func(grantDirDeleteTree, .{ .side_effect = .any }),
+        .dirRename = func(grantDirRename, .{ .side_effect = .any }),
+        .fileClose = func(grantFileClose, .{ .side_effect = .any }),
+        .fileStat = func(grantFileStat, .{ .side_effect = .none }),
+        .fileReadAll = func(grantFileReadAll, .{ .side_effect = .any }),
+        .fileRead = func(grantFileRead, .{ .side_effect = .any }),
+        .filePread = func(grantFilePread, .{ .side_effect = .none }),
+        .fileWriteAll = func(grantFileWriteAll, .{ .side_effect = .any }),
+        .fileWrite = func(grantFileWrite, .{ .side_effect = .any }),
+        .filePwriteAll = func(grantFilePwriteAll, .{ .side_effect = .any }),
+        .fileWriteMoveAll = func(grantFileWriteMoveAll, .{ .side_effect = .any }),
+        .fileWriteMove = func(grantFileWriteMove, .{ .side_effect = .any }),
+        .filePwriteMoveAll = func(grantFilePwriteMoveAll, .{ .side_effect = .any }),
+        .fileSetLength = func(grantFileSetLength, .{ .side_effect = .any }),
+        .fileSync = func(grantFileSync, .{ .side_effect = .any }),
     });
-    try call.set(ops, "id", grant.id);
-    var pair = call.array();
-    try pair.push(try newGrant(call.env(), .sync, grant.id));
-    try pair.push(ops);
-    return pair.finish();
+    try stampGrant(env, object, .sync, grant.id);
+    return object.value;
 }
 
 // ---- fs.requestAsync ---------------------------------------------------------
@@ -374,15 +375,19 @@ fn grantKey(isolate: v8.Isolate) v8.Private {
     return v8.Private.forApi(isolate, v8.String.initUtf8(isolate, "origine:fs-grant"));
 }
 
-/// A grant object as the host builds it: `{ kind, id }` carrying the secret, which is set here and
-/// nowhere else. The glue adds the operations and freezes it; it cannot give an object the secret or change
-/// whose grant this is.
-fn newGrant(env: binding.Env, kind: GrantKind, id: u32) !v8.Object {
-    const object = eu.v.object(env.isolate);
+/// Makes `object` a grant: `kind` and `id` as plain properties and the secret, set here and nowhere
+/// else. The host builds every grant (`request`, `requestAsync`); the glue adds the async operations
+/// and freezes an async one, and cannot give an object the secret or change whose grant this is.
+fn stampGrant(env: binding.Env, object: v8.Object, kind: GrantKind, id: u32) !void {
     try binding.set(env, object, "kind", @as([]const u8, if (kind == .sync) "sync" else "async"));
     try binding.set(env, object, "id", id);
     const number = @as(f64, @floatFromInt(@backingInt(kind))) * 4294967296.0 + @as(f64, @floatFromInt(id));
     if (!(object.setPrivate(env.ctx, grantKey(env.isolate), eu.v.num_f64(env.isolate, number).numeric.primitive.value) orelse return error.Unexpected)) return error.Unexpected;
+}
+
+fn newGrant(env: binding.Env, kind: GrantKind, id: u32) !v8.Object {
+    const object = eu.v.object(env.isolate);
+    try stampGrant(env, object, kind, id);
     return object;
 }
 
@@ -594,4 +599,231 @@ fn fileSetLength(g: *FsGrant, file_ref: FileRef, length: u64) !void {
 
 fn fileSync(g: *FsGrant, file_ref: FileRef) !void {
     try (try g.file(file_ref)).sync();
+}
+
+// ---- the operations a sync grant carries ------------------------------------
+//
+// What the glue used to wrap in JS: handles are frozen `{ kind, fs, id }` objects, stats
+// `{ kind, size }`, a directory listing an array of `{ name, kind }`; a malformed argument is
+// `InvalidInput` before anything runs. They call the ops above, which keep the `(fs, id)` form that
+// the Rust twin shares.
+
+/// `{ kind, fs, id }` of a handle argument: the object must say it is a `kind` and carry two u32s.
+fn handleParts(call: *Call, index: usize, kind: []const u8) !struct { fs: u32, id: u32 } {
+    const arg = call.arg(index);
+    if (!arg.isObject()) return error.InvalidInput;
+    const object = arg.toObject(call.ctx) orelse return error.InvalidInput;
+    const said = object.get(call.ctx, binding.string(call.isolate, "kind")) orelse return error.InvalidInput;
+    if (!said.strictEquals(binding.string(call.isolate, kind))) return error.InvalidInput;
+    return .{ .fs = try handleNumber(call, object, "fs"), .id = try handleNumber(call, object, "id") };
+}
+
+fn handleNumber(call: *Call, object: v8.Object, name: []const u8) !u32 {
+    const value = object.get(call.ctx, binding.string(call.isolate, name)) orelse return error.InvalidInput;
+    if (!value.isNumber()) return error.InvalidInput;
+    const number = value.numberValue(call.ctx) orelse return error.InvalidInput;
+    if (!(number >= 0) or number > 4294967295.0 or number != @floor(number)) return error.InvalidInput;
+    return @intFromFloat(number);
+}
+
+pub const DirHandle = struct {
+    ref: DirRef,
+
+    pub fn decode(call: *Call, index: usize) !DirHandle {
+        const parts = try handleParts(call, index, "dir");
+        return .{ .ref = .{ .fs = parts.fs, .id = parts.id } };
+    }
+};
+
+pub const FileHandle = struct {
+    ref: FileRef,
+
+    pub fn decode(call: *Call, index: usize) !FileHandle {
+        const parts = try handleParts(call, index, "file");
+        return .{ .ref = .{ .fs = parts.fs, .id = parts.id } };
+    }
+};
+
+/// Python-style open modes -> native bits (write 1, create 2, truncate 4, exclusive 8). Handles always allow
+/// reading when writable, so `x` and `x+` (and `w`/`w+`, `r+`/`rw`) are equivalent natively; `c` and `t`
+/// extend Python's set for Rust-style options. Undefined is `r`; anything unknown is `InvalidInput`.
+pub const OpenMode = struct {
+    bits: u32,
+
+    const table = [_]struct { []const u8, u32 }{
+        .{ "r", 0 },   .{ "rw", 1 }, .{ "r+", 1 }, .{ "w", 7 }, .{ "w+", 7 }, .{ "x", 11 },
+        .{ "x+", 11 }, .{ "c", 3 },  .{ "c+", 3 }, .{ "t", 5 }, .{ "t+", 5 },
+    };
+
+    pub fn decode(call: *Call, index: usize) !OpenMode {
+        const arg = call.arg(index);
+        if (arg.isUndefined()) return .{ .bits = 0 };
+        if (!arg.isString()) return error.InvalidInput;
+        var buffer: [8]u8 = undefined;
+        const text = arg.toString(call.ctx) orelse return error.InvalidInput;
+        if (text.lenUtf8(call.isolate) > buffer.len) return error.InvalidInput;
+        const mode = buffer[0..text.writeUtf8(call.isolate, &buffer)];
+        for (table) |entry| if (std.mem.eql(u8, entry[0], mode)) return .{ .bits = entry[1] };
+        return error.InvalidInput;
+    }
+};
+
+/// A `Uint8Array` argument, aliased (a different view kind is `InvalidInput`, as the glue checked).
+pub const Bytes = struct {
+    data: []u8,
+
+    pub fn decode(call: *Call, index: usize) !Bytes {
+        const arg = call.arg(index);
+        if (!arg.isUint8Array()) return error.InvalidInput;
+        return .{ .data = binding.viewBytes(arg) orelse return error.InvalidInput };
+    }
+};
+
+/// `{ limit }` of `fileReadAll(file, options)`: a non-negative number, `Infinity` or absent for no limit.
+pub const ReadOptions = struct {
+    limit: Limit,
+
+    pub fn decode(call: *Call, index: usize) !ReadOptions {
+        const unlimited: ReadOptions = .{ .limit = .{ .bytes = std.math.maxInt(usize) } };
+        const arg = call.arg(index);
+        if (arg.isUndefined() or arg.isNull()) return unlimited;
+        const object = arg.toObject(call.ctx) orelse return error.InvalidInput;
+        const value = object.get(call.ctx, binding.string(call.isolate, "limit")) orelse return error.InvalidInput;
+        if (value.isUndefined() or value.isNull()) return unlimited;
+        if (!value.isNumber()) return error.InvalidInput;
+        const number = value.numberValue(call.ctx) orelse return error.InvalidInput;
+        if (std.math.isInf(number)) return if (number > 0) unlimited else error.InvalidInput;
+        if (!(number >= 0)) return error.InvalidInput;
+        return .{ .limit = .{ .bytes = @intFromFloat(@min(number, @as(f64, @floatFromInt(std.math.maxInt(usize) / 2)))) } };
+    }
+};
+
+fn handleValue(call: *Call, kind: []const u8, fs: u32, id: u32) !v8.Value {
+    const object = eu.v.object(call.isolate);
+    try call.set(object, "kind", kind);
+    try call.set(object, "fs", fs);
+    try call.set(object, "id", id);
+    _ = object.setIntegrityLevel(call.ctx, .Frozen) orelse return error.JavaScriptException;
+    return object.value;
+}
+
+fn statValue(call: *Call, info: Stat) !v8.Value {
+    const object = eu.v.object(call.isolate);
+    try call.set(object, "kind", info[0]);
+    try call.set(object, "size", info[1]);
+    _ = object.setIntegrityLevel(call.ctx, .Frozen) orelse return error.JavaScriptException;
+    return object.value;
+}
+
+fn grantDirOpenFile(g: *FsGrant, call: *Call, dir: DirHandle, path: EntryPath, mode: OpenMode) !v8.Value {
+    return handleValue(call, "file", g.id, try openFile(g, dir.ref, path, mode.bits));
+}
+
+fn grantDirOpenDir(g: *FsGrant, call: *Call, dir: DirHandle, path: Path) !v8.Value {
+    return handleValue(call, "dir", g.id, try openDir(g, dir.ref, path));
+}
+
+fn grantDirClose(g: *FsGrant, dir: DirHandle) !void {
+    return closeDir(g, dir.ref);
+}
+
+fn grantDirStat(g: *FsGrant, call: *Call, dir: DirHandle, path: Path) !v8.Value {
+    return statValue(call, try stat(g, dir.ref, path));
+}
+
+fn grantDirSymlinkStat(g: *FsGrant, call: *Call, dir: DirHandle, path: Path) !v8.Value {
+    return statValue(call, try symlinkStat(g, dir.ref, path));
+}
+
+/// A frozen array of frozen `{ name, kind }`.
+fn grantDirRead(g: *FsGrant, call: *Call, dir: DirHandle) !v8.Value {
+    try g.readable();
+    var list = call.array();
+    var iterator = (try g.dir(dir.ref)).iterate();
+    while (try iterator.next()) |entry| {
+        const object = eu.v.object(call.isolate);
+        try call.set(object, "name", entry.name);
+        try call.set(object, "kind", kindCode(entry.kind));
+        _ = object.setIntegrityLevel(call.ctx, .Frozen) orelse return error.JavaScriptException;
+        try list.push(object.value);
+    }
+    _ = list.array.object.setIntegrityLevel(call.ctx, .Frozen) orelse return error.JavaScriptException;
+    return list.finish();
+}
+
+fn grantDirCreateDir(g: *FsGrant, dir: DirHandle, path: EntryPath) !void {
+    return createDir(g, dir.ref, path);
+}
+
+fn grantDirCreateDirPath(g: *FsGrant, dir: DirHandle, path: SubPath) !void {
+    return createDirPath(g, dir.ref, path);
+}
+
+fn grantDirDeleteFile(g: *FsGrant, dir: DirHandle, path: EntryPath) !void {
+    return deleteFile(g, dir.ref, path);
+}
+
+fn grantDirDeleteDir(g: *FsGrant, dir: DirHandle, path: SubPath) !void {
+    return deleteDir(g, dir.ref, path);
+}
+
+fn grantDirDeleteTree(g: *FsGrant, dir: DirHandle, path: SubPath) !void {
+    return deleteTree(g, dir.ref, path);
+}
+
+fn grantDirRename(g: *FsGrant, dir: DirHandle, old_path: SubPath, new_dir: DirHandle, new_path: SubPath) !void {
+    return rename(g, dir.ref, old_path, new_dir.ref, new_path);
+}
+
+fn grantFileClose(g: *FsGrant, file: FileHandle) !void {
+    return close(g, file.ref);
+}
+
+fn grantFileStat(g: *FsGrant, call: *Call, file: FileHandle) !v8.Value {
+    return statValue(call, try fileStat(g, file.ref));
+}
+
+fn grantFileReadAll(g: *FsGrant, call: *Call, file: FileHandle, options: ReadOptions) !v8.Value {
+    return readAll(g, call, file.ref, options.limit);
+}
+
+fn grantFileRead(g: *FsGrant, file: FileHandle, buffer: Bytes) !usize {
+    return fileRead(g, file.ref, buffer.data);
+}
+
+fn grantFilePread(g: *FsGrant, file: FileHandle, buffer: Bytes, offset: u64) !usize {
+    return filePread(g, file.ref, buffer.data, offset);
+}
+
+fn grantFileWriteAll(g: *FsGrant, file: FileHandle, bytes: Bytes) !void {
+    return writeAll(g, file.ref, bytes.data);
+}
+
+fn grantFileWrite(g: *FsGrant, file: FileHandle, bytes: Bytes) !usize {
+    return fileWrite(g, file.ref, bytes.data);
+}
+
+fn grantFilePwriteAll(g: *FsGrant, file: FileHandle, bytes: Bytes, offset: u64) !void {
+    return filePwriteAll(g, file.ref, bytes.data, offset);
+}
+
+/// Sync writes copy (the call blocks) and have no move variant: there is nothing to hand over.
+fn grantFileWriteMoveAll(_: *FsGrant, _: FileHandle, _: Bytes) !void {
+    return error.Unsupported;
+}
+
+fn grantFileWriteMove(_: *FsGrant, _: FileHandle, _: Bytes) !void {
+    return error.Unsupported;
+}
+
+fn grantFilePwriteMoveAll(_: *FsGrant, _: FileHandle, _: Bytes) !void {
+    return error.Unsupported;
+}
+
+fn grantFileSetLength(g: *FsGrant, file: FileHandle, length: u64) !void {
+    return fileSetLength(g, file.ref, length);
+}
+
+fn grantFileSync(g: *FsGrant, file: FileHandle) !void {
+    return fileSync(g, file.ref);
 }

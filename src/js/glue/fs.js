@@ -1,7 +1,7 @@
 // `api.fs`: the fs capability factory. Evaluated as an expression by src/api/glue.zig:
 // `(native, util) => makeFsCap`. `makeFsCap(spec)` returns a frozen `{ requestSync, requestAsync }`;
-// each request binds the native ops of one grant (Zig natives + errno cell for sync, Rust natives on
-// an io runtime for async) and returns the sync or async variant. `spec` is the embedder's
+// a sync request returns the grant the host built (Zig natives + errno cell); an async one wraps the
+// Rust natives of its grant on an io runtime in promise-returning operations. `spec` is the embedder's
 // ceiling (`Config.fs`): `{ root, write, sync, async }`.
 //
 // A request names the access it wants, `access: 'r' | 'w' | 'rw'` (required). A request above the
@@ -105,171 +105,7 @@
   const asDir = handleOfKind('dir');
   const asFile = handleOfKind('file');
 
-  // Binds the native ops of one grant into the guest-visible operations. Each operation
-  // validates its arguments (failing with InvalidInput through the errno cell), calls the
-  // native and, when the native succeeded, shapes its result. The natives take a handle as
-  // two arguments, `(fs, id)`. Operations that fail return undefined.
-  function makeOps(ops) {
-    const fsId = ops.id;
-    const bad = () => {
-      errno[0] = InvalidInput;
-    };
-    // Sync writes copy (the call blocks) and have no move variant: there is nothing to hand over.
-    const unsupported = () => {
-      errno[0] = Unsupported;
-    };
-    const ok = () => errno[0] === 0;
-    const statOf = out => freeze({ kind: out[0], size: out[1] });
-
-    const dirOps = {
-      dirOpenFile(dir, path, flags) {
-        const d = asDir(dir),
-          bits = openBits(flags);
-        if (d === null || !isString(path) || bits < 0) return bad();
-        const id = ops.openFile(d.fs, d.id, path, bits);
-        return ok() ? freeze({ kind: 'file', fs: fsId, id }) : undefined;
-      },
-      dirOpenDir(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        const id = ops.openDir(d.fs, d.id, path);
-        return ok() ? freeze({ kind: 'dir', fs: fsId, id }) : undefined;
-      },
-      dirClose(dir) {
-        const d = asDir(dir);
-        if (d === null) return bad();
-        ops.closeDir(d.fs, d.id);
-      },
-      dirStat(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        const out = ops.stat(d.fs, d.id, path);
-        return ok() ? statOf(out) : undefined;
-      },
-      dirSymlinkStat(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        const out = ops.symlinkStat(d.fs, d.id, path);
-        return ok() ? statOf(out) : undefined;
-      },
-      dirRead(dir) {
-        const d = asDir(dir);
-        if (d === null) return bad();
-        const flat = ops.readDir(d.fs, d.id);
-        if (!ok()) return undefined;
-        // The native returns `[name, kind, name, kind, ...]`.
-        const entries = [];
-        for (let i = 0; i < flat.length; i += 2) entries.push(freeze({ name: flat[i], kind: flat[i + 1] }));
-        return freeze(entries);
-      },
-      dirCreateDir(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        ops.createDir(d.fs, d.id, path);
-      },
-      dirCreateDirPath(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        ops.createDirPath(d.fs, d.id, path);
-      },
-      dirDeleteFile(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        ops.deleteFile(d.fs, d.id, path);
-      },
-      dirDeleteDir(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        ops.deleteDir(d.fs, d.id, path);
-      },
-      dirDeleteTree(dir, path) {
-        const d = asDir(dir);
-        if (d === null || !isString(path)) return bad();
-        ops.deleteTree(d.fs, d.id, path);
-      },
-      dirRename(dir, oldPath, newDir, newPath) {
-        const d = asDir(dir),
-          n = asDir(newDir);
-        if (d === null || n === null || !isString(oldPath) || !isString(newPath)) return bad();
-        ops.rename(d.fs, d.id, oldPath, n.fs, n.id, newPath);
-      },
-    };
-
-    const fileOps = {
-      fileClose(file) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        ops.close(f.fs, f.id);
-      },
-      fileStat(file) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        const out = ops.fileStat(f.fs, f.id);
-        return ok() ? statOf(out) : undefined;
-      },
-      fileReadAll(file, options) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        const limit = (options === undefined ? undefined : options.limit) ?? Infinity;
-        if (typeof limit !== 'number' || !(limit >= 0)) return bad();
-        return ops.readAll(f.fs, f.id, limit);
-      },
-      fileRead(file, buffer) {
-        const f = asFile(file);
-        if (f === null || !isBytes(buffer)) return bad();
-        return ops.fileRead(f.fs, f.id, buffer);
-      },
-      filePread(file, buffer, offset) {
-        const f = asFile(file);
-        if (f === null || !isBytes(buffer)) return bad();
-        return ops.filePread(f.fs, f.id, buffer, offset);
-      },
-      fileWriteAll(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        ops.writeAll(f.fs, f.id, bytes);
-      },
-      fileWrite(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.fileWrite(f.fs, f.id, bytes);
-      },
-      filePwriteAll(file, bytes, offset) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        ops.filePwriteAll(f.fs, f.id, bytes, offset);
-      },
-      fileWriteMoveAll(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        unsupported();
-      },
-      fileWriteMove(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        unsupported();
-      },
-      filePwriteMoveAll(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        unsupported();
-      },
-      fileSetLength(file, length) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        ops.fileSetLength(f.fs, f.id, length);
-      },
-      fileSync(file) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        ops.fileSync(f.fs, f.id);
-      },
-    };
-
-    return { ...dirOps, ...fileOps };
-  }
-
-  // The async twin of `makeOps` over `native.fsAsync` (Rust, on an io runtime): same operation
+  // The async grant's operations over `native.fsAsync` (Rust, on an io runtime): same operation
   // names and argument validation, but it never touches the shared errno cell. Every operation
   // returns a promise; validation and completion failures reject with a frozen `{ errno, name }`
   // (the natives reject with that shape already). `fsId` is the async grant's id.
@@ -491,11 +327,11 @@
         const grant = grantOf(spec, hint);
         if (typeof grant === 'number') throw failure(grant);
         if (!spec.sync) throw failure(PermissionDenied);
-        // The host builds the grant (`{ kind, id }` with the secret that makes it one) and the natives bound
-        // to it; the glue gives the grant its operations.
-        const made = native.fsRequest(grant.root, grant.access);
+        // The host builds the grant: its operations, `kind`, `id` and the secret that makes it one. The glue adds
+        // the scope's `errno` array (one object for every grant) and freezes it.
+        const granted = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
-        return completed(made[0], { errno, ...makeOps(made[1]) });
+        return completed(granted, { errno });
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),

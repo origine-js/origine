@@ -717,6 +717,107 @@ test "quansync: leaves, composites, yields, errors, finally and fast paths" {
     try check(fx.scope, "report.fast === 'fast:gen' && report.badYield === true && report.run === '3:3' && report.byMode === '4:4' && report.frozen");
 }
 
+test "graph: recipes, sources, resolvers, import handlers, providers and caches are frozen data" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource, SourceMap, ModuleImportPhase } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import, ImportError, MakeRecipe, Transform } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative, origine, importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { origineProvider, fsProvider, json, fromLoader } from 'origine:@std/graph/providers';
+        \\import { ImportCache, ResolveCache, CodeCache } from 'origine:@std/graph/cache';
+        \\const invalid = f => { try { f(); } catch (e) { return e.name === 'InvalidInput' && typeof e.message === 'string'; } return false; };
+        \\export async function main() {
+        \\  const out = globalThis.report = {};
+        \\  const js = (source) => source;
+        \\  // sources: immutable chain, the receiver never changes
+        \\  const file = ModuleSource.file('./a.ts');
+        \\  const chained = file.withTransformer(js).withTransformer(Transform.byExtension({ '.ts': js }));
+        \\  out.chain = file.transformers.length === 0 && chained.transformers.length === 2 && file.native && !chained.native;
+        \\  out.sourceFrozen = Object.isFrozen(file) && Object.isFrozen(chained.transformers) && ModuleSource.is(file);
+        \\  out.sourceBad = invalid(() => ModuleSource.file('')) && invalid(() => ModuleSource.file('a\0b')) && invalid(() => ModuleSource.text(1))
+        \\    && invalid(() => file.withTransformer(42)) && invalid(() => ModuleSource.file('x', { kind: 'nope' }));
+        \\  out.maps = SourceMap.None.kind === 'none' && SourceMap.url('a.map').value === 'a.map' && SourceMap.text('{}').kind === 'text' && invalid(() => SourceMap.url(''));
+        \\  out.phases = ModuleImportPhase.Evaluation === 'evaluation' && Object.isFrozen(ModuleImportPhase);
+        \\  // resolver: layers are appended to a copy
+        \\  const empty = ImportResolver.layered();
+        \\  const resolver = empty.layer(relative()).layer(origine()).layer(importMap({ imports: { a: 'app:/a.js' }, scopes: { 'app:/x/': { b: 'app:/b.js' } } }));
+        \\  out.resolver = empty.layers.length === 0 && resolver.layers.length === 3 && ImportResolver.is(resolver) && Object.isFrozen(resolver.layers);
+        \\  out.resolverBad = invalid(() => empty.layer(42)) && invalid(() => importMap({ imports: { a: 1 } })) && invalid(() => importMap(null));
+        \\  out.mapCopy = resolver.layers[2].imports.a === 'app:/a.js' && resolver.layers[2].scopes['app:/x/'].b === 'app:/b.js' && Object.isFrozen(resolver.layers[2].imports);
+        \\  // a chain made only of host descriptors is native; one function makes it js
+        \\  const native = ImportHandler.make({
+        \\    resolver,
+        \\    hooks: [origineProvider({ std: { include: ['text'] } }), json(), fsProvider({ read: 'copy' })],
+        \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({}) }),
+        \\    cache: ImportCache.native({ retain: 'used', entries: 100 }),
+        \\  });
+        \\  out.native = native.native === true && native.plan.every(e => e.kind === 'native') && native.plan.length === 3 + 3 + 1 + 1 + 1
+        \\    && native.plan[0].stage === 'resolver' && native.plan[0].name === 'relative' && native.plan[3].name === 'origine' && Object.isFrozen(native.plan);
+        \\  const mixed = ImportHandler.make({ resolver, hooks: async () => Import.next(), meta: ({ id }) => ({ url: id }) });
+        \\  out.mixed = mixed.native === false && mixed.plan.filter(e => e.kind === 'js').length === 2 && mixed.hooks.length === 1 && typeof mixed.meta === 'function';
+        \\  out.defaults = mixed.cache.retain === 'all' && mixed.maker.host === 'maker' && native.meta === null;
+        \\  out.handlerBad = invalid(() => ImportHandler.make({ resolver, hooks: [] }) && ImportHandler.make({ resolver: ImportResolver.layered(), hooks: [] }))
+        \\    && invalid(() => ImportHandler.make({ resolver })) && invalid(() => ImportHandler.make({ resolver, hooks: [42] }))
+        \\    && invalid(() => ImportHandler.make({ resolver, hooks: [], maker: () => 1 })) && invalid(() => ImportHandler.make({ resolver, hooks: [], cache: ResolveCache.native() }))
+        \\    && ImportHandler.make({ resolver, hooks: [] }) !== undefined;
+        \\  const customMaker = ImportHandler.make({ resolver, hooks: [], maker: MakeRecipe.fn(() => ({})) });
+        \\  out.customMaker = !customMaker.native && customMaker.plan.some(e => e.stage === 'maker' && e.kind === 'js');
+        \\  out.makerImport = MakeRecipe.inherit({ import: native }).import === native && invalid(() => MakeRecipe.inherit({ import: {} })) && invalid(() => MakeRecipe.fn(1));
+        \\  // recipes: the name defaults to the path, text needs one, native follows the parts
+        \\  const recipe = ModuleRecipe({ source: ModuleSource.file('./main.js'), import: native });
+        \\  const text = ModuleRecipe({ source: ModuleSource.text('export {}'), import: native, name: 'inline', codeCache: CodeCache.none });
+        \\  const tainted = ModuleRecipe({ source: ModuleSource.file('./m.ts').withTransformer(js), import: native });
+        \\  out.recipe = recipe.name === './main.js' && recipe.native === true && recipe.codeCache === null && text.native && text.codeCache.host === 'codeCacheNone'
+        \\    && !tainted.native && !ModuleRecipe({ source: file, import: mixed }).native && Object.isFrozen(recipe) && ModuleRecipe.is(recipe) && ImportHandler.is(native);
+        \\  out.recipeBad = invalid(() => ModuleRecipe({ source: ModuleSource.text(''), import: native })) && invalid(() => ModuleRecipe({ source: file }))
+        \\    && invalid(() => ModuleRecipe({ import: native })) && invalid(() => ModuleRecipe({ source: file, import: native, name: '' })) && invalid(() => ModuleRecipe({ source: file, import: native, codeCache: {} }));
+        \\  // option bags are read as data: a getter is ignored, so the required option is missing
+        \\  out.getter = invalid(() => ModuleRecipe({ source: file, get import() { return native; } }));
+        \\  // verdicts
+        \\  out.verdicts = Import.next() === Import.next() && Import.accept().kind === 'accept' && Object.isFrozen(Import.next())
+        \\    && Import.provide(file).source === file && Import.provide(recipe).recipe === recipe && invalid(() => Import.provide({}));
+        \\  const rejected = Import.reject(ImportError.NotFound);
+        \\  const other = Import.reject(ImportError.other('Not allowed'));
+        \\  out.reject = rejected.error.name === 'NotFound' && ImportError.is(rejected.error, ImportError.NotFound) && other.error.message === 'Not allowed' && other.error.name === 'Unexpected'
+        \\    && invalid(() => Import.reject(123456)) && invalid(() => Import.reject({})) && invalid(() => ImportError.other(1)) && ImportError.is(Import.reject(ImportError.PermissionDenied).error, ImportError.PermissionDenied);
+        \\  const ref = Object.freeze({});
+        \\  out.link = Import.link(ref, { mode: 'hardened' }).mode === 'hardened' && Import.link(ref, { mode: 'shared' }).reference === ref
+        \\    && invalid(() => Import.link(ref)) && invalid(() => Import.link(ref, { mode: 'live' })) && invalid(() => Import.link(null, { mode: 'shared' }));
+        \\  // transformers by extension
+        \\  const byExt = Transform.byExtension({ '.ts': js, '.d.ts': js });
+        \\  out.byExt = byExt.entries.length === 2 && byExt.native === false && Transform.byExtension({}).native === true
+        \\    && invalid(() => Transform.byExtension({ ts: js })) && invalid(() => Transform.byExtension({ '.': js })) && invalid(() => Transform.byExtension({ '.a/b': js }))
+        \\    && invalid(() => Transform.byExtension({ '.a..b': js })) && invalid(() => Transform.byExtension({ '.ts': 1 })) && invalid(() => Transform.byExtension(null));
+        \\  // providers
+        \\  const std = origineProvider({ std: { exclude: ['fs'] } });
+        \\  out.providers = std.std.exclude[0] === 'fs' && origineProvider({ std: { include: ['text', 'text'] } }).std.include.length === 1 && fsProvider({ read: 'mmap' }).read === 'mmap'
+        \\    && json().kind === 'provider' && invalid(() => origineProvider({ std: {} })) && invalid(() => origineProvider({ std: { include: [], exclude: [] } }))
+        \\    && invalid(() => origineProvider({ std: { include: ['origine:@std/text'] } })) && invalid(() => origineProvider({})) && invalid(() => fsProvider({})) && invalid(() => fsProvider({ read: 'map' }));
+        \\  const hook = fromLoader(async (id, attributes) => id === 'a' ? 'export default 1' : id === 'b' ? { source: 'export default ' + attributes.type } : 42);
+        \\  const a = await hook({ id: 'a', attributes: {} });
+        \\  const b = await hook({ id: 'b', attributes: { type: 'json' } });
+        \\  const c = await hook({ id: 'c', attributes: {} });
+        \\  out.fromLoader = a.kind === 'provide' && a.source.text === 'export default 1' && b.source.text === 'export default json' && c.kind === 'reject' && ImportError.is(c.error, ImportError.InvalidData) && invalid(() => fromLoader(1));
+        \\  // caches
+        \\  out.caches = ImportCache.native({ retain: 'all' }).retain === 'all' && ImportCache.native({ retain: 'used', entries: 0 }).entries === 0 && !('entries' in ImportCache.native({ retain: 'all' }))
+        \\    && invalid(() => ImportCache.native({})) && invalid(() => ImportCache.native({ retain: 'some' })) && invalid(() => ImportCache.native({ retain: 'all', entries: -1 })) && invalid(() => ImportCache.native({ retain: 'all', entries: 1.5 }))
+        \\    && ResolveCache.native({ entries: 8 }).entries === 8 && ResolveCache.native().host === 'resolveCache'
+        \\    && CodeCache.memory({ bytes: 1024 }).bytes === 1024 && CodeCache.dir(Object.freeze({ kind: 'async' })).fs.kind === 'async' && invalid(() => CodeCache.dir(null)) && invalid(() => CodeCache.memory({ bytes: -5 }));
+        \\  const custom = CodeCache.custom({ load: () => undefined, store: () => {} });
+        \\  out.custom = custom.kind === 'codeCache' && custom.native === false && invalid(() => CodeCache.custom({ load: () => {} })) && Object.isFrozen(CodeCache);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.chain && report.sourceFrozen && report.sourceBad && report.maps && report.phases");
+    try check(fx.scope, "report.resolver && report.resolverBad && report.mapCopy");
+    try check(fx.scope, "report.native && report.mixed && report.defaults && report.handlerBad && report.customMaker && report.makerImport");
+    try check(fx.scope, "report.recipe && report.recipeBad && report.getter");
+    try check(fx.scope, "report.verdicts && report.reject && report.link && report.byExt");
+    try check(fx.scope, "report.providers && report.fromLoader && report.caches && report.custom");
+}
+
 test "api: Rust-style fs over sync and async io" {
     var fx: Fixture = undefined;
     try fx.setup(

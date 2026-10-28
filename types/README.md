@@ -54,7 +54,7 @@ Version*) so the editor and `tsc` agree. Hover docs come from the JSDoc on every
 | `env.d.ts`, `scope.d.ts` | `api.env`, `api.scope` |
 | `errors.d.ts` | `IoError` and `HostError`, the `{ errno, name }` values thrown or rejected (plain objects, not an `Error`), one per error domain |
 | `generated/errno.d.ts` | **Generated** from `src/api/errno_codes.zig`: `IoErrnoTable`/`HostErrnoTable` (and their `*Name`, `*Code`), `ErrnoTable` |
-| `std/*.d.ts` | `declare module` for `origine:@std/errno`, `io`, `fs`, `text`, `debug`, `quansync`, `transformer/oxc` |
+| `std/*.d.ts` | `declare module` for `origine:@std/errno`, `io`, `fs`, `text`, `debug`, `quansync`, `transformer/oxc`, `graph/*` |
 | `globals.d.ts`, `repl.d.ts` | the hardened context's globals; the REPL's global `api` (opt in) |
 
 Things the types cannot say (they are in the JSDoc): a handle consumed by `toEvent()`/`toPull()` is

@@ -1,0 +1,70 @@
+// `origine:@std/graph/cache`: the three caches of the graph, as descriptors the host builds natively.
+//
+//   ImportCache    (id, attributes) -> module. One native table per context, made from the descriptor
+//                  (a V8 module belongs to a single context). `retain` says how long an entry lives.
+//   ResolveCache   (referrer, specifier, attributes, phase) -> resolved id. Native memo.
+//   CodeCache      (id, source hash) -> V8 code-cache bytes. Persistent or in memory.
+//
+// ImportCache and ResolveCache are consulted on every import and behind V8's synchronous link, so
+// they cannot call back into JS. CodeCache is off that path and may be backed by JS (`custom`).
+import { ERRNO } from 'origine:@std/errno';
+
+const freeze = Object.freeze;
+const invalid = message => freeze({ errno: ERRNO.io.InvalidInput, name: 'InvalidInput', message });
+const own = (object, key) => {
+  if (object === null || typeof object !== 'object') return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+};
+
+/// A count or byte capacity: a non-negative safe integer, or `undefined` for none.
+const capacity = (what, name, value) => {
+  if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0)) throw invalid(`${what}: ${name} must be a non-negative integer`);
+  return value;
+};
+const withCapacity = (host, kind, name, value, rest) => freeze({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
+
+export const ImportCache = freeze({
+  /// The native table. `retain` is required because it changes what re-importing does:
+  /// `'all'` keeps every entry for the context's lifetime (module identity as in ESM);
+  /// `'used'` drops an entry once no handle, dependent or live reference holds it, so a later import
+  /// evaluates the module again. `entries` caps the table (readable as `size`/`entries` on the view).
+  native(options) {
+    const retain = own(options, 'retain');
+    if (retain !== 'all' && retain !== 'used') throw invalid("ImportCache.native: retain must be 'all' or 'used'");
+    return withCapacity('importCache', 'cache', 'entries', capacity('ImportCache.native', 'entries', own(options, 'entries')), { retain });
+  },
+});
+
+export const ResolveCache = freeze({
+  /// The native memo of resolver results. `entries` caps it.
+  native(options = {}) {
+    return withCapacity('resolveCache', 'cache', 'entries', capacity('ResolveCache.native', 'entries', own(options, 'entries')), {});
+  },
+});
+
+const none = freeze({ host: 'codeCacheNone', kind: 'codeCache' });
+
+export const CodeCache = freeze({
+  /// No code cache: every compile parses.
+  none,
+  /// Bytes kept in the graph's memory and shared by all of its contexts. `bytes` caps it.
+  memory(options = {}) {
+    return withCapacity('codeCacheMemory', 'codeCache', 'bytes', capacity('CodeCache.memory', 'bytes', own(options, 'bytes')), {});
+  },
+  /// Files in the directory `fs` (a grant of `api.fs`) grants, in the `__oricache__` format. Reads and
+  /// writes touch the disk; writes happen at `graph.flush()`.
+  dir(fs, options = {}) {
+    if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant');
+    return withCapacity('codeCacheDir', 'codeCache', 'bytes', capacity('CodeCache.dir', 'bytes', own(options, 'bytes')), { fs });
+  },
+  /// Your own store. `load(key, source)` returns the cached bytes (`Uint8Array`) or `undefined`;
+  /// `store(key, bytes)` saves them. Both may be async and run in the creating realm. `key` is
+  /// `{ id, hash }`; a cache is valid for the exact source text it was made from.
+  custom(options) {
+    const load = own(options, 'load');
+    const store = own(options, 'store');
+    if (typeof load !== 'function' || typeof store !== 'function') throw invalid('CodeCache.custom: load and store must be functions');
+    return freeze({ kind: 'codeCache', native: false, load, store });
+  },
+});

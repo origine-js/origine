@@ -2,10 +2,11 @@
 export type LoaderResult = string | { readonly source: string };
 
 /**
- * Supplies module source for a child scope. Called with the module id in the **creating** scope;
- * may be async. A throw or rejection fails the import. It must not create scopes (`Unsupported`).
+ * Supplies module source for a child scope. Called with the module id in the **creating** scope and
+ * the import attributes of the request as a plain object (`{ type: 'json' }` for a JSON import, `{}`
+ * otherwise); may be async. A throw or rejection fails the import. It must not create scopes (`Unsupported`).
  */
-export type Loader = (moduleId: string) => LoaderResult | Promise<LoaderResult>;
+export type Loader = (moduleId: string, attributes: Readonly<Record<string, string>>) => LoaderResult | Promise<LoaderResult>;
 
 /** A JavaScript source transform for one file extension: `(source, id) => string | { source }`. Promises are not supported. */
 export type SourceTransform = (source: string, id: string) => string | { readonly source: string };

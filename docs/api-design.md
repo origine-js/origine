@@ -26,6 +26,7 @@ Rust natives in `rust/crates/origine_api*`. Tests: `src/tests/managed/api.zig`. 
 | Transformers | The init scope transforms `.ts .mts .cts .tsx .jsx` through oxc by default (`Host.Config.transformers`); children get none unless the init passes them. See 4.5. |
 | Intrinsics snapshot | Done (engine level, below the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. Scope bootstrap helpers are restored from the snapshot instead of recompiled ([startup research](startup-optimization-research.md)). |
 | `isolate` | Absent (reserved name, see 4.6). |
+| Module graph | Designed in [graph-api.md](graph-api.md), replacing the module options of `api.scope` (`api.context`, `api.graph`). Only the data side exists: `origine:@std/graph/*` (recipes, sources, import handlers, resolver layers, providers, cache descriptors), pure JS and not yet used by anything. |
 
 Measured when the engine snapshot landed (release V8, debug app build, one scope; current numbers are in [shell-performance.md](shell-performance.md)): `Context::New` 3.75 ms average (7.6 ms first) with the unfrozen built-in seed, because each context installs features and freezes the intrinsic graph, versus 0.18 ms restored from a finalized custom snapshot. Scope creation drops from about 4.3 ms to about 0.55 ms; the snapshot takes 7.5 ms and about 400 KB and is generated at build time. Isolate creation (about 2.5 ms) is unchanged.
 
@@ -303,7 +304,7 @@ Layout: `src/api/{host,glue,fs,env,scope,js_loader,init_loader,init_cache,errno,
 
 ## 10. Open questions
 
-- **Resolver:** a custom module resolver is not supported; the import map is the only resolution control. Exception routing and reentrancy beyond the no-`createScope`-in-loader rule still need a definition.
+- **Resolver:** a custom module resolver is not supported; the import map is the only resolution control. Exception routing and reentrancy beyond the no-`createScope`-in-loader rule still need a definition. The module graph design ([graph-api.md](graph-api.md)) answers it with layered, possibly async resolver layers that run in the creating realm during the load stage; it needs `ModuleMap.compile` to park an entry while a request resolves.
 - **Native narrowing:** which specs get a native intersect layer beyond `root`/`mode` of the dropped fs `narrow` (section 5).
 - **Network permission:** how the embedder grants wider network access than loopback, and whether it follows the request/grant shape (4.3).
 - **Detailed errors:** the cppgc out-parameter (section 6) is unimplemented.

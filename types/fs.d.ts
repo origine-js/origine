@@ -119,7 +119,7 @@ export type AsyncFsOps = { readonly [K in keyof Shared]: Fn<Shared[K], Promise<S
 
 /**
  * A blocking grant from `api.fs.requestSync`: operations run on the isolate thread. What makes the
- * object a grant is a secret the host stamped on it, which a script cannot read or copy: a copy of every
+ * object a grant is a secret the host set when it built it, which a script cannot read or copy: a copy of every
  * property (`{ ...grant }`, `Object.assign`, `Object.create(grant)`, a `Proxy`) calls the same operations but is
  * not accepted where a grant is the authority (`api.graph.narrow({ fs })`, `CodeCache.dir`: `InvalidInput`).
  */
@@ -133,7 +133,7 @@ export interface SyncFs extends SyncFsOps {
 
 /**
  * A genuinely asynchronous grant from `api.fs.requestAsync`: operations run on the `io` it was requested
- * with. Stamped by the host like {@link SyncFs}: only the object `requestAsync` resolved with is a grant.
+ * with. Built by the host like {@link SyncFs}: only the object `requestAsync` resolved with is a grant, and it stops being one when its `io` closes.
  */
 export interface AsyncFs extends AsyncFsOps {
   readonly kind: "async";

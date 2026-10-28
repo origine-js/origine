@@ -19,6 +19,7 @@
     joinPath,
     ioHandles,
     closedIo,
+    completed,
     shared,
     errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported },
   },
@@ -490,13 +491,11 @@
         const grant = grantOf(spec, hint);
         if (typeof grant === 'number') throw failure(grant);
         if (!spec.sync) throw failure(PermissionDenied);
-        const ops = native.fsRequest(grant.root, grant.access);
+        // The host builds the grant (`{ kind, id }` with the secret that makes it one) and the natives bound
+        // to it; the glue gives the grant its operations.
+        const made = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
-        const granted = { kind: 'sync', id: ops.id, errno, ...makeOps(ops) };
-        // The host stamps the object with a secret only it can read: what the graph accepts as a grant.
-        native.fsBrand(granted, 0, ops.id);
-        if (errno[0] !== 0) throw failure(take());
-        return freeze(granted);
+        return completed(made[0], { errno, ...makeOps(made[1]) });
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),
@@ -508,14 +507,12 @@
         const grant = grantOf(spec, hint);
         if (typeof grant === 'number') return Promise.reject(failure(grant));
         if (!spec.async || native.fsAsync === undefined) return Promise.reject(failure(PermissionDenied));
-        return native.fsAsync
-          .request(io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access)
-          .then(granted => {
-            const made = { kind: 'async', id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) };
-            native.fsBrand(made, 1, granted.id);
-            if (errno[0] !== 0) throw failure(take());
-            return freeze(made);
-          });
+        // `io.close()` tells the host, which then refuses the grants opened on that io as an authority.
+        shared.asyncFsClosed ??= handle => native.fsAsyncClosed(handle.id);
+        // The host opens the grant on the Rust runtime and builds the grant object from its answer.
+        return native
+          .fsRequestAsync(native.fsAsync.request, io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access)
+          .then(granted => completed(granted, makeAsyncOps(native.fsAsync, granted.id)));
       },
     });
   }

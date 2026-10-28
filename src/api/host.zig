@@ -214,6 +214,8 @@ pub const Host = struct {
     grants: std.ArrayList(*fs_api.FsGrant) = .empty,
     /// Async grants stamped for a realm (`fs.brand`); the Rust runtime owns the grants themselves.
     async_grants: std.ArrayList(fs_api.AsyncGrant) = .empty,
+    /// Async grant requests waiting on the Rust runtime (`fs.requestAsync`).
+    async_requests: std.ArrayList(*fs_api.AsyncRequest) = .empty,
     states: std.ArrayList(*ScopeState) = .empty,
     /// The module graph: graphs, registered import handlers, contexts and their imports in flight.
     /// Ids are never reused (`registry.zig`). A context is freed with its scope, a handler when no live
@@ -275,6 +277,11 @@ pub const Host = struct {
         }
         self.grants.deinit(alloc);
         self.async_grants.deinit(alloc);
+        for (self.async_requests.items) |pending| {
+            pending.resolver.deinit();
+            alloc.destroy(pending);
+        }
+        self.async_requests.deinit(alloc);
         for (self.states.items) |state| self.releaseState(state);
         self.states.deinit(alloc);
         for (self.imports.items) |pending| {
@@ -500,6 +507,9 @@ pub const Host = struct {
                 owned.bindings.release(state, owned.ptr);
             }
             for (self.grants.items) |grant| if (grant.owner == state) grant.deinit();
+            for (self.async_grants.items) |*grant| if (grant.owner == state) {
+                grant.closed = true;
+            };
             // Its graphs go with the realm that could name them; contexts still using one keep it until they are freed.
             var index: usize = 0;
             while (index < self.graphs.values().len) {
@@ -676,7 +686,8 @@ pub const Host = struct {
             }),
             .fs => try call.object(ScopeState, state, .{
                 .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
-                .fsBrand = func(fs_api.brand, .{ .side_effect = .any }),
+                .fsRequestAsync = func(fs_api.requestAsync, .{ .side_effect = .any }),
+                .fsAsyncClosed = func(fs_api.asyncClosed, .{ .side_effect = .any }),
             }),
             .graph, .context => blk: {
                 const object = try call.object(ScopeState, state, .{
@@ -744,7 +755,7 @@ pub const Host = struct {
         const keys: []const []const u8 = switch (module) {
             .host => &.{ "env", "threading", "snapshot" },
             .isolate => &.{"isolate"},
-            .fs => &.{ "fsRequest", "fsBrand" },
+            .fs => &.{ "fsRequest", "fsRequestAsync", "fsAsyncClosed" },
             else => &.{},
         };
         for (keys) |property| {

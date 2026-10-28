@@ -4,7 +4,7 @@
 // `Config.runtime`); the glue only adds the narrowing the init asked for. A handle is frozen
 // data `{ kind: 'io', id, backend }` plus `close()`; it is not transferable across scopes
 // and `api.fs.requestAsync` takes it as `io`.
-(native, { freeze, own, failure, ioHandles, closedIo, errors: { Unsupported, BadHandle } }) => {
+(native, { freeze, own, failure, ioHandles, closedIo, shared, errors: { Unsupported, BadHandle } }) => {
   const BACKENDS = freeze(['auto', 'uring', 'kqueue', 'threaded']);
 
   // `state` = { parent, backends: string[] | undefined, max, live }: one record per narrowing.
@@ -28,6 +28,7 @@
         if (closing !== undefined) return closing;
         if (native.io.close === undefined) return Promise.reject(failure(Unsupported));
         closedIo.add(handle);
+        shared.asyncFsClosed?.(handle);
         closing = (async () => {
           try {
             await native.io.close(made.id);

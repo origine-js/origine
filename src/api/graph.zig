@@ -533,7 +533,7 @@ pub fn graphFor(host: *Host, id: u32) !*Graph {
 }
 
 /// `create(fs?, cacheKind, bytes, cacheFs?, sourceBytes)`: a graph. `fs` is a grant `api.fs` made, as
-/// the host stamped it (`fs.brand`): a sync one is read by the host, an async one is attached with
+/// the host built it (`fs.request` / `fs.requestAsync`): a sync one is read by the host, an async one is attached with
 /// `asyncFs`; without one `fs` hooks are `PermissionDenied`. `cacheKind` is 0 none, 1 memory, 2 dir
 /// (`cacheFs`, a sync grant with write access, is where `__codecache__` lives), 3 custom. Anything that is
 /// not a grant of this realm is `InvalidInput`.
@@ -947,7 +947,7 @@ pub fn bind(state: *ScopeState, step_fn: v8.Function) Error!void {
 }
 
 /// `asyncFs(graph, grant, open, readAll, close)`: makes the graph read through the async fs grant
-/// `grant` (an object the host stamped) with the Rust natives of `native.fsAsync`. The graph must have
+/// `grant` (an object the host built) with the Rust natives of `native.fsAsync`. The graph must have
 /// no sync grant.
 pub fn asyncFs(state: *ScopeState, call: *Call, graph_id: u32, grant: v8.Object, open_fn: v8.Function, read_fn: v8.Function, close_fn: v8.Function) Error!void {
     const graph = graphFor(state.host, graph_id) catch |err| return errno.narrow(err);

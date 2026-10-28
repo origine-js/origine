@@ -5,7 +5,7 @@
 // a Uint32Array over native memory fetched once per scope, and return a neutral
 // value (undefined / 0). They clear it on entry.
 native => {
-  const { freeze, getOwnPropertyDescriptor } = Object;
+  const { freeze, getOwnPropertyDescriptor, defineProperty } = Object;
   // Trusted API surfaces only: freeze their methods/accessors without validating a guest graph.
   const freezeMethods = object => {
     for (const key of Reflect.ownKeys(object)) {
@@ -42,8 +42,17 @@ native => {
   // accepts only live members of the first set (the Rust natives validate the id again).
   const ioHandles = new WeakSet();
   const closedIo = new WeakSet();
+  // Adds `members` to `target` as frozen own properties and freezes it: the host built the object (a
+  // grant), the glue only gives it its operations. Defines properties, so no setter on a prototype runs.
+  const completed = (target, members) => {
+    for (const key of Reflect.ownKeys(members)) {
+      defineProperty(target, key, { value: members[key], enumerable: true, writable: false, configurable: false });
+    }
+    return freeze(target);
+  };
+
   // Parts one factory publishes for another (the graph glue for the context glue).
   const shared = {};
 
-  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo, shared };
+  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo, completed, shared };
 };

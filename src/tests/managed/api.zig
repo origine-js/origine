@@ -1228,12 +1228,22 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
         \\  out.chained = name(() => api.graph.narrow({ fs: real }).narrow({ codeCache: CodeCache.memory() }).narrow({ fs: remote }));
         \\  // An async grant cannot be a cache directory (the cache is written with the host's own file calls).
         \\  out.asyncCache = name(() => api.graph.narrow({ codeCache: CodeCache.dir(remote) }));
+        \\  // Subclasses, prototypes and clones of a real grant are not grants either.
+        \\  class Sub { constructor(grant) { return Object.defineProperties(Object.create(grant), { kind: { value: grant.kind }, id: { value: grant.id } }); } }
+        \\  class Derived extends Object { constructor(grant) { super(); Object.defineProperties(this, Object.getOwnPropertyDescriptors(grant)); } }
+        \\  const clone = grant => { try { return structuredClone(grant); } catch (e) { return { ...grant, cloneFailed: e.name }; } };
+        \\  out.exotic = [real, remote].flatMap(grant => [new Sub(grant), new Derived(grant), Object.setPrototypeOf({ kind: grant.kind, id: grant.id }, grant), clone(grant)]).map(copy => name(() => api.graph.narrow({ fs: copy })));
+        \\  // Closing the io runtime ends the async grants opened on it: the host refuses them as an authority.
         \\  await io.close();
+        \\  out.closedAsync = name(() => api.graph.narrow({ fs: remote }));
+        \\  out.stillSync = name(() => api.graph.narrow({ fs: real }));
         \\}
     , true, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.forged === 'InvalidInput' && report.forgedFrozen === 'InvalidInput' && report.copy === 'InvalidInput' && report.forgedCache === 'InvalidInput' && report.real === 'ok'");
+    try check(fx.scope, "report.forged.length === 18 && report.forged.every(n => n === 'InvalidInput') && report.forgedCache.every(n => n === 'InvalidInput')");
+    try check(fx.scope, "report.notObjects.every(n => n === 'InvalidInput') && report.real === 'ok' && report.async === 'ok' && report.chained === 'ok'");
+    try check(fx.scope, "report.exotic.length === 8 && report.exotic.every(n => n === 'InvalidInput') && report.closedAsync === 'InvalidInput' && report.stillSync === 'ok'");
 }
 
 test "graph: a source larger than the graph's limit fails the import, never cut short, for sync and async grants" {

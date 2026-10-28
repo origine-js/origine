@@ -5,8 +5,8 @@
 //! answered right here, synchronously, and never enters JS. Otherwise the call goes to the JS
 //! driver of the creating realm (src/js/glue/graph.js), which runs the chain and answers with
 //! data; its promise is settled through `Runtime.completeResolve` / `completeLoad`, so the child
-//! is never waiting inside its own link or evaluate path. A JS driver call runs with
-//! `host.in_loader` set: it may not create contexts.
+//! is never waiting inside its own link or evaluate path. The driver waits one microtask before it
+//! runs any user function, so none of them runs on the stack of a child's `import()`.
 //!
 //! The identity table of a context is its scope's `ModuleMap` (a V8 module belongs to one
 //! context, so each context has its own). `origine:` modules are served only by the native
@@ -301,9 +301,6 @@ fn callDriver(self: *Context, kind: enum { resolve, load }, handler_id: u32, tok
     var h_scope: v8.HandleScope = undefined;
     h_scope.init(isolate);
     defer h_scope.deinit();
-    const was_in_loader = host.in_loader;
-    host.in_loader = true;
-    defer host.in_loader = was_in_loader;
     var tc: v8.TryCatch = undefined;
     tc.init(isolate);
     defer tc.deinit();
@@ -674,7 +671,6 @@ pub fn create(state: *ScopeState, import_handler: u32, graph_id: u32) Error!u32 
 fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
     const host = state.host;
     const alloc = host.allocator;
-    if (host.in_loader) return error.Unsupported;
     const h = try graph_api.handlerFor(host, import_handler);
     const graph = try graph_api.graphFor(host, graph_id);
     if (!h.native and state.driver == null) return error.Unsupported;
@@ -809,7 +805,6 @@ pub fn importSpecifier(state: *ScopeState, call: *Call, id: u32, specifier: []co
 
 fn importImpl(state: *ScopeState, call: *Call, id: u32, specifier: []const u8, attributes: []const u8) !v8.Promise {
     const context = try contextFor(state, id);
-    if (state.host.in_loader) return error.Unsupported;
     const promise = try context.scope.importModuleWithAttributes(specifier, try attributesOf(call, attributes), null);
     return startImport(call, state, context, promise);
 }
@@ -823,7 +818,6 @@ pub fn evaluateSource(state: *ScopeState, call: *Call, id: u32, name: []const u8
 
 fn evaluateImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8, source: []const u8, handler: u32, meta: []const u8) !v8.Promise {
     const context = try contextFor(state, id);
-    if (state.host.in_loader) return error.Unsupported;
     _ = try graph_api.handlerFor(state.host, handler);
     if (name.len == 0 or std.mem.startsWith(u8, name, module_types.origine_prefix)) return error.InvalidInput;
     if (try context.scope.module_map.get(.{ .module_id = name }, null)) |existing| {

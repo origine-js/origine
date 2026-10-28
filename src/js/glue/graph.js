@@ -153,10 +153,16 @@
 
   // ---- the driver ------------------------------------------------------------------------------
 
+  /// The host calls the driver synchronously, and a child's `import()` is such a call from inside the
+  /// child's own evaluation. Waiting one microtask first means no layer, hook, maker, transformer or
+  /// `meta` of the creating realm ever runs on the child's stack: they run when it has unwound.
+  const settled = () => Promise.resolve();
+
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
 
   /// Resolves `specifier` through the layers of handler `hid`; functions run here, host layers in the host.
   const driverResolve = async (hid, ctxId, specifier, referrer, attributes) => {
+    await settled();
     const record = byId[hid];
     const request = freeze({ specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
     for (let index = 0; index < record.layerFns.length; index++) {
@@ -201,6 +207,7 @@
   /// The load stage for handler `hid`: hooks in order, then the maker. Answers the data the host
   /// completes the load with: `{ kind: 'source', source, handler, meta }` or `{ kind: 'link', ... }`.
   const driverLoad = async (hid, ctxId, graphId, id, attributes, specifier, referrer) => {
+    await settled();
     const record = byId[hid];
     const resolved = freeze({ id, attributes: freeze({ ...attributes }), specifier, referrer, phase: 'evaluation' });
     const json = attributesJson(attributes);

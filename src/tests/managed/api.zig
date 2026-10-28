@@ -961,6 +961,44 @@ test "graph: JS layers, hooks, makers and transformers run in the creating realm
     try t.expect(fx.host.driver_calls > 0);
 }
 
+test "graph: JS layers and hooks never run on the stack of a child's import()" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  // `marked` is 1 only while the child is inside its own synchronous import() call.
+        \\  let marked = 0;
+        \\  const seen = [];
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => { seen.push('layer:' + marked); return { id: specifier }; }),
+        \\    hooks: [async r => { seen.push('hook:' + marked); return Import.provide(ModuleSource.text('export const v = 1;')); }],
+        \\  });
+        \\  const ctx = await api.context.create({
+        \\    import: handler,
+        \\    preload: [{ source: '(values) => { globalThis.start = () => { values.mark(1); const p = import("dyn"); values.mark(0); return p; }; }', values: { mark: n => { marked = n; } } }],
+        \\  });
+        \\  await ModuleRecipe({ source: ModuleSource.text('await start(); globalThis.done = 1;'), import: handler, name: 'root' }).create(api.graph).evaluate(ctx);
+        \\  out.seen = seen.join(',');
+        \\  // A hook may create a context: it runs from the microtask checkpoint.
+        \\  const maker = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => { const inner = await api.context.create({ import: handler }); inner.close(); return Import.provide(ModuleSource.text('export const w = 2;')); }],
+        \\  });
+        \\  const outer = await api.context.create({ import: maker });
+        \\  out.nested = await outer.import('x').then(r => r.status, e => e.name + ':' + e.message);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.seen === 'layer:0,hook:0'");
+    try check(fx.scope, "report.nested === 'evaluated'");
+    try check(fx.rt.scopes.items[1], "done === 1");
+}
+
 test "graph: origineProvider serves an allowlist and JS cannot forge origine: modules" {
     var fx: Fixture = undefined;
     try fx.setup(

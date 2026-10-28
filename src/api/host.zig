@@ -201,9 +201,6 @@ pub const Host = struct {
     next_fs_id: u32 = 1,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
     rust_isolate: ?v8.Isolate = null,
-    /// True while a JS loader callback runs inside Runtime.pump's scope iteration;
-    /// creating a scope then would invalidate that iteration.
-    in_loader: bool = false,
     /// Set by an owner on another thread to end `settle` with `error.Terminated`.
     stop: ?*const std.atomic.Value(bool) = null,
     /// Only scripts actually loaded are retained; flush after execution to include lazy code.

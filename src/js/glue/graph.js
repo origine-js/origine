@@ -207,6 +207,38 @@
     } catch {}
   };
 
+  /// A hardened link's view of a value another realm exported: plain data (primitives, arrays and
+  /// objects whose prototype is a realm's `Object.prototype` or null, cycles kept) is copied, so the
+  /// exporting module's own objects stay as mutable as they were; a function, a class and any other
+  /// object cannot be copied and is shared (the host freezes it in place, with what it reaches).
+  /// An accessor property is `Unsupported`.
+  const copyData = (value, seen) => {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
+    if (typeof value === 'function') return value;
+    const known = seen.get(value);
+    if (known !== undefined) return known;
+    const copyProperties = (from, to) => {
+      for (const key of Object.keys(from)) {
+        const descriptor = Object.getOwnPropertyDescriptor(from, key);
+        if (!('value' in descriptor)) throw named(Unsupported, `a hardened link cannot copy the accessor ${JSON.stringify(key)}`);
+        to[key] = copyData(descriptor.value, seen);
+      }
+      return to;
+    };
+    if (Array.isArray(value)) {
+      const copy = [];
+      seen.set(value, copy);
+      return copyProperties(value, copy);
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === null || Object.getPrototypeOf(prototype) === null) {
+      const copy = prototype === null ? Object.create(null) : {};
+      seen.set(value, copy);
+      return copyProperties(value, copy);
+    }
+    return value;
+  };
+
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
   const NEXT = freeze({ kind: 'next' });
 
@@ -254,7 +286,16 @@
           const state = referenceState.get(verdict.reference);
           if (state === undefined || state.context === null || state.status !== 'evaluated')
             throw named(InvalidInput, 'link needs a reference that is evaluated in a context');
-          return freeze({ kind: 'link', context: state.context, name: state.name, mode: verdict.mode });
+          const reply = { kind: 'link', context: state.context, name: state.name, mode: verdict.mode };
+          // A hardened link from another context brings copies of the exports, made here.
+          if (verdict.mode === 'hardened' && state.context !== ctxId) {
+            const namespace = host(native.context.namespaceOf, state.context, state.name);
+            const exports = {};
+            const seen = new Map();
+            for (const key of Object.keys(namespace)) exports[key] = copyData(namespace[key], seen);
+            reply.exports = exports;
+          }
+          return freeze(reply);
         }
         case 'reject':
           throw verdict.error;

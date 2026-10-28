@@ -13,7 +13,7 @@ All of it is implemented except what the last row lists. Tests: `src/tests/manag
 | `api.context` (`create`, `import`, `references`, `close`, preload) | Replaces `api.scope`, which is gone. |
 | Async or layered resolution in `ModuleMap` | `Resolver.resolve_async`, `Runtime.completeResolve` (`src/managed/module_map.zig`). |
 | Native plans | A handler with no JS function runs entirely in Zig (`Handler.native`); see Native plans. |
-| `Import.link` | `'hardened'` over `Content.exports`, `'shared'` over `Content.module`; the spike below showed V8 accepts the latter. |
+| `Import.link` | `'hardened'` over `Content.exports` (data copied in the creating realm), `'shared'` over `Content.module`; the spike below showed V8 accepts the latter. |
 | Refcounted module table | `retain: 'all' \| 'used'`, pins (`ModuleMap.pin`), `delete`, `clear`, `entries` cap, `ModuleMap.sweep`. |
 | Code caches | `none`, `memory`, `dir` (one file per module under `__oricache__` of the cache grant, named from a hash of the module id) and `custom` (`load` before a module compiles, `store` at `graph.flush()`). |
 | `Snapshot.prepare` and baked contexts (multi-context `init_snapshot`) | Later, and the module graph's: the `api.isolate` snapshot step stays single-context. |
@@ -29,9 +29,8 @@ What the implementation does differently from the proposal this page started as:
 4. **`ModuleReference.status` has no separate `instantiated`**: a reference goes `declared`, `loaded`, `evaluating`, `evaluated` or `errored`. `requests[].reference` are one level deep: they are `declared` until `load()` is called on them.
 5. **The origine ceiling** (what `origineProvider` may include) comes from the context's import handler only; the init scope is unrestricted. A hook that names more than that is `PermissionDenied` (`Unsupported` in a context whose handler serves nothing).
 6. **A root module is addressed by its name.** `evaluate` and preloads register the source under the module's `name` and import that name, bypassing the resolver; the name must be unused in the context's table (`InvalidInput`).
-7. **`'hardened'` freezes the exported graph in place** (the hardener's rule), so the source context's exported objects become frozen too.
-8. **Errors from JS hooks**: an `ImportError` kind keeps its kind; anything else, `ImportError.other(message)` included, reaches the importing module as an `Error` with `name: message`.
-9. **Oxc transformers are plain descriptors** (`ts()` returns `{ host: 'oxc', kind: 'transformer', transform, options }`), no longer callable functions.
+7. **Errors from JS hooks**: an `ImportError` kind keeps its kind; anything else, `ImportError.other(message)` included, reaches the importing module as an `Error` with `name: message`.
+8. **Oxc transformers are plain descriptors** (`ts()` returns `{ host: 'oxc', kind: 'transformer', transform, options }`), no longer callable functions.
 
 ## Facts that shape the design
 
@@ -96,10 +95,12 @@ There is no `origineNamespace` flag. `origine()` only canonicalises `origine:` i
 | Verb | The importer gets | Safety |
 |---|---|---|
 | `Import.provide(recipe)` | a fresh reference of the recipe in its own context | safe |
-| `Import.link(ref, { mode: 'hardened' })` | a synthetic module of `ref`'s exports through the hardener (plain data and functions, a snapshot of the values) | safe |
+| `Import.link(ref, { mode: 'hardened' })` | a synthetic module of `ref`'s exports as a snapshot: plain data is copied (and the copies frozen), functions, classes and other objects are shared and frozen in place in their own realm (they cannot be copied); accessors are `Unsupported` | safe for the exporter's data; its code objects are frozen |
 | `Import.link(ref, { mode: 'shared' })` | the other context's module itself (live bindings, same objects) | leaks the realm boundary on purpose; V8 accepts it (spike below) |
 
 `link` takes a reference bound and evaluated in another context; `mode` is required there.
+
+**Hardened links.** The exporter's data and code are treated differently because only data can be copied. `Scope.harden` freezes a graph in place, which is right for values the creator hands over (preload `values`) but would break an exporting module that mutates its own exports after it was linked, so a hardened link copies plain data in the creating realm (the glue's `copyData`) and lets the importer's hardener freeze the copies. Functions and classes cannot be copied: they are shared and frozen in place, with their statics and prototype chain, and a class static the exporter keeps mutating will throw there. `Import.link` of a function-heavy module is therefore best done with `'shared'` when the exporter must keep working.
 
 **Spike result (`src/tests/managed/shared_link.zig`, also exercised end to end by the `graph: link` test).** Two scopes of one isolate: `Module::InstantiateModule` in the importer's context accepts a dependency that was already instantiated and evaluated in the other context. The importer reads live bindings (a counter bumped in A is seen by B's imported binding) and receives A's own objects (their creation context is A's, not B's). So `'shared'` ships; it is the documented realm leak, available only to code that holds both the reference and the importer's handler. Node's `vm.Module` refuses this combination by policy; V8 itself does not. Authority is the handle: only code holding both the reference and the importer's handler can write the verdict, and hooks run in the creating realm.
 

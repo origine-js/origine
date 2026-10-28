@@ -188,10 +188,14 @@ declare module "origine:@std/graph/import" {
     /** Stop the chain with a source (the `maker` makes it a recipe) or a recipe (final; the maker is skipped). The importer gets its own module. */
     provide(target: ModuleSource | ModuleRecipe): Verdict;
     /**
-     * Stop the chain and use a module already evaluated in some context. `mode` is required: `'hardened'`
-     * links a synthetic module of its exports passed through the hardener (plain data and functions, a
-     * snapshot of the values); `'shared'` links the module itself (live bindings, same objects, and it
-     * leaks the realm boundary on purpose).
+     * Stop the chain and use a module already evaluated in some context. `mode` is required when that is
+     * not the importer's own context. `'hardened'` links a synthetic module of its exports as a snapshot:
+     * plain data (primitives, arrays and objects with a plain prototype, cycles kept) is copied and the
+     * copies are frozen, so the exporting module's own objects stay as mutable as they were; a function, a
+     * class and any other object cannot be copied, so it is shared and frozen in place in its own realm
+     * together with what it reaches (a class's statics and prototype chain); an accessor property is
+     * `Unsupported`. `'shared'` links the module itself (live bindings, same objects, and it leaks the
+     * realm boundary on purpose).
      */
     link(reference: object, options: { readonly mode: "hardened" | "shared" }): Verdict;
     /** Stop the chain with an error. Throws `InvalidInput` for any other code. */

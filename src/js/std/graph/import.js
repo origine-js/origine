@@ -69,10 +69,13 @@ export const Import = freeze({
     throw invalid('Import.provide: expected a ModuleSource or a ModuleRecipe');
   },
   /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a
-  /// fresh copy. `mode` is required when that context is not the importer's: `'hardened'` links a
-  /// synthetic module of its exports passed through the hardener (plain data and functions, a snapshot
-  /// of the values); `'shared'` links the module itself (live bindings, same objects: it leaks the
-  /// realm boundary, on purpose).
+  /// fresh copy. `mode` is required when that context is not the importer's. `'hardened'` links a
+  /// synthetic module of its exports as a snapshot: plain data (primitives, arrays and objects with a
+  /// plain prototype, cycles kept) is copied and the copies are frozen, so the exporting module's own
+  /// objects stay as mutable as they were; a function, a class and any other object cannot be copied, so
+  /// it is shared and frozen in place in its own realm with what it reaches (a class's statics and
+  /// prototype chain); an accessor property is `Unsupported`. `'shared'` links the module itself (live
+  /// bindings, same objects: it leaks the realm boundary, on purpose).
   link(reference, options) {
     if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
     const mode = own(options, 'mode');

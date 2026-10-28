@@ -50,6 +50,7 @@ comptime {
     errno.requireBinding(cachePut);
     errno.requireBinding(pin);
     errno.requireBinding(unpin);
+    errno.requireBinding(namespaceOf);
 }
 
 /// What a resolved id was resolved for; the load stage needs it.
@@ -763,7 +764,11 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
         const other_id = numberOf(ctx, isolate, object, "context") orelse return error.InvalidData;
         const name = (try stringOf(ctx, isolate, alloc, object, "name")) orelse return error.InvalidData;
         const mode = (try stringOf(ctx, isolate, alloc, object, "mode")) orelse return error.InvalidData;
-        return .{ .done = .{ .content = try link(self, other_id, name, std.mem.eql(u8, mode, "shared"), alloc) } };
+        if (object.get(ctx, binding.string(isolate, "exports"))) |given| if (given.isObject()) {
+            if (!std.mem.eql(u8, mode, "hardened")) return error.InvalidData;
+            return .{ .done = .{ .content = try linkExports(self, ctx, isolate, given.toObject(ctx).?, alloc) } };
+        };
+        return .{ .done = .{ .content = try link(self, other_id, name, std.mem.eql(u8, mode, "shared")) } };
     }
     return error.InvalidData;
 }
@@ -817,15 +822,15 @@ fn idOf(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, value: v
     return (try stringOf(ctx, isolate, alloc, object, "id")) orelse error.InvalidData;
 }
 
-/// The content that makes the module `name` of context `other_id` available to `self`: the module
-/// itself (`shared`: live bindings, the other realm's objects), or a synthetic module of its
-/// exports (hardened by the module map). Handles stay in `self.link_*` until the next bridge call.
-fn link(self: *Context, other_id: u32, name: []const u8, shared: bool, alloc: std.mem.Allocator) !module_types.Content {
+/// The content that makes the module `name` of context `other_id` available to `self` as it is: the
+/// module itself (`shared`: live bindings, the other realm's objects; or an alias in the same
+/// context). A hardened link from another context has no such form: the creating realm hands over
+/// the exports it copied (`linkExports`). Handles stay in `self.link_*` until the next bridge call.
+fn link(self: *Context, other_id: u32, name: []const u8, shared: bool) !module_types.Content {
     const host = self.host;
     if (other_id == 0 or other_id > host.contexts.items.len) return error.BadHandle;
     const other = host.contexts.items[other_id - 1];
     if (other.closed or other.creator != self.creator) return error.BadHandle;
-    const isolate = self.scope.runtime.isolate;
     const held = (try other.scope.module_map.get(.{ .module_id = name }, null)) orelse return error.NotFound;
     errdefer held.deinit();
     try self.link_modules.append(host.allocator, held);
@@ -835,27 +840,45 @@ fn link(self: *Context, other_id: u32, name: []const u8, shared: bool, alloc: st
     // the importer, in the wrong context.
     if (module.getStatus() != 4) return error.InvalidInput;
     if (shared or other == self) return .{ .module = module };
-    const other_ctx = other.scope.context.deref();
-    other_ctx.enter();
-    defer other_ctx.exit();
-    const namespace = (module.getModuleNamespace() orelse return error.InvalidData).toObject(other_ctx) orelse return error.InvalidData;
-    const names = namespace.getOwnPropertyNames(other_ctx, .{ .OnlyEnumerable = true, .SkipSymbols = true }, .ConvertToString) orelse return error.InvalidData;
+    // A hardened link brings its own exports (copied by the creating realm, see `linkExports`).
+    return error.InvalidData;
+}
+
+/// The exports of a hardened link: the own enumerable properties of `exports_object`, which the
+/// creating realm built (plain data copied, functions and other objects shared). Handles stay in
+/// `self.link_values` until the next bridge call. Requires the creating realm's `ctx` entered.
+fn linkExports(self: *Context, ctx: v8.Context, isolate: v8.Isolate, exports_object: v8.Object, alloc: std.mem.Allocator) !module_types.Content {
+    const names = exports_object.getOwnPropertyNames(ctx, .{ .OnlyEnumerable = true, .SkipSymbols = true }, .ConvertToString) orelse return error.InvalidData;
     const exports = try alloc.alloc(module_types.Export, names.len());
     var count: usize = 0;
     var index: u32 = 0;
     while (index < names.len()) : (index += 1) {
-        const key = names.object.getIndex(other_ctx, index) orelse continue;
+        const key = names.object.getIndex(ctx, index) orelse continue;
         if (!key.isString()) continue;
-        const text = key.toString(other_ctx) orelse continue;
-        const buffer = try alloc.alloc(u8, text.lenUtf8(isolate));
-        const bytes = buffer[0..text.writeUtf8(isolate, buffer)];
-        const value = namespace.get(other_ctx, key) orelse return error.InvalidData;
+        const bytes = try stringValue(ctx, isolate, alloc, key);
+        const value = exports_object.get(ctx, key) orelse return error.InvalidData;
         const retained: v8.Global.Of(v8.Value) = .new(isolate, value);
-        try self.link_values.append(host.allocator, retained);
+        try self.link_values.append(self.host.allocator, retained);
         exports[count] = .{ .name = bytes, .value = retained };
         count += 1;
     }
     return .{ .exports = exports[0..count] };
+}
+
+/// `namespaceOf(context, name)`: the namespace object of the evaluated module `name` of a context
+/// this realm created, for the glue to read (a foreign object: never kept).
+pub fn namespaceOf(state: *ScopeState, id: u32, name: []const u8) Error!v8.Value {
+    return namespaceImpl(state, id, name) catch |err| return errno.narrow(err);
+}
+
+fn namespaceImpl(state: *ScopeState, id: u32, name: []const u8) !v8.Value {
+    const context = try contextFor(state, id);
+    const held = (try context.scope.module_map.get(.{ .module_id = name }, null)) orelse return error.NotFound;
+    defer held.deinit();
+    const module = held.deref();
+    // V8 aborts on the namespace of a module that is not instantiated; only an evaluated one is shared.
+    if (module.getStatus() != 4) return error.InvalidInput;
+    return module.getModuleNamespace() orelse error.InvalidData;
 }
 
 fn metaHook(data: ?*anyopaque, request: module_types.MetaRequest) void {

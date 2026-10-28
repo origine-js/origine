@@ -161,7 +161,7 @@ test "api: getters load and harden capabilities once and retain separate disk co
         defer api.deinit();
         try exposeApi(scope, api);
         try check(scope,
-            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,io,net' &&
+            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,isolate,io,net' &&
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );
@@ -1353,6 +1353,55 @@ test "graph: link refuses a module that is still evaluating and a failed import 
     try fx.run();
     try check(fx.scope, "report.status === 'evaluating' && report.early.includes('InvalidInput') && report.late === 'ok'");
     try check(fx.scope, "report.failed.includes('NotFound') && report.after === 'ok' && report.imported === 'evaluated'");
+}
+
+test "graph: a hardened link copies plain data and leaves the exporting module's own objects alone" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const graph = api.graph;
+        \\  const layer = ({ specifier }) => ({ id: specifier });
+        \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
+        \\  const a = await api.context.create({ import: leaf });
+        \\  const source = ModuleRecipe({ source: ModuleSource.text(`
+        \\    export const obj = { tag: 'a', list: [1, 2], nested: { deep: true } };
+        \\    export const loop = {}; loop.self = loop;
+        \\    export const bare = Object.create(null); bare.k = 1;
+        \\    export const plain = 1;
+        \\    export function bump() { obj.tag = 'b'; obj.list.push(3); }
+        \\    export class K { static n = 0; static inc() { K.n++; } }
+        \\    globalThis.sourceObj = obj; globalThis.sourceK = K;`), import: leaf, name: 'a-mod' }).create(graph);
+        \\  await source.evaluate(a);
+        \\  const getter = ModuleRecipe({ source: ModuleSource.text('export const g = { get x() { return 1; } };'), import: leaf, name: 'getter-mod' }).create(graph);
+        \\  await getter.evaluate(a);
+        \\  const linker = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(layer),
+        \\    hooks: [async r => (r.id === 'link:hard' ? Import.link(source, { mode: 'hardened' }) : r.id === 'link:getter' ? Import.link(getter, { mode: 'hardened' }) : Import.next())],
+        \\  });
+        \\  const b = await api.context.create({ import: linker });
+        \\  const run = (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: linker, name }).create(graph).evaluate(b).then(() => 'ok', e => e.message);
+        \\  out.hard = await run('h', `
+        \\    import { obj, loop, bare, plain, bump, K } from 'link:hard';
+        \\    const before = obj.tag + obj.list.length;
+        \\    bump();
+        \\    let inc = 'no throw'; try { K.inc(); } catch (e) { inc = e.name; }
+        \\    globalThis.seen = { before, after: obj.tag + obj.list.length + obj.nested.deep, frozen: Object.isFrozen(obj) && Object.isFrozen(obj.list) && Object.isFrozen(obj.nested),
+        \\      cycle: loop.self === loop, bare: bare.k + ':' + (Object.getPrototypeOf(bare) === null), plain, inc, sameObject: obj === globalThis.sourceObj };`);
+        \\  out.getter = await run('g', "import { g } from 'link:getter';");
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.hard === 'ok' && report.getter.includes('Unsupported')");
+    // B sees frozen copies that bump() in A did not change; K is shared and frozen in place.
+    try check(fx.rt.scopes.items[2], "seen.before === 'a2' && seen.after === 'a2true' && seen.frozen && seen.cycle && seen.bare === '1:true' && seen.plain === 1 && seen.inc === 'TypeError' && seen.sameObject === false");
+    // The exporting module keeps its own mutable objects: bump() changed them, nothing froze them.
+    try check(fx.rt.scopes.items[1], "sourceObj.tag === 'b' && sourceObj.list.length === 3 && !Object.isFrozen(sourceObj) && !Object.isFrozen(sourceObj.list) && Object.isFrozen(sourceK)");
 }
 
 test "graph: native plans with oxc, json, import maps and accept never enter JS" {

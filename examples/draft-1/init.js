@@ -9,7 +9,7 @@ const text = bytes => String.fromCharCode(...bytes);
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  eprintln('args:', api.env.args().join(' '));
+  eprintln('args:', api.host.env.args().join(' '));
   /** @type {import('@origine/types').FsRequest} */
   const grant = { root: 'examples/draft-1/work', access: 'rw' };
   const sync = api.fs.requestSync(grant);

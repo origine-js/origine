@@ -4,7 +4,7 @@ export interface EnvNarrow {
   readonly allow: readonly string[];
 }
 
-/** `api.env`: command-line arguments and environment variables. */
+/** `api.host.env`: command-line arguments and environment variables. */
 export interface EnvCap {
   /** The arguments the program was started with. */
   args(): readonly string[];

@@ -1,4 +1,4 @@
-import type { EnvCap } from "./env.d.ts";
+import type { HostCap } from "./host.d.ts";
 import type { FsCap } from "./fs.d.ts";
 import type { IoCap } from "./io.d.ts";
 import type { NetCap } from "./net.d.ts";
@@ -7,7 +7,7 @@ import type { ModuleGraph } from "./graph.d.ts";
 
 /**
  * The host API handed to `main`: every permission a program has. Frozen. Narrow a capability
- * (`api.env.narrow`, `api.io.narrow`) to hand a slice to a context; nothing widens one.
+ * (`api.host.env.narrow`, `api.io.narrow`) to hand a slice to a context; nothing widens one.
  * `api.io` and `api.net` exist where the embedder gave the program a runtime ceiling (the
  * `origine` shell does); see {@link BasicApi} for code that must also run without it.
  */
@@ -18,8 +18,8 @@ export interface Api {
   readonly io: IoCap;
   /** Loopback TCP (needs an `io`). */
   readonly net: NetCap;
-  /** Arguments and environment variables. */
-  readonly env: EnvCap;
+  /** The machine and process: arguments and environment variables. */
+  readonly host: HostCap;
   /** Module graph: sources, code caches and the authority modules are produced with. */
   readonly graph: ModuleGraph;
   /** Realms whose imports run through an import handler. */
@@ -27,7 +27,7 @@ export interface Api {
 }
 
 /** The part of {@link Api} every embedder provides. */
-export type BasicApi = Pick<Api, "fs" | "env" | "graph" | "context">;
+export type BasicApi = Pick<Api, "fs" | "host" | "graph" | "context">;
 
 /**
  * The entry point: an init module exports `main`. It may be `async`; the program runs until the

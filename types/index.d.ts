@@ -29,6 +29,7 @@ export type {
   IoErrnoTable,
 } from "./errors.d.ts";
 export type { EnvCap, EnvNarrow } from "./env.d.ts";
+export type { HostCap } from "./host.d.ts";
 export type {
   Access,
   AsyncFs,

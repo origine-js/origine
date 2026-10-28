@@ -17,7 +17,7 @@ Rust natives in `rust/crates/origine_api*`. Tests: `src/tests/managed/api.zig`. 
 |---|---|
 | Lifecycle | `Host.run`: evaluates the init module, calls exported `main(api)`, pumps until settled. The evaluated init graph is snapshotted lazily: the first run of `dir/init.js` evaluates it in a throwaway `SnapshotCreator` isolate (no host natives, so only `source` modules and pure-JS `origine:@std/*`; `import.meta.native` is absent) and stores `dir/__oricache__/init.js.<engine>.v8-snapshot`; later runs restore it, skip evaluation and call `main`. Valid while the engine tag, the init specifier and every file-backed module's content hash are unchanged (`src/api/init_cache.zig`, `src/managed/init_snapshot.zig`). An init that throws, awaits I/O or fails to load runs the normal path instead. Modules that run outside the snapshot (lazy imports, or every module when the init cannot be snapshotted) also get a V8 code cache, `name.<engine>.v8-code-cache` in the same `__oricache__`, written after the program ran and served only for byte-identical source (V8 itself only compares length); V8 refuses a cache made under a different startup blob, so a rebuilt snapshot costs one round of rejected caches. Snapshot files carry a readable header (file layout version, V8 build and code-cache tag, then the key); a file from another version is rejected with its reason, never migrated, and writing a cache file sweeps the directory of cache files made by other engine tags. `ORIGINE_NO_SNAPSHOT=1` disables both, `ORIGINE_SNAPSHOT_LOG=1` reports snapshot hit/miss (with the reason)/create/skip on stderr. |
 | `origine:@std/*` | `io` (Zig-style `Dir`/`File`/`IoError`/`Limit`), `fs` (Rust `std::fs`-style), `quansync` (write once, run sync or async), `text` (`encodeUtf8`/`decodeUtf8`/`tryDecodeUtf8`, no `TextEncoder`/`TextDecoder` in the context), `errno`, `transformer/oxc` (pure JS descriptors the host runs natively) and `graph/*` (the module graph's data). Each is documented in [src/js/docs](../src/js/docs/README.md). Native versions (V8 string conversion, simdutf) reach `text` through `import.meta.native`, injected by the host for the embedded `origine:` ids only (`Scope.Options.meta`); the module deletes the property after capturing it, and the `origine:` id namespace cannot be taken by working-directory files. The init scope sees every `origine:*` module; a context sees only those its import handler's `origineProvider` serves (`api.context`, 4.5). |
-| `api.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. No `set`. |
+| `api.host.env` | `args()`, `get`, `list`, `narrow({allow})`. `args()` includes the init path, then the user arguments. No `set`. |
 | `api.fs` | `requestSync({root, access})` (blocking, Zig natives, errno cell), `await requestAsync({io, root, access})` (genuinely asynchronous on an `api.io` runtime; Rust natives); `access` is required: `'r'`, `'w'` or `'rw'`, and a request above the host ceiling is denied, never downgraded. No `narrow` on fs for now: `Config.fs` is the only ceiling. Real backend only (no memory/overlay). The two variants have the same op names (`dirOpenFile`, `dirOpenDir`, `dirClose`, `dirStat`, `dirSymlinkStat`, `dirCreateDir`, `dirCreateDirPath`, `dirDeleteFile`, `dirDeleteDir`, `dirDeleteTree`, `dirRename`, `dirRead`, `fileStat`, `fileReadAll`, `fileRead`, `filePread`, `fileWrite`, `fileWriteAll`, `filePwriteAll`, `fileSetLength`, `fileSync`, `fileClose`); async additionally has `fileReadInto`, `filePreadInto`, `fileReadAlloc`, `filePreadAlloc` and the move writes `fileWriteMove`, `fileWriteMoveAll`, `filePwriteMoveAll` (the sync cap has them too, failing `Unsupported`). |
 | `api.io` | Only when the embedder sets `Config.runtime` (the ceiling: backends, `max_runtimes`, `default_entries`). `create({backend?: 'auto'\|'uring'\|'kqueue'\|'threaded', entries?})` (sync) returns a frozen handle with `close()`, `run()`, and the clock and timers `now`, `sleep`, `sleepUntil`, `timer`, `timerAt` ([timers](../src/js/docs/timers.md)); `await io.close()` cancels in-flight operations and destroys the runtime (every call returns the same promise, which settles once the runtime is closed, and `maxRuntimes` slots are freed then); `narrow({backends, maxRuntimes})` only lowers the ceiling. Handles are not transferable across scopes. See 4.4. |
 | `api.net` | Present wherever `api.io` is. Loopback TCP only (`127.0.0.1`, `localhost`, `::1`): `listen`, `connect`, `Server.accept`, `Socket.read/readInto/readCopy/write`, and event-style handles (`register`, `send`, `io.run()`). See [net](../src/js/docs/net.md). UDP, other hosts and an embedder network permission are not implemented. |
@@ -107,7 +107,7 @@ interface Api {
   fs:      FsCap;       // request an fs object
   io:      IoCap;       // async runtimes, timers (needs the embedder's runtime ceiling)
   net:     NetCap;      // loopback tcp (needs io); fetch and udp are todo
-  env:     EnvCap;      // args and environment variables
+  host:    HostCap;     // machine and process: `host.env` (args and environment variables)
   graph:   ModuleGraph; // sources, code caches and the authority modules are produced with
   context: ContextCap;  // realms whose imports run through an import handler
   isolate: IsolateCap;  // create isolates (not implemented)
@@ -127,9 +127,9 @@ interface AsyncFs { kind: 'async'; id: number;                      /* FsOps<Pro
 - The sync and async variants expose the **same operation names** (`dirOpenFile`, `fileRead`, `fileWrite`, `dirCreateDir`, `stat`, `dirIterate`, `fileClose`, ...). Sync blocks the isolate thread. `requestSync` throws `PermissionDenied` unless the grant allows it (host `FsConfig.sync`), and the runtime must have `allow_explicit_blocking_api` set (already in `Runtime.Options`). `requestAsync` additionally needs `FsConfig.async`, `Config.runtime`, and an `io` handle of the same scope that is still open.
 - An fs object is the whole authority for its backend. A sub-directory grant is a request with a `root`. `access: 'w'` is write-only: native handles are readable when writable, so the grant itself denies (`PermissionDenied`) everything that observes what exists (reads, stat, directory listings, opening for read). Confinement of `root` is lexical only: `..`, absolute paths and `__oricache__` components are denied, but a symlink inside the root can still lead out of it when followed (`metadata`, `stat`, `open`); how to confine symlinks is undecided.
 
-### 4.2 `env`
+### 4.2 `host.env`
 
-`env` gives `args`, `get(name)` and `list()`. `narrow({ allow })` filters the visible variable names. Replacing values with a fixed table and a `set` operation are ideas, not implemented.
+`api.host.env` gives `args`, `get(name)` and `list()`. `narrow({ allow })` filters the visible variable names. Replacing values with a fixed table and a `set` operation are ideas, not implemented.
 
 ### 4.3 `net`
 
@@ -184,11 +184,11 @@ Not implemented. Reserved name. Constraints already fixed: it is an `api` capabi
 
 ## 5. Narrowing (monotonic attenuation)
 
-Each capability narrows itself: `api.env.narrow(spec)`, `api.io.narrow(spec)`. (`api.fs` has no `narrow` for now, only the embedder's `Config.fs` ceiling and the `access` of each request; `api.graph.narrow` replaces the fs grant or code cache it holds, and `api.context` and `api.net` have no `narrow`.) Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
+Each capability narrows itself: `api.host.env.narrow(spec)`, `api.io.narrow(spec)`. (`api.fs` has no `narrow` for now, only the embedder's `Config.fs` ceiling and the `access` of each request; `api.graph.narrow` replaces the fs grant or code cache it holds, and `api.context` and `api.net` have no `narrow`.) Each returns a new capability that is a subset. **Nothing widens a grant**: there is no union or "elevate" operation.
 
 ```js
 const roFs   = api.fs.requestSync({ root: "/data", access: "r" });
-const env    = api.env.narrow({ allow: ["HOME", "PATH"] });
+const env    = api.host.env.narrow({ allow: ["HOME", "PATH"] });
 ```
 
 - **`api.*` is just an object map of functions, so narrowing is function replacement.** `narrow` returns a copy of the map in which the affected functions are replaced by wrappers that check the spec first and return an error (or call the original). For example the narrowed `dirOpenFile` rejects a path outside `root`, and a narrowed `fileRead` clamps its `limit`. This is plain JS, so it is easy to write and audit, and the init can narrow with any policy it likes (the spec shapes above are only examples).
@@ -244,7 +244,7 @@ export async function main(api) {
   const fs = { sync: api.fs.requestSync({ root: "/", access: "rw" }) };   // async: await api.fs.requestAsync({ io, root: "/", access: "rw" })
 
   const nodeFs  = makeNodeFs(fs, Dir);
-  const process = makeProcess(api.env.narrow({ allow: ["HOME", "PATH"] }));
+  const process = makeProcess(api.host.env.narrow({ allow: ["HOME", "PATH"] }));
 
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered().layer(importMap({ imports: { "node:fs": "app:/shim/node-fs.js", index: "app:/index.js" } })),
@@ -280,7 +280,7 @@ export function makeNodeFs(fs, Dir) {
 
 | Concern | Code |
 |---|---|
-| `api` object, grants, lifecycle | `src/api/host.zig` (`Host`, `Config`), `src/api/{fs,env,scope}.zig`, guest shape in `src/js/glue/` |
+| `api` object, grants, lifecycle | `src/api/host.zig` (`Host`, `Config`), `src/api/{fs,env,graph,context}.zig`, guest shape in `src/js/glue/` |
 | Typed native bindings, errno cell | `src/api/binding.zig`, `call.zig`, `errno.zig`, `errno_codes.zig` |
 | Async runtimes, async fs, net, timers | Rust: `rust/crates/origine_api` (natives), `origine_api_fs` (grants), `origine_io` (futures, runtime); Zig: `src/io` (event loop) |
 | Init snapshot and code caches | `src/api/{init_cache,init_loader}.zig`, `src/managed/{init_snapshot,snapshot}.zig` |
@@ -292,14 +292,14 @@ export function makeNodeFs(fs, Dir) {
 
 Embedded modules are `Module { id, source, bindings }` values (`src/api/module.zig`), one file each under `std/`, joined in `std/modules.zig`. `bindings` is `stateless(table)` (natives bound to the scope state) or `stateful(S, table)` (one `S` per scope, created on the module's first `import.meta` read, `init`/`deinit` optional, torn down by `Host.destroy`); `Config.modules` replaces the table, which is how tests add their own.
 
-Layout: `src/api/{host,glue,fs,env,scope,js_loader,init_loader,init_cache,errno,call,binding,module}.zig`, `src/api/std/{modules,io,errno,quansync,fs,text,transformer/oxc}.zig`, `src/api/transform/{transformer,transformers,ts,jsx,handle,oxc}.zig`, `src/js/{bootstrap.js,glue/{index,util,fs,env,scope,io,net}.js,std/{io,fs,text,quansync,transformer/oxc}.js}`.
+Layout: `src/api/{host,glue,fs,env,scope,js_loader,init_loader,init_cache,errno,call,binding,module}.zig`, `src/api/std/{modules,io,errno,quansync,fs,text,transformer/oxc}.zig`, `src/api/transform/{transformer,transformers,ts,jsx,handle,oxc}.zig`, `src/js/{bootstrap.js,glue/{index,util,fs,host,graph,context,io,net}.js,std/{io,fs,text,quansync,transformer/oxc}.js}`.
 
 ## 9. Delivery status
 
 1. Snapshot plus `main(api)`; `origine:@std/io` descriptors: done.
 2. `fs`: real backend with sync and async variants done (`narrow` dropped for now); memory and overlay backends not started.
 3. `api.context.create` with an import handler (layered, possibly async resolver; hooks; maker; transformers), preload `values`, `api.graph` with code caches, `Import.link`: done (replaces `api.scope`). Source and defer phases: not implemented.
-4. `env`: done. `io`, timers and loopback `net`: done. Wider `net` (fetch, UDP): not started.
+4. `host` (with `host.env`): done. `io`, timers and loopback `net`: done. Wider `net` (fetch, UDP): not started.
 5. `isolate`: not started.
 
 ## 10. Open questions

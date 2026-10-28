@@ -65,7 +65,7 @@ fn evaluate(isolate: v8.Isolate, ctx: v8.Context, module: Module) !v8.Function {
     return v8.Function.from_opaque(value.data.handle) orelse error.BootstrapFailed;
 }
 
-pub const Module = enum { common, fs, env, graph, context, io, net };
+pub const Module = enum { common, fs, host, graph, context, io, net };
 pub const module_count = std.meta.fieldNames(Module).len;
 
 /// A script's static source, origin and code-cache identity; retains no resources.

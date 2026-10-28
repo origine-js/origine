@@ -559,7 +559,7 @@ pub const Host = struct {
         const env = call.env();
         const part = switch (module) {
             .common => return error.InvalidInput,
-            .env => try call.object(ScopeState, state, .{
+            .host => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),
                     .get = func(env_api.get, .{ .side_effect = .none }),
@@ -612,7 +612,7 @@ pub const Host = struct {
             .io, .net => eu.v.object(env.isolate),
         };
         const key: ?[]const u8 = switch (module) {
-            .env => name,
+            .host => "env",
             .fs => "fsRequest",
             else => null,
         };

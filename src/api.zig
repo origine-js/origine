@@ -1,4 +1,4 @@
-//! The guest-visible `api` (env, fs, io, scope) and the typed binding layer behind it.
+//! The guest-visible `api` (host, fs, io, graph, context) and the typed binding layer behind it.
 //!
 //! - `Host` owns authority and drives the init -> `main(api)` lifecycle.
 //! - `binding` / `Call` are the DX for writing JS-native functions as ordinary typed

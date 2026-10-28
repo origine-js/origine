@@ -55,7 +55,7 @@ export async function main(api) {
 }
 ```
 
-The `api` object offers `fs`, `env`, `scope`, and (when the host grants an I/O runtime) `io`
+The `api` object offers `fs`, `host`, `graph`, `context`, and (when the host grants an I/O runtime) `io`
 (timers, async runtimes) and `net` (loopback TCP). The design, narrowing rules and security
 properties are in [docs/api-design.md](docs/api-design.md); the guest modules are in
 [src/js/docs/](src/js/docs/README.md). Runnable examples live in `examples/`:

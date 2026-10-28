@@ -1,4 +1,4 @@
-//! `api.env`: program arguments and environment variables (read-only).
+//! `api.host.env`: program arguments and environment variables (read-only).
 const std = @import("std");
 const Call = @import("binding.zig").Call;
 const errno = @import("errno.zig");

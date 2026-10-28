@@ -8,7 +8,7 @@
   const bound = Object.create(null);
   const options = {
     fs: { root: undefined, write: true, async: true, sync: true },
-    env: null,
+    host: undefined,
     graph: undefined,
     context: undefined,
     io: { parent: null, backends: undefined, max: Infinity, live: 0 },
@@ -38,7 +38,7 @@
     }
     return capabilities[name];
   };
-  for (const name of ['fs', 'env', 'graph', 'context', 'io', 'net']) {
+  for (const name of ['fs', 'host', 'graph', 'context', 'io', 'net']) {
     const get = freeze(() => access(name));
     const descriptor = { get, enumerable: true, configurable: false };
     Object.defineProperty(full, name, descriptor);

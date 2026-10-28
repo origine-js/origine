@@ -8,7 +8,7 @@ import { eprintln } from 'origine:@std/debug';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto', mode = 'copy'] = api.env.args();
+  const [, sizeArg, connsArg, warmArg, measArg, backend = 'auto', mode = 'copy'] = api.host.env.args();
   // mode: 'copy' = readCopy (copy into a reused buffer), 'into' = readInto (detach and get the buffer back),
   // 'events' = socket.register('data') with exact-size leases and synchronous send (no promise per message)
   const pinnedReads = mode === 'into';

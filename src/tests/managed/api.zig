@@ -161,14 +161,14 @@ test "api: getters load and harden capabilities once and retain separate disk co
         defer api.deinit();
         try exposeApi(scope, api);
         try check(scope,
-            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,env,graph,context,io,net' &&
+            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,io,net' &&
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );
         try t.expectEqual(@as(usize, 1), probe.loads.count());
         try t.expect(probe.loads.contains("origine:glue"));
         try t.expect(host.rust_isolate == null);
-        try check(scope, "api.env === api.env && Object.isFrozen(api.env.args) && api.env.args().length === 0");
+        try check(scope, "api.host.env === api.host.env && Object.isFrozen(api.host.env.args) && api.host.env.args().length === 0");
         try t.expect(!probe.loads.contains("origine:glue.fs"));
         try check(scope, "api.fs === api.fs && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.fs)");
         try check(scope,
@@ -223,7 +223,7 @@ test "api: snapshot restores immutable getters and network classes without compi
         \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
         \\  typeof d.get === 'function' && Object.isFrozen(d.get) && !d.configurable && d.set === undefined)
     );
-    try check(a, "Object.isFrozen(api.fs) && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.env.args) && Object.isFrozen(api.context.create)");
+    try check(a, "Object.isFrozen(api.fs) && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.host.env.args) && Object.isFrozen(api.context.create)");
     try t.expect(host.rust_isolate == null);
     try check(a,
         \\[api.net.Handle, api.net.Server, api.net.PullServer, api.net.EventServer, api.net.Socket, api.net.PullSocket, api.net.EventSocket].every(C =>
@@ -253,7 +253,7 @@ test "api: snapshot restores immutable getters and network classes without compi
     const restricted_api = try restricted_host.install(restricted, null);
     defer restricted_api.deinit();
     try exposeApi(restricted, restricted_api);
-    try check(restricted, "Object.keys(api).join(',') === 'fs,env,graph,context' && api.io === undefined && api.net === undefined && Object.isFrozen(api)");
+    try check(restricted, "Object.keys(api).join(',') === 'fs,host,graph,context' && api.io === undefined && api.net === undefined && Object.isFrozen(api)");
     try check(restricted, "(() => { try { api.fs.requestSync({ access: 'r' }); return false; } catch (e) { return e.name === 'PermissionDenied'; } })()");
     try t.expect(restricted_host.rust_isolate == null);
     host.flushGlueCache(a);
@@ -328,8 +328,8 @@ test "api: main receives env and an fs with sync and async variants" {
         \\import { Dir, IoError, HostError, Limit } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  out.args = api.env.args().join(',');
-        \\  out.home = api.env.get('HOME');
+        \\  out.args = api.host.env.args().join(',');
+        \\  out.home = api.host.env.get('HOME');
         \\  const sync = api.fs.requestSync({ access: 'rw' });
         \\  const io = api.io.create({});
         \\  const async = await api.fs.requestAsync({ io, access: 'rw' });
@@ -419,7 +419,7 @@ test "api: io and env narrowing are monotonic" {
         \\  out.closeAfter = solo.close() === c1;
         \\  await slot.create({ backend: 'threaded' }).close();
         \\  await io.close();
-        \\  const one = api.env.narrow({ allow: ['HOME'] });
+        \\  const one = api.host.env.narrow({ allow: ['HOME'] });
         \\  out.home = one.get('HOME'); out.path = one.get('PATH');
         \\  const none = one.narrow({ allow: ['PATH'] });
         \\  out.widened = none.get('PATH') !== undefined || none.get('HOME') !== undefined;

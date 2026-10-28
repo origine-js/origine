@@ -1,4 +1,4 @@
-// api.env, api.io, api.context, quansync, errno, globals. Type-checked only, never run.
+// api.host.env, api.io, api.context, quansync, errno, globals. Type-checked only, never run.
 import type { Api, Main } from "@origine/types";
 import { ERRNO } from "origine:@std/errno";
 import { quansync, run } from "origine:@std/quansync";
@@ -10,8 +10,8 @@ import { fromLoader } from "origine:@std/graph/providers";
 import { eprintln } from "origine:@std/debug";
 
 export const main: Main = async (api: Api) => {
-  eprintln("args", api.env.args().length, api.env.get("HOME") ?? "unset");
-  const narrowed = api.env.narrow({ allow: ["HOME"] });
+  eprintln("args", api.host.env.args().length, api.host.env.get("HOME") ?? "unset");
+  const narrowed = api.host.env.narrow({ allow: ["HOME"] });
   const names: readonly string[] = narrowed.list();
   void names;
 
@@ -67,7 +67,7 @@ export const main: Main = async (api: Api) => {
   // @ts-expect-error `context` has no `narrow`
   api.context.narrow({});
   // @ts-expect-error `narrow` needs `allow`
-  api.env.narrow({});
+  api.host.env.narrow({});
   // @ts-expect-error `narrow` takes the same `backends`, no `max`
   api.io.narrow({ max: 1 });
   // @ts-expect-error not a backend

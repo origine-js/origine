@@ -20,7 +20,7 @@ tables (not importable), and [bootstrap.js](../bootstrap.js) is the hardening bo
 The runtime handle's monotonic clock, sleeps, deadlines, and cancellable timers are
 documented in [timers.md](timers.md).
 
-The API exposes memoized getters for `fs`, `env`, `scope`, `io`, and `net` (the last
+The API exposes memoized getters for `fs`, `host`, `graph`, `context`, `io`, and `net` (the last
 two require a runtime ceiling). Engine and init snapshots contain the prepared API,
 its non-configurable getters, frozen methods, and frozen network classes/prototypes.
 Installation binds per-scope state; getters bind each capability's native authority

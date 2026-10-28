@@ -35,7 +35,11 @@ export interface Context extends Disposable {
 /** `api.context`: realms. A context gets no capability unless the parent hands it a slice through `preload` values. */
 export interface ContextCap {
   /**
-   * Creates a context. Rejects `InvalidInput` for malformed options (a missing `import`, a preload that is
+   * Creates a context. Contexts whose `import` handlers use the same `ImportCache` object (a handler makes
+   * its default one once, so contexts made from one handler object use the same) share that cache's modules:
+   * the first to import an id evaluates it and the others link that module (live bindings, same objects),
+   * which leaks the realm boundary; give each context its own handler or cache to keep them apart.
+   * Rejects `InvalidInput` for malformed options (a missing `import`, a preload that is
    * not exactly one of `source`/`module`) and `ModuleError` when a preload fails.
    */
   create(options: ContextOptions): Promise<Context>;

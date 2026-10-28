@@ -1465,8 +1465,10 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  out.codecache = await run(graph, ctx, "import './__codecache__/x.js'", 'm2');
         \\  const wo = await api.fs.requestAsync({ io, access: 'w' });
         \\  const writeOnly = api.graph.derive({ fs: wo });
-        \\  const wctx = await api.context.create({ import: handler, graph: writeOnly });
-        \\  out.writeOnly = await run(writeOnly, wctx, "import './dep.js'", 'm3');
+        \\  // Its own handler: one that shared the cache of `handler` would take dep.js from `ctx`, which read it with more authority.
+        \\  const narrower = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
+        \\  const wctx = await api.context.create({ import: narrower, graph: writeOnly });
+        \\  out.writeOnly = await ModuleRecipe({ source: ModuleSource.text("import './dep.js'"), import: narrower, name: 'm3' }).create(writeOnly).evaluate(wctx).then(() => 'ok', e => e.message);
         \\  out.accept = await (async () => {
         \\    const accepting = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [async () => Import.accept()] });
         \\    const actx = await api.context.create({ import: accepting, graph });
@@ -1653,8 +1655,9 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
         \\  await main.evaluate(ctx);
         \\  out.evaluated = main.status;
         \\  const closed = api.graph.derive({});
-        \\  const noFs = await api.context.create({ import: handler, graph: closed });
-        \\  out.noFs = await ModuleRecipe({ source: ModuleSource.text('import "./a.ts"'), import: handler, name: 'nofs' }).create(closed).evaluate(noFs).then(() => 'ok', e => e.message);
+        \\  const bare = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'mmap' })] });
+        \\  const noFs = await api.context.create({ import: bare, graph: closed });
+        \\  out.noFs = await ModuleRecipe({ source: ModuleSource.text('import "./a.ts"'), import: bare, name: 'nofs' }).create(closed).evaluate(noFs).then(() => 'ok', e => e.message);
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -1684,14 +1687,16 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const ro = api.fs.requestSync({ access: 'r' });
-        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  // A handler per context: contexts of one handler share its modules and would compile nothing the second time.
+        \\  const make = () => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
         \\  const run = async (graph, count) => {
-        \\    const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
-        \\    const a = await api.context.create({ import: handler, graph });
-        \\    await recipe.create(graph).evaluate(a);
+        \\    const one = make();
+        \\    const a = await api.context.create({ import: one, graph });
+        \\    await ModuleRecipe({ source: ModuleSource.file('main.js'), import: one }).create(graph).evaluate(a);
         \\    const first = await graph.flush();
-        \\    const b = await api.context.create({ import: handler, graph });
-        \\    await recipe.create(graph).evaluate(b);
+        \\    const two = make();
+        \\    const b = await api.context.create({ import: two, graph });
+        \\    await ModuleRecipe({ source: ModuleSource.file('main.js'), import: two }).create(graph).evaluate(b);
         \\    return [first, await graph.flush()];
         \\  };
         \\  out.memory = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.memory() }))).join(':');
@@ -1737,7 +1742,7 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const ro = api.fs.requestSync({ access: 'r' });
-        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  const make = () => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
         \\  const store = new Map();
         \\  const calls = [];
         \\  const keyOf = k => k.id + '@' + k.hash;
@@ -1747,6 +1752,7 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
         \\  });
         \\  const run = async codeCache => {
         \\    const graph = api.graph.derive({ fs: ro, codeCache });
+        \\    const handler = make();
         \\    const ctx = await api.context.create({ import: handler, graph });
         \\    await ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler }).create(graph).evaluate(ctx);
         \\    return graph.flush();
@@ -1857,22 +1863,138 @@ test "graph: ImportCache objects name separate tables, also inside one context" 
         \\  out.deleted = left.delete('dep') + ':' + left.size + ',' + right.size;
         \\  // Retention is per object: a 'used' table frees what a reference does not hold, an 'all' one keeps it.
         \\  const used = ImportCache.native({ retain: 'used' });
+        \\  const keep = ImportCache.native({ retain: 'all' });
         \\  const mixed = await api.context.create({ import: handlerFor(used) });
-        \\  await entry(handlerFor(shared), 'c.js').evaluate(mixed);
+        \\  await entry(handlerFor(keep), 'c.js').evaluate(mixed);
         \\  (await mixed.import('dep')).release();
-        \\  out.mixed = used.size + ',' + shared.size;
-        \\  // size counts every context that uses the object.
-        \\  out.across = shared.size;
-        \\  out.cleared = shared.clear() + ':' + shared.size + ',' + right.size;
+        \\  out.mixed = used.size + ',' + keep.size;
+        \\  out.cleared = keep.clear() + ':' + keep.size + ',' + right.size;
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.sameCache === 'dep:2'");
     // Context one: dep and a.js; context two: left holds dep (from ctx.import) and right holds b.js and its dep.
-    try check(fx.scope, "report.sizes === '1,2' && report.deleted === '1:0,2' && report.mixed === '0,4' && report.across === 4 && report.cleared === '4:0,2'");
+    try check(fx.scope, "report.sizes === '1,2' && report.deleted === '1:0,2' && report.mixed === '0,2' && report.cleared === '2:0,2'");
     try check(fx.rt.scopes.items[1], "count === 1");
     try check(fx.rt.scopes.items[2], "count === 2");
+}
+
+test "graph: contexts that use one ImportCache object share its modules; two objects do not" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { ImportCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const text = "globalThis.count = (globalThis.count ?? 0) + 1; export let n = 0; export function inc() { return ++n; } export const o = { v: 1 };";
+        \\  const handlerFor = options => ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => Import.provide(ModuleSource.text(text))],
+        \\    ...options,
+        \\  });
+        \\  // Two contexts made from the SAME handler object share the default cache it made, so one module.
+        \\  const same = handlerFor();
+        \\  const a = await api.context.create({ import: same });
+        \\  const b = await api.context.create({ import: same });
+        \\  const ma = await a.import('m');
+        \\  const mb = await b.import('m');
+        \\  out.once = ma.exports().n + ':' + mb.exports().n;
+        \\  // Live bindings and the same objects: a change through one context is seen through the other.
+        \\  ma.exports().inc();
+        \\  out.live = mb.exports().n;
+        \\  // Two handlers with two cache objects do not.
+        \\  const c = await api.context.create({ import: handlerFor({ cache: ImportCache.native({ retain: 'all' }) }) });
+        \\  const d = await api.context.create({ import: handlerFor({ cache: ImportCache.native({ retain: 'all' }) }) });
+        \\  await c.import('m');
+        \\  await d.import('m');
+        \\  out.separate = (await c.import('m')).exports().n + ':' + (await d.import('m')).exports().o.v;
+        \\  // Imports that start together still run the module once: the later waits for the home.
+        \\  const cache = ImportCache.native({ retain: 'all' });
+        \\  const shared = handlerFor({ cache });
+        \\  const e = await api.context.create({ import: shared });
+        \\  const f = await api.context.create({ import: shared });
+        \\  const both = await Promise.all([e.import('m'), f.import('m')]);
+        \\  both[0].exports().inc();
+        \\  out.together = both[1].exports().n;
+        \\  out.size = cache.size;
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.once === '0:0' && report.live === 1 && report.separate === '0:1' && report.together === 1 && report.size === 1");
+    // The module ran in its home only: context a (scope 1) counts one, b (scope 2) never ran it.
+    try check(fx.rt.scopes.items[1], "count === 1");
+    try check(fx.rt.scopes.items[2], "typeof count === 'undefined'");
+    // Separate caches: each of c and d ran it.
+    try check(fx.rt.scopes.items[3], "count === 1");
+    try check(fx.rt.scopes.items[4], "count === 1");
+    // Imports that start together: e (scope 5) is the home, f (scope 6) never ran it.
+    try check(fx.rt.scopes.items[5], "count === 1");
+    try check(fx.rt.scopes.items[6], "typeof count === 'undefined'");
+}
+
+test "graph: delete in one context is seen by all, a closed home hands the module over, retain used counts users" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const text = "globalThis.count = (globalThis.count ?? 0) + 1; export let n = globalThis.count;";
+        \\  const handlerFor = cache => ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => Import.provide(ModuleSource.text(text))],
+        \\    cache,
+        \\  });
+        \\  // delete(id) forgets the module in every context that holds it; the next import makes a new one.
+        \\  const cache = ImportCache.native({ retain: 'all' });
+        \\  const handler = handlerFor(cache);
+        \\  const a = await api.context.create({ import: handler });
+        \\  const b = await api.context.create({ import: handler });
+        \\  await a.import('m');
+        \\  await b.import('m');
+        \\  out.before = cache.size;
+        \\  out.deleted = cache.delete('m');
+        \\  out.after = cache.size;
+        \\  // b imports first now, so b is the new home.
+        \\  const again = await b.import('m');
+        \\  await a.import('m');
+        \\  out.reimported = again.exports().n + ':' + cache.size;
+        \\  // The home closes: the context that used its module drops it, and the next import evaluates a new one there.
+        \\  const c = await api.context.create({ import: handler });
+        \\  const d = await api.context.create({ import: handler });
+        \\  cache.clear();
+        \\  await c.import('m');
+        \\  const linked = await d.import('m');
+        \\  c.close();
+        \\  out.closedHome = (() => { try { linked.exports(); return 'readable'; } catch (e) { return e.name; } })();
+        \\  const fresh = await d.import('m');
+        \\  out.handedOver = fresh.exports().n;
+        \\  // retain 'used': the home keeps a module while another context still uses it.
+        \\  const used = ImportCache.native({ retain: 'used' });
+        \\  const hu = handlerFor(used);
+        \\  const e = await api.context.create({ import: hu });
+        \\  const f = await api.context.create({ import: hu });
+        \\  const me = await e.import('m');
+        \\  const mf = await f.import('m');
+        \\  out.usedStart = used.size;
+        \\  me.release();
+        \\  out.homeReleased = used.size;
+        \\  mf.release();
+        \\  out.allReleased = used.size;
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.before === 1 && report.deleted === 2 && report.after === 0 && report.reimported === '1:1' && report.closedHome === 'NotFound'");
+    try check(fx.scope, "report.handedOver >= 1 && report.usedStart === 1 && report.homeReleased === 1 && report.allReleased === 0");
 }
 
 test "graph: retain used frees unused modules, delete resets identity, release unpins" {

@@ -183,6 +183,14 @@ pub const Scope = struct {
         /// Retention and cap per table, for a scope with several (`Resolver.namespace_of`): asked
         /// when a table is swept. Without it `retain` and `table_limit` apply to every table.
         table_policy: ?TablePolicy = null,
+        /// Called when a module this scope linked from another context (`Content.module`) is released from
+        /// the map, with the key of its entry (`ModuleMap.keyOf`): the host gives back what it held for it.
+        shared_released: ?KeyHook = null,
+    };
+
+    pub const KeyHook = struct {
+        data: ?*anyopaque = null,
+        call: *const fn (data: ?*anyopaque, key: []const u8) void,
     };
 
     pub const Retain = enum { all, used };

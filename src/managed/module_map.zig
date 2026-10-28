@@ -610,12 +610,65 @@ pub const ModuleMap = struct {
         return self.entries.count();
     }
 
-    /// How many modules table `namespace` holds.
+    /// How many modules table `namespace` holds here. A module linked from another context
+    /// (`Content.module`) belongs to that context's count.
     pub fn countNamespace(self: *const ModuleMap, namespace: u32) usize {
         var count: usize = 0;
         for (self.all_entries.items) |entry| {
-            if (entry.cached and !entry.dead and entry.namespace == namespace) count += 1;
+            if (entry.cached and !entry.dead and !entry.shared and entry.namespace == namespace) count += 1;
         }
+        return count;
+    }
+
+    /// The key of an entry, as `shared_released` reports it. Caller frees it with `alloc`.
+    pub fn keyOf(alloc: std.mem.Allocator, key: ModuleMapKey) ![]const u8 {
+        const attributes = try normalizeAttributes(alloc, key.import_attributes);
+        defer alloc.free(attributes);
+        return cacheKey(alloc, key.namespace, key.module_id, attributes);
+    }
+
+    /// What another context can take of the module `key` this map holds as its own (not linked from
+    /// elsewhere): nothing, a module that is still loading or evaluating, a failed one, or the evaluated
+    /// module itself (a handle the caller releases).
+    pub const Shareable = union(enum) { none, loading, failed, ready: v8.Global.Of(v8.Module) };
+
+    pub fn shareable(self: *ModuleMap, key: ModuleMapKey) Shareable {
+        var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
+        defer scratch.deinit();
+        const attributes = normalizeAttributes(scratch.allocator(), key.import_attributes) catch return .none;
+        const encoded = cacheKey(scratch.allocator(), key.namespace, key.module_id, attributes) catch return .none;
+        const entry = self.entries.get(encoded) orelse return .none;
+        if (entry.shared) return .none;
+        if (entry.failure != null) return .failed;
+        const module = (entry.module orelse return .loading).deref();
+        if (entry.preparing or entry.pending != null or entry.unresolved.items.len != 0) return .loading;
+        return switch (module.getStatus()) {
+            4 => .{ .ready = .new(self.isolate(), module) },
+            5 => .failed,
+            else => .loading,
+        };
+    }
+
+    /// `pin` for the entry `key` names. Returns the serial `unpin` takes, 0 when the table has no such module.
+    pub fn pinKey(self: *ModuleMap, key: ModuleMapKey) !u32 {
+        var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
+        defer scratch.deinit();
+        const attributes = try normalizeAttributes(scratch.allocator(), key.import_attributes);
+        const encoded = try cacheKey(scratch.allocator(), key.namespace, key.module_id, attributes);
+        const entry = self.entries.get(encoded) orelse return 0;
+        if (entry.serial == 0) {
+            self.next_serial += 1;
+            entry.serial = self.next_serial;
+        }
+        entry.pins += 1;
+        return entry.serial;
+    }
+
+    /// Forgets the entries of table `namespace` that are modules linked from another context (and what
+    /// imported them), so the next import makes a module of its own. Returns how many entries it dropped.
+    pub fn dropShared(self: *ModuleMap, keys: []const ModuleMapKey) !usize {
+        var count: usize = 0;
+        for (keys) |key| count += try self.deleteCache(key);
         return count;
     }
 
@@ -700,6 +753,7 @@ pub const ModuleMap = struct {
     /// Releases one swept entry: out of the table and the identity index, every handle dropped.
     fn release(self: *ModuleMap, entry: *Entry) void {
         const alloc = self.scope.runtime.allocator;
+        if (entry.shared) if (self.scope.options.shared_released) |hook| hook.call(hook.data, entry.cache_key);
         if (entry.cached) {
             _ = self.entries.remove(entry.cache_key);
             entry.cached = false;
@@ -992,6 +1046,9 @@ pub const ModuleMap = struct {
         self.driving = true;
         defer self.driving = false;
         var progress = false;
+        if (self.scope.options.loader) |loader| if (loader.poll) |poll| {
+            if (poll(loader.data)) progress = true;
+        };
         var index: usize = 0;
         // Evaluation can synchronously trigger more dynamic imports and grow tasks.
         while (index < self.tasks.items.len) : (index += 1) {

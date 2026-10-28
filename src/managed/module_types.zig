@@ -138,6 +138,10 @@ pub const Loader = struct {
     /// Request bytes for this token remain readable during this callback, then
     /// become invalid as teardown proceeds. No result or ownership is transferred.
     cancel: ?*const fn (data: ?*anyopaque, token: LoadToken) void = null,
+    /// Called each time the scope's imports are driven (`Runtime.pump`): a host that parked loads on
+    /// something other than I/O (another context's module) completes the ones that can go on now. Returns
+    /// whether it completed any.
+    poll: ?*const fn (data: ?*anyopaque) bool = null,
 };
 
 /// Everything `MetaInitializer.init` may touch. All fields are borrowed for the

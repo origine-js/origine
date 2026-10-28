@@ -111,6 +111,65 @@ fn workOf(pending: *const PendingJs) Work {
     return .{ .handler = pending.handler, .token = pending.token, .namespace = pending.namespace, .referrer_namespace = pending.referrer_namespace, .id = pending.id, .specifier = pending.specifier, .referrer = pending.referrer, .attributes = pending.attributes };
 }
 
+/// A module this context linked from the context that is its home, instead of loading its own.
+const SharedFrom = struct {
+    home: u32,
+    /// The pin it holds in the home's table, so a `used` table there keeps the module while this one uses it.
+    serial: u32,
+    namespace: u32,
+    id: []u8,
+    attributes: []module_types.ImportAttribute,
+};
+
+/// A load parked until the home of the module it asked for has evaluated it.
+const ShareWait = struct {
+    token: module_types.LoadToken,
+    namespace: u32,
+    id: []u8,
+    attributes: []module_types.ImportAttribute,
+};
+
+fn dupeAttributes(alloc: std.mem.Allocator, attributes: []const module_types.ImportAttribute) ![]module_types.ImportAttribute {
+    const out = try alloc.alloc(module_types.ImportAttribute, attributes.len);
+    var done: usize = 0;
+    errdefer {
+        for (out[0..done]) |item| {
+            alloc.free(item.key);
+            alloc.free(item.value);
+        }
+        alloc.free(out);
+    }
+    for (attributes, out) |item, *slot| {
+        const key = try alloc.dupe(u8, item.key);
+        errdefer alloc.free(key);
+        slot.* = .{ .key = key, .value = try alloc.dupe(u8, item.value) };
+        done += 1;
+    }
+    return out;
+}
+
+fn freeAttributes(alloc: std.mem.Allocator, attributes: []module_types.ImportAttribute) void {
+    for (attributes) |item| {
+        alloc.free(item.key);
+        alloc.free(item.value);
+    }
+    alloc.free(attributes);
+}
+
+fn sameAttributes(a: []const module_types.ImportAttribute, b: []const module_types.ImportAttribute) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.mem.eql(u8, x.key, y.key) or !std.mem.eql(u8, x.value, y.value)) return false;
+    return true;
+}
+
+/// Where a module another context could hold stands.
+const Home = union(enum) {
+    none,
+    loading,
+    failed,
+    ready: struct { home: *Context, module: v8.Global.Of(v8.Module) },
+};
+
 pub const Context = struct {
     host: *Host,
     id: u32,
@@ -141,6 +200,9 @@ pub const Context = struct {
     link_values: std.ArrayList(v8.Global.Of(v8.Value)) = .empty,
     link_modules: std.ArrayList(v8.Global.Of(v8.Module)) = .empty,
     closed: bool = false,
+    /// Modules of other contexts this one uses, by `ModuleMap.keyOf`. Keys are owned.
+    shared_from: std.StringHashMapUnmanaged(SharedFrom) = .empty,
+    share_waits: std.ArrayList(ShareWait) = .empty,
 
     /// What the `origine` hooks of `h` serve together: the union of their filters, built in `arena`
     /// (the lists it points at are owned by the handler and outlive the context). Nothing when the
@@ -184,6 +246,83 @@ pub const Context = struct {
         return false;
     }
 
+    fn waitsFor(self: *const Context, key: module_types.ModuleMapKey) bool {
+        for (self.share_waits.items) |wait| {
+            if (wait.namespace == key.namespace and std.mem.eql(u8, wait.id, key.module_id) and sameAttributes(wait.attributes, key.import_attributes)) return true;
+        }
+        return false;
+    }
+
+    /// The context among the others of this realm that holds the module `key` as its own: the first to have
+    /// imported it (lowest id). A context that is itself waiting for it does not count.
+    fn findHome(self: *Context, key: module_types.ModuleMapKey) Home {
+        var found: Home = .none;
+        var best: u32 = std.math.maxInt(u32);
+        for (self.host.contexts.values()) |other| {
+            if (other == self or other.closed or other.creator != self.creator or other.id >= best) continue;
+            if (other.waitsFor(key)) continue;
+            switch (other.scope.module_map.shareable(key)) {
+                .none => {},
+                .loading => {
+                    best = other.id;
+                    found = .loading;
+                },
+                // A failed module is not shared: this context tries for itself.
+                .failed => {},
+                .ready => |module| {
+                    if (found == .ready) found.ready.module.deinit();
+                    best = other.id;
+                    found = .{ .ready = .{ .home = other, .module = module } };
+                },
+            }
+        }
+        return found;
+    }
+
+    /// Uses the module `key` of `home`: pins it there and remembers where it came from. The handle is kept until the
+    /// next bridge call, because the map copies a linked module only once it finishes compiling (see `link`).
+    fn adopt(self: *Context, home: *Context, module: v8.Global.Of(v8.Module), key: module_types.ModuleMapKey) !v8.Module {
+        const alloc = self.host.allocator;
+        try self.link_modules.append(alloc, module);
+        const serial = try home.scope.module_map.pinKey(key);
+        const table_key = try module_map.ModuleMap.keyOf(alloc, key);
+        errdefer alloc.free(table_key);
+        const slot = try self.shared_from.getOrPut(alloc, table_key);
+        if (slot.found_existing) {
+            alloc.free(table_key);
+            home.scope.module_map.unpin(serial);
+        } else {
+            const id = try alloc.dupe(u8, key.module_id);
+            errdefer alloc.free(id);
+            slot.value_ptr.* = .{ .home = home.id, .serial = serial, .namespace = key.namespace, .id = id, .attributes = try dupeAttributes(alloc, key.import_attributes) };
+        }
+        return module.deref();
+    }
+
+    /// Forgets what this context used from `home`, which is closing: the next import of those modules makes
+    /// a module of its own here (and so does everything that imported them).
+    fn dropFrom(self: *Context, home: u32) void {
+        const alloc = self.host.allocator;
+        var keys: std.ArrayList(module_types.ModuleMapKey) = .empty;
+        defer keys.deinit(alloc);
+        var it = self.shared_from.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.home != home) continue;
+            keys.append(alloc, .{ .module_id = entry.value_ptr.id, .import_attributes = entry.value_ptr.attributes, .namespace = entry.value_ptr.namespace }) catch return;
+        }
+        if (keys.items.len == 0) return;
+        _ = self.scope.module_map.dropShared(keys.items) catch {};
+        for (keys.items) |key| {
+            const table_key = module_map.ModuleMap.keyOf(alloc, key) catch continue;
+            defer alloc.free(table_key);
+            if (self.shared_from.fetchRemove(table_key)) |removed| {
+                alloc.free(removed.key);
+                alloc.free(removed.value.id);
+                freeAttributes(alloc, removed.value.attributes);
+            }
+        }
+    }
+
     fn cacheOfHandler(self: *Context, handler: u32) u32 {
         return tableOfHandler(self.host, handler);
     }
@@ -199,6 +338,18 @@ pub const Context = struct {
         const alloc = self.host.allocator;
         self.ceiling_arena.deinit();
         self.releaseLinks();
+        var shared = self.shared_from.iterator();
+        while (shared.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+            alloc.free(entry.value_ptr.id);
+            freeAttributes(alloc, entry.value_ptr.attributes);
+        }
+        self.shared_from.deinit(alloc);
+        for (self.share_waits.items) |wait| {
+            alloc.free(wait.id);
+            freeAttributes(alloc, wait.attributes);
+        }
+        self.share_waits.deinit(alloc);
         self.link_values.deinit(alloc);
         self.link_modules.deinit(alloc);
         var it = self.handler_of.keyIterator();
@@ -359,6 +510,20 @@ fn tableOfHandler(host: *Host, handler: u32) u32 {
     return found.cache;
 }
 
+/// `Scope.Options.shared_released`: this context stopped using a module it linked from its home, so the home
+/// may free it (under `retain: 'used'`).
+fn sharedReleased(data: ?*anyopaque, key: []const u8) void {
+    const self: *Context = @ptrCast(@alignCast(data.?));
+    const removed = self.shared_from.fetchRemove(key) orelse return;
+    const alloc = self.host.allocator;
+    if (self.host.contexts.get(removed.value.home)) |home| {
+        if (!home.closed) home.scope.module_map.unpin(removed.value.serial);
+    }
+    alloc.free(removed.key);
+    alloc.free(removed.value.id);
+    freeAttributes(alloc, removed.value.attributes);
+}
+
 /// `Resolver.namespace_of`: the imports of a module live in the table of the handler that governs them.
 fn namespaceOfHook(data: ?*anyopaque, referrer_namespace: u32, referrer: module_types.ModuleId) u32 {
     const self: *Context = @ptrCast(@alignCast(data.?));
@@ -380,9 +545,82 @@ fn tablePolicy(data: ?*anyopaque, namespace: u32) Scope.Policy {
 
 fn cancel(data: ?*anyopaque, token: module_types.LoadToken) void {
     const self: *Context = @ptrCast(@alignCast(data.?));
+    var index: usize = 0;
+    while (index < self.share_waits.items.len) {
+        if (self.share_waits.items[index].token != token) {
+            index += 1;
+            continue;
+        }
+        const wait = self.share_waits.swapRemove(index);
+        self.host.allocator.free(wait.id);
+        freeAttributes(self.host.allocator, wait.attributes);
+    }
     for (self.pendings.items) |pending| if (pending.token == token) {
         pending.settled = true;
     };
+}
+
+/// `Loader.poll`: completes the loads parked on another context's module that can go on now. Its home
+/// evaluated the module (link it), failed (fail the load) or went away (this context becomes the home and loads
+/// the module itself).
+fn poll(data: ?*anyopaque) bool {
+    const self: *Context = @ptrCast(@alignCast(data.?));
+    if (self.share_waits.items.len == 0 or self.closed) return false;
+    const alloc = self.host.allocator;
+    const rt = self.scope.runtime;
+    var progress = false;
+    // Take the list: what still waits goes back at the end.
+    var waits = self.share_waits;
+    self.share_waits = .empty;
+    defer waits.deinit(alloc);
+    for (waits.items) |parked| {
+        const wanted: module_types.ModuleMapKey = .{ .module_id = parked.id, .import_attributes = parked.attributes, .namespace = parked.namespace };
+        const found = self.findHome(wanted);
+        if (found == .loading) {
+            self.share_waits.append(alloc, parked) catch {
+                alloc.free(parked.id);
+                freeAttributes(alloc, parked.attributes);
+                rt.completeLoad(parked.token, .{ .failure = error.OutOfMemory }) catch {};
+            };
+            continue;
+        }
+        defer {
+            alloc.free(parked.id);
+            freeAttributes(alloc, parked.attributes);
+        }
+        progress = true;
+        switch (found) {
+            .loading => unreachable,
+            .failed => unreachable,
+            .ready => |home| {
+                const module = self.adopt(home.home, home.module, wanted) catch |err| {
+                    rt.completeLoad(parked.token, .{ .failure = err }) catch {};
+                    continue;
+                };
+                rt.completeLoad(parked.token, .{ .content = .{ .module = module } }) catch {};
+            },
+            .none => {
+                // The home is gone: load it here.
+                var scratch = std.heap.ArenaAllocator.init(alloc);
+                defer scratch.deinit();
+                const key = Context.infoKey(scratch.allocator(), parked.namespace, parked.id, parked.attributes) catch continue;
+                const info = self.resolved.get(key) orelse {
+                    rt.completeLoad(parked.token, .{ .failure = error.NotFound }) catch {};
+                    continue;
+                };
+                const work: Work = .{ .handler = info.handler, .token = parked.token, .namespace = parked.namespace, .id = parked.id, .specifier = info.specifier, .referrer = info.referrer, .attributes = parked.attributes };
+                const outcome = advanceHooks(self, scratch.allocator(), work, 0) catch |err| {
+                    rt.completeLoad(parked.token, .{ .failure = err }) catch {};
+                    continue;
+                };
+                switch (outcome) {
+                    .parked => {},
+                    .done => |completion| rt.completeLoad(parked.token, completion) catch {},
+                }
+            },
+        }
+    }
+    return progress;
 }
 
 fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {
@@ -390,6 +628,25 @@ fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_ty
     self.releaseLinks();
     const key = try Context.infoKey(request.allocator, request.namespace, request.module_id, request.import_attributes);
     const info = self.resolved.get(key) orelse return error.NotFound;
+    // A module the host did not write can be the one another context already has: contexts that use the same
+    // `ImportCache` share its modules. The first to import an id is its home.
+    if (!std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) {
+        const wanted: module_types.ModuleMapKey = .{ .module_id = request.module_id, .import_attributes = request.import_attributes, .namespace = request.namespace };
+        switch (self.findHome(wanted)) {
+            .none => {},
+            .failed => unreachable,
+            .loading => {
+                const alloc = self.host.allocator;
+                const id = try alloc.dupe(u8, request.module_id);
+                errdefer alloc.free(id);
+                const attributes = try dupeAttributes(alloc, request.import_attributes);
+                errdefer freeAttributes(alloc, attributes);
+                try self.share_waits.append(alloc, .{ .token = request.token, .namespace = request.namespace, .id = id, .attributes = attributes });
+                return .pending;
+            },
+            .ready => |found| return .{ .module = try self.adopt(found.home, found.module, wanted) },
+        }
+    }
     const work: Work = .{ .handler = info.handler, .token = request.token, .namespace = request.namespace, .id = request.module_id, .specifier = info.specifier, .referrer = info.referrer, .attributes = request.import_attributes };
     switch (try advanceHooks(self, request.allocator, work, 0)) {
         .parked => return .pending,
@@ -1128,11 +1385,12 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
     var options: Scope.Options = .{
         .origine_namespace = true,
         .resolver = .{ .data = context, .resolve_async = resolveAsync, .cancel = cancel, .namespace_of = namespaceOfHook },
-        .loader = .{ .data = context, .load = load },
+        .loader = .{ .data = context, .load = load, .poll = poll },
         .meta = .{ .data = context, .init = metaHook },
         .on_dispose = host.disposer(),
         .on_freed = host.freer(),
         .table_policy = .{ .data = host, .call = tablePolicy },
+        .shared_released = .{ .data = context, .call = sharedReleased },
     };
     if (graph.kind != .none) options.code_cache = .{ .data = context, .load = cacheLoad, .store = cacheStore };
     const scope = try state.scope.runtime.createScope(options);
@@ -1296,6 +1554,10 @@ pub fn close(state: *ScopeState, id: u32) Error!void {
 pub fn closeContext(host: *Host, context: *Context) void {
     if (context.closed) return;
     context.closed = true;
+    // The modules it is the home of are gone with it: whoever used them makes its own next time.
+    for (host.contexts.values()) |other| {
+        if (other != context and !other.closed) other.dropFrom(context.id);
+    }
     for (host.contexts.values()) |other| {
         if (!other.closed and other.creator.scope == context.scope) closeContext(host, other);
     }

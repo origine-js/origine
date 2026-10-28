@@ -251,7 +251,12 @@ declare module "origine:@std/graph/import" {
     readonly hooks: Hook | readonly Hook[];
     /** Default `MakeRecipe.inherit()`. */
     readonly maker?: Maker;
-    /** Default `ImportCache.native({ retain: 'all' })`. */
+    /**
+     * Default `ImportCache.native({ retain: 'all' })`, made once per handler. Contexts that use the same
+     * `ImportCache` object share its modules, so two contexts created from one handler object share module
+     * instances (live bindings, the same objects) unless you give each its own handler or cache. Sharing
+     * leaks the realm boundary: objects of the home context (the first to import a module) reach the others.
+     */
     readonly cache?: ImportCache;
     /** `({ id }) => data`, called when a module is made; the plain-data result becomes its `import.meta`. */
     readonly meta?: (info: { readonly id: string }) => Readonly<Record<string, unknown>>;

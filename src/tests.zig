@@ -19,6 +19,7 @@ test {
     _ = @import("tests/managed/thread_isolate.zig");
     _ = @import("tests/managed/channel.zig");
     _ = @import("tests/managed/isolate.zig");
+    _ = @import("tests/managed/net_iter.zig");
     _ = @import("tests/managed/snapshot.zig");
     _ = @import("tests/managed/init_snapshot.zig");
     _ = @import("tests/managed/init_cache.zig");

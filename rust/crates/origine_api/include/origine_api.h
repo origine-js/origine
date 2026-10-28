@@ -71,6 +71,8 @@ void origine_api_wake(void *isolate);
 /* Closes the channel end `handle` (an unknown handle is ignored). Thread-safe; for the thread of an
  * isolate that is going away, for the ends it was given. */
 void origine_api_channel_close(uint32_t handle);
+/* Discards the stashed value `id` (an unknown id is ignored), closing the ports in it. Thread-safe. */
+void origine_api_stash_discard(uint64_t id);
 
 #ifdef __cplusplus
 }

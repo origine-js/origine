@@ -18,9 +18,10 @@ use crate::{channel, fs, io, net, sub};
 /// Every native, in registration order.
 pub(crate) static NATIVES: &[RawNative] = &[
     channel::NATIVE_CHANNEL_CREATE,
-    channel::NATIVE_CHANNEL_CLONE,
     channel::NATIVE_CHANNEL_CLOSE,
-    channel::NATIVE_CHANNEL_ADOPT,
+    channel::NATIVE_CHANNEL_BRAND,
+    channel::NATIVE_CHANNEL_SET_PORT_FACTORY,
+    channel::NATIVE_CHANNEL_IDENTIFY,
     channel::NATIVE_CHANNEL_STASH,
     channel::NATIVE_CHANNEL_UNSTASH,
     channel::NATIVE_CHANNEL_DISCARD,

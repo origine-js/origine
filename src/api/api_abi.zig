@@ -46,3 +46,4 @@ pub extern fn origine_api_has_work(isolate: *anyopaque) u8;
 pub extern fn origine_api_pollable(isolate: *anyopaque) i64;
 pub extern fn origine_api_wake(isolate: *anyopaque) void;
 pub extern fn origine_api_channel_close(handle: u32) void;
+pub extern fn origine_api_stash_discard(id: u64) void;

@@ -206,6 +206,7 @@ fn abi_signatures() {
     let _ = [h::origine_api_pollable, origine_api_pollable];
     let _ = [h::origine_api_wake, origine_api_wake];
     let _ = [h::origine_api_channel_close, channel::origine_api_channel_close];
+    let _ = [h::origine_api_stash_discard, channel::origine_api_stash_discard];
     let _ = [h::origine_api_natives_count, registry::origine_api_natives_count];
     let _ = [h::origine_api_natives_get, registry::origine_api_natives_get];
 }

@@ -68,3 +68,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn origine_api_channel_close(handle: u32);
 }
+unsafe extern "C" {
+    pub fn origine_api_stash_discard(id: u64);
+}

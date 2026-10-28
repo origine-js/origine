@@ -77,201 +77,115 @@ pub const Parent = struct {
     }
 };
 
-test "channel: values, order, backpressure and close within one isolate" {
+test "channel: pull ports carry values, order, backpressure, buffers and ports" {
     var p: Parent = undefined;
     try p.setup("init.js",
         \\export async function main(api) {
-        \\  const { channel, sender, receiver } = api.host.threading;
+        \\  const { Channel } = api.host.threading;
         \\  const out = globalThis.report = {};
-        \\  const { tx, rx } = channel({ capacity: 1 });
+        \\  const [a, b] = new Channel({ mode: 'pull', capacity: 1 });
         \\  // Structured clone: richer than JSON, and a copy.
         \\  const original = { map: new Map([[1, 'a']]), bytes: new Uint8Array([1, 2, 3]), big: 5n };
-        \\  await tx.send(original);
-        \\  const copy = await rx.recv();
+        \\  await a.send(original);
+        \\  const event = await b.recv();
+        \\  const copy = event.data;
         \\  out.clone = copy !== original && copy.map.get(1) === 'a' && copy.bytes.join() === '1,2,3' && copy.big === 5n;
+        \\  out.shape = event.identity === 0 && event.transfer.length === 0 && Object.isFrozen(event);
         \\  // Capacity 1: the second send waits until the first message is received.
-        \\  await tx.send('first');
+        \\  await a.send('first');
         \\  let second = false;
-        \\  const pending = tx.send('second').then(() => { second = true; });
+        \\  const pending = a.send('second').then(() => { second = true; });
         \\  await Promise.resolve(); await Promise.resolve();
         \\  out.blocked = second === false;
-        \\  out.first = await rx.recv();
+        \\  out.first = (await b.recv()).data;
         \\  await pending;
-        \\  out.second = await rx.recv();
+        \\  out.second = (await b.recv()).data;
         \\  // A function cannot be cloned; nothing is queued.
-        \\  try { tx.send(() => 1); out.fn = 'sent'; } catch (e) { out.fn = e.name; }
-        \\  // Transfer moves the buffer.
+        \\  try { a.send(() => 1); out.fn = 'sent'; } catch (e) { out.fn = e.name; }
+        \\  // Transfer moves the buffer, and lists it among the received transfer.
         \\  const buffer = new ArrayBuffer(4);
-        \\  await tx.send(buffer, { transfer: [buffer] });
-        \\  const moved = await rx.recv();
-        \\  out.moved = buffer.byteLength === 0 && moved.byteLength === 4;
+        \\  await a.send(buffer, { transfer: [buffer] });
+        \\  const moved = await b.recv();
+        \\  out.moved = buffer.byteLength === 0 && moved.data.byteLength === 4 && moved.transfer[0] === moved.data;
         \\  // A shared buffer is shared, not copied.
         \\  const sab = new SharedArrayBuffer(4);
-        \\  await tx.send(sab);
+        \\  await a.send(sab);
         \\  Atomics.store(new Int32Array(sab), 0, 7);
-        \\  out.shared = Atomics.load(new Int32Array(await rx.recv()), 0);
-        \\  // Closing the last sender drains, then ends the iteration; a second sender keeps it open.
-        \\  const other = tx.clone();
-        \\  await tx.send('x');
-        \\  tx.close();
-        \\  out.open = await rx.recv();
-        \\  await other.send('y');
-        \\  other.close();
+        \\  out.shared = Atomics.load(new Int32Array((await b.recv()).data), 0);
+        \\  // A port moves with a message when it is listed; the original stops working.
+        \\  const [c, d] = new Channel({ mode: 'pull' });
+        \\  try { a.send({ d }); out.unlisted = 'sent'; } catch (e) { out.unlisted = e.name; }
+        \\  await a.send({ d }, { transfer: [d] });
+        \\  const carried = await b.recv();
+        \\  out.port = carried.transfer[0] === carried.data.d && carried.data.d.mode === 'pull';
+        \\  try { await d.send(1); out.old = 'sent'; } catch (e) { out.old = e.name; }
+        \\  await c.send('through');
+        \\  out.through = (await carried.data.d.recv()).data;
+        \\  // Closing a port ends the peer's iteration after what was sent.
+        \\  await a.send('last');
+        \\  a.close();
         \\  const rest = [];
-        \\  for await (const value of rx) rest.push(value);
+        \\  for await (const e of b) rest.push(e.data);
         \\  out.rest = rest.join();
-        \\  try { await rx.recv(); } catch (e) { out.eof = e.name; }
-        \\  // Closing the receiver breaks sends.
-        \\  const again = channel({ capacity: 2 });
-        \\  again.rx.close();
-        \\  try { await again.tx.send(1); } catch (e) { out.broken = e.name; }
-        \\  try { channel({ capacity: 0 }); } catch (e) { out.cap = e.name; }
-        \\  try { tx.close(); } catch (e) { out.stale = e.name; }
-        \\  const fresh = channel({ capacity: 1 });
-        \\  out.reattached = typeof sender(fresh.tx.handle).send === 'function' && typeof receiver(fresh.rx.handle).recv === 'function';
-        \\  try { receiver(again.rx.handle); } catch (e) { out.adopt = e.name; }
+        \\  try { await b.recv(); } catch (e) { out.eof = e.name; }
+        \\  try { await b.send(1); } catch (e) { out.broken = e.name; }
+        \\  try { a.close(); } catch (e) { out.stale = e.name; }
+        \\  try { new Channel({}); } catch (e) { out.mode = e.name; }
+        \\  try { Channel({ mode: 'pull' }); } catch (e) { out.call = e.name; }
         \\}
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.clone && report.blocked && report.first === 'first' && report.second === 'second'");
+    try check(p.scope, "report.clone && report.shape && report.blocked && report.first === 'first' && report.second === 'second'");
     try check(p.scope, "report.fn === 'TypeError' && report.moved && report.shared === 7");
-    try check(p.scope, "report.open === 'x' && report.rest === 'y' && report.eof === 'NotConnected'");
-    try check(p.scope, "report.broken === 'BrokenPipe' && report.cap === 'TypeError' && report.stale === 'BadHandle' && report.reattached && report.adopt === 'BadHandle'");
+    try check(p.scope, "report.unlisted === 'TypeError' && report.port && report.old === 'BadHandle' && report.through === 'through'");
+    try check(p.scope, "report.rest === 'last' && report.eof === 'NotConnected' && report.broken === 'BrokenPipe' && report.stale === 'BadHandle'");
+    try check(p.scope, "report.mode === 'TypeError' && report.call === 'TypeError'");
 }
 
-/// Waits for the parent to publish the channel handles in `handles.txt`, then starts the child.
-const Launch = struct {
-    parent: *Parent,
-    buffers: v8.ArrayBuffer.Allocator,
-    child_path: []const u8,
-    child: ?*Isolate = null,
-    failed: bool = false,
-
-    fn run(self: *Launch) void {
-        var tries: usize = 0;
-        while (tries < 2000) : (tries += 1) {
-            var delay: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
-            _ = std.c.nanosleep(&delay, null);
-            const text = self.parent.tmp.dir.readFileAlloc(t.io, "handles.txt", t.allocator, .limited(64)) catch continue;
-            defer t.allocator.free(text);
-            var parts = std.mem.splitScalar(u8, text, ' ');
-            const first = parts.next() orelse continue;
-            const second = parts.next() orelse continue;
-            if (second.len == 0) continue;
-            self.child = Isolate.spawn(t.allocator, .{
-                .init = self.child_path,
-                .args = &.{ self.child_path, first, second },
-                .fs = .{ .root = .{ .handle = self.parent.tmp.dir.handle } },
-                .array_buffer_allocator = self.buffers,
-                .platform = support.engine.platform,
-            }) catch {
-                self.failed = true;
-                return;
-            };
-            return;
-        }
-        self.failed = true;
-    }
-};
-
-test "channel: two isolates on two threads exchange messages and share memory" {
+test "channel: event ports deliver messages, pause and convert" {
     var p: Parent = undefined;
-    try p.setup("parent.js",
-        \\import { Dir, IoError } from 'origine:@std/io';
+    try p.setup("init.js",
         \\export async function main(api) {
-        \\  const { channel } = api.host.threading;
+        \\  const { Channel } = api.host.threading;
         \\  const out = globalThis.report = {};
-        \\  const toChild = channel({ capacity: 1 }), fromChild = channel({ capacity: 4 });
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
-        \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'handles.txt', 'w'));
-        \\  sync.fileWriteAll(f, Uint8Array.from(toChild.rx.handle + ' ' + fromChild.tx.handle, c => c.charCodeAt(0)));
-        \\  sync.fileClose(f);
-        \\  const sab = new SharedArrayBuffer(8);
-        \\  for (let n = 1; n <= 3; n++) await toChild.tx.send({ n, sab });
-        \\  toChild.tx.close();
+        \\  const [e, f] = new Channel({ mode: 'event' });
+        \\  out.pullMethods = f.recv === undefined && typeof f.register === 'function';
         \\  const got = [];
-        \\  for await (const reply of fromChild.rx) got.push(reply.doubled);
-        \\  out.got = got.join(',');
-        \\  out.shared = Atomics.load(new Int32Array(sab), 0);
+        \\  const closed = new Promise(resolve => f.register('close', resolve));
+        \\  const registration = f.register('message', event => got.push(event.data + '@' + event.identity));
+        \\  await e.send(1);
+        \\  await e.send(2);
+        \\  f.pause();
+        \\  out.paused = f.paused;
+        \\  await e.send(3);
+        \\  for (let n = 0; n < 5; n++) await Promise.resolve();
+        \\  f.resume();
+        \\  e.close();
+        \\  await closed;
+        \\  out.got = got.join();
+        \\  out.unregistered = registration.unregister() === true && registration.unregister() === false;
+        \\  // A throwing handler goes to the error handlers.
+        \\  const [g, h] = new Channel({ mode: 'event' });
+        \\  const errors = [];
+        \\  h.register('error', error => errors.push(error.message));
+        \\  h.register('message', () => { throw new Error('handler'); });
+        \\  await g.send(0);
+        \\  await new Promise(resolve => h.register('error', resolve));
+        \\  out.errors = errors.join();
+        \\  // Converting between modes consumes the old port.
+        \\  const [i, j] = new Channel({ mode: 'pull' });
+        \\  const event = j.toEvent();
+        \\  try { await j.recv(); out.consumed = 'ok'; } catch (x) { out.consumed = x.name; }
+        \\  out.mode = event.mode + '/' + event.toPull().mode;
+        \\  const [k, l] = new Channel({ mode: 'event' });
+        \\  l.register('message', () => {});
+        \\  try { l.toPull(); out.started = 'ok'; } catch (x) { out.started = x.name; }
+        \\  i.close(); k.close();
         \\}
     );
     defer p.deinit();
-    try p.tmp.dir.writeFile(t.io, .{ .sub_path = "child.js", .data =
-        \\export async function main(api) {
-        \\  const { receiver, sender } = api.host.threading;
-        \\  const args = api.host.env.args();
-        \\  const rx = receiver(Number(args[1])), tx = sender(Number(args[2]));
-        \\  for await (const message of rx) {
-        \\    Atomics.store(new Int32Array(message.sab), 0, 42);
-        \\    await tx.send({ doubled: message.n * 2 });
-        \\  }
-        \\  tx.close();
-        \\}
-    });
-    const child_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/child.js", .{p.tmp.sub_path});
-    defer t.allocator.free(child_path);
-    const buffers = if (v8.V8.isSandboxEnabled())
-        try v8.ArrayBuffer.Allocator.fromSandbox()
-    else
-        try v8.ArrayBuffer.Allocator.fromZig(t.allocator);
-    defer buffers.deinit();
-    var launch: Launch = .{ .parent = &p, .buffers = buffers, .child_path = child_path };
-    const launcher = try std.Thread.spawn(.{}, Launch.run, .{&launch});
-    // Join the helper and the child before anything they use is freed, even when the run fails.
-    const ran = p.run();
-    launcher.join();
-    const outcome: ?m.Api.ThreadIsolateOutcome = if (launch.child) |child| child.join() else null;
-    defer if (launch.child) |child| child.destroy();
-    try ran;
-    try t.expect(!launch.failed);
-    try t.expectEqual(m.Api.ThreadIsolateOutcome.completed, outcome.?);
-    try check(p.scope, "report.got === '2,4,6' && report.shared === 42");
-}
-
-test "channel: the ends of an isolate that dies are closed" {
-    var p: Parent = undefined;
-    try p.setup("parent.js",
-        \\import { Dir, IoError } from 'origine:@std/io';
-        \\export async function main(api) {
-        \\  const { channel } = api.host.threading;
-        \\  const out = globalThis.report = {};
-        \\  const toChild = channel({ capacity: 1 }), fromChild = channel({ capacity: 1 });
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
-        \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'handles.txt', 'w'));
-        \\  sync.fileWriteAll(f, Uint8Array.from(toChild.rx.handle + ' ' + fromChild.tx.handle, c => c.charCodeAt(0)));
-        \\  sync.fileClose(f);
-        \\  // The child takes both ends over and then dies without closing them.
-        \\  try { await fromChild.rx.recv(); out.ended = false; } catch (e) { out.ended = e.name; }
-        \\  // Its receiver is closed too: nobody reads toChild any more.
-        \\  try { for (;;) await toChild.tx.send(1); } catch (e) { out.broken = e.name; }
-        \\}
-    );
-    defer p.deinit();
-    try p.tmp.dir.writeFile(t.io, .{ .sub_path = "child.js", .data =
-        \\export function main(api) {
-        \\  const { receiver, sender } = api.host.threading;
-        \\  const args = api.host.env.args();
-        \\  receiver(Number(args[1]));
-        \\  sender(Number(args[2]));
-        \\  throw new Error('child dies');
-        \\}
-    });
-    const child_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/child.js", .{p.tmp.sub_path});
-    defer t.allocator.free(child_path);
-    const buffers = if (v8.V8.isSandboxEnabled())
-        try v8.ArrayBuffer.Allocator.fromSandbox()
-    else
-        try v8.ArrayBuffer.Allocator.fromZig(t.allocator);
-    defer buffers.deinit();
-    var launch: Launch = .{ .parent = &p, .buffers = buffers, .child_path = child_path };
-    const launcher = try std.Thread.spawn(.{}, Launch.run, .{&launch});
-    const ran = p.run();
-    launcher.join();
-    const outcome: ?m.Api.ThreadIsolateOutcome = if (launch.child) |child| child.join() else null;
-    defer if (launch.child) |child| child.destroy();
-    try ran;
-    try t.expect(!launch.failed);
-    try t.expectEqual(m.Api.ThreadIsolateOutcome.failed, outcome.?);
-    try check(p.scope, "report.ended === 'NotConnected' && report.broken === 'BrokenPipe'");
+    try p.run();
+    try check(p.scope, "report.pullMethods && report.got === '1@0,2@0,3@0' && report.unregistered");
+    try check(p.scope, "report.errors === 'handler' && report.consumed === 'BadHandle' && report.mode === 'event/pull' && report.started === 'Unsupported' && report.paused === true");
 }

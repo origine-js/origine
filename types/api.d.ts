@@ -39,7 +39,7 @@ export type BasicApi = Pick<Api, "fs" | "host" | "graph" | "context">;
  *
  * ```ts
  * import type { Main } from '@origine/types';
- * export const main: Main = async api => { ... };
+ * export const main: Main = async (api, data) => { ... };  // `data`: what `api.isolate.create` passed
  * ```
  */
-export type Main = (api: Api) => void | Promise<void>;
+export type Main<Data = unknown> = (api: Api, data: Data) => void | Promise<void>;

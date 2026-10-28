@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use origine_api_core::{NativeError, errno};
 
 use crate::host::{HostState, Pending};
-use crate::message::{self, Message};
+use crate::message::{self, Message, Received};
 use crate::native;
 use crate::native::error_value;
 use crate::sys;
@@ -180,7 +180,7 @@ pub(crate) fn service(scope: &mut v8::PinScope<'_, '_, ()>) -> usize {
         match wait {
             Wait::Recv { rx, pending } => match try_recv(rx, isolate) {
                 Ok(Some(message)) => {
-                    settle(scope, pending, |scope| message::decode(scope, message));
+                    settle(scope, pending, |scope| received_object(scope, message));
                     settled += 1;
                 }
                 Ok(None) => parked.push(Wait::Recv { rx, pending }),
@@ -209,6 +209,59 @@ pub(crate) fn service(scope: &mut v8::PinScope<'_, '_, ()>) -> usize {
     settled
 }
 
+/// The object `recv` resolves with: `{ identity, data, transfer }`.
+fn received_object<'s>(scope: &mut v8::PinScope<'s, '_>, message: Message) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let Received { identity, data, transfer } = message::decode(scope, message)?;
+    let object = crate::encode::new_object(scope);
+    crate::encode::set(scope, object, "identity", identity)?;
+    crate::encode::set(scope, object, "data", data)?;
+    crate::encode::set(scope, object, "transfer", transfer)?;
+    crate::encode::freeze(scope, object)
+}
+
+// ---- ports: moving ends between isolates ------------------------------------------------
+
+/// A port is an open sender (`tx`) and an open receiver (`rx`); `BadHandle` otherwise.
+pub(crate) fn check_port(tx: u32, rx: u32) -> Result<(), NativeError> {
+    find(tx, End::Sender)?;
+    find(rx, End::Receiver)?;
+    Ok(())
+}
+
+/// Takes a port's two ends out of the registry under new handles that nobody owns (the port is in
+/// flight inside a message). The old handles stop working at once.
+pub(crate) fn move_out(tx: u32, rx: u32) -> Result<(u32, u32), NativeError> {
+    let mut guard = registry();
+    let registry = guard.as_mut().ok_or_else(bad_handle)?;
+    match (registry.ends.get(&tx), registry.ends.get(&rx)) {
+        (Some(a), Some(b)) if a.end == End::Sender && b.end == End::Receiver => {}
+        _ => return Err(bad_handle()),
+    }
+    let (Some(sender), Some(receiver)) = (registry.ends.remove(&tx), registry.ends.remove(&rx)) else { return Err(bad_handle()) };
+    let mut renumber = |entry: Entry| -> Result<u32, NativeError> {
+        let id = registry.next;
+        registry.next = id.checked_add(1).ok_or(NativeError::Errno(errno::QUOTA_EXCEEDED))?;
+        registry.ends.insert(id, Entry { owner: 0, ..entry });
+        Ok(id)
+    };
+    Ok((renumber(sender)?, renumber(receiver)?))
+}
+
+/// Makes `owner` (an isolate address) the owner of `handle`.
+pub(crate) fn adopt_id(handle: u32, owner: usize) {
+    if let Some(entry) = registry().as_mut().and_then(|registry| registry.ends.get_mut(&handle)) {
+        entry.owner = owner;
+    }
+}
+
+/// Closes `handle` if it is still open.
+pub(crate) fn close_handle(handle: u32) {
+    let entry = registry().as_mut().and_then(|registry| registry.ends.remove(&handle));
+    if let Some(entry) = entry {
+        finish_end(entry);
+    }
+}
+
 /// The two ends of a new channel.
 #[derive(crate::IntoJs)]
 pub struct Ends {
@@ -216,8 +269,8 @@ pub struct Ends {
     rx: u32,
 }
 
-/// `native.channel.create(capacity)`: a channel holding at most `capacity` (>= 1) messages.
-/// Returns `{ tx, rx }`, the handles of its ends.
+/// `native.channel.create(capacity)`: a one-way channel holding at most `capacity` (>= 1) messages.
+/// Returns `{ tx, rx }`, the handles of its ends; the calling isolate owns them.
 #[native(side_effect = "any", path = "channel.create")]
 fn channel_create(host: &mut HostState, capacity: u32) -> Result<Ends, NativeError> {
     if capacity == 0 {
@@ -236,31 +289,48 @@ fn channel_create(host: &mut HostState, capacity: u32) -> Result<Ends, NativeErr
     let rx = match add_end(End::Receiver, chan, owner) {
         Ok(rx) => rx,
         Err(error) => {
-            if let Some(registry) = registry().as_mut() {
-                registry.ends.remove(&tx);
-            }
+            close_handle(tx);
             return Err(error);
         }
     };
     Ok(Ends { tx, rx })
 }
 
-/// `native.channel.clone(tx)`: another sender handle of the same channel. `BadHandle` for a
-/// handle that is not an open sender.
-#[native(side_effect = "any", path = "channel.clone")]
-fn channel_clone(host: &mut HostState, tx: u32) -> Result<u32, NativeError> {
-    let chan = find(tx, End::Sender)?;
-    lock(&chan).senders += 1;
-    match add_end(End::Sender, Arc::clone(&chan), host.isolate) {
-        Ok(id) => Ok(id),
-        Err(error) => {
-            lock(&chan).senders -= 1;
-            Err(error)
-        }
-    }
+/// `native.channel.brand(object, tx, rx, mode)`: marks `object` as a port over the two handles (see
+/// `message::BRAND`); only a marked object can be listed in a transfer list.
+#[native(side_effect = "any", path = "channel.brand")]
+fn channel_brand<'s>(scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::Object>, tx: u32, rx: u32, mode: u32) -> Result<(), NativeError> {
+    message::brand(scope, object, tx, rx, mode)
 }
 
-/// `native.channel.stash(value, transfer?)`: serializes `value` (moving the `transfer` buffers, like
+/// `native.channel.setPortFactory(fn)`: the function `(tx, rx, mode) => port` that rebuilds a received
+/// port in this isolate. Set once by the glue.
+#[native(side_effect = "any", path = "channel.setPortFactory")]
+fn channel_set_port_factory<'s>(scope: &mut v8::PinScope<'s, '_>, factory: v8::Local<'s, v8::Function>) -> Result<(), NativeError> {
+    let global = std::rc::Rc::new(v8::Global::new(scope, factory));
+    native::host_mut(scope)?.port_factory = Some(global);
+    Ok(())
+}
+
+/// `native.channel.identify(identity)`: the number messages sent from this isolate carry as
+/// `event.identity`.
+#[native(side_effect = "any", path = "channel.identify")]
+fn channel_identify(host: &mut HostState, identity: u32) -> Result<(), NativeError> {
+    host.identity = identity;
+    Ok(())
+}
+
+fn transfer_list<'s>(scope: &mut v8::PinScope<'s, '_>, transfer: Option<v8::Local<'s, v8::Array>>) -> Result<Vec<v8::Local<'s, v8::Value>>, NativeError> {
+    let mut items = Vec::new();
+    if let Some(list) = transfer {
+        for index in 0..list.length() {
+            items.push(list.get_index(scope, index).ok_or_else(|| NativeError::type_error("cannot read the transfer list"))?);
+        }
+    }
+    Ok(items)
+}
+
+/// `native.channel.stash(value, transfer?)`: serializes `value` (moving the `transfer` items, like
 /// `send`) and keeps it until `unstash`. Returns an id.
 #[native(side_effect = "any", path = "channel.stash")]
 fn channel_stash<'s>(
@@ -268,8 +338,8 @@ fn channel_stash<'s>(
     value: v8::Local<'s, v8::Value>,
     transfer: Option<v8::Local<'s, v8::Array>>,
 ) -> Result<f64, NativeError> {
-    let buffers = transfer_list(scope, transfer)?;
-    let message = message::encode(scope, value, &buffers)?;
+    let items = transfer_list(scope, transfer)?;
+    let message = message::encode(scope, value, &items)?;
     let mut guard = STASH.lock().unwrap_or_else(PoisonError::into_inner);
     let (next, map) = guard.get_or_insert_with(|| (1, HashMap::new()));
     let id = *next;
@@ -279,41 +349,35 @@ fn channel_stash<'s>(
     Ok(id as f64)
 }
 
-/// `native.channel.unstash(id)`: the stashed value, rebuilt in this isolate; the stash entry is
-/// consumed. `NotFound` for an unknown or already taken id.
+fn take_stash(id: f64) -> Option<Message> {
+    (id >= 1.0 && id.fract() == 0.0).then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64)))).flatten()
+}
+
+/// `native.channel.unstash(id)`: the stashed value, rebuilt in this isolate (its ports are taken
+/// over by it); the stash entry is consumed. `NotFound` for an unknown or already taken id.
 #[native(side_effect = "any", path = "channel.unstash")]
 fn channel_unstash<'s>(scope: &mut v8::PinScope<'s, '_>, id: f64) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-    let message = (id >= 1.0 && id.fract() == 0.0)
-        .then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64))))
-        .flatten()
-        .ok_or(NativeError::Errno(errno::NOT_FOUND))?;
-    message::decode(scope, message)
+    let message = take_stash(id).ok_or(NativeError::Errno(errno::NOT_FOUND))?;
+    Ok(message::decode(scope, message)?.data)
 }
 
-/// `native.channel.discard(id)`: discards a stashed value that will never be taken (`NotFound` if gone).
+/// `native.channel.discard(id)`: discards a stashed value that will never be taken, closing the
+/// ports in it (`NotFound` if gone).
 #[native(side_effect = "any", path = "channel.discard")]
 fn channel_discard(id: f64) -> Result<(), NativeError> {
-    let gone = (id >= 1.0 && id.fract() == 0.0)
-        .then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64))))
-        .flatten();
-    gone.map(drop).ok_or(NativeError::Errno(errno::NOT_FOUND))
+    take_stash(id).map(drop).ok_or(NativeError::Errno(errno::NOT_FOUND))
 }
 
-fn transfer_list<'s>(scope: &mut v8::PinScope<'s, '_>, transfer: Option<v8::Local<'s, v8::Array>>) -> Result<Vec<v8::Local<'s, v8::ArrayBuffer>>, NativeError> {
-    let mut buffers = Vec::new();
-    if let Some(list) = transfer {
-        for index in 0..list.length() {
-            let item = list.get_index(scope, index).ok_or_else(|| NativeError::type_error("cannot read the transfer list"))?;
-            let buffer = v8::Local::<v8::ArrayBuffer>::try_from(item).map_err(|_| NativeError::type_error("the transfer list holds only ArrayBuffers"))?;
-            buffers.push(buffer);
-        }
-    }
-    Ok(buffers)
+/// `origine_api_stash_discard(id)`: `discard` for the thread of an isolate that is going away; an
+/// unknown id is ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn origine_api_stash_discard(id: u64) {
+    drop(take_stash(id as f64));
 }
 
-/// `native.channel.close(handle)`: closes a sender (the last one lets `recv` drain and then fail
-/// `NotConnected`) or the receiver (queued messages are dropped and `send` fails `BrokenPipe`).
-/// `BadHandle` for an unknown or already closed handle.
+/// `native.channel.close(handle)`: closes a sender (`recv` drains, then fails `NotConnected`) or a
+/// receiver (queued messages are dropped and `send` fails `BrokenPipe`). `BadHandle` for an unknown
+/// or already closed handle.
 #[native(side_effect = "any", path = "channel.close")]
 fn channel_close(handle: u32) -> Result<(), NativeError> {
     let entry = registry().as_mut().and_then(|registry| registry.ends.remove(&handle)).ok_or_else(bad_handle)?;
@@ -353,24 +417,11 @@ pub(crate) fn release_owned(isolate: usize) {
     }
 }
 
-/// `origine_api_channel_close(handle)`: closes an end from outside any isolate (the thread of an
-/// isolate that is going away uses it for the ends it was given). An unknown handle is ignored.
+/// `origine_api_channel_close(handle)`: closes an end from outside any isolate. An unknown handle is
+/// ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn origine_api_channel_close(handle: u32) {
-    let entry = registry().as_mut().and_then(|registry| registry.ends.remove(&handle));
-    if let Some(entry) = entry {
-        finish_end(entry);
-    }
-}
-
-/// `native.channel.adopt(handle)`: makes the calling isolate the owner of an end, so that it is closed
-/// when this isolate goes away. `BadHandle` for an unknown or closed handle.
-#[native(side_effect = "any", path = "channel.adopt")]
-fn channel_adopt(host: &mut HostState, handle: u32) -> Result<(), NativeError> {
-    let mut guard = registry();
-    let entry = guard.as_mut().and_then(|registry| registry.ends.get_mut(&handle)).ok_or_else(bad_handle)?;
-    entry.owner = host.isolate;
-    Ok(())
+    close_handle(handle);
 }
 
 fn promise<'s>(scope: &mut v8::PinScope<'s, '_>) -> Result<(v8::Local<'s, v8::PromiseResolver>, Pending), NativeError> {
@@ -387,9 +438,9 @@ fn park(scope: &mut v8::PinScope<'_, '_>, wait: Wait) -> Result<(), NativeError>
 }
 
 /// `native.channel.send(tx, value, transfer?)`: Promise<void>, resolved once the message is queued
-/// (it waits while the channel is full). `transfer` lists `ArrayBuffer`s to move. Rejects
-/// `BrokenPipe` when the receiver is closed, `BadHandle` for a handle that is not an open sender;
-/// a value that cannot be cloned throws synchronously and nothing is detached.
+/// (it waits while the channel is full). `transfer` lists the `ArrayBuffer`s and ports to move.
+/// Rejects `BrokenPipe` when the receiver is closed, `BadHandle` for a handle that is not an open
+/// sender; a value that cannot be cloned throws synchronously and nothing is moved.
 #[native(side_effect = "any", path = "channel.send")]
 fn channel_send<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -398,8 +449,8 @@ fn channel_send<'s>(
     transfer: Option<v8::Local<'s, v8::Array>>,
 ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
     find(tx, End::Sender)?;
-    let buffers = transfer_list(scope, transfer)?;
-    let message = message::encode(scope, value, &buffers)?;
+    let items = transfer_list(scope, transfer)?;
+    let message = message::encode(scope, value, &items)?;
     let (resolver, pending) = promise(scope)?;
     let promise = resolver.get_promise(scope);
     let isolate = native::host_mut(scope)?.isolate;
@@ -418,9 +469,9 @@ fn channel_send<'s>(
     Ok(promise.into())
 }
 
-/// `native.channel.recv(rx)`: Promise of the oldest message, waiting while the channel is empty.
-/// Rejects `NotConnected` once the queue is drained and every sender is closed, `BadHandle` for a
-/// handle that is not an open receiver.
+/// `native.channel.recv(rx)`: Promise of the oldest message as `{ identity, data, transfer }`,
+/// waiting while the channel is empty. Rejects `NotConnected` once the queue is drained and the
+/// sender is closed, `BadHandle` for a handle that is not an open receiver.
 #[native(side_effect = "any", path = "channel.recv")]
 fn channel_recv<'s>(scope: &mut v8::PinScope<'s, '_>, rx: u32) -> Result<v8::Local<'s, v8::Value>, NativeError> {
     find(rx, End::Receiver)?;
@@ -430,7 +481,7 @@ fn channel_recv<'s>(scope: &mut v8::PinScope<'s, '_>, rx: u32) -> Result<v8::Loc
     match try_recv(rx, isolate) {
         Ok(Some(message)) => {
             drop(pending);
-            match message::decode(scope, message) {
+            match received_object(scope, message) {
                 Ok(value) => {
                     let _ = resolver.resolve(scope, value);
                 }

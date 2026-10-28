@@ -19,6 +19,7 @@
   let beginData;
   let endData;
   const MAX_READ = 1 << 28;
+  const READ_CHUNK = 65536;
   // Bytes per read while draining a socket whose reading was ended.
   const DRAIN_READ = 1 << 16;
   // Default `queued.limit`: bytes the outbox holds for a slow peer.
@@ -424,6 +425,22 @@
       }
     }
     /**
+     * `for await (const socket of server)`: the connections as `accept()` resolves them, until the
+     * server is closed (an error other than the close ends the loop by throwing).
+     */
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        let socket;
+        try {
+          socket = await this.accept();
+        } catch (e) {
+          if (this.closed) return;
+          throw e;
+        }
+        yield socket;
+      }
+    }
+    /**
      * Returns an `EventServer` over the same listener and consumes this handle (it throws
      * `BadHandle` afterwards). Throws `WouldBlock` while an `accept()` is pending.
      */
@@ -711,6 +728,18 @@
         return core.track(core.readEnded ? Promise.resolve(0) : native.net.readCopy(core.id, buffer), n => n === 0);
       } catch (e) {
         return Promise.reject(e);
+      }
+    }
+    /**
+     * `for await (const chunk of socket)`: the bytes as `read(65536)` returns them (each a
+     * `Uint8Array` of 1 to 65536 bytes), until the end of the stream. Use `read(length)` for another
+     * chunk size.
+     */
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        const chunk = await this.read(READ_CHUNK);
+        if (chunk.length === 0) return;
+        yield chunk;
       }
     }
     /**

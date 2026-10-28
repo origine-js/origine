@@ -1,55 +1,98 @@
 import type { EnvCap } from "./env.d.ts";
 
-/** Options of {@link Sender.send}. */
+/** How a port is read, chosen when the channel is made (there is no default), like the handles of `api.net`. */
+export type PortMode = "pull" | "event";
+
+/** Options of {@link PortBase.send}. */
 export interface SendOptions {
-  /** `ArrayBuffer`s to move with the message: they are detached here once it is queued. */
-  readonly transfer?: readonly ArrayBuffer[];
-}
-
-/**
- * The sending end of a channel. Values are copied with the structured clone algorithm
- * (`SharedArrayBuffer`s are shared, not copied), so functions and symbols cannot be sent.
- */
-export interface Sender {
-  /** A number that names this end; pass it to another isolate and rebuild the end with {@link ThreadingCap.sender}. */
-  readonly handle: number;
   /**
-   * Queues a copy of `value`, waiting while the channel is full. Throws `TypeError` for a value that
-   * cannot be cloned (nothing is queued or detached). Rejects `BrokenPipe` once the receiver is closed.
+   * What moves with the message: `ArrayBuffer`s (detached here once it is queued) and ports. A port
+   * that is in the message must be listed; a listed port stops working here and its peer talks to the
+   * receiver. A port with a read in flight or a started flow cannot move (`WouldBlock`).
    */
-  send(value: unknown, options?: SendOptions): Promise<void>;
-  /** Another sender of the same channel. The channel ends for receivers only when every sender is closed. */
-  clone(): Sender;
-  /** Closes this sender (`BadHandle` when it is already closed). */
+  readonly transfer?: readonly (ArrayBuffer | Port)[];
+}
+
+/** What a port delivers, as `recv()` resolves it and as `message` handlers get it. */
+export interface MessageEvent {
+  /** The identity of the isolate that sent it (0 for the first isolate, `Isolate.id` for one made by `create`). */
+  readonly identity: number;
+  /** The structured clone of the value sent (`SharedArrayBuffer`s are shared). */
+  readonly data: unknown;
+  /** The objects that moved with it, in the order of the sender's `transfer` list. */
+  readonly transfer: readonly (ArrayBuffer | Port)[];
+}
+
+/** The part of a port both modes share. Values are cloned with the structured clone algorithm. */
+export interface PortBase {
+  readonly mode: PortMode;
+  /**
+   * Queues a copy of `data`, waiting while the channel is full. Throws `TypeError` for a value that
+   * cannot be cloned (a function, a symbol, an unlisted port) and nothing is queued or moved. Rejects
+   * `BrokenPipe` once the peer closed its port.
+   */
+  send(data: unknown, options?: SendOptions): Promise<void>;
+  /** Closes this port: the peer's pending and later reads end once what was sent is read, and its sends reject `BrokenPipe`. `BadHandle` when already closed or moved. */
   close(): void;
 }
 
-/** The receiving end of a channel; iterating it yields messages until every sender is closed and the queue is drained. */
-export interface Receiver extends AsyncIterable<unknown> {
-  /** A number that names this end; see {@link Sender.handle}. */
-  readonly handle: number;
-  /** The oldest message, waiting while the channel is empty. Rejects `NotConnected` once it is drained and every sender is closed. */
-  recv(): Promise<unknown>;
-  /** Closes the receiver: queued messages are dropped and senders get `BrokenPipe`. */
-  close(): void;
+/** A port read with promises: `recv`, `for await`. */
+export interface PullPort extends PortBase {
+  readonly mode: "pull";
+  /** The oldest message, waiting while there is none. Rejects `NotConnected` once the peer closed and everything was read. */
+  recv(): Promise<MessageEvent>;
+  /** The messages until the peer closes its port. */
+  [Symbol.asyncIterator](): AsyncIterableIterator<MessageEvent>;
+  /** A new event port over the same channel; consumes this one (`BadHandle` afterwards). `WouldBlock` while a `recv` is pending. */
+  toEvent(): EventPort;
 }
 
-/** Options of {@link ThreadingCap.channel}. */
+/** The events of an {@link EventPort}. */
+export interface PortEvents {
+  message: MessageEvent;
+  /** Fires once: the peer closed (after the messages it sent were delivered) or this port was closed. */
+  close: undefined;
+  /** A failed read, or a `message` handler that threw. */
+  error: unknown;
+}
+
+/** A port that pushes: `register('message', fn)`. */
+export interface EventPort extends PortBase {
+  readonly mode: "event";
+  /**
+   * Subscribes `fn`; returns `{ unregister() }`. The first `message` handler starts the flow. While a
+   * handler is registered the port keeps the isolate's event loop busy; close the port to let it end.
+   */
+  register<E extends keyof PortEvents>(event: E, fn: (event: PortEvents[E]) => void): { unregister(): boolean };
+  pause(): void;
+  resume(): void;
+  readonly paused: boolean;
+  /** A new pull port over the same channel; consumes this one. `Unsupported` once a `message` handler started the flow. */
+  toPull(): PullPort;
+}
+
+export type Port = PullPort | EventPort;
+
+/** Options of {@link ChannelConstructor}. */
 export interface ChannelOptions {
-  /** The most messages the channel holds before `send` waits (an integer from 1 to 2^32 - 1). */
-  readonly capacity: number;
+  /** Required: how both ports are read. */
+  readonly mode: PortMode;
+  /** The most messages waiting in each direction before `send` waits (an integer from 1 to 2^32 - 1). Default 16. */
+  readonly capacity?: number;
+}
+
+/** `new Channel({ mode })`: `[port, remotePort]`, two connected ports. What one sends the other receives, in order. */
+export interface ChannelConstructor {
+  new (options: ChannelOptions & { mode: "pull" }): readonly [PullPort, PullPort];
+  new (options: ChannelOptions & { mode: "event" }): readonly [EventPort, EventPort];
+  new (options: ChannelOptions): readonly [Port, Port];
 }
 
 /** `api.host.threading`: what the host offers for running work on several threads. */
 export interface ThreadingCap {
   /** Logical CPUs this process may run threads on (at least 1). */
   readonly parallelism: number;
-  /** A new bounded channel between isolates. Throws `TypeError` for a bad `capacity`. */
-  channel(options: ChannelOptions): { readonly tx: Sender; readonly rx: Receiver };
-  /** The sender behind a {@link Sender.handle} received from another isolate. This isolate takes it over: it is closed when this isolate ends. `BadHandle` for a closed or unknown handle. */
-  sender(handle: number): Sender;
-  /** The receiver behind a {@link Receiver.handle} received from another isolate; taken over like {@link ThreadingCap.sender}. */
-  receiver(handle: number): Receiver;
+  readonly Channel: ChannelConstructor;
 }
 
 /** `api.host`: the machine and process the program runs on. */

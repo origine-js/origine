@@ -45,6 +45,11 @@
     Object.defineProperty(full, name, descriptor);
     if (name !== 'io' && name !== 'net' && name !== 'isolate') Object.defineProperty(basic, name, descriptor);
   }
+  // The second argument of `main`: what the creating isolate passed to `api.isolate.create`.
+  const initial = () => {
+    access('isolate');
+    return util.shared.initial();
+  };
   // Private context embedder data holds this bundle; guest code receives only an API.
-  return [freeze(full), freeze(basic), native, util.errno, prepare];
+  return [freeze(full), freeze(basic), native, util.errno, prepare, initial];
 };

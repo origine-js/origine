@@ -15,20 +15,24 @@ export const main: Main = async (api: Api) => {
   // @ts-expect-error parallelism is read-only
   api.host.threading.parallelism = 2;
   eprintln("cpus", cpus);
-  const { tx, rx } = api.host.threading.channel({ capacity: 2 });
-  await tx.send({ a: 1 }, { transfer: [new ArrayBuffer(1)] });
-  const message: unknown = await rx.recv();
-  for await (const each of rx) eprintln("message", String(each));
-  api.host.threading.sender(tx.handle).close();
-  // @ts-expect-error capacity is required
-  api.host.threading.channel({});
-  eprintln("sent", String(message));
-  const worker = api.isolate.create({ init: "child.js", capacity: 2, args: ["a"], env: { A: "b" }, data: { n: 1 } });
-  await worker.tx.send("hi");
+  const [port, remote] = new api.host.threading.Channel({ mode: "pull" });
+  await port.send({ a: 1 }, { transfer: [new ArrayBuffer(1)] });
+  const event = await remote.recv();
+  eprintln("message", event.identity, String(event.data), event.transfer.length);
+  for await (const each of remote) eprintln("message", String(each.data));
+  const [pushed, remotePushed] = new api.host.threading.Channel({ mode: "event", capacity: 4 });
+  const registration = remotePushed.register("message", (each) => eprintln("event", each.identity));
+  remotePushed.register("close", () => registration.unregister());
+  pushed.close();
+  const worker = api.isolate.create({ init: "child.js", args: ["a"], env: { A: "b" }, data: { remote }, transfer: [remote] });
   const exit = await worker.join();
-  eprintln(exit.status, exit.error ?? "ok", api.isolate.parent?.data);
-  // @ts-expect-error capacity is required
-  api.isolate.create({ init: "child.js" });
+  eprintln(exit.status, exit.error ?? "ok", worker.id);
+  // @ts-expect-error the mode is required
+  new api.host.threading.Channel({});
+  // @ts-expect-error a pull port has no register
+  port.register("message", () => {});
+  // @ts-expect-error init is required
+  api.isolate.create({});
   const narrowed = api.host.env.narrow({ allow: ["HOME"] });
   const names: readonly string[] = narrowed.list();
   void names;

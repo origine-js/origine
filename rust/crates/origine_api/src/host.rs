@@ -127,6 +127,10 @@ pub struct HostState {
     pub(crate) chan_waits: Vec<crate::channel::Wait>,
     /// The address of the isolate this state belongs to: the key other threads wake it by.
     pub(crate) isolate: usize,
+    /// The number messages sent from this isolate carry as `identity` (set by `channel.identify`).
+    pub(crate) identity: u32,
+    /// Rebuilds a received port (registered by the glue, `channel.setPortFactory`).
+    pub(crate) port_factory: Option<Rc<v8::Global<v8::Function>>>,
 }
 
 impl HostState {
@@ -152,6 +156,8 @@ impl HostState {
             wake,
             chan_waits: Vec::new(),
             isolate: 0,
+            identity: 0,
+            port_factory: None,
         }
     }
 
@@ -489,6 +495,7 @@ impl HostState {
         self.events.borrow_mut().clear();
         self.pending.clear();
         self.chan_waits.clear();
+        self.port_factory = None;
         crate::channel::release_owned(self.isolate);
         self.completions.borrow_mut().clear();
         let ids: Vec<u32> = self.runtimes.keys().copied().collect();

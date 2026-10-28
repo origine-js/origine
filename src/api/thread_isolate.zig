@@ -43,8 +43,13 @@ pub const Options = struct {
 /// How the thread ended. `failed` carries the error name in `failure`.
 pub const Outcome = enum { completed, failed, terminated };
 
+/// Hands out the identities of isolates made by `ThreadIsolate.spawn`: 1, 2, ... (the first isolate is 0).
+var next_identity: std.atomic.Value(u32) = .init(1);
+
 pub const ThreadIsolate = struct {
     allocator: std.mem.Allocator,
+    /// This isolate's identity (`event.identity` of the messages it sends), unique in the process.
+    id: u32,
     options: Options,
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
@@ -62,7 +67,8 @@ pub const ThreadIsolate = struct {
     pub fn spawn(allocator: std.mem.Allocator, options: Options) !*ThreadIsolate {
         const self = try allocator.create(ThreadIsolate);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .options = options };
+        self.* = .{ .allocator = allocator, .id = next_identity.fetchAdd(1, .monotonic), .options = options };
+        if (options.link) |link| self.options.link = .{ .data = link.data, .identity = self.id };
         self.options.init = try allocator.dupe(u8, options.init);
         errdefer allocator.free(self.options.init);
         const args = try allocator.alloc([]const u8, options.args.len);
@@ -148,6 +154,8 @@ pub const ThreadIsolate = struct {
         defer {
             self.finished.store(true, .release);
             for (self.options.release) |handle| abi.origine_api_channel_close(handle);
+            // A stashed message the child never took (it died first) is dropped, closing the ports in it.
+            if (self.options.link) |link| if (link.data != 0) abi.origine_api_stash_discard(link.data);
         }
         self.execute() catch |err| {
             if (self.stop.load(.acquire)) {
@@ -172,7 +180,7 @@ pub const ThreadIsolate = struct {
             .env = options.env,
             .fs = options.fs,
             .runtime = options.runtime,
-            .link = options.link,
+            .link = self.options.link,
             .isolates = options.isolates,
         });
         host.stop = &self.stop;

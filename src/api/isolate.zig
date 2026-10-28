@@ -17,18 +17,19 @@ comptime {
     errno.requireBinding(link);
 }
 
-/// `native.isolate.spawn(init, argsJson, envJson, rx, tx, done, data)`: starts an isolate running
-/// `init` (a module specifier), with `args` (a JSON array of strings; the child sees the specifier
-/// first, as the process entry point does) and `env` (a JSON array of alternating names and values).
-/// `rx`/`tx` are the channel ends the child is given and `done` one that is closed when it ends;
-/// all three are closed when the thread ends. `data` is a stash id (0: none). Returns the isolate id.
+/// `native.isolate.spawn(init, argsJson, envJson, done, data)`: starts an isolate running `init` (a
+/// module specifier), with `args` (a JSON array of strings; the child sees the specifier first, as the
+/// process entry point does) and `env` (a JSON array of alternating names and values). `done` is a
+/// channel end closed when the thread ends. `data` is a stash id (0: none): the second argument of the
+/// child's `main`; the child drops it itself if it dies before taking it. Returns the isolate's
+/// identity, unique in the process.
 /// `PermissionDenied` when the embedder gave no `isolates`, `QuotaExceeded` past `max`,
 /// `InvalidInput` for malformed JSON.
-pub fn spawn(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, rx: u32, tx: u32, done: u32, data: f64) errno.Error!u32 {
-    return spawnImpl(state, init, args_json, env_json, rx, tx, done, data) catch |err| return errno.narrow(err);
+pub fn spawn(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, done: u32, data: f64) errno.Error!u32 {
+    return spawnImpl(state, init, args_json, env_json, done, data) catch |err| return errno.narrow(err);
 }
 
-fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, rx: u32, tx: u32, done: u32, data: f64) !u32 {
+fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, done: u32, data: f64) !u32 {
     const host = state.host;
     const config = host.isolates orelse return error.PermissionDenied;
     if (host.children.items.len >= config.max) return error.QuotaExceeded;
@@ -58,17 +59,16 @@ fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_js
         .platform = config.platform,
         .engine_snapshot = config.engine_snapshot,
         .isolates = config,
-        .link = .{ .rx = rx, .tx = tx, .data = @intFromFloat(data) },
-        .release = &.{ rx, tx, done },
+        .link = .{ .data = @intFromFloat(data), .identity = 0 },
+        .release = &.{done},
     });
     host.children.appendAssumeCapacity(child);
-    return @intCast(host.children.items.len);
+    return child.id;
 }
 
 fn childOf(state: *ScopeState, id: u32) !*ThreadIsolate {
-    const items = state.host.children.items;
-    if (id == 0 or id > items.len) return error.BadHandle;
-    return items[id - 1];
+    for (state.host.children.items) |child| if (child.id == id) return child;
+    return error.BadHandle;
 }
 
 /// `native.isolate.terminate(id)`: asks the isolate to stop; it ends at its next turn. Idempotent.
@@ -97,9 +97,9 @@ pub fn failure(state: *ScopeState, id: u32) errno.Error!?[]const u8 {
     return child.failure();
 }
 
-/// `native.isolate.link()`: for a child isolate `[rx, tx, data]` (its channel ends and the stash id
-/// of its data, 0 for none); undefined in the first isolate.
-pub fn link(state: *ScopeState) errno.Error!?[3]f64 {
+/// `native.isolate.link()`: in a child isolate the stash id of the second argument of its `main` (0
+/// for none); undefined in the first isolate.
+pub fn link(state: *ScopeState) errno.Error!?f64 {
     const given = state.host.link orelse return null;
-    return .{ @floatFromInt(given.rx), @floatFromInt(given.tx), @floatFromInt(given.data) };
+    return @floatFromInt(given.data);
 }

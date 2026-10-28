@@ -9,20 +9,32 @@ Facts about the machine and process the program runs on. Types: `types/host.d.ts
 ## `host.threading`
 
 - `parallelism`: logical CPUs the process may use (a number, at least 1). Read-only.
-- `channel({ capacity })`: a bounded channel between isolates, `{ tx, rx }`. `capacity` is required (no default).
-- `sender(handle)`, `receiver(handle)`: rebuild an end from the `handle` number of one made elsewhere (an argument or a message to another isolate).
+- `Channel`: `new Channel({ mode, capacity? })` makes two connected ports, `[port, remotePort]` (see below). Types: `types/host.d.ts`.
 
-### Channels
+### Channels and ports
 
-Messages are copied with the structured clone algorithm (V8 `ValueSerializer`): `Map`, `Set`, typed arrays, `BigInt`, plain objects and arrays work; functions and symbols throw `TypeError` at `send` and queue nothing. `SharedArrayBuffer`s are shared by reference, not copied (`Atomics` works across isolates). `send(value, { transfer: [buffer] })` moves the listed `ArrayBuffer`s: they are detached in the sender once the whole value was serialized (`Unsupported` for a buffer that cannot be detached; the buffers stay intact when `send` throws).
+A channel connects two ports, in this isolate or in different ones (a port travels in a message or in `api.isolate.create`'s `data`, see below). Like the handles of `api.net`, a port is made in one of two **read modes**, chosen explicitly (`mode` has no default) and visible in its class, so they cannot be mixed: methods of the other mode do not exist on a port.
 
-| Call | Result |
+```js
+const [port, remote] = new api.host.threading.Channel({ mode: 'pull' });
+await port.send({ hello: 'world' }, { transfer: [buffer] });
+const { identity, data, transfer } = await remote.recv();   // a frozen MessageEvent
+for await (const event of remote) { /* until the peer closes its port */ }
+```
+
+| Mode | Receiving |
 |---|---|
-| `tx.send(value, options?)` | `Promise<void>`; waits while the channel holds `capacity` messages. Rejects `BrokenPipe` when the receiver is closed. |
-| `tx.clone()` | another sender; receivers see the end of the channel only when every sender is closed. |
-| `tx.close()` / `rx.close()` | `BadHandle` when already closed. Closing the receiver drops queued messages. |
-| `rx.recv()` | `Promise` of the oldest message; waits while the channel is empty. Rejects `NotConnected` once drained with no sender left. |
-| `for await (const m of rx)` | the messages until that end. |
+| `'pull'` | `recv(): Promise<MessageEvent>`, `for await (const event of port)`, `toEvent()` |
+| `'event'` | `register('message' \| 'close' \| 'error', fn)` returns `{ unregister() }`; `pause()`, `resume()`, `paused`, `toPull()` |
 
-A handle names an end process-wide: the same number closes the same end for every isolate that holds it. An end belongs to the isolate that made it (`channel`, `clone`) or last took it over (`sender(handle)`, `receiver(handle)`), and is closed when that isolate ends, so a peer waiting on a crashed isolate sees `NotConnected` or `BrokenPipe` instead of waiting forever.
-Order is kept per channel. Natives: `rust/crates/origine_api/src/channel.rs` (`native.channel.*`), codec in `message.rs`.
+Both: `send(data, { transfer }): Promise<void>` (waits while `capacity` messages are queued; default capacity 16 per direction), `close()`, `mode`. `toEvent()`/`toPull()` return a new port over the same channel and consume the old one (`BadHandle` afterwards); `toEvent()` throws `WouldBlock` with a `recv` pending, `toPull()` `Unsupported` once a `message` handler started the flow.
+
+A `MessageEvent` is `{ identity, data, transfer }`: `identity` is the id of the sending isolate (0 for the first one, `Isolate.id` for one made by `create`), `data` the structured clone of what was sent, `transfer` the objects that moved with it, in the order of the sender's list.
+
+**Cloning.** `Map`, `Set`, typed arrays, `BigInt`, plain objects and arrays work; functions and symbols throw `TypeError` at `send` and queue nothing. `SharedArrayBuffer`s are shared by reference (`Atomics` works across isolates). `Date` objects are not part of the guest: use `Temporal` (`Date.now()` exists).
+
+**Transfer.** `send(data, { transfer: [...] })` moves the listed `ArrayBuffer`s (detached here once the message is queued; `Unsupported` for one that cannot be detached) and ports. As on the Web, a port in the message must be listed: an unlisted port is a `TypeError`. A listed port stops working here (`BadHandle`) and the receiver gets a working port of the same mode; its peer now talks to the receiver. A port with a `recv` pending or a started `message` flow cannot move (`WouldBlock`).
+
+**Closing.** `close()` on a port ends the peer's reads once what was sent is read (`NotConnected` for `recv`, the end of the `for await`, the `close` event) and makes the peer's sends reject `BrokenPipe`. A port belongs to the isolate that has it; when that isolate ends, its ports close, so a peer is never left waiting for a crashed isolate. An event port with a `message` handler keeps the isolate's work pending: `close()` it to let the program end.
+
+Natives: `rust/crates/origine_api/src/channel.rs` (`native.channel.*`), codec in `message.rs`.

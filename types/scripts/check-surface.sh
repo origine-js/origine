@@ -60,8 +60,8 @@ missing "net cap member" "$here/net.d.ts" listen connect Handle Server PullServe
 
 # Capabilities of api.*.
 missing "api capability" "$here/api.d.ts" fs host graph context isolate io net
-missing "isolate member" "$here/isolate.d.ts" CreateConfig create parent terminate join
-missing "host member" "$here/host.d.ts" env threading parallelism channel sender receiver
+missing "isolate member" "$here/isolate.d.ts" CreateConfig create terminate join
+missing "host member" "$here/host.d.ts" env threading parallelism Channel
 missing "env member" "$here/env.d.ts" args get list narrow
 missing "io cap member" "$here/io.d.ts" create narrow close run now timer timerAt sleep sleepUntil
 missing "context member" "$here/context.d.ts" import graph preload references close create

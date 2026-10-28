@@ -91,9 +91,10 @@ pub const RuntimeConfig = struct {
 /// cannot report its next delayed-task deadline, so the wait is capped and the platform pumped again.
 const platform_poll_ns: i64 = 100 * std.time.ns_per_ms;
 
-/// What a child isolate's `api.isolate.parent` is made of: the channel ends it was given (receiver
-/// and sender handles) and the id of the stashed `data` message (0: none).
-pub const ParentLink = struct { rx: u32, tx: u32, data: u64 };
+/// What a child isolate starts with: the id of the stashed message that is the second argument of its
+/// `main` (0: none) and its identity, the number its messages carry as `event.identity` (the first
+/// isolate is 0).
+pub const ParentLink = struct { data: u64, identity: u32 };
 
 /// What `api.isolate.create` needs from the embedder; without it the guest has no `api.isolate`.
 /// Everything is borrowed and must outlive the Host and every isolate it spawned.
@@ -109,7 +110,7 @@ pub const IsolateConfig = struct {
 pub const Config = struct {
     /// Enables `api.isolate`.
     isolates: ?IsolateConfig = null,
-    /// Set for a Host that runs a child isolate: its `api.isolate.parent`.
+    /// Set for a Host that runs a child isolate.
     link: ?ParentLink = null,
     args: []const []const u8 = &.{},
     env: []const env_api.Pair = &.{},
@@ -613,6 +614,7 @@ pub const Host = struct {
                 .threading = .{
                     .parallelism = func(threading_api.parallelism, .{ .side_effect = .none }),
                     .attach = func(attachChannels, .{ .side_effect = .any }),
+                    .identity = func(threading_api.identity, .{ .side_effect = .none }),
                 },
             }),
             .fs => try call.object(ScopeState, state, .{
@@ -699,6 +701,16 @@ pub const Host = struct {
         return if (needs_factory) (try host.compileGlue(state.scope, module)).object.value else eu.v.undefined_value(env.isolate).value;
     }
 
+    /// The value the glue keeps for `main`'s second argument; needs the entered context and a live HandleScope.
+    fn initialData(self: *Host, isolate: v8.Isolate, ctx: v8.Context) !v8.Value {
+        _ = self;
+        const bundle = glue_script.restored(ctx) orelse return error.BootstrapFailed;
+        const initial_value = bundle.object.getIndex(ctx, glue_script.initial_index) orelse return error.BootstrapFailed;
+        const initial = v8.Function.from_opaque(initial_value.data.handle) orelse return error.BootstrapFailed;
+        const undefined_value = eu.v.undefined_value(isolate).value;
+        return initial.call(ctx, undefined_value, &.{}) orelse error.InitFailed;
+    }
+
     /// Lifecycle driver: evaluates `init_specifier` as a module in `scope` (which
     /// must have been created with `initOptions`), then calls its exported `main`
     /// with the root `api` and pumps until it settles. Returns error.InitFailed or
@@ -728,7 +740,9 @@ pub const Host = struct {
             const main_value = namespace.get(session.ctx, binding.string(session.isolate(), "main")) orelse return error.InitFailed;
             const main_fn = v8.Function.from_opaque(main_value.data.handle) orelse return error.MainMissing;
             errdefer session.retainException(error_info);
-            const result = main_fn.call(session.ctx, eu.v.undefined_value(session.isolate()).value, &.{api.deref()}) orelse return error.MainFailed;
+            // The second argument is what the creating isolate passed to `api.isolate.create` (undefined in the first).
+            const data = if (self.link != null) try self.initialData(session.isolate(), session.ctx) else eu.v.undefined_value(session.isolate()).value;
+            const result = main_fn.call(session.ctx, eu.v.undefined_value(session.isolate()).value, &.{ api.deref(), data }) orelse return error.MainFailed;
             break :blk v8.Global.Of(v8.Value).new(session.isolate(), result);
         };
         defer main_result.deinit();

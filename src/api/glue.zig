@@ -15,6 +15,8 @@ pub const basic_index = 1;
 pub const native_index = 2;
 pub const errno_index = 3;
 const prepare_index = 4;
+/// The glue function that returns the second argument of `main` (see `Host.run`).
+pub const initial_index = 5;
 
 /// Borrows the entered context; returns its private template as a local handle, if present.
 pub fn restored(ctx: v8.Context) ?v8.Array {

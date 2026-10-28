@@ -165,6 +165,8 @@ export interface PullSocket extends SocketBase {
   readInto(buffer: BytesLike): Promise<{ readonly bytes: number; readonly buffer: ArrayBuffer }>;
   /** Reads once into `buffer` **by copy** and resolves the byte count (0 at end of stream). The buffer is not detached, so one buffer serves every read. Best for small reads. */
   readCopy(buffer: BytesLike): Promise<number>;
+  /** `for await (const chunk of socket)`: the bytes as `read(65536)` returns them, until the end of the stream. */
+  [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
   /**
    * Hands the connection to a **new** `EventSocket` and **consumes this handle**: it reports
    * `closed === true` and every operation on it throws or rejects `BadHandle` (the connection is
@@ -212,6 +214,8 @@ export interface ServerBase extends Handle {
 export interface PullServer<S extends Mode = Mode> extends ServerBase {
   /** Resolves the next connection as a socket of the server's `socketMode`. */
   accept(): Promise<Socket<S>>;
+  /** `for await (const socket of server)`: the connections as `accept()` resolves them, until the server is closed. */
+  [Symbol.asyncIterator](): AsyncIterableIterator<Socket<S>>;
   /** Hands the listener to a new `EventServer` and consumes this handle. Throws `WouldBlock` while an `accept()` is pending. */
   toEvent(): EventServer<S>;
 }

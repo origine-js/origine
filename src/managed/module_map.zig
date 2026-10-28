@@ -11,6 +11,7 @@ const ImportCacheKey = @import("module_types.zig").ImportCacheKey;
 const ImportAttribute = @import("module_types.zig").ImportAttribute;
 const ResolveRequest = @import("module_types.zig").ResolveRequest;
 const Resolver = @import("module_types.zig").Resolver;
+const ResolveCompletion = @import("module_types.zig").ResolveCompletion;
 const Export = @import("module_types.zig").Export;
 const Content = @import("module_types.zig").Content;
 const LoadToken = @import("module_types.zig").LoadToken;
@@ -23,6 +24,8 @@ const origine_prefix = @import("module_types.zig").origine_prefix;
 const init_snapshot = @import("init_snapshot.zig");
 
 const Dependency = struct { specifier: []const u8, attributes: []const ImportAttribute, entry: *Entry };
+/// A module request whose asynchronous resolution has not settled. Strings are arena-owned.
+const Unresolved = struct { specifier: []const u8, attributes: []const ImportAttribute, token: LoadToken };
 const Entry = struct {
     cache_key: []const u8,
     cached: bool = true,
@@ -38,14 +41,24 @@ const Entry = struct {
     preparing: bool = true,
     visited: bool = false,
     pending: ?LoadToken = null,
+    /// Requests of this module still waiting for an asynchronous resolver. While any is left the
+    /// entry stays `preparing`, so no import that depends on it can start linking.
+    unresolved: std.ArrayList(Unresolved) = .empty,
     /// Source copy kept until `flushCodeCache` for a module compiled without a usable code
     /// cache. Null once flushed, for modules that consumed a cache, and without a hook.
     cache_source: ?[]const u8 = null,
 };
+/// The map's view of a resolver answer: the id, or the token to wait for.
+const Resolved = union(enum) { id: []const u8, pending: LoadToken };
 const Task = struct {
-    root: *Entry,
+    /// Null while the root specifier itself is still being resolved asynchronously.
+    root: ?*Entry,
     resolver: v8.Global.Of(v8.Promise.Resolver),
     settled: bool = false,
+    /// While `root` is null: the token of its resolution and the request (arena-owned strings).
+    root_token: ?LoadToken = null,
+    specifier: []const u8 = "",
+    attributes: []const ImportAttribute = &.{},
 };
 
 /// Per-scope mapping from resolved specifiers and attributes to V8 module instances.
@@ -129,6 +142,8 @@ pub const ModuleMap = struct {
     pub fn deinit(self: *ModuleMap) void {
         for (self.all_entries.items) |entry| {
             if (entry.pending) |token| if (self.scope.options.loader) |loader| if (loader.cancel) |cancel| cancel(loader.data, token);
+            if (self.scope.options.resolver) |resolver| if (resolver.cancel) |cancel| for (entry.unresolved.items) |request| cancel(resolver.data, request.token);
+            entry.unresolved.deinit(self.scope.runtime.allocator);
             if (entry.module) |value| value.deinit();
             if (entry.failure) |value| value.deinit();
             if (entry.evaluation) |value| value.deinit();
@@ -136,6 +151,7 @@ pub const ModuleMap = struct {
             entry.dependencies.deinit(self.scope.runtime.allocator);
         }
         for (self.tasks.items) |task| {
+            if (task.root_token) |token| if (self.scope.options.resolver) |resolver| if (resolver.cancel) |cancel| cancel(resolver.data, token);
             if (!task.settled) _ = task.resolver.deref().reject(self.ctx(), self.errorValue(error.RuntimeClosed));
             task.resolver.deinit();
         }
@@ -162,13 +178,26 @@ pub const ModuleMap = struct {
 
     /// Borrows inputs and alloc through the resolver call. The resolver's
     /// contract returns bytes owned by alloc; errors transfer no result storage.
-    fn resolve(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) ![]const u8 {
+    fn resolve(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) !Resolved {
         const enabled = self.scope.options.origine_namespace;
         if (!enabled and std.mem.startsWith(u8, specifier, origine_prefix)) return error.OrigineNamespaceDisabled;
-        const resolver = self.scope.options.resolver orelse return alloc.dupe(u8, specifier);
-        const id = try resolver.resolve(resolver.data, .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .import_attributes = attributes });
-        if (!enabled and std.mem.startsWith(u8, id, origine_prefix)) return error.OrigineNamespaceDisabled;
-        return id;
+        const resolver = self.scope.options.resolver orelse return .{ .id = try alloc.dupe(u8, specifier) };
+        const rt = self.scope.runtime;
+        var request: ResolveRequest = .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .import_attributes = attributes };
+        const resolve_async = resolver.resolve_async orelse {
+            const id = try resolver.resolve(resolver.data, request);
+            if (!enabled and std.mem.startsWith(u8, id, origine_prefix)) return error.OrigineNamespaceDisabled;
+            return .{ .id = id };
+        };
+        request.token = rt.next_load_token;
+        rt.next_load_token = std.math.add(LoadToken, request.token, 1) catch return error.LoadTokenExhausted;
+        switch (try resolve_async(resolver.data, request)) {
+            .id => |id| {
+                if (!enabled and std.mem.startsWith(u8, id, origine_prefix)) return error.OrigineNamespaceDisabled;
+                return .{ .id = id };
+            },
+            .pending => return .{ .pending = request.token },
+        }
     }
 
     /// Borrows entry/exception through return; retains an independent persistent
@@ -319,9 +348,17 @@ pub const ModuleMap = struct {
                     const alloc = scratch.allocator();
                     const attributes = try self.readAttributes(alloc, request.getImportAttributes().?, 3);
                     const specifier = try string(alloc, iso, request.getSpecifier().?);
-                    const id = try self.resolve(alloc, specifier, entry.id, attributes);
-                    const dependency = try self.fetch(alloc, id, attributes);
-                    entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = dependency.attributes, .entry = dependency });
+                    switch (try self.resolve(alloc, specifier, entry.id, attributes)) {
+                        .id => |id| {
+                            const dependency = try self.fetch(alloc, id, attributes);
+                            entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = dependency.attributes, .entry = dependency });
+                        },
+                        .pending => |token| {
+                            const owned_attributes = try self.arenaAllocator().alloc(ImportAttribute, attributes.len);
+                            for (attributes, owned_attributes) |attribute, *copy| copy.* = .{ .key = try self.arenaAllocator().dupe(u8, attribute.key), .value = try self.arenaAllocator().dupe(u8, attribute.value) };
+                            try entry.unresolved.append(self.scope.runtime.allocator, .{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = owned_attributes, .token = token });
+                        },
+                    }
                 }
             },
             .exports => |exports| {
@@ -341,7 +378,77 @@ pub const ModuleMap = struct {
                 try self.indexModule(entry);
             },
         }
-        entry.preparing = false;
+        entry.preparing = entry.unresolved.items.len != 0;
+    }
+
+    /// Settles an asynchronous resolution started by `Resolver.resolve_async`: continues the
+    /// module (or root import) that asked, fetching the module it resolved to. Returns whether
+    /// `token` was pending here. Borrows the completion through return; requires the entered
+    /// context and a live HandleScope. A failure fails the module that asked.
+    pub fn completeResolve(self: *ModuleMap, token: LoadToken, completion: ResolveCompletion) !bool {
+        var tc_scope: v8.TryCatch = undefined;
+        tc_scope.init(self.isolate());
+        defer tc_scope.deinit();
+        var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
+        defer scratch.deinit();
+        const alloc = scratch.allocator();
+        for (self.tasks.items) |*task| {
+            if (task.root_token != token) continue;
+            task.root_token = null;
+            const resolved = self.settledId(alloc, completion) catch |err| {
+                task.settled = true;
+                _ = task.resolver.deref().reject(self.ctx(), self.settledFailure(completion, &tc_scope, err));
+                return true;
+            };
+            task.root = self.fetch(alloc, resolved, task.attributes) catch |err| {
+                task.settled = true;
+                _ = task.resolver.deref().reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
+                return true;
+            };
+            return true;
+        }
+        for (self.all_entries.items) |entry| {
+            for (entry.unresolved.items, 0..) |request, index| {
+                if (request.token != token) continue;
+                _ = entry.unresolved.orderedRemove(index);
+                const resolved = self.settledId(alloc, completion) catch |err| {
+                    self.fail(entry, self.settledFailure(completion, &tc_scope, err));
+                    return true;
+                };
+                const dependency = self.fetch(alloc, resolved, request.attributes) catch |err| {
+                    self.fail(entry, tc_scope.getException() orelse self.errorValue(err));
+                    return true;
+                };
+                entry.dependencies.append(self.scope.runtime.allocator, .{ .specifier = request.specifier, .attributes = dependency.attributes, .entry = dependency }) catch |err| {
+                    self.fail(entry, self.errorValue(err));
+                    return true;
+                };
+                if (entry.unresolved.items.len == 0 and entry.failure == null and entry.module != null) entry.preparing = false;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The id of a successful completion, copied into `alloc`; the origine-namespace gate applies
+    /// to it as to any resolver answer.
+    fn settledId(self: *ModuleMap, alloc: std.mem.Allocator, completion: ResolveCompletion) ![]const u8 {
+        switch (completion) {
+            .id => |id| {
+                if (!self.scope.options.origine_namespace and std.mem.startsWith(u8, id, origine_prefix)) return error.OrigineNamespaceDisabled;
+                return alloc.dupe(u8, id);
+            },
+            .failure => |err| return err,
+            .exception => return error.ResolverFailed,
+        }
+    }
+
+    /// The value a failed completion rejects or fails with: the host's exception when it gave one.
+    fn settledFailure(self: *ModuleMap, completion: ResolveCompletion, tc_scope: *v8.TryCatch, err: anyerror) v8.Value {
+        return switch (completion) {
+            .exception => |exception| exception.deref(),
+            else => tc_scope.getException() orelse self.errorValue(err),
+        };
     }
 
     /// Hands the code cache of every module that compiled without a usable one to the scope's
@@ -488,17 +595,34 @@ pub const ModuleMap = struct {
         var tc_scope: v8.TryCatch = undefined;
         tc_scope.init(self.isolate());
         defer tc_scope.deinit();
-        const id = self.resolve(alloc, specifier, referrer, attributes) catch |err| {
+        const resolved = self.resolve(alloc, specifier, referrer, attributes) catch |err| {
             _ = resolver.reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
             return promise;
         };
-        const root = self.fetch(alloc, id, attributes) catch |err| {
-            _ = resolver.reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
-            return promise;
-        };
-        const retained = v8.Global.Of(v8.Promise.Resolver).new(self.isolate(), resolver);
-        errdefer retained.deinit();
-        try self.tasks.append(self.scope.runtime.allocator, .{ .root = root, .resolver = retained });
+        switch (resolved) {
+            .id => |id| {
+                const root = self.fetch(alloc, id, attributes) catch |err| {
+                    _ = resolver.reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
+                    return promise;
+                };
+                const retained = v8.Global.Of(v8.Promise.Resolver).new(self.isolate(), resolver);
+                errdefer retained.deinit();
+                try self.tasks.append(self.scope.runtime.allocator, .{ .root = root, .resolver = retained });
+            },
+            .pending => |token| {
+                const retained = v8.Global.Of(v8.Promise.Resolver).new(self.isolate(), resolver);
+                errdefer retained.deinit();
+                const owned_attributes = try self.arenaAllocator().alloc(ImportAttribute, attributes.len);
+                for (attributes, owned_attributes) |attribute, *copy| copy.* = .{ .key = try self.arenaAllocator().dupe(u8, attribute.key), .value = try self.arenaAllocator().dupe(u8, attribute.value) };
+                try self.tasks.append(self.scope.runtime.allocator, .{
+                    .root = null,
+                    .resolver = retained,
+                    .root_token = token,
+                    .specifier = try self.arenaAllocator().dupe(u8, specifier),
+                    .attributes = owned_attributes,
+                });
+            },
+        }
         _ = self.drive();
         return promise;
     }
@@ -650,7 +774,7 @@ pub const ModuleMap = struct {
         // Evaluation can synchronously trigger more dynamic imports and grow tasks.
         while (index < self.tasks.items.len) : (index += 1) {
             if (self.tasks.items[index].settled) continue;
-            const root = self.tasks.items[index].root;
+            const root = self.tasks.items[index].root orelse continue;
             const resolver = self.tasks.items[index].resolver.deref();
             self.resetVisited();
             if (self.graphFailure(root)) |failure| {

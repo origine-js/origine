@@ -15,6 +15,8 @@ pub const ModuleMapKey = struct { module_id: ModuleId, import_attributes: []cons
 pub const ImportCacheKey = ModuleMapKey;
 /// Borrowed UTF-8 key/value strings; the containing API defines their lifetime.
 pub const ImportAttribute = struct { key: []const u8, value: []const u8 };
+/// Names a pending load or resolution; unique per runtime.
+pub const LoadToken = u64;
 pub const ResolveRequest = struct {
     /// Allocate the returned canonical ID here, synchronously on the isolate thread.
     /// This alloc is borrowed for the callback only; never retain it/use off-thread.
@@ -26,7 +28,12 @@ pub const ResolveRequest = struct {
     specifier: []const u8,
     referrer: ModuleId,
     import_attributes: []const ImportAttribute = &.{},
+    /// Names this request when `Resolver.resolve_async` answers `.pending`; later passed to
+    /// `Runtime.completeResolve`. Unique among pending loads and resolutions of the runtime.
+    token: LoadToken = 0,
 };
+/// What an asynchronous resolver answers: the id now, or `.pending` after keeping `request.token`.
+pub const ResolveOutcome = union(enum) { id: ModuleId, pending };
 pub const Resolver = struct {
     /// Host-owned state, borrowed without destruction; must outlive Runtime.destroy.
     data: ?*anyopaque = null,
@@ -34,7 +41,26 @@ pub const Resolver = struct {
     /// Release temporaries on success and clean up on failure.
     /// Ownership of the result transfers to the runtime on success. Never return
     /// static/stack bytes, freed storage, or memory from a different alloc.
-    resolve: *const fn (data: ?*anyopaque, request: ResolveRequest) anyerror!ModuleId,
+    /// Not called when `resolve_async` is set.
+    resolve: *const fn (data: ?*anyopaque, request: ResolveRequest) anyerror!ModuleId = unsupportedSync,
+    /// Optional asynchronous variant, used instead of `resolve`. It either returns the id (as
+    /// `resolve` does) or `.pending`, keeping only `request.token` and copies of the request
+    /// strings (they are borrowed for the call). The module that asked waits, and so does every
+    /// import that depends on it, until `Runtime.completeResolve` settles the token. Like loader
+    /// callbacks, it runs on the isolate thread and must not create scopes.
+    resolve_async: ?*const fn (data: ?*anyopaque, request: ResolveRequest) anyerror!ResolveOutcome = null,
+    /// Called during Runtime.destroy or scope teardown for tokens still pending. `data` is still borrowed.
+    cancel: ?*const fn (data: ?*anyopaque, token: LoadToken) void = null,
+};
+fn unsupportedSync(_: ?*anyopaque, _: ResolveRequest) anyerror!ModuleId {
+    return error.AsyncResolverOnly;
+}
+/// Borrowed inputs, like `Completion`: nothing is accessed after `completeResolve` returns.
+pub const ResolveCompletion = union(enum) {
+    /// The canonical id; copied.
+    id: ModuleId,
+    failure: anyerror,
+    exception: v8.Global.Of(v8.Value),
 };
 /// name is borrowed UTF-8; value is a borrowed persistent handle from this runtime.
 /// The receiving content API copies the name and retains its own handle.
@@ -43,7 +69,6 @@ pub const Export = struct { name: []const u8, value: v8.Global.Of(v8.Value) };
 /// updateImportCache/completeLoad call returns (success or error). No ownership is
 /// transferred. Source is copied into V8; export names and handles are retained.
 pub const Content = union(enum) { source: []const u8, exports: []const Export };
-pub const LoadToken = u64;
 pub const LoadRequest = struct {
     /// Runtime-owned arena for result source/exports/names. Do not free result
     /// allocations; use the alloc only synchronously inside this callback.

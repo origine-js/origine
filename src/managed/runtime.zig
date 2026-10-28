@@ -309,4 +309,21 @@ pub const Runtime = struct {
         }
         return error.StaleLoadToken;
     }
+
+    /// Settles an asynchronous resolution (`Resolver.resolve_async` answered `.pending`). Same
+    /// rules as `completeLoad`: owning isolate thread, after the callback returned, inputs
+    /// borrowed through return. Fails with StaleLoadToken when no scope waits for `token`.
+    pub fn completeResolve(self: *Runtime, token: module_types.LoadToken, completion: module_types.ResolveCompletion) !void {
+        var session: Session = undefined;
+        session.init(self);
+        defer session.deinit();
+        for (self.scopes.items) |scope| {
+            if (scope.disposed) continue;
+            const ctx = scope.context.deref();
+            ctx.enter();
+            defer ctx.exit();
+            if (try scope.module_map.completeResolve(token, completion)) return;
+        }
+        return error.StaleLoadToken;
+    }
 };

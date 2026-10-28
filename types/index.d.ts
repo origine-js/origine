@@ -30,6 +30,7 @@ export type {
 } from "./errors.d.ts";
 export type { EnvCap, EnvNarrow } from "./env.d.ts";
 export type { CreateConfig, CreateOptions, Isolate, IsolateCap, IsolateExit } from "./isolate.d.ts";
+export type { DataBlobOptions, Snapshot, SnapshotConstructor, SnapshotCreateOptions, SnapshotLoadOptions } from "./host.d.ts";
 export type { ChannelConstructor, ChannelOptions, EventPort, HostCap, MessageEvent, Port, PortBase, PortEvents, PortMode, PullPort, SendOptions, ThreadingCap } from "./host.d.ts";
 export type {
   Access,

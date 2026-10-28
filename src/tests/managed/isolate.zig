@@ -7,11 +7,11 @@ const check = @import("support.zig").check;
 const Parent = @import("channel.zig").Parent;
 
 /// A parent whose host may create isolates; `child` is written next to it as `child.js`.
-const Case = struct {
+pub const Case = struct {
     parent: Parent,
     buffers: v8.ArrayBuffer.Allocator,
 
-    fn setup(self: *Case, parent_source: []const u8, child_source: []const u8) !void {
+    pub fn setup(self: *Case, parent_source: []const u8, child_source: []const u8) !void {
         support.ensureV8();
         // As the process entry point: a sandboxed V8 only accepts ArrayBuffer memory from its own pages.
         self.buffers = if (v8.V8.isSandboxEnabled())
@@ -25,13 +25,13 @@ const Case = struct {
     }
 
     /// The host (and with it every child) goes before the buffers they use.
-    fn deinit(self: *Case) void {
+    pub fn deinit(self: *Case) void {
         self.parent.deinit();
         self.buffers.deinit();
     }
 };
 
-const prelude =
+pub const prelude =
     \\const childPath = api => api.host.env.args()[0].replace('parent.js', 'child.js');
     \\
 ;

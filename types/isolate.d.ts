@@ -1,4 +1,4 @@
-import type { Port } from "./host.d.ts";
+import type { Port, Snapshot } from "./host.d.ts";
 
 /** Options of {@link IsolateCap.create} and {@link IsolateCap.CreateConfig}. */
 export interface CreateOptions {
@@ -15,10 +15,15 @@ export interface CreateOptions {
   readonly data?: unknown;
   /** The `ArrayBuffer`s and ports of `data` to move rather than copy; they stop working here. */
   readonly transfer?: readonly (ArrayBuffer | Port)[];
+  /**
+   * Starts the isolate from this snapshot (made for the same `init`, else `InvalidInput`): its init module
+   * graph is already evaluated and its source is not read again. The isolate keeps its own hold on it.
+   */
+  readonly snapshot?: Snapshot;
 }
 
 /** The validated, frozen options of one `create`. */
-export type CreateConfig = Readonly<Required<Pick<CreateOptions, "init" | "args" | "env">>> & Readonly<Pick<CreateOptions, "data" | "transfer">>;
+export type CreateConfig = Readonly<Required<Pick<CreateOptions, "init" | "args" | "env">>> & Readonly<Pick<CreateOptions, "data" | "transfer" | "snapshot">>;
 
 /** How an isolate ended. */
 export interface IsolateExit {

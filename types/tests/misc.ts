@@ -31,6 +31,13 @@ export const main: Main = async (api: Api) => {
   new api.host.threading.Channel({});
   // @ts-expect-error a pull port has no register
   port.register("message", () => {});
+  const snapshot = api.host.Snapshot.create({ init: "child.js" });
+  const file: Uint8Array = snapshot.origineDataBlob({ compress: false });
+  const loaded = api.host.Snapshot.fromOrigineDataBlob(file, { init: "child.js" });
+  api.host.Snapshot.fromRaw(loaded.blob()).close();
+  api.isolate.create({ init: "child.js", snapshot });
+  // @ts-expect-error a snapshot is made by Snapshot's static methods
+  new api.host.Snapshot();
   // @ts-expect-error init is required
   api.isolate.create({});
   const narrowed = api.host.env.narrow({ allow: ["HOME"] });

@@ -30,6 +30,8 @@
       if (typeof value !== 'string') throw new TypeError('env.' + name + ' must be a string');
       env[name] = value;
     }
+    const snapshot = own(options, 'snapshot');
+    if (snapshot !== undefined) shared.snapshotId(snapshot);
     const transfer = own(options, 'transfer');
     if (transfer !== undefined && !Array.isArray(transfer)) throw new TypeError('transfer must be an array of ArrayBuffers and ports');
     const config = freeze({
@@ -38,6 +40,7 @@
       env: freeze(env),
       data: own(options, 'data'),
       transfer: transfer === undefined ? undefined : freeze([...transfer]),
+      snapshot,
     });
     configs.add(config);
     return config;
@@ -54,7 +57,7 @@
       if (config.data !== undefined) data = native.channel.stash(config.data, config.transfer);
       const env = [];
       for (const name of Object.keys(config.env)) env.push(name, config.env[name]);
-      id = native.isolate.spawn(config.init, JSON.stringify(config.args), JSON.stringify(env), done.tx, data);
+      id = native.isolate.spawn(config.init, JSON.stringify(config.args), JSON.stringify(env), done.tx, data, config.snapshot === undefined ? 0 : shared.snapshotId(config.snapshot));
       checked(take());
     } catch (error) {
       for (const handle of [done.tx, done.rx]) {

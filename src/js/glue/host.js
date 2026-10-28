@@ -2,7 +2,7 @@
 // by src/api/glue.zig: `(native, util) => makeHostCap`. `makeHostCap()` builds the namespace.
 // `api.host.env` takes a Set of visible names, or null for all (`makeEnvCap(allow)`).
 (native, util) => {
-  const { freeze, freezeMethods, own, shared } = util;
+  const { freeze, freezeMethods, own, shared, take, failure } = util;
   function makeEnvCap(allow) {
     const visible = name => allow === null || allow.has(name);
     return freezeMethods({
@@ -250,8 +250,86 @@
   // `api.isolate` builds its internal channels from the same pieces.
   shared.channels = { ready };
 
+  // ---- snapshots ------------------------------------------------------------------------
+  // A heap snapshot held natively by id. `Snapshot.create` evaluates an init module graph, the
+  // others load what `blob()` / `origineDataBlob()` saved; `api.isolate.create` starts isolates from one.
+  const snapshotIds = new WeakMap();
+  const SNAPSHOT_TOKEN = {};
+  const checked = value => {
+    const code = take();
+    if (code !== 0) throw failure(code);
+    return value;
+  };
+  const initOption = options => {
+    const init = own(options, 'init');
+    if (typeof init !== 'string' || init === '') throw new TypeError('init must be a module specifier');
+    return init;
+  };
+  const bytesArg = bytes => {
+    if (!(bytes instanceof Uint8Array)) throw new TypeError('bytes must be a Uint8Array');
+    return bytes;
+  };
+  class Snapshot {
+    constructor(token, id) {
+      if (token !== SNAPSHOT_TOKEN) throw new TypeError('use Snapshot.create, fromRaw or fromOrigineDataBlob');
+      snapshotIds.set(this, id);
+    }
+    /**
+     * Evaluates the module graph of `init` (not its `main`) in a throwaway isolate **on this thread**,
+     * which is blocked until it is done, and snapshots the heap. Throws `{ errno }` `InvalidData` for an
+     * init that throws or needs I/O to finish.
+     */
+    static create(options) {
+      const init = initOption(options);
+      return new Snapshot(SNAPSHOT_TOKEN, checked(native.snapshot.create(init)));
+    }
+    /** A snapshot over a copy of a bare V8 blob, as `blob()` returns it. It has no `init`. */
+    static fromRaw(bytes) {
+      return new Snapshot(SNAPSHOT_TOKEN, checked(native.snapshot.fromRaw(bytesArg(bytes))));
+    }
+    /**
+     * A snapshot from the bytes `origineDataBlob()` made (the file format of `__oricache__`) for the
+     * same `init` by this same build. `InvalidData` for a damaged file, another build or init, or
+     * source files that changed since.
+     */
+    static fromOrigineDataBlob(bytes, options) {
+      const init = initOption(options);
+      return new Snapshot(SNAPSHOT_TOKEN, checked(native.snapshot.fromFile(bytesArg(bytes), init)));
+    }
+    /** The specifier this snapshot was made for; undefined for one from `fromRaw`. */
+    get init() {
+      return checked(native.snapshot.init(snapshotIds.get(this)));
+    }
+    /** A `Uint8Array` copy of the raw V8 blob. */
+    blob() {
+      return checked(native.snapshot.blob(snapshotIds.get(this)));
+    }
+    /**
+     * A `Uint8Array` with the bytes of the `__oricache__` snapshot file for this snapshot. `compress`
+     * (default false) packs it with LZ4 and needs a build with LZ4 snapshots. `Unsupported` for a
+     * snapshot from `fromRaw`.
+     */
+    origineDataBlob(options) {
+      const compress = own(options, 'compress') ?? false;
+      if (typeof compress !== 'boolean') throw new TypeError('compress must be a boolean');
+      return checked(native.snapshot.file(snapshotIds.get(this), compress));
+    }
+    /** Releases the memory. Isolates started from it keep their own hold. `BadHandle` when already closed. */
+    close() {
+      checked(native.snapshot.close(snapshotIds.get(this)));
+    }
+  }
+  freeze(Snapshot);
+  freeze(Snapshot.prototype);
+  shared.snapshotId = snapshot => {
+    const id = snapshotIds.get(snapshot);
+    if (id === undefined) throw new TypeError('snapshot must be a Snapshot');
+    return id;
+  };
+
   return () => ({
     env: makeEnvCap(null),
+    Snapshot,
     threading: freezeMethods({
       get parallelism() {
         return native.threading.parallelism();

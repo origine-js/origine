@@ -17,6 +17,7 @@ const Runtime = @import("../managed/runtime.zig").Runtime;
 const init_snapshot = @import("../managed/init_snapshot.zig");
 const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
 const abi = @import("api_abi.zig");
+const snapshot_api = @import("snapshot.zig");
 
 pub const Options = struct {
     /// Module specifier of the child's init module (its exported `main(api)` runs). Copied.
@@ -33,6 +34,9 @@ pub const Options = struct {
     engine_snapshot: ?[]align(16) const u8 = null,
     /// What the child's `api.isolate.parent` is made of; null for a plain thread isolate.
     link: ?host_api.ParentLink = null,
+    /// An init snapshot (or bare blob) to start from, instead of the engine snapshot. The thread owns
+    /// this reference and releases it when the handle is destroyed.
+    snapshot: ?*snapshot_api.Record = null,
     /// Lets the child create isolates in turn (null: it cannot).
     isolates: ?host_api.IsolateConfig = null,
     /// Channel ends closed when the thread is done (after its outcome is recorded), whether or not
@@ -138,6 +142,7 @@ pub const ThreadIsolate = struct {
         allocator.free(self.options.env);
         allocator.free(self.options.release);
         allocator.free(self.options.init);
+        if (self.options.snapshot) |held| held.release();
         allocator.destroy(self);
     }
 
@@ -199,7 +204,7 @@ pub const ThreadIsolate = struct {
         defer alloc.free(references);
         rt = try Runtime.create(alloc, .{
             .array_buffer_allocator = .{ .borrowed = options.array_buffer_allocator },
-            .snapshot = options.engine_snapshot,
+            .snapshot = if (options.snapshot) |held| held.blob() else options.engine_snapshot,
             .external_references = init_snapshot.referenceTable(references),
         });
         {
@@ -209,7 +214,11 @@ pub const ThreadIsolate = struct {
         }
         // A terminate that arrived before the isolate was published has set `stop` only.
         if (self.stop.load(.acquire)) return error.Terminated;
-        const scope = try rt.?.createScope(host.initOptions());
+        var scope_options = host.initOptions();
+        if (options.snapshot) |held| if (held.image) |*image| {
+            scope_options.init_snapshot = &image.table;
+        };
+        const scope = try rt.?.createScope(scope_options);
         var error_info: ErrorInfo = .{};
         defer error_info.deinit();
         try host.run(scope, options.platform, options.init, &error_info);

@@ -95,10 +95,67 @@ export interface ThreadingCap {
   readonly Channel: ChannelConstructor;
 }
 
+/** Options of {@link SnapshotConstructor.create}. */
+export interface SnapshotCreateOptions {
+  /** Module specifier of the init module whose graph is evaluated, resolved as the process's own init is. */
+  readonly init: string;
+}
+
+/** Options of {@link SnapshotConstructor.fromOrigineDataBlob}. */
+export interface SnapshotLoadOptions {
+  /** The specifier the file was made for. */
+  readonly init: string;
+}
+
+/** Options of {@link Snapshot.origineDataBlob}. */
+export interface DataBlobOptions {
+  /** Pack the file with LZ4 (default `false`); needs a build with LZ4 snapshots, else `Unsupported`. */
+  readonly compress?: boolean;
+}
+
+/**
+ * A heap snapshot held in memory. Start isolates from one with `api.isolate.create({ snapshot })`:
+ * they begin with the init module graph already evaluated.
+ */
+export interface Snapshot {
+  /** The specifier this snapshot was made for; `undefined` for one from `fromRaw`. */
+  readonly init: string | undefined;
+  /** A copy of the raw V8 blob. */
+  blob(): Uint8Array;
+  /**
+   * A copy of the snapshot in the file format of `__oricache__`: it carries the table that restores the
+   * modules, and fits only this build, this `init` and these sources. `Unsupported` for a snapshot
+   * from `fromRaw`, which has no table.
+   */
+  origineDataBlob(options?: DataBlobOptions): Uint8Array;
+  /** Releases the memory; isolates already started from it keep their own hold. `BadHandle` when already closed. */
+  close(): void;
+}
+
+/** `api.host.Snapshot`. Cannot be called or constructed: use the static methods. */
+export interface SnapshotConstructor {
+  readonly prototype: Snapshot;
+  /**
+   * Evaluates the module graph of `options.init` (not its `main`) in a throwaway isolate **on this
+   * thread, which stays blocked until it is done**, and snapshots the heap. Throws `InvalidData` for
+   * an init that throws or needs I/O to finish, `Unsupported` for a graph a snapshot cannot carry,
+   * `PermissionDenied` where the embedder allows no isolates.
+   */
+  create(options: SnapshotCreateOptions): Snapshot;
+  /** A snapshot over a copy of a bare V8 blob, as `blob()` returns it. `InvalidData` for bytes V8 refuses. */
+  fromRaw(bytes: Uint8Array): Snapshot;
+  /**
+   * A snapshot from the bytes `origineDataBlob()` made. `InvalidData` for a damaged file, one made by
+   * another build or for another `init`, or whose source files changed since.
+   */
+  fromOrigineDataBlob(bytes: Uint8Array, options: SnapshotLoadOptions): Snapshot;
+}
+
 /** `api.host`: the machine and process the program runs on. */
 export interface HostCap {
   /** Arguments and environment variables. */
   readonly env: EnvCap;
+  readonly Snapshot: SnapshotConstructor;
   /** Threads: how many the host can run at once. */
   readonly threading: ThreadingCap;
 }

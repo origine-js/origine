@@ -18,6 +18,7 @@ const env_api = @import("env.zig");
 const errno = @import("errno.zig");
 const threading_api = @import("threading.zig");
 const isolate_api = @import("isolate.zig");
+const snapshot_api = @import("snapshot.zig");
 pub const ThreadIsolate = @import("thread_isolate.zig").ThreadIsolate;
 const fs_api = @import("fs.zig");
 const graph_api = @import("graph.zig");
@@ -224,6 +225,8 @@ pub const Host = struct {
     next_fs_id: u32 = 1,
     isolates: ?IsolateConfig = null,
     link: ?ParentLink = null,
+    /// Snapshots the guest made or loaded, by id (index + 1); `null` once closed. Released by `destroy`.
+    snapshots: std.ArrayList(?*snapshot_api.Record) = .empty,
     /// Isolates this Host created, in id order (id = index + 1); terminated and joined by `destroy`.
     children: std.ArrayList(*ThreadIsolate) = .empty,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
@@ -251,6 +254,8 @@ pub const Host = struct {
             child.destroy();
         }
         self.children.deinit(alloc);
+        for (self.snapshots.items) |item| if (item) |rec| rec.release();
+        self.snapshots.deinit(alloc);
         if (self.rust_isolate) |isolate| origine_api_detach_isolate(isolate.handle);
         for (self.grants.items) |grant| {
             grant.deinit();
@@ -616,6 +621,15 @@ pub const Host = struct {
                     .attach = func(attachChannels, .{ .side_effect = .any }),
                     .identity = func(threading_api.identity, .{ .side_effect = .none }),
                 },
+                .snapshot = .{
+                    .create = func(snapshot_api.create, .{ .side_effect = .any }),
+                    .fromRaw = func(snapshot_api.fromRaw, .{ .side_effect = .any }),
+                    .fromFile = func(snapshot_api.fromFile, .{ .side_effect = .any }),
+                    .blob = func(snapshot_api.blob, .{ .side_effect = .any }),
+                    .file = func(snapshot_api.file, .{ .side_effect = .any }),
+                    .init = func(snapshot_api.initOf, .{ .side_effect = .any }),
+                    .close = func(snapshot_api.close, .{ .side_effect = .any }),
+                },
             }),
             .fs => try call.object(ScopeState, state, .{
                 .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
@@ -680,7 +694,7 @@ pub const Host = struct {
             .io, .net => eu.v.object(env.isolate),
         };
         const keys: []const []const u8 = switch (module) {
-            .host => &.{ "env", "threading" },
+            .host => &.{ "env", "threading", "snapshot" },
             .isolate => &.{"isolate"},
             .fs => &.{"fsRequest"},
             else => &.{},

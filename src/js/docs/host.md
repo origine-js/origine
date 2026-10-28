@@ -6,6 +6,27 @@ Facts about the machine and process the program runs on. Types: `types/host.d.ts
 
 `args()`, `get(name)`, `list()` and `narrow({ allow })`; see `docs/api-design.md` (4.2).
 
+## `host.Snapshot`
+
+A heap snapshot in memory (types: `types/host.d.ts`). A new isolate started from one (`api.isolate.create({ snapshot })`) begins with the init module graph already evaluated, so it skips loading and running that code.
+
+```js
+const snapshot = api.host.Snapshot.create({ init: './worker.js' });   // blocks this thread while the graph is evaluated
+const bytes = snapshot.origineDataBlob();     // same format as a file in __oricache__
+const later = api.host.Snapshot.fromOrigineDataBlob(bytes, { init: './worker.js' });
+api.isolate.create({ init: './worker.js', snapshot: later });
+```
+
+| | |
+|---|---|
+| `Snapshot.create({ init })` | Evaluates the module graph of `init` (not its `main`) in a throwaway isolate **on this thread**, which stays blocked until it is done; run it in a worker isolate to keep an event loop responsive. `InvalidData` for an init that throws or needs I/O to finish, `Unsupported` for a graph a snapshot cannot carry, `PermissionDenied` where the embedder allows no isolates. |
+| `Snapshot.fromRaw(bytes)` | A snapshot over a copy of a bare V8 blob (`blob()`'s result). It has no module table and no `init`: an isolate started from it begins with that heap and evaluates its init normally. `InvalidData` for bytes V8 refuses. |
+| `Snapshot.fromOrigineDataBlob(bytes, { init })` | From the bytes `origineDataBlob()` made. A file only fits the build that made it, the same `init` and the same source files: anything else is `InvalidData` (a packed file in a build without LZ4 snapshots is `Unsupported`). |
+| `snapshot.init` | The specifier it was made for, `undefined` after `fromRaw`. |
+| `snapshot.blob()` | A `Uint8Array` copy of the raw V8 blob. |
+| `snapshot.origineDataBlob({ compress? })` | A `Uint8Array` copy in the file format of `__oricache__` (a `meta` word, then the module table and the blob), so JavaScript can keep it on disk. `compress: true` packs it with LZ4 and needs a build with LZ4 snapshots (`Unsupported` otherwise). `Unsupported` after `fromRaw`. |
+| `snapshot.close()` | Releases the memory; isolates already started from it keep their own hold. `BadHandle` afterwards. |
+
 ## `host.threading`
 
 - `parallelism`: logical CPUs the process may use (a number, at least 1). Read-only.

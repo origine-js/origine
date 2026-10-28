@@ -8,6 +8,7 @@ const host_api = @import("host.zig");
 const ScopeState = host_api.ScopeState;
 const ThreadIsolate = @import("thread_isolate.zig").ThreadIsolate;
 const Call = @import("binding.zig").Call;
+const snapshot_api = @import("snapshot.zig");
 
 comptime {
     errno.requireBinding(spawn);
@@ -17,19 +18,20 @@ comptime {
     errno.requireBinding(link);
 }
 
-/// `native.isolate.spawn(init, argsJson, envJson, done, data)`: starts an isolate running `init` (a
+/// `native.isolate.spawn(init, argsJson, envJson, done, data, snapshot)`: starts an isolate running `init` (a
 /// module specifier), with `args` (a JSON array of strings; the child sees the specifier first, as the
 /// process entry point does) and `env` (a JSON array of alternating names and values). `done` is a
 /// channel end closed when the thread ends. `data` is a stash id (0: none): the second argument of the
 /// child's `main`; the child drops it itself if it dies before taking it. Returns the isolate's
-/// identity, unique in the process.
+/// identity, unique in the process. `snapshot` is a `native.snapshot` id (0: none) to start the
+/// isolate from; it must have been made for `init` (`InvalidInput` otherwise).
 /// `PermissionDenied` when the embedder gave no `isolates`, `QuotaExceeded` past `max`,
 /// `InvalidInput` for malformed JSON.
-pub fn spawn(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, done: u32, data: f64) errno.Error!u32 {
-    return spawnImpl(state, init, args_json, env_json, done, data) catch |err| return errno.narrow(err);
+pub fn spawn(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, done: u32, data: f64, snapshot: u32) errno.Error!u32 {
+    return spawnImpl(state, init, args_json, env_json, done, data, snapshot) catch |err| return errno.narrow(err);
 }
 
-fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, done: u32, data: f64) !u32 {
+fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_json: []const u8, done: u32, data: f64, snapshot: u32) !u32 {
     const host = state.host;
     const config = host.isolates orelse return error.PermissionDenied;
     if (host.children.items.len >= config.max) return error.QuotaExceeded;
@@ -49,6 +51,17 @@ fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_js
     argv[0] = init;
     @memcpy(argv[1..], args_parsed.value);
     try host.children.ensureUnusedCapacity(alloc, 1);
+    // A snapshot is for one init: the child imports `init` and finds its graph already evaluated.
+    var held: ?*snapshot_api.Record = null;
+    if (snapshot != 0) {
+        const rec = try snapshot_api.retained(state, snapshot);
+        if (rec.init) |text| if (!std.mem.eql(u8, text, init)) {
+            rec.release();
+            return error.InvalidInput;
+        };
+        held = rec;
+    }
+    errdefer if (held) |rec| rec.release();
     const child = try ThreadIsolate.spawn(alloc, .{
         .init = init,
         .args = argv,
@@ -59,6 +72,7 @@ fn spawnImpl(state: *ScopeState, init: []const u8, args_json: []const u8, env_js
         .platform = config.platform,
         .engine_snapshot = config.engine_snapshot,
         .isolates = config,
+        .snapshot = held,
         .link = .{ .data = @intFromFloat(data), .identity = 0 },
         .release = &.{done},
     });

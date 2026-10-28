@@ -297,6 +297,35 @@ fn readSnapshot(alloc: std.mem.Allocator, root: sys.Dir, path: []const u8, compt
     return error.UnsupportedFeature;
 }
 
+/// The bytes of a cache file for `image`, in memory: the `meta` word, then the image (LZ4-packed
+/// when `compress`, which needs a build with `-Duser_snapshot=compressed`: `error.Unsupported`
+/// otherwise). The same bytes `store` writes. Caller frees with `alloc`; `image` stays the caller's.
+pub fn encodeFile(alloc: std.mem.Allocator, image: *const managed.init_snapshot.Image, compress: bool) ![]u8 {
+    if (compress) {
+        if (comptime !snapshot_compressed) return error.Unsupported;
+        const packed_bytes = try lz4_lib.pack(alloc, image.bytes);
+        defer alloc.free(packed_bytes);
+        return withMeta(alloc, meta.lz4, packed_bytes);
+    }
+    return withMeta(alloc, 0, image.bytes);
+}
+
+/// The snapshot inside the bytes of a cache file (`readSnapshot` for memory): checks the `meta`
+/// word, expands a packed payload (`error.UnsupportedFeature` when this build cannot) and returns an
+/// aligned copy owned by the caller. Borrows `file` for the call.
+pub fn decodeFile(alloc: std.mem.Allocator, file: []const u8) ![]align(16) u8 {
+    if (file.len < meta.len) return error.TruncatedFile;
+    const features = try meta.read(file[0..meta.len], meta.supported);
+    const payload = file[meta.len..];
+    if (features & meta.lz4 == 0) {
+        const bytes = try alloc.alignedAlloc(u8, managed.init_snapshot.alignment, payload.len);
+        @memcpy(bytes, payload);
+        return bytes;
+    }
+    if (comptime meta.supported & meta.lz4 != 0) return lz4_lib.unpack(alloc, payload);
+    return error.UnsupportedFeature;
+}
+
 /// Writes the snapshot file under `root` atomically (temporary file in the same directory,
 /// then rename) so a concurrent or interrupted run never sees a partial file. Creates
 /// `__oricache__` on demand. Borrows everything; the caller keeps the image.

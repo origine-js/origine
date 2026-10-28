@@ -46,9 +46,9 @@ export interface ThreadingCap {
   readonly parallelism: number;
   /** A new bounded channel between isolates. Throws `TypeError` for a bad `capacity`. */
   channel(options: ChannelOptions): { readonly tx: Sender; readonly rx: Receiver };
-  /** The sender behind a {@link Sender.handle} received from another isolate. */
+  /** The sender behind a {@link Sender.handle} received from another isolate. This isolate takes it over: it is closed when this isolate ends. `BadHandle` for a closed or unknown handle. */
   sender(handle: number): Sender;
-  /** The receiver behind a {@link Receiver.handle} received from another isolate. */
+  /** The receiver behind a {@link Receiver.handle} received from another isolate; taken over like {@link ThreadingCap.sender}. */
   receiver(handle: number): Receiver;
 }
 

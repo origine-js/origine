@@ -24,5 +24,5 @@ Messages are copied with the structured clone algorithm (V8 `ValueSerializer`): 
 | `rx.recv()` | `Promise` of the oldest message; waits while the channel is empty. Rejects `NotConnected` once drained with no sender left. |
 | `for await (const m of rx)` | the messages until that end. |
 
-A handle names an end process-wide: the same number closes the same end for every isolate that holds it. Ends are not closed when an isolate dies; close them explicitly.
+A handle names an end process-wide: the same number closes the same end for every isolate that holds it. An end belongs to the isolate that made it (`channel`, `clone`) or last took it over (`sender(handle)`, `receiver(handle)`), and is closed when that isolate ends, so a peer waiting on a crashed isolate sees `NotConnected` or `BrokenPipe` instead of waiting forever.
 Order is kept per channel. Natives: `rust/crates/origine_api/src/channel.rs` (`native.channel.*`), codec in `message.rs`.

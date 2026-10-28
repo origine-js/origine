@@ -63,8 +63,10 @@ const Step = enum(u32) { layer = 0, hook = 1, maker = 2, transform = 3, meta = 4
 
 /// A call into the JS driver whose promise has not settled: which element runs and what the chain
 /// needs to go on once it answers. A chain keeps its token across steps; only the end completes it.
-const PendingJs = struct {
-    context: *Context,
+pub const PendingJs = struct {
+    host: *Host,
+    /// Null once the context was freed while the call was in flight: the callbacks then only free it.
+    context: ?*Context,
     /// The request the chain serves: a resolution for `layer`, a load for every other step.
     token: module_types.LoadToken,
     step: Step,
@@ -84,6 +86,8 @@ const PendingJs = struct {
     file: u32 = 0,
     json: bool = false,
     settled: bool = false,
+    /// A completion callback ran (its sibling never will): nothing refers to it any more.
+    fired: bool = false,
 };
 
 /// What a chain works on. Borrowed.
@@ -205,7 +209,16 @@ pub const Context = struct {
             alloc.free(entry.value_ptr.*);
         }
         self.meta.deinit(alloc);
-        for (self.pendings.items) |pending| freePending(alloc, pending);
+        // A call whose promise has not settled still has callbacks in the creating realm that point at
+        // its record: hand it to the host, which frees it when one of them runs.
+        for (self.pendings.items) |pending| {
+            if (pending.fired) {
+                freePending(alloc, pending);
+                continue;
+            }
+            pending.context = null;
+            self.host.orphans.append(alloc, pending) catch {};
+        }
         self.pendings.deinit(alloc);
     }
 
@@ -266,7 +279,7 @@ pub const Context = struct {
     }
 };
 
-fn freePending(alloc: std.mem.Allocator, pending: *PendingJs) void {
+pub fn freePending(alloc: std.mem.Allocator, pending: *PendingJs) void {
     alloc.free(pending.id);
     for (pending.attributes) |attribute| {
         alloc.free(attribute.key);
@@ -279,10 +292,19 @@ fn freePending(alloc: std.mem.Allocator, pending: *PendingJs) void {
     alloc.destroy(pending);
 }
 
+/// A completion callback of a call whose context is gone: nothing else refers to it.
+fn freeOrphan(pending: *PendingJs) void {
+    const host = pending.host;
+    for (host.orphans.items, 0..) |item, index| if (item == pending) {
+        _ = host.orphans.swapRemove(index);
+        break;
+    };
+    freePending(host.allocator, pending);
+}
+
 fn contextFor(state: *ScopeState, id: u32) !*Context {
     const host = state.host;
-    if (id == 0 or id > host.contexts.items.len) return error.BadHandle;
-    const found = host.contexts.items[id - 1];
+    const found = host.contexts.get(id) orelse return if (host.contexts.issued(id)) error.StaleHandle else error.BadHandle;
     if (found.creator != state) return error.BadHandle;
     if (found.closed) return error.StaleHandle;
     return found;
@@ -489,7 +511,7 @@ fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8
     const alloc = self.host.allocator;
     const pending = try alloc.create(PendingJs);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .context = self, .token = work.token, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json };
+    pending.* = .{ .host = self.host, .context = self, .token = work.token, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json };
     pending.id = try alloc.dupe(u8, work.id);
     errdefer alloc.free(pending.id);
     pending.specifier = try alloc.dupe(u8, work.specifier);
@@ -666,7 +688,8 @@ fn retire(self: *Context, pending: *PendingJs) void {
 
 fn fulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(PendingJs, info);
-    const self = pending.context;
+    pending.fired = true;
+    const self = pending.context orelse return freeOrphan(pending);
     if (pending.settled or self.closed) return;
     pending.settled = true;
     defer retire(self, pending);
@@ -775,7 +798,8 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
 
 fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(PendingJs, info);
-    const self = pending.context;
+    pending.fired = true;
+    const self = pending.context orelse return freeOrphan(pending);
     if (pending.settled or self.closed) return;
     pending.settled = true;
     defer retire(self, pending);
@@ -828,8 +852,7 @@ fn idOf(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, value: v
 /// the exports it copied (`linkExports`). Handles stay in `self.link_*` until the next bridge call.
 fn link(self: *Context, other_id: u32, name: []const u8, shared: bool) !module_types.Content {
     const host = self.host;
-    if (other_id == 0 or other_id > host.contexts.items.len) return error.BadHandle;
-    const other = host.contexts.items[other_id - 1];
+    const other = host.contexts.get(other_id) orelse return error.BadHandle;
     if (other.closed or other.creator != self.creator) return error.BadHandle;
     const held = (try other.scope.module_map.get(.{ .module_id = name }, null)) orelse return error.NotFound;
     errdefer held.deinit();
@@ -986,11 +1009,17 @@ fn cacheStore(data: ?*anyopaque, request: module_types.CodeCacheRequest, bytes: 
     }
 }
 
-fn onDispose(data: ?*anyopaque, scope: *Scope) void {
-    const host: *Host = @ptrCast(@alignCast(data.?));
-    for (host.contexts.items) |ctx| if (ctx.scope == scope) {
-        ctx.closed = true;
+/// Frees a context whose scope was freed. Records that callbacks can still reach outlive it: an
+/// import in flight (its promise rejects as the scope's pending loads do) loses its context pointer, and
+/// the calls into the JS driver whose promises are open are handed to the host (`Context.deinit`).
+pub fn free(host: *Host, context: *Context) void {
+    const alloc = host.allocator;
+    for (host.imports.items) |pending| if (pending.context == context) {
+        pending.context = null;
     };
+    host.contexts.remove(context.id);
+    context.deinit();
+    alloc.destroy(context);
 }
 
 // ---- natives ---------------------------------------------------------------
@@ -1007,12 +1036,12 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
     const h = try graph_api.handlerFor(host, import_handler);
     const graph = try graph_api.graphFor(host, graph_id);
     if (!h.native and state.driver == null) return error.Unsupported;
-    try host.contexts.ensureUnusedCapacity(alloc, 1);
+    try host.contexts.map.ensureUnusedCapacity(alloc, 1);
     const context = try alloc.create(Context);
     errdefer alloc.destroy(context);
     context.* = .{
         .host = host,
-        .id = @intCast(host.contexts.items.len + 1),
+        .id = try host.contexts.issue(),
         .creator = state,
         .scope = undefined,
         .graph = graph,
@@ -1027,6 +1056,7 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
         .loader = .{ .data = context, .load = load },
         .meta = .{ .data = context, .init = metaHook },
         .on_dispose = host.disposer(),
+        .on_freed = host.freer(),
         .retain = switch (h.retain) {
             .all => .all,
             .used => .used,
@@ -1038,7 +1068,7 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
     errdefer state.scope.runtime.disposeScope(scope);
     context.scope = scope;
     _ = try host.attach(scope);
-    host.contexts.appendAssumeCapacity(context);
+    host.contexts.put(alloc, context.id, context) catch unreachable;
     return context.id;
 }
 
@@ -1046,7 +1076,10 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
 /// has been evaluated, or rejected with a fresh `ModuleError`.
 pub const ImportState = struct {
     host: *Host,
-    context: *Context,
+    /// Null once the context was freed: a callback that still runs (the scope's pending loads reject
+    /// when it is freed) settles the promise and frees the record.
+    context: ?*Context,
+    creator: *ScopeState,
     resolver: v8.Global.Of(v8.Promise.Resolver),
     done: bool = false,
 };
@@ -1055,7 +1088,7 @@ fn settleOk(pending: *ImportState, isolate: v8.Isolate, id: ?[]const u8) void {
     if (pending.done) return;
     pending.done = true;
     defer pending.resolver.deinit();
-    const parent = pending.context.creator.scope.context.deref();
+    const parent = pending.creator.scope.context.deref();
     const value = if (id) |text| binding.string(isolate, text) else eu.v.undefined_value(isolate).value;
     _ = pending.resolver.deref().resolve(parent, value);
 }
@@ -1064,7 +1097,7 @@ fn settleFail(pending: *ImportState, isolate: v8.Isolate, reason: v8.Value, chil
     if (pending.done) return;
     pending.done = true;
     defer pending.resolver.deinit();
-    const parent = pending.context.creator.scope.context.deref();
+    const parent = pending.creator.scope.context.deref();
     const message = if (reason.toDetailString(child_ctx)) |text| text.name.primitive.value else binding.string(isolate, "module evaluation failed");
     const env: binding.Env = .{ .isolate = isolate, .ctx = parent };
     const failure = binding.encode(env, {}, .{
@@ -1078,19 +1111,32 @@ fn settleFail(pending: *ImportState, isolate: v8.Isolate, reason: v8.Value, chil
     _ = pending.resolver.deref().reject(parent, failure);
 }
 
+/// Forgets a settled import and frees it: the promise settled once, so its other callback never runs.
+fn freeImport(pending: *ImportState) void {
+    const host = pending.host;
+    for (host.imports.items, 0..) |item, index| if (item == pending) {
+        _ = host.imports.swapRemove(index);
+        break;
+    };
+    host.allocator.destroy(pending);
+}
+
 fn importFulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(ImportState, info);
     const isolate = info.isolate();
-    const ctx = isolate.getCurrentContext();
-    _ = ctx;
-    const id = pending.context.scope.module_map.idOfNamespace(info.get_arg(0));
-    settleOk(pending, isolate, id);
+    if (pending.context) |context| {
+        settleOk(pending, isolate, context.scope.module_map.idOfNamespace(info.get_arg(0)));
+    } else {
+        settleFail(pending, isolate, binding.string(isolate, "the context was closed"), isolate.getCurrentContext());
+    }
+    freeImport(pending);
 }
 
 fn importRejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(ImportState, info);
     const isolate = info.isolate();
     settleFail(pending, isolate, info.get_arg(0), isolate.getCurrentContext());
+    freeImport(pending);
 }
 
 fn startImport(call: *Call, state: *ScopeState, context: *Context, promise: v8.Global.Of(v8.Promise)) !v8.Promise {
@@ -1100,7 +1146,7 @@ fn startImport(call: *Call, state: *ScopeState, context: *Context, promise: v8.G
     const resolver = eu.v.promise_resolver(call.ctx) orelse return error.Unexpected;
     const pending = try alloc.create(ImportState);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .host = host, .context = context, .resolver = .new(call.isolate, resolver) };
+    pending.* = .{ .host = host, .context = context, .creator = state, .resolver = .new(call.isolate, resolver) };
     errdefer pending.resolver.deinit();
     try host.imports.append(alloc, pending);
     errdefer _ = host.imports.pop();
@@ -1176,7 +1222,7 @@ pub fn close(state: *ScopeState, id: u32) Error!void {
 pub fn closeContext(host: *Host, context: *Context) void {
     if (context.closed) return;
     context.closed = true;
-    for (host.contexts.items) |other| {
+    for (host.contexts.values()) |other| {
         if (!other.closed and other.creator.scope == context.scope) closeContext(host, other);
     }
     context.scope.runtime.disposeScope(context.scope);
@@ -1215,7 +1261,7 @@ fn flushImpl(state: *ScopeState, call: *Call, graph_id: u32) !v8.Value {
     const host = state.host;
     const graph = try graph_api.graphFor(host, graph_id);
     var stored: usize = 0;
-    for (host.contexts.items) |context| {
+    for (host.contexts.values()) |context| {
         if (context.closed or context.graph != graph) continue;
         stored += context.scope.flushCodeCache();
     }
@@ -1332,6 +1378,15 @@ fn preloadModuleImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8,
 fn preloadSettle(pending: *PreloadState, isolate: v8.Isolate, reason: ?v8.Value) void {
     if (pending.done) return;
     pending.done = true;
+    // Settled once: no callback refers to it afterwards.
+    defer {
+        const host = pending.host;
+        for (host.preloads.items, 0..) |item, index| if (item == pending) {
+            _ = host.preloads.swapRemove(index);
+            break;
+        };
+        host.allocator.destroy(pending);
+    }
     defer pending.resolver.deinit();
     defer if (pending.values) |held| {
         held.deinit();

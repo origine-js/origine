@@ -1037,7 +1037,7 @@ test "graph: a settled driver call is freed and a second evaluate waits for the 
     try fx.run();
     try check(fx.scope, "report.imports === 6 && report.same && report.afterSecond === 1 && report.runs === 1 && report.failures === 'ModuleError,ModuleError:errored'");
     // Every call into the driver settled, so none is kept.
-    try t.expectEqual(@as(usize, 0), fx.host.contexts.items[0].pendings.items.len);
+    try t.expectEqual(@as(usize, 0), fx.host.contexts.values()[0].pendings.items.len);
 }
 
 test "graph: a handler with functions in it runs its host elements natively and calls the driver only for the functions" {
@@ -1159,8 +1159,8 @@ test "graph: the origine ceiling of a context is the exact union of its hooks" {
         .{ true, false, true },
         .{ false, false, false },
     };
-    try t.expectEqual(expected.len, fx.host.contexts.items.len);
-    for (fx.host.contexts.items, expected) |context, row| {
+    try t.expectEqual(expected.len, fx.host.contexts.count());
+    for (fx.host.contexts.values(), expected) |context, row| {
         const ceiling = context.ceiling.?;
         for (names, row) |name, allowed| try t.expectEqual(allowed, ceiling.allows(name));
     }
@@ -1269,7 +1269,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
     try t.expectEqual(@as(usize, 1), fx.host.driver_calls);
     // The graphs read through the async grant's natives, not through a sync grant.
     var async_graphs: usize = 0;
-    for (fx.host.graphs.items) |graph| {
+    for (fx.host.graphs.values()) |graph| {
         if (graph.async_fs != null) {
             async_graphs += 1;
             try t.expect(graph.fs == null);
@@ -3515,6 +3515,52 @@ test "api: closing a context disposes it, including one with a load in flight" {
     fx.rt.pump();
     // Only the init scope is left: every context was freed, not just closed.
     try t.expectEqual(@as(usize, 1), fx.rt.scopes.items.len);
+}
+
+test "api: a closed context is freed with its imports and driver calls; ids are not reused" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
+        \\export async function main(api) {
+        \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js', late: 'app:/late.js' } })), hooks: [fromLoader(load)] });
+        \\  for (let n = 0; n < 30; n++) {
+        \\    const child = await api.context.create({ import: handlerFor(() => 'export const x = 1'), preload: [{ module: 'export default () => {};', values: {} }] });
+        \\    await child.import('m');
+        \\    child.close();
+        \\  }
+        \\  // A hook that settles after its context was closed, and one that never settles.
+        \\  let release;
+        \\  const gate = new Promise(resolve => { release = resolve; });
+        \\  const late = await api.context.create({ import: handlerFor(() => gate.then(() => 'export const y = 1')) });
+        \\  const running = late.import('late').then(() => 'ran', () => 'rejected');
+        \\  const stuck = await api.context.create({ import: handlerFor(() => new Promise(() => {})) });
+        \\  stuck.import('m').catch(() => {});
+        \\  await Promise.resolve();
+        \\  late.close();
+        \\  stuck.close();
+        \\  globalThis.hold = () => { release('export const y = 1'); return running; };
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    fx.rt.pump();
+    // Every context is gone, and so are the finished imports and preloads. The settled-later hook is
+    // still in flight; the one that never settles keeps only its small record.
+    try t.expectEqual(@as(usize, 0), fx.host.contexts.count());
+    try t.expectEqual(@as(u32, 33), fx.host.contexts.next);
+    try t.expect(fx.host.imports.items.len <= 2);
+    try t.expectEqual(@as(usize, 0), fx.host.preloads.items.len);
+    const orphans = fx.host.orphans.items.len;
+    try t.expect(orphans >= 1);
+    try check(fx.scope, "(hold().then(() => { globalThis.settled = true; }), true)");
+    fx.rt.pump();
+    try check(fx.scope, "globalThis.settled === true");
+    try t.expectEqual(@as(usize, 0), fx.host.imports.items.len);
+    // The gated call's record was freed by its callback; only the one that never settles remains.
+    try t.expectEqual(orphans - 1, fx.host.orphans.items.len);
 }
 
 test "api: module preloads, with the origine allowlist per context" {

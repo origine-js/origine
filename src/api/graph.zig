@@ -518,8 +518,7 @@ pub const Graph = struct {
 };
 
 pub fn graphFor(host: *Host, id: u32) !*Graph {
-    if (id == 0 or id > host.graphs.items.len) return error.BadHandle;
-    const found = host.graphs.items[id - 1];
+    const found = host.graphs.get(id) orelse return if (host.graphs.issued(id)) error.StaleHandle else error.BadHandle;
     if (found.closed) return error.StaleHandle;
     return found;
 }
@@ -543,7 +542,7 @@ fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, 
     if (!(bytes >= 0) or bytes > 9007199254740991) return error.InvalidInput;
     const created = try alloc.create(Graph);
     errdefer alloc.destroy(created);
-    created.* = .{ .host = host, .id = @intCast(host.graphs.items.len + 1), .owner = state, .kind = kind, .cache_bytes = @intFromFloat(bytes) };
+    created.* = .{ .host = host, .id = try host.graphs.issue(), .owner = state, .kind = kind, .cache_bytes = @intFromFloat(bytes) };
     if (fs_id != 0) {
         const grant = try grantFor(host, fs_id);
         if (!grant.read) return error.PermissionDenied;
@@ -554,7 +553,7 @@ fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, 
         if (!grant.write) return error.PermissionDenied;
         created.dir_state = init_cache.CodeCacheState.initFlat(host, grant.root);
     }
-    try host.graphs.append(alloc, created);
+    try host.graphs.put(alloc, created.id, created);
     return created.id;
 }
 
@@ -697,13 +696,13 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         },
         else => {},
     };
-    try host.handlers.append(host.allocator, parsed);
-    return @intCast(host.handlers.items.len);
+    const id = try host.handlers.issue();
+    try host.handlers.put(host.allocator, id, parsed);
+    return id;
 }
 
 pub fn handlerFor(host: *Host, id: u32) !*Handler {
-    if (id == 0 or id > host.handlers.items.len) return error.BadHandle;
-    return host.handlers.items[id - 1];
+    return host.handlers.get(id) orelse if (host.handlers.issued(id)) error.StaleHandle else error.BadHandle;
 }
 
 fn attributesOf(call: *Call, json: []const u8) ![]const module_types.ImportAttribute {

@@ -170,6 +170,9 @@ pub const Scope = struct {
         /// and before its module map goes: the host releases what it keeps for the scope. Not
         /// called by `Runtime.destroy`, which hosts tear down first. Callback data is host-owned.
         on_dispose: ?Disposer = null,
+        /// Called last when a disposed scope has been freed, with its (dangling) address, which names
+        /// nothing any more: the host drops the records it kept for it. Not called by `Runtime.destroy`.
+        on_freed: ?Disposer = null,
         /// What the module table keeps of a module nothing else holds: `all` keeps every module for
         /// the scope's lifetime (module identity as in ESM), `used` frees a module once no pin,
         /// import in flight or held module reaches it, so a later import evaluates it again.
@@ -259,6 +262,7 @@ pub const Scope = struct {
     fn teardown(self: *Scope, notify: bool) void {
         const alloc = self.runtime.allocator;
         const ctx = self.context.deref();
+        const freed = if (notify) self.options.on_freed else null;
         ctx.enter();
         if (notify) if (self.options.on_dispose) |hook| hook.call(hook.data, self);
         self.module_map.deinit();
@@ -273,6 +277,7 @@ pub const Scope = struct {
         }
         self.context.deinit();
         alloc.destroy(self);
+        if (freed) |hook| hook.call(hook.data, self);
     }
 
     /// Deep-freeze a supported public graph. Hidden closure/private state is intentionally untouched.

@@ -24,6 +24,7 @@ const fs_api = @import("fs.zig");
 const graph_api = @import("graph.zig");
 const context_api = @import("context.zig");
 const init_loader = @import("init_loader.zig");
+const registry = @import("registry.zig");
 const origine_modules = @import("std/modules.zig");
 const module_api = @import("module.zig");
 const transformer_api = @import("transform/transformer.zig");
@@ -213,11 +214,16 @@ pub const Host = struct {
     grants: std.ArrayList(*fs_api.FsGrant) = .empty,
     states: std.ArrayList(*ScopeState) = .empty,
     /// The module graph: graphs, registered import handlers, contexts and their imports in flight.
-    /// Ids are `index + 1` and never reused; everything is freed by `destroy`.
-    graphs: std.ArrayList(*graph_api.Graph) = .empty,
-    handlers: std.ArrayList(*graph_api.Handler) = .empty,
-    contexts: std.ArrayList(*context_api.Context) = .empty,
+    /// Ids are never reused (`registry.zig`). A context is freed with its scope, a handler when no live
+    /// context can reach it, a graph once it is closed and none of its contexts is left; `destroy`
+    /// frees the rest.
+    graphs: registry.Registry(graph_api.Graph) = .{},
+    handlers: registry.Registry(graph_api.Handler) = .{},
+    contexts: registry.Registry(context_api.Context) = .{},
     imports: std.ArrayList(*context_api.ImportState) = .empty,
+    /// Calls into the JS driver whose context was freed before the promise settled; each is freed by
+    /// its callback, or by `destroy` when the promise never settles.
+    orphans: std.ArrayList(*context_api.PendingJs) = .empty,
     preloads: std.ArrayList(*context_api.PreloadState) = .empty,
     /// How many times a context called into the JS driver of the module graph. A handler with no JS
     /// function in it never does (tests assert it).
@@ -275,17 +281,19 @@ pub const Host = struct {
             alloc.destroy(pending);
         }
         self.preloads.deinit(alloc);
-        for (self.contexts.items) |context| {
+        for (self.contexts.values()) |context| {
             context.deinit();
             alloc.destroy(context);
         }
         self.contexts.deinit(alloc);
-        for (self.handlers.items) |item| {
+        for (self.orphans.items) |pending| context_api.freePending(alloc, pending);
+        self.orphans.deinit(alloc);
+        for (self.handlers.values()) |item| {
             item.deinit();
             alloc.destroy(item);
         }
         self.handlers.deinit(alloc);
-        for (self.graphs.items) |item| {
+        for (self.graphs.values()) |item| {
             item.deinit();
             alloc.destroy(item);
         }
@@ -400,7 +408,7 @@ pub const Host = struct {
     /// The `origine:` modules code running in `scope` may serve to others: the allowlist of its
     /// context, nothing for a scope without the namespace, everything for the init scope.
     pub fn ceilingOf(self: *Host, scope: *Scope) ?graph_api.StdFilter {
-        for (self.contexts.items) |context| if (context.scope == scope) return context.ceiling;
+        for (self.contexts.values()) |context| if (context.scope == scope) return context.ceiling;
         if (!scope.options.origine_namespace) return .{ .include = &.{} };
         return null;
     }
@@ -410,11 +418,24 @@ pub const Host = struct {
         return .{ .data = self, .call = onDispose };
     }
 
+    /// The `Scope.Options.on_freed` hook of a context's scope: its record goes with it.
+    pub fn freer(self: *Host) Scope.Disposer {
+        return .{ .data = self, .call = onFreed };
+    }
+
+    fn onFreed(data: ?*anyopaque, scope: *Scope) void {
+        const self: *Host = @ptrCast(@alignCast(data.?));
+        for (self.contexts.values()) |context| if (context.scope == scope) {
+            context_api.free(self, context);
+            return;
+        };
+    }
+
     /// Runs while a disposed scope is freed: releases its host state and its JS loader.
     fn onDispose(data: ?*anyopaque, scope: *Scope) void {
         const self: *Host = @ptrCast(@alignCast(data.?));
         self.release(scope);
-        for (self.contexts.items) |context| if (context.scope == scope) {
+        for (self.contexts.values()) |context| if (context.scope == scope) {
             context.closed = true;
         };
     }

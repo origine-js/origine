@@ -1217,6 +1217,45 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
     try check(fx.scope, "report.forged === 'InvalidInput' && report.forgedFrozen === 'InvalidInput' && report.copy === 'InvalidInput' && report.forgedCache === 'InvalidInput' && report.real === 'ok'");
 }
 
+test "graph: a source larger than the graph's limit fails the import, never cut short, for sync and async grants" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create({});
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  out.root = api.graph.sourceBytes;
+        \\  let counter = 0;
+        \\  const tryImport = async graph => {
+        \\    const ctx = await api.context.create({ import: handler, graph });
+        \\    const run = specifier => ModuleRecipe({ source: ModuleSource.text('import ' + JSON.stringify(specifier) + ';'), import: handler, name: 'entry' + (counter++) + '.js' }).create(graph).evaluate(ctx).then(() => 'ok', e => e.message);
+        \\    const answers = [await run('./fits.js'), await run('./big.js')];
+        \\    ctx.close();
+        \\    return answers;
+        \\  };
+        \\  const sync = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }), sourceBytes: 40 });
+        \\  out.syncLimit = sync.sourceBytes;
+        \\  out.sync = await tryImport(sync);
+        \\  out.async = await tryImport(api.graph.narrow({ fs: await api.fs.requestAsync({ io, access: 'r' }), sourceBytes: 40 }));
+        \\  out.bad = [0, 1.5, -1, '9'].map(n => { try { api.graph.narrow({ sourceBytes: n }); return 'ok'; } catch (e) { return e.name; } }).join(',');
+        \\  await io.close();
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    // 40 bytes exactly fits; one more does not.
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "fits.js", .data = "export const k = 1; //xxxxxxxxxxxxxxxxxx" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "big.js", .data = "export const k = 1; //xxxxxxxxxxxxxxxxxxx" });
+    try fx.run();
+    try check(fx.scope, "report.root === 67108864 && report.syncLimit === 40 && report.bad === 'InvalidInput,InvalidInput,InvalidInput,InvalidInput'");
+    try check(fx.scope, "report.sync[0] === 'ok' && report.sync[1].includes('FileTooLarge') && report.async[0] === 'ok' && report.async[1].includes('FileTooLarge')");
+}
+
 test "graph: an async fs grant serves source files on its io runtime without entering JS" {
     var fx: Fixture = undefined;
     try fx.setup(

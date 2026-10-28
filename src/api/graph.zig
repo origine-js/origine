@@ -453,6 +453,8 @@ pub const Graph = struct {
     kind: CodeCacheKind = .none,
     /// `bytes` cap of the memory cache (0: none).
     cache_bytes: usize = 0,
+    /// Largest source file a hook reads through the graph's fs grant; a larger one is `FileTooLarge`.
+    source_limit: usize,
     /// Code-cache entries of this graph: `id ++ 0 ++ <32 byte hash of the source>` to bytes.
     memory: std.StringHashMapUnmanaged([]u8) = .empty,
     memory_size: usize = 0,
@@ -533,8 +535,9 @@ pub fn graphFor(host: *Host, id: u32) !*Graph {
 /// `create(fsId | 0, cacheKind, bytes, cacheFsId | 0)`: a graph. `fsId` is the id of a sync fs grant
 /// whose root sources are read from (0: none, so `fs` hooks are `PermissionDenied`). `cacheKind` is
 /// 0 none, 1 memory, 2 dir (`cacheFsId` names the grant whose root holds `__oricache__`), 3 custom.
-pub fn graphCreate(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32) Error!u32 {
-    return graphCreateImpl(state, fs_id, cache_kind, bytes, cache_fs_id) catch |err| return errno.narrow(err);
+/// `sourceBytes` (at least 1) is the largest source file the graph reads.
+pub fn graphCreate(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32, source_bytes: f64) Error!u32 {
+    return graphCreateImpl(state, fs_id, cache_kind, bytes, cache_fs_id, source_bytes) catch |err| return errno.narrow(err);
 }
 
 /// `close(graph)`: the graph takes no more contexts or references, and is freed (with the code
@@ -560,14 +563,15 @@ fn grantFor(host: *Host, id: u32) !*fs_api.FsGrant {
     return error.BadHandle;
 }
 
-fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32) !u32 {
+fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32, source_bytes: f64) !u32 {
     const host = state.host;
     const alloc = host.allocator;
     const kind = std.enums.fromInt(CodeCacheKind, cache_kind) orelse return error.InvalidInput;
     if (!(bytes >= 0) or bytes > 9007199254740991) return error.InvalidInput;
+    if (!(source_bytes >= 1) or source_bytes > 9007199254740991) return error.InvalidInput;
     const created = try alloc.create(Graph);
     errdefer alloc.destroy(created);
-    created.* = .{ .host = host, .id = try host.graphs.issue(), .owner = state, .kind = kind, .cache_bytes = @intFromFloat(bytes) };
+    created.* = .{ .host = host, .id = try host.graphs.issue(), .owner = state, .source_limit = @intFromFloat(source_bytes), .kind = kind, .cache_bytes = @intFromFloat(bytes) };
     if (fs_id != 0) {
         const grant = try grantFor(host, fs_id);
         if (!grant.read) return error.PermissionDenied;
@@ -631,7 +635,11 @@ fn readFromGraph(env: HookEnv, id: []const u8) ![]u8 {
     const grant = env.graph.fs orelse return error.PermissionDenied;
     if (grant.closed) return error.StaleHandle;
     try fs_api.cleanPath(id);
-    return grant.root.readFileAlloc(id, env.alloc, .unlimited);
+    // `limited(n)` rejects a file of n bytes or more; one that is exactly the limit still fits.
+    return grant.root.readFileAlloc(id, env.alloc, .limited(env.graph.source_limit + 1)) catch |err| switch (err) {
+        error.StreamTooLong => error.FileTooLarge,
+        else => |other| other,
+    };
 }
 
 pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attributes: []const module_types.ImportAttribute) !HookResult {

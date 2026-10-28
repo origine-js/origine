@@ -50,6 +50,12 @@ export interface GraphOptions {
   readonly fs?: SyncFs | AsyncFs;
   /** `origine:@std/graph/cache`: where V8 code caches are kept. Default: none. */
   readonly codeCache?: import("origine:@std/graph/cache").CodeCache;
+  /**
+   * The largest source file the graph reads through its fs grant, in bytes (a positive integer). A larger
+   * file fails the import with `FileTooLarge`; it is never cut short. Default: the graph's own
+   * ({@link ModuleGraph.sourceBytes}), 64 MiB for `api.graph`.
+   */
+  readonly sourceBytes?: number;
 }
 
 /**
@@ -63,6 +69,8 @@ export interface ModuleGraph {
    * not already hold. Throws `InvalidInput` for a grant that is not sync or a malformed cache.
    */
   narrow(options?: GraphOptions): NarrowedGraph;
+  /** The largest source file the graph reads through its fs grant, in bytes. */
+  readonly sourceBytes: number;
   /**
    * Persists the V8 code caches of modules that compiled without a usable one (a `dir` cache writes
    * its files, a `custom` one gets `store` calls). Resolves how many modules were stored.

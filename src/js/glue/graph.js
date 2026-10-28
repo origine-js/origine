@@ -186,10 +186,14 @@
   const readText = async (graphId, path) => {
     const grant = graphFs.get(graphId);
     if (grant === undefined || grant.kind !== 'async') return host(native.graph.readSource, graphId, path);
+    const limit = grant.limit;
     const ops = util.shared.fsAsync;
     const file = await ops.openFile(grant.id, 0, path, 0);
     try {
-      return host(native.graph.utf8, await ops.readAll(grant.id, file, Infinity));
+      // One byte more than the limit tells a file that is too large from one that just fits.
+      const bytes = await ops.readAll(grant.id, file, limit + 1);
+      if (bytes.length > limit) throw named(errors.FileTooLarge, `${path} is larger than ${limit} bytes`);
+      return host(native.graph.utf8, bytes);
     } finally {
       await ops.close(grant.id, file).catch(() => {});
     }
@@ -591,8 +595,10 @@
       narrow(options) {
         const fs = own(options, 'fs') ?? config.fs;
         const codeCache = own(options, 'codeCache') ?? config.codeCache;
-        return build(fs, codeCache);
+        return build(fs, codeCache, own(options, 'sourceBytes') ?? config.sourceBytes);
       },
+      /// The largest source file the graph reads through its fs grant, in bytes.
+      sourceBytes: config.sourceBytes,
       /// Persists the code caches of modules compiled without one; resolves how many modules were stored.
       async flush() {
         const out = host(native.context.flush, id);
@@ -625,7 +631,11 @@
     return freeze(graph);
   };
 
-  const build = (fs, codeCache) => {
+  /// The largest source file a graph reads unless `narrow({ sourceBytes })` says otherwise.
+  const DEFAULT_SOURCE_BYTES = 64 * 1024 * 1024;
+
+  const build = (fs, codeCache, sourceBytes = DEFAULT_SOURCE_BYTES) => {
+    if (!Number.isSafeInteger(sourceBytes) || sourceBytes < 1) throw invalid('sourceBytes must be a positive integer');
     let fsId = 0;
     if (fs !== undefined) {
       if (fs === null || typeof fs !== 'object' || (fs.kind !== 'sync' && fs.kind !== 'async') || !fsGrants.has(fs))
@@ -651,14 +661,14 @@
       }
       bytes = codeCache.bytes ?? 0;
     }
-    const id = host(native.graph.create, fsId, kind, bytes, cacheFsId);
+    const id = host(native.graph.create, fsId, kind, bytes, cacheFsId, sourceBytes);
     if (kind === 3) graphCache.set(id, codeCache);
     if (fs !== undefined) {
       if (fs.kind === 'async')
         host(native.graph.asyncFs, id, fs.id, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
-      graphFs.set(id, freeze({ kind: fs.kind, id: fs.id }));
+      graphFs.set(id, freeze({ kind: fs.kind, id: fs.id, limit: sourceBytes }));
     }
-    return makeGraph(id, freeze({ fs, codeCache }));
+    return makeGraph(id, freeze({ fs, codeCache, sourceBytes }));
   };
 
   let root;
@@ -691,6 +701,7 @@
     const cap = {
       narrow: options => rootGraph().narrow(options),
       flush: () => rootGraph().flush(),
+      sourceBytes: DEFAULT_SOURCE_BYTES,
       [CREATE]: recipe => rootGraph()[CREATE](recipe),
     };
     graphs.set(cap, {

@@ -584,8 +584,10 @@ fn continueRead(self: *Context, work: Work, pending: *PendingJs, value: v8.Value
     tc.init(isolate);
     defer tc.deinit();
     const undef = eu.v.undefined_value(isolate).value;
-    const unlimited = eu.v.num_f64(isolate, std.math.inf(f64)).numeric.primitive.value;
-    const result = async_fs.read_all.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, file), unlimited }) orelse {
+    // One byte more than the limit tells a file that is too large from one that just fits (`readAll`
+    // stops at its limit without an error).
+    const limit = eu.v.num_f64(isolate, @as(f64, @floatFromInt(self.graph.source_limit)) + 1).numeric.primitive.value;
+    const result = async_fs.read_all.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, file), limit }) orelse {
         closeFile(self, file);
         return failureOf(parent_ctx, isolate, &tc);
     };
@@ -730,6 +732,7 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
             // The bytes of the file; the grant's file is closed whatever happens next.
             defer closeFile(self, pending.file);
             const bytes = binding.viewBytes(value) orelse return error.InvalidData;
+            if (bytes.len > self.graph.source_limit) return error.FileTooLarge;
             const text = try alloc.dupe(u8, bytes);
             const source = if (pending.json) try json_module.wrap(alloc, text) else text;
             break :blk try supplied(self, alloc, work, source);

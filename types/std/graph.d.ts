@@ -344,7 +344,13 @@ declare module "origine:@std/graph/cache" {
     readonly none: CodeCache;
     /** Kept in the graph's memory and shared by its contexts; `bytes` caps it. */
     memory(options?: { readonly bytes?: number }): CodeCache;
-    /** Files in the directory an `api.fs` grant allows, in the `__oricache__` format. Touches the disk; written at `graph.flush()`. */
+    /**
+     * Files in the directory an `api.fs` grant allows (it needs write access), one per module at
+     * `__oricache__/<16 hex digits of BLAKE3(module id)>.<engine tag>.v8-code-cache`. The id only picks the
+     * name, so a virtual id (`app:/x.js`, `https://...`) or one with `..` cannot land outside `__oricache__`
+     * or depend on the working directory; each file holds the hash of the source it was made from and is
+     * ignored for any other text. Touches the disk; written at `graph.flush()`.
+     */
     dir(fs: object, options?: { readonly bytes?: number }): CodeCache;
     /**
      * Your own store; both functions may be async and run in the creating realm. `store(key, blob)` runs at

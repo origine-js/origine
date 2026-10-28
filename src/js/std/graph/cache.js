@@ -65,7 +65,10 @@ export const CodeCache = freeze({
   memory(options = {}) {
     return withCapacity('codeCacheMemory', 'codeCache', 'bytes', capacity('CodeCache.memory', 'bytes', own(options, 'bytes')), {});
   },
-  /// Files in the directory `fs` (a grant of `api.fs`) grants, in the `__oricache__` format. Reads and
+  /// Files in the directory `fs` (a grant of `api.fs` with write access) grants, one per module at
+  /// `__oricache__/<16 hex digits of BLAKE3(module id)>.<engine tag>.v8-code-cache`: the id only picks the
+  /// name, so a virtual id or one with `..` stays inside `__oricache__`. Each file holds the hash of the
+  /// source it was made from and is ignored for any other text. Reads and
   /// writes touch the disk; writes happen at `graph.flush()`.
   dir(fs, options = {}) {
     if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant');

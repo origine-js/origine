@@ -157,6 +157,19 @@ fn cachePath(alloc: std.mem.Allocator, path: []const u8, tag: [12]u8, ext: []con
     return std.fs.path.join(alloc, &.{ dir, dir_name, file });
 }
 
+/// `__oricache__/<16 hex digits of BLAKE3(module id)>.<tag>.v8-code-cache`: the file of a module of a
+/// graph's cache directory. The id only picks the name: a virtual id (`app:/x.js`, `https://...`) or
+/// one with `..` in it can neither land outside `__oricache__` nor depend on the working directory.
+/// The file itself holds the hash of the source it was made from, which is what makes it valid.
+fn flatPath(alloc: std.mem.Allocator, module_id: []const u8, tag: [12]u8) ![]u8 {
+    var digest: Hash = undefined;
+    Blake3.hash(module_id, &digest, .{});
+    const name = std.fmt.bytesToHex(digest[0..8].*, .lower);
+    const file = try std.fmt.allocPrint(alloc, "{s}.{s}.{s}", .{ name, tag, code_cache_extension });
+    defer alloc.free(file);
+    return std.fs.path.join(alloc, &.{ dir_name, file });
+}
+
 /// Derives the snapshot entry for `init_specifier` (as the host imports it): the engine key
 /// plus the specifier. Borrows host and specifier through return.
 pub fn entryFor(alloc: std.mem.Allocator, host: *const Host, init_specifier: []const u8) !Entry {
@@ -365,14 +378,32 @@ pub const CodeCacheState = struct {
     host: *Host,
     tag: [12]u8,
     root: sys.Dir,
+    /// Where a module's cache file goes: `beside` its source (`dir/__oricache__/name.<tag>.<ext>`, for
+    /// the files of the init's working directory), or `flat` in `root/__oricache__` under a name made
+    /// from the module id, whatever the id looks like (a graph's cache directory, see `flatPath`).
+    layout: enum { beside, flat } = .beside,
 
     pub fn init(host: *Host, root: sys.Dir) CodeCacheState {
         return initWithKey(engineKey(host), host, root);
     }
 
+    /// A state for a graph's cache directory: every file is `root/__oricache__/<id hash>.<tag>.<ext>`.
+    pub fn initFlat(host: *Host, root: sys.Dir) CodeCacheState {
+        var state = initWithKey(engineKey(host), host, root);
+        state.layout = .flat;
+        return state;
+    }
+
     /// `init` with an `engineKey` the caller already computed.
     pub fn initWithKey(engine: Hash, host: *Host, root: sys.Dir) CodeCacheState {
         return .{ .host = host, .tag = tagOf(engine), .root = root };
+    }
+
+    fn pathOf(self: *const CodeCacheState, alloc: std.mem.Allocator, module_id: []const u8) ![]u8 {
+        return switch (self.layout) {
+            .beside => cachePath(alloc, module_id, self.tag, code_cache_extension),
+            .flat => flatPath(alloc, module_id, self.tag),
+        };
     }
 
     /// The hook to put into `Scope.Options.code_cache`; borrows self (stable address).
@@ -393,7 +424,7 @@ fn sourceHash(source: []const u8) Hash {
 fn loadCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest) ?[]const u8 {
     const state: *CodeCacheState = @ptrCast(@alignCast(data.?));
     if (!cacheable(request.module_id)) return null;
-    const path = cachePath(request.allocator, request.module_id, state.tag, code_cache_extension) catch return null;
+    const path = state.pathOf(request.allocator, request.module_id) catch return null;
     const file = state.root.readFileAllocOptions(path, request.allocator, .limited(1 << 28), .@"8", null) catch return null;
     return decodeCode(request.allocator, file, request.source, meta.supported);
 }
@@ -450,7 +481,7 @@ fn storeCode(data: ?*anyopaque, request: managed.module_types.CodeCacheRequest, 
     const state: *CodeCacheState = @ptrCast(@alignCast(data.?));
     if (!cacheable(request.module_id)) return;
     const alloc = state.host.allocator;
-    const path = cachePath(alloc, request.module_id, state.tag, code_cache_extension) catch return;
+    const path = state.pathOf(alloc, request.module_id) catch return;
     defer alloc.free(path);
     const file = encodeCode(alloc, request.source, bytes, code_cache_compressed) catch return;
     defer alloc.free(file);

@@ -552,7 +552,7 @@ fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, 
     if (kind == .dir) {
         const grant = try grantFor(host, cache_fs_id);
         if (!grant.write) return error.PermissionDenied;
-        created.dir_state = init_cache.CodeCacheState.init(host, grant.root);
+        created.dir_state = init_cache.CodeCacheState.initFlat(host, grant.root);
     }
     try host.graphs.append(alloc, created);
     return created.id;

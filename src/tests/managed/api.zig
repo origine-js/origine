@@ -1504,6 +1504,58 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
     try check(fx.scope, "report.wrong === 1 && report.throwing === 2 && report.junk === 2 && report.notBytes === 2");
 }
 
+test "graph: CodeCache.dir keeps the files of virtual and escaping module ids inside its directory" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { CodeCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const rw = api.fs.requestSync({ access: 'rw', root: 'cache' });
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => Import.provide(ModuleSource.text(`export const id = ${JSON.stringify(r.id)}; export function f() { return 1; }`))],
+        \\  });
+        \\  const ids = ['app:/x.js', '../../escape.js', 'https://example.com/a/b.js', 'mem:y'];
+        \\  const run = async () => {
+        \\    const graph = api.graph.narrow({ codeCache: CodeCache.dir(rw) });
+        \\    const ctx = await api.context.create({ import: handler, graph });
+        \\    for (const id of ids) await ctx.import(id);
+        \\    return graph.flush();
+        \\  };
+        \\  out.first = await run();
+        \\  out.second = await run();
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.createDirPath(t.io, "cache");
+    try fx.run();
+    // Four modules compile without a cache once, and a second graph finds all four on disk.
+    try check(fx.scope, "report.first === 4 && report.second === 0");
+    var cache_dir = try fx.tmp.dir.openDir(t.io, "cache/__oricache__", .{ .iterate = true });
+    defer cache_dir.close(t.io);
+    var files: usize = 0;
+    var it = cache_dir.iterate();
+    while (try it.next(t.io)) |entry| {
+        try t.expect(std.mem.endsWith(u8, entry.name, ".v8-code-cache"));
+        files += 1;
+    }
+    try t.expectEqual(@as(usize, 4), files);
+    // Nothing else appeared in the working directory or above it.
+    var root = try fx.tmp.dir.openDir(t.io, ".", .{ .iterate = true });
+    defer root.close(t.io);
+    var names: usize = 0;
+    var top = root.iterate();
+    while (try top.next(t.io)) |entry| {
+        try t.expect(std.mem.eql(u8, entry.name, "cache") or std.mem.eql(u8, entry.name, "init.js"));
+        names += 1;
+    }
+    try t.expectEqual(@as(usize, 2), names);
+}
+
 test "graph: retain used frees unused modules, delete resets identity, release unpins" {
     var fx: Fixture = undefined;
     try fx.setup(

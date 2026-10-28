@@ -12,6 +12,7 @@ test {
     _ = @import("tests/managed/import_maps.zig");
     _ = @import("tests/managed/module_map.zig");
     _ = @import("tests/managed/loading.zig");
+    _ = @import("tests/managed/shared_link.zig");
     _ = @import("tests/managed/cache.zig");
     _ = @import("tests/managed/api.zig");
     _ = @import("tests/managed/snapshot.zig");

@@ -76,9 +76,11 @@ There is no `origineNamespace` flag. `origine()` only canonicalises `origine:` i
 |---|---|---|
 | `Import.provide(recipe)` | a fresh reference of the recipe in its own context | safe |
 | `Import.link(ref, { mode: 'hardened' })` | a synthetic module of `ref`'s exports through the hardener (plain data and functions, a snapshot of the values) | safe |
-| `Import.link(ref, { mode: 'shared' })` | the other context's module itself (live bindings, same objects) | leaks the realm boundary on purpose; V8 acceptance is verified by a test before it is promised |
+| `Import.link(ref, { mode: 'shared' })` | the other context's module itself (live bindings, same objects) | leaks the realm boundary on purpose; V8 accepts it (spike below) |
 
-`link` takes a reference bound and evaluated in another context; `mode` is required there. Authority is the handle: only code holding both the reference and the importer's handler can write the verdict, and hooks run in the creating realm.
+`link` takes a reference bound and evaluated in another context; `mode` is required there.
+
+**Spike result (`src/tests/managed/shared_link.zig`).** Two scopes of one isolate: `Module::InstantiateModule` in the importer's context accepts a dependency that was already instantiated and evaluated in the other context. The importer reads live bindings (a counter bumped in A is seen by B's imported binding) and receives A's own objects (their creation context is A's, not B's). So `'shared'` ships; it is the documented realm leak, available only to code that holds both the reference and the importer's handler. Node's `vm.Module` refuses this combination by policy; V8 itself does not. Authority is the handle: only code holding both the reference and the importer's handler can write the verdict, and hooks run in the creating realm.
 
 ### Caches and lifetime
 

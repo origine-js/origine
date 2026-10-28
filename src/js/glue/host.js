@@ -17,5 +17,12 @@
     });
   }
 
-  return () => ({ env: makeEnvCap(null) });
+  return () => ({
+    env: makeEnvCap(null),
+    threading: freezeMethods({
+      get parallelism() {
+        return native.threading.parallelism();
+      },
+    }),
+  });
 };

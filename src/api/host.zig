@@ -15,6 +15,7 @@ const eu = @import("@util");
 const binding = @import("binding.zig");
 const func = binding.func;
 const env_api = @import("env.zig");
+const threading_api = @import("threading.zig");
 const fs_api = @import("fs.zig");
 const graph_api = @import("graph.zig");
 const context_api = @import("context.zig");
@@ -565,6 +566,9 @@ pub const Host = struct {
                     .get = func(env_api.get, .{ .side_effect = .none }),
                     .list = func(env_api.list, .{ .side_effect = .none }),
                 },
+                .threading = .{
+                    .parallelism = func(threading_api.parallelism, .{ .side_effect = .none }),
+                },
             }),
             .fs => try call.object(ScopeState, state, .{
                 .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
@@ -611,12 +615,12 @@ pub const Host = struct {
             },
             .io, .net => eu.v.object(env.isolate),
         };
-        const key: ?[]const u8 = switch (module) {
-            .host => "env",
-            .fs => "fsRequest",
-            else => null,
+        const keys: []const []const u8 = switch (module) {
+            .host => &.{ "env", "threading" },
+            .fs => &.{"fsRequest"},
+            else => &.{},
         };
-        if (key) |property| {
+        for (keys) |property| {
             const value = part.get(env.ctx, binding.string(env.isolate, property)) orelse return error.JavaScriptException;
             try binding.set(env, native, property, value);
         }

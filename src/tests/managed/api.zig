@@ -394,6 +394,19 @@ test "api: errno is one native-backed array and open modes are python-style" {
     try check(fx.scope, "report.shared && report.pinned && report.codes === '0,11,11,0,0,30,30,30'");
 }
 
+test "api: host.threading.parallelism is a positive integer" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\export function main(api) {
+        \\  const n = api.host.threading.parallelism;
+        \\  globalThis.report = { n, frozen: Object.isFrozen(api.host.threading) };
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "Number.isInteger(report.n) && report.n >= 1 && report.frozen");
+}
+
 test "api: io and env narrowing are monotonic" {
     var fx: Fixture = undefined;
     try fx.setup(

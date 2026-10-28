@@ -11,6 +11,10 @@ import { eprintln } from "origine:@std/debug";
 
 export const main: Main = async (api: Api) => {
   eprintln("args", api.host.env.args().length, api.host.env.get("HOME") ?? "unset");
+  const cpus: number = api.host.threading.parallelism;
+  // @ts-expect-error parallelism is read-only
+  api.host.threading.parallelism = 2;
+  eprintln("cpus", cpus);
   const narrowed = api.host.env.narrow({ allow: ["HOME"] });
   const names: readonly string[] = narrowed.list();
   void names;

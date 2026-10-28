@@ -20,6 +20,7 @@
   const RECIPE = Symbol.for('origine:@std/graph/recipe');
   const SOURCE = Symbol.for('origine:@std/graph/source');
   const CREATE = Symbol.for('origine:@std/graph/create');
+  const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
   const named = (code, message) => freeze({ errno: code, name: util.failure(code).name, message });
   const invalid = message => named(InvalidInput, message);
@@ -601,6 +602,19 @@
             await cache.store(freeze({ id: out[index][0], hash: out[index][1] }), out[index][2]);
         }
         return out[0];
+      },
+      /// Ends the graph: no more contexts or references can be made with it, and the host frees what it
+      /// kept (code caches not yet flushed are dropped) once the contexts using it are gone.
+      close() {
+        host(native.graph.close, id);
+        graphFs.delete(id);
+        graphCache.delete(id);
+      },
+      [dispose]() {
+        native.graph.close(id);
+        take();
+        graphFs.delete(id);
+        graphCache.delete(id);
       },
       [CREATE](recipe) {
         if (recipe === null || typeof recipe !== 'object' || recipe[RECIPE] !== true) throw invalid('expected a ModuleRecipe');

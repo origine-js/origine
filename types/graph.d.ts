@@ -62,10 +62,23 @@ export interface ModuleGraph {
    * A graph with `options` replacing the fs grant or the code cache. It holds nothing the realm does
    * not already hold. Throws `InvalidInput` for a grant that is not sync or a malformed cache.
    */
-  narrow(options?: GraphOptions): ModuleGraph;
+  narrow(options?: GraphOptions): NarrowedGraph;
   /**
    * Persists the V8 code caches of modules that compiled without a usable one (a `dir` cache writes
    * its files, a `custom` one gets `store` calls). Resolves how many modules were stored.
    */
   flush(): Promise<number>;
+}
+
+/**
+ * What {@link ModuleGraph.narrow} returns: a graph the caller owns. `api.graph` has no `close`: it lives
+ * as long as the realm.
+ */
+export interface NarrowedGraph extends ModuleGraph, Disposable {
+  /**
+   * Ends the graph. It takes no more contexts or references (`StaleHandle`), and the host frees what it
+   * kept, the code caches among them, once the contexts using it are gone. Code caches that were not
+   * `flush`ed are dropped. Closing again is `StaleHandle`; `using` closes it and ignores a second close.
+   */
+  close(): void;
 }

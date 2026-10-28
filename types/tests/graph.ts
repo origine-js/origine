@@ -49,6 +49,14 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   const io = api.io.create({});
   const asyncGraph = api.graph.narrow({ fs: await api.fs.requestAsync({ io, access: "r" }) });
   void asyncGraph;
+  // A narrowed graph is the caller's: it can be closed (or disposed); `api.graph` itself cannot.
+  asyncGraph.close();
+  {
+    using scoped = api.graph.narrow();
+    void scoped;
+  }
+  // @ts-expect-error api.graph lives as long as the realm
+  api.graph.close();
   const reference = recipe.create(graph);
   await reference.load();
   const requests: number = reference.requests?.length ?? 0;

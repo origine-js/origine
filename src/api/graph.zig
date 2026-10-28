@@ -35,6 +35,7 @@ const Error = errno.Error;
 comptime {
     @setEvalBranchQuota(200_000);
     errno.requireBinding(graphCreate);
+    errno.requireBinding(graphClose);
     errno.requireBinding(handler);
     errno.requireBinding(layer);
     errno.requireBinding(hook);
@@ -534,6 +535,24 @@ pub fn graphFor(host: *Host, id: u32) !*Graph {
 /// 0 none, 1 memory, 2 dir (`cacheFsId` names the grant whose root holds `__oricache__`), 3 custom.
 pub fn graphCreate(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32) Error!u32 {
     return graphCreateImpl(state, fs_id, cache_kind, bytes, cache_fs_id) catch |err| return errno.narrow(err);
+}
+
+/// `close(graph)`: the graph takes no more contexts or references, and is freed (with the code
+/// caches it kept) once the contexts that use it are gone. Code caches not yet flushed are discarded.
+pub fn graphClose(state: *ScopeState, id: u32) Error!void {
+    const graph = graphFor(state.host, id) catch |err| return errno.narrow(err);
+    if (graph.owner != state) return error.BadHandle;
+    graph.closed = true;
+    releaseGraph(state.host, graph);
+}
+
+/// Frees `graph` when it is closed and no context uses it.
+pub fn releaseGraph(host: *Host, graph: *Graph) void {
+    if (!graph.closed) return;
+    for (host.contexts.values()) |context| if (context.graph == graph) return;
+    host.graphs.remove(graph.id);
+    graph.deinit();
+    host.allocator.destroy(graph);
 }
 
 fn grantFor(host: *Host, id: u32) !*fs_api.FsGrant {

@@ -1017,9 +1017,11 @@ pub fn free(host: *Host, context: *Context) void {
     for (host.imports.items) |pending| if (pending.context == context) {
         pending.context = null;
     };
+    const graph = context.graph;
     host.contexts.remove(context.id);
     context.deinit();
     alloc.destroy(context);
+    graph_api.releaseGraph(host, graph);
     graph_api.sweepHandlers(host);
 }
 

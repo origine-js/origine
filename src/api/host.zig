@@ -495,6 +495,19 @@ pub const Host = struct {
                 owned.bindings.release(state, owned.ptr);
             }
             for (self.grants.items) |grant| if (grant.owner == state) grant.deinit();
+            // Its graphs go with the realm that could name them; contexts still using one keep it until they are freed.
+            var index: usize = 0;
+            while (index < self.graphs.values().len) {
+                const owned = self.graphs.values()[index];
+                if (owned.owner != state) {
+                    index += 1;
+                    continue;
+                }
+                owned.closed = true;
+                const before = self.graphs.count();
+                graph_api.releaseGraph(self, owned);
+                if (self.graphs.count() == before) index += 1;
+            }
             // The cell may live in the buffer being released: keep its value and move home.
             state.errno_local = state.shared.errno_cell.*;
             state.shared.errno_cell = &state.errno_local;
@@ -662,6 +675,7 @@ pub const Host = struct {
                 const object = try call.object(ScopeState, state, .{
                     .graph = .{
                         .create = func(graph_api.graphCreate, .{ .side_effect = .any }),
+                        .close = func(graph_api.graphClose, .{ .side_effect = .any }),
                         .handler = func(graph_api.handler, .{ .side_effect = .any }),
                         .layer = func(graph_api.layer, .{ .side_effect = .any }),
                         .hook = func(graph_api.hook, .{ .side_effect = .any }),

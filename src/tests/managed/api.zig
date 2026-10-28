@@ -3626,6 +3626,49 @@ fn runPhase(fx: *Fixture, name: []const u8) !void {
     try check(fx.scope, "phaseDone && phaseError === undefined");
 }
 
+test "api: a closed graph is freed with the last context that uses it" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
+        \\import { CodeCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) {
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js' } })), hooks: [fromLoader(() => 'export const x = 1')] });
+        \\  globalThis.phase1 = async () => {
+        \\    const names = [];
+        \\    for (let n = 0; n < 30; n++) {
+        \\      const graph = api.graph.narrow({ codeCache: CodeCache.memory() });
+        \\      const child = await api.context.create({ import: handler, graph });
+        \\      await child.import('m');
+        \\      graph.close();
+        \\      // The context keeps working with a closed graph, which takes no more of them.
+        \\      names.push(await child.import('m').then(ref => ref.name, e => e.name));
+        \\      names.push(await api.context.create({ import: handler, graph }).then(() => 'created', e => e.name));
+        \\      names.push((() => { try { graph.close(); return 'closed'; } catch (e) { return e.name; } })());
+        \\      child.close();
+        \\    }
+        \\    {
+        \\      using scoped = api.graph.narrow();
+        \\      scoped.flush();
+        \\    }
+        \\    let rootClose;
+        \\    try { api.graph.close(); rootClose = 'closed'; } catch (e) { rootClose = e.name; }
+        \\    globalThis.report = { names: names.join(','), rootClose };
+        \\  };
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try runPhase(&fx, "phase1");
+    fx.rt.pump();
+    try check(fx.scope, "report.names.split(',').every((name, i) => name === ['app:/m.js', 'StaleHandle', 'StaleHandle'][i % 3]) && report.rootClose === 'TypeError'");
+    // Only the root graph (made for the contexts that took the default) is left.
+    try t.expect(fx.host.graphs.count() <= 1);
+    try t.expectEqual(@as(usize, 0), fx.host.contexts.count());
+}
+
 test "api: module preloads, with the origine allowlist per context" {
     var fx: Fixture = undefined;
     try fx.setup(

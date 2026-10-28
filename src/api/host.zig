@@ -724,6 +724,7 @@ pub const Host = struct {
                         .pin = func(context_api.pin, .{ .side_effect = .any }),
                         .unpin = func(context_api.unpin, .{ .side_effect = .any }),
                         .namespaceOf = func(context_api.namespaceOf, .{ .side_effect = .any }),
+                        .hardenExports = func(context_api.hardenExports, .{ .side_effect = .any }),
                         .preload = func(context_api.preloadScript, .{ .side_effect = .any }),
                         .preloadModule = func(context_api.preloadModule, .{ .side_effect = .any }),
                     },

@@ -1246,6 +1246,54 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
     try check(fx.scope, "report.exotic.length === 8 && report.exotic.every(n => n === 'InvalidInput') && report.closedAsync === 'InvalidInput' && report.stillSync === 'ok'");
 }
 
+test "graph: the host reads the exports of an evaluated reference with the hardened copy rules" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fromLoader } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fromLoader(() => '')] });
+        \\  const make = (text, name) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(api.graph);
+        \\  const ctx = await api.context.create({ import: handler });
+        \\  const good = make("export const n = 41; export const cfg = { n: 1, list: [1, { deep: true }] }; cfg.self = cfg; export let count = 0; export function bump() { cfg.n++; count++; return cfg.n; } export class Box { static kind = 'box'; } export default 'dflt';", 'good.js');
+        \\  out.before = (() => { try { good.exports(); return 'ok'; } catch (e) { return e.name; } })();
+        \\  await good.evaluate(ctx);
+        \\  const first = good.exports();
+        \\  out.keys = Object.keys(first).sort().join(',');
+        \\  out.proto = Object.getPrototypeOf(first) === null;
+        \\  out.values = first.n === 41 && first.default === 'dflt' && first.count === 0;
+        \\  // Plain data is a frozen copy (a cycle kept); the context's own object stays mutable and live.
+        \\  out.frozen = Object.isFrozen(first) && Object.isFrozen(first.cfg) && Object.isFrozen(first.cfg.list) && Object.isFrozen(first.cfg.list[1]);
+        \\  out.cycle = first.cfg.self === first.cfg;
+        \\  out.copyIsolated = (() => { try { first.cfg.n = 99; } catch {} return first.cfg.n; })();
+        \\  // A function is shared: it runs in the context's realm on the context's objects, and is frozen.
+        \\  out.fn = [first.bump(), first.bump()].join(',') + ':' + Object.isFrozen(first.bump) + ':' + (first.Box.kind === 'box') + ':' + Object.isFrozen(first.Box);
+        \\  // Another call copies again and reads the bindings as they are now.
+        \\  const second = good.exports();
+        \\  out.second = second !== first && second.cfg.n === 3 && second.count === 2 && first.count === 0;
+        \\  // What cannot be copied is Unsupported, not silently shared.
+        \\  const code = async text => { const ref = make(text, 'm' + (out.n = (out.n ?? 0) + 1) + '.js'); await ref.evaluate(ctx); try { ref.exports(); return 'ok'; } catch (e) { return e.name; } };
+        \\  out.accessor = await code("export const o = { get x() { return 1; } };");
+        \\  out.map = await code("export const m = new Map();");
+        \\  out.typed = await code("export const t = new Uint8Array(1);");
+        \\  // A reference that is not evaluated has no exports to read; neither has one of a closed context.
+        \\  out.declared = (() => { try { make('export {}', 'd.js').exports(); return 'ok'; } catch (e) { return e.name; } })();
+        \\  const imported = await ctx.import('good.js').catch(() => null);
+        \\  ctx.close();
+        \\  out.closed = (() => { try { good.exports(); return 'ok'; } catch (e) { return e.name; } })();
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.before === 'InvalidInput' && report.keys === 'Box,bump,cfg,count,default,n' && report.proto && report.values && report.frozen && report.cycle && report.copyIsolated === 1");
+    try check(fx.scope, "report.fn === '2,3:true:true:true' && report.second && report.accessor === 'Unsupported' && report.map === 'Unsupported' && report.typed === 'Unsupported' && report.declared === 'InvalidInput' && report.closed === 'StaleHandle'");
+}
+
 test "graph: load() goes one level at a time, through dependency references, three levels deep" {
     var fx: Fixture = undefined;
     try fx.setup(

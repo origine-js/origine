@@ -65,6 +65,6 @@ missing "host member" "$here/host.d.ts" env threading parallelism Channel Snapsh
 missing "env member" "$here/env.d.ts" args get list narrow
 missing "io cap member" "$here/io.d.ts" create narrow close run now timer timerAt sleep sleepUntil
 missing "context member" "$here/context.d.ts" import graph preload references close create
-missing "graph member" "$here/graph.d.ts" derive flush load evaluate release requests status name context
+missing "graph member" "$here/graph.d.ts" derive flush load evaluate exports release requests status name context
 
 exit $status

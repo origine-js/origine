@@ -509,6 +509,25 @@
       state.status = 'loaded';
       return this;
     }
+    /// A snapshot of the module's exports, for the realm that created the context (`status` must be
+    /// `evaluated`). The same copy rules as `Import.link(..., { mode: 'hardened' })`: plain data (primitives,
+    /// arrays, objects with a plain prototype, cycles kept) is copied into this realm and frozen; a function,
+    /// a class or any other object cannot be copied, so it is shared and frozen in place with what it reaches,
+    /// and keeps running in the context's realm; an accessor property is `Unsupported`. Every call copies
+    /// again and reads the bindings as they are now.
+    exports() {
+      const state = this.#state;
+      if (state.released) throw named(errors.BadHandle, 'released');
+      if (state.status !== 'evaluated' || state.context === null) throw invalid('exports needs a reference that is evaluated in a context');
+      const namespace = host(native.context.namespaceOf, state.context, state.name);
+      const seen = new Map();
+      const out = Object.create(null);
+      for (const key of Object.keys(namespace)) {
+        Object.defineProperty(out, key, { value: copyData(namespace[key], seen), enumerable: true, writable: true, configurable: true });
+      }
+      host(native.context.hardenExports, out);
+      return out;
+    }
     /// Binds the reference to `ctx` (one context per reference) and evaluates it there. Another call
     /// for the same context waits for the first one and settles the same way.
     evaluate(ctx) {

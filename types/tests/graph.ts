@@ -62,6 +62,10 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   const requests: number = reference.requests?.length ?? 0;
   await using ctx = { context: await api.context.create({ import: handler, graph }), async [Symbol.asyncDispose]() { this.context.close(); } };
   await reference.evaluate(ctx.context);
+  const exported: Readonly<Record<string, unknown>> = reference.exports();
+  void exported;
+  // @ts-expect-error exports() takes no argument
+  reference.exports(ctx.context);
   const stored: number = await graph.flush();
   const view = ImportCache.native({ retain: "used" }).in(ctx.context);
   void [requests, stored, view.size, view.delete("a"), view.clear()];

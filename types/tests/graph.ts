@@ -45,6 +45,10 @@ const inline = ModuleRecipe({ source: ModuleSource.text("export {}", SourceMap.t
 const pure: boolean = recipe.native && inline.native;
 export async function graphUse(api: import("@origine/types").Api): Promise<void> {
   const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: "r" }), codeCache: CodeCache.memory() });
+  // An async grant is read on its io runtime, without blocking.
+  const io = api.io.create({});
+  const asyncGraph = api.graph.narrow({ fs: await api.fs.requestAsync({ io, access: "r" }) });
+  void asyncGraph;
   const reference = recipe.create(graph);
   await reference.load();
   const requests: number = reference.requests?.length ?? 0;

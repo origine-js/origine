@@ -1217,6 +1217,67 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
     try check(fx.scope, "report.forged === 'InvalidInput' && report.forgedFrozen === 'InvalidInput' && report.copy === 'InvalidInput' && report.forgedCache === 'InvalidInput' && report.real === 'ok'");
 }
 
+test "graph: an async fs grant serves source files on its io runtime without entering JS" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider, json } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create({});
+        \\  const ro = await api.fs.requestAsync({ io, access: 'r' });
+        \\  const graph = api.graph.narrow({ fs: ro });
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
+        \\  out.native = handler.native;
+        \\  const ctx = await api.context.create({ import: handler, graph });
+        \\  const main = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler }).create(graph);
+        \\  await main.load();
+        \\  out.requests = main.requests.map(r => r.specifier + '=' + r.reference.name + '/' + r.reference.status).join(',');
+        \\  await main.evaluate(ctx);
+        \\  out.status = main.status;
+        \\  out.imported = (await ctx.import('./dep.js')).status;
+        \\  const run = async (g, c, text, name) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(g).evaluate(c).then(() => 'ok', e => e.message);
+        \\  out.missing = await run(graph, ctx, "import './nope.js'", 'm1');
+        \\  out.oricache = await run(graph, ctx, "import './__oricache__/x.js'", 'm2');
+        \\  const wo = await api.fs.requestAsync({ io, access: 'w' });
+        \\  const writeOnly = api.graph.narrow({ fs: wo });
+        \\  const wctx = await api.context.create({ import: handler, graph: writeOnly });
+        \\  out.writeOnly = await run(writeOnly, wctx, "import './dep.js'", 'm3');
+        \\  out.accept = await (async () => {
+        \\    const accepting = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [async () => Import.accept()] });
+        \\    const actx = await api.context.create({ import: accepting, graph });
+        \\    return ModuleRecipe({ source: ModuleSource.text("import { k } from './dep.js'; globalThis.k2 = k;"), import: accepting, name: 'm4' }).create(graph).evaluate(actx).then(() => 'ok', e => e.message);
+        \\  })();
+        \\  await io.close();
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "dep.js", .data = "export const k = 41;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "data.json", .data = "{\"v\": 1}" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.js", .data = "import { k } from './dep.js'; import data from './data.json' with { type: 'json' }; globalThis.answer = k + data.v;" });
+    try fx.run();
+    try check(fx.scope, "report.native === true && report.status === 'evaluated' && report.imported === 'evaluated'");
+    try check(fx.scope, "report.requests === './dep.js=dep.js/declared,./data.json=data.json/declared'");
+    try check(fx.scope, "report.missing.includes('NotFound') && report.oricache.includes('PermissionDenied') && report.writeOnly.includes('PermissionDenied')");
+    try check(fx.scope, "report.accept === 'ok'");
+    try check(fx.rt.scopes.items[1], "answer === 42");
+    // The native handler and the accept hook's own read: only the JS hook (accept) entered the driver.
+    try t.expectEqual(@as(usize, 1), fx.host.driver_calls);
+    // The graphs read through the async grant's natives, not through a sync grant.
+    var async_graphs: usize = 0;
+    for (fx.host.graphs.items) |graph| {
+        if (graph.async_fs != null) {
+            async_graphs += 1;
+            try t.expect(graph.fs == null);
+        }
+    }
+    try t.expect(async_graphs >= 2);
+}
+
 test "graph: link shares or hardens the module of another context" {
     var fx: Fixture = undefined;
     try fx.setup(

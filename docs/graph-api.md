@@ -24,7 +24,7 @@ All of it is implemented except what the last row lists. Tests: `src/tests/manag
 What the implementation does differently from the proposal this page started as:
 
 1. **One identity table per context, shared by all its handlers** (the scope's `ModuleMap`), not one per cache object. `ImportCache.native({ retain, entries })` of the context's `import` handler sets how the table keeps modules; the cache option of other handlers is not consulted.
-2. **Reading files needs a sync fs grant.** `narrow({ fs })` takes `api.fs.requestSync(...)`; an async grant is `InvalidInput`. Only a grant object `api.fs` itself made counts: a lookalike `{ kind: 'sync', id }` with a guessed id is `InvalidInput`, so a realm that was handed `api.graph` cannot reach the grants of the realm that gave it. The host reads with its own blocking read inside the load stage (native handlers) or in the driver.
+2. **A graph reads with one fs grant, sync or async, and only one `api.fs` made.** `narrow({ fs })` takes `api.fs.requestSync(...)` or `await api.fs.requestAsync(...)`; a lookalike `{ kind, id }` with a guessed id is `InvalidInput`, so a realm that was handed `api.graph` cannot reach the grants of the realm that gave it. A sync grant is read by the host with its own blocking read inside the load stage. An async grant is read on its io runtime: the context's chain calls the grant's Rust natives (open, read all, close) itself and parks on their promises, so the read completes through `completeLoad` and no JS function runs (`CodeCache.dir` still needs a sync grant, since the cache writes with the host's own file calls).
 3. **`CodeCache.custom` is store-only.** `load` is not consulted; `store(key, bytes)` is called at `graph.flush()`.
 4. **`meta` lives on the handler only.** The maker returns `{ import?, transformer? }`.
 5. **`ModuleReference.status` has no separate `instantiated`**: a reference goes `declared`, `loaded`, `evaluating`, `evaluated` or `errored`. `requests[].reference` are one level deep: they are `declared` until `load()` is called on them.
@@ -166,4 +166,3 @@ Question 1: what the name promises. 2: hidden cost. 3: another way. 4: shed word
 
 - How a declared dependency reference is adopted when the evaluating context's table already holds its key (today `evaluate` of the dependency's reference would fail `InvalidInput` for the taken name).
 - Prefetching `CodeCache.custom` loads in the driver (would need a source hash in JS).
-- Async fs grants for native reads (would complete on the io runtime).

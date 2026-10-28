@@ -72,7 +72,9 @@
     }
     const hooks = [];
     const hookFns = [];
+    const hookHosts = [];
     for (const hook of handler.hooks) {
+      hookHosts.push(typeof hook === 'function' ? null : hook.host);
       if (typeof hook === 'function') {
         hooks.push({ js: true });
         hookFns.push(hook);
@@ -104,7 +106,7 @@
       cache: { retain: handler.cache.retain, entries: handler.cache.entries ?? null },
       meta: handler.meta !== null,
     };
-    return { spec, layerFns, hookFns, transformerFns };
+    return { spec, layerFns, hookFns, hookHosts, transformerFns };
   };
 
   const register = handler => {
@@ -112,13 +114,14 @@
     const known = handlers.get(handler);
     if (known !== undefined) return known;
     bindDriver();
-    const { spec, layerFns, hookFns, transformerFns } = flatten(handler);
+    const { spec, layerFns, hookFns, hookHosts, transformerFns } = flatten(handler);
     const id = host(native.graph.handler, JSON.stringify(spec));
     const record = freeze({
       id,
       handler,
       layerFns,
       hookFns,
+      hookHosts,
       transformerFns,
       native: handler.native,
       retain: handler.cache.retain,
@@ -153,9 +156,26 @@
     return host(native.graph.transform, JSON.stringify(hostSpec(t)), id, text);
   };
 
+  /// The fs grant of each graph by graph id: `{ kind: 'sync' | 'async', id }`, or absent.
+  const graphFs = new Map();
+
+  /// A file of the graph's fs grant as text. A sync grant is read by the host at once; an async
+  /// one through its io runtime (open, read all, close: the natives of `api.fs.requestAsync`).
+  const readText = async (graphId, path) => {
+    const grant = graphFs.get(graphId);
+    if (grant === undefined || grant.kind !== 'async') return host(native.graph.readSource, graphId, path);
+    const ops = util.shared.fsAsync;
+    const file = await ops.openFile(grant.id, 0, path, 0);
+    try {
+      return host(native.graph.utf8, await ops.readAll(grant.id, file, Infinity));
+    } finally {
+      await ops.close(grant.id, file).catch(() => {});
+    }
+  };
+
   /// The text of a `ModuleSource`: read through the graph's fs grant or given, then its transformer chain.
   const sourceText = async (source, graphId, id) => {
-    let text = source.kind === 'text' ? source.text : host(native.graph.readSource, graphId, source.path);
+    let text = source.kind === 'text' ? source.text : await readText(graphId, source.path);
     for (const t of source.transformers) text = await applyTransformer(t, id, text);
     return text;
   };
@@ -269,11 +289,20 @@
       let reply;
       if (record.hookFns[index] !== null) {
         reply = await steps.hook(hid, 0, graphId, index, id, attributes, specifier, referrer);
+      } else if (graphFs.get(graphId)?.kind === 'async' && (record.hookHosts[index] === 'fs' || record.hookHosts[index] === 'json')) {
+        // The host's hook cannot wait for an async read; this loop can.
+        const isJson = attributes.type === 'json';
+        const serves = !id.startsWith('origine:') && (record.hookHosts[index] === 'json' ? isJson : !isJson);
+        if (!serves) reply = NEXT;
+        else {
+          const text = await readText(graphId, id);
+          reply = freeze({ kind: 'provide', source: isJson ? host(native.graph.jsonModule, text) : text });
+        }
       } else {
         const text = host(native.graph.hook, hid, index, graphId, 0, id, json);
         reply = text === undefined ? NEXT : freeze({ kind: 'provide', source: text });
       }
-      if (reply.kind === 'accept') supplied = host(native.graph.readSource, graphId, id);
+      if (reply.kind === 'accept') supplied = await readText(graphId, id);
       else if (reply.kind === 'provide') supplied = reply.source;
       else if (reply.kind === 'final') return freeze({ kind: 'source', source: reply.source, handler: reply.handler, meta: await metaOf(byId[reply.handler], id) });
       else if (reply.kind === 'link') return reply;
@@ -304,7 +333,7 @@
   /// The native pipeline of a `native` handler, or the driver, for code that is not a context
   /// (`reference.load()` asks for the sources of a module's dependencies this way).
   const pipeline = async (record, graphId, specifier, referrer, attributes) => {
-    if (record.native) {
+    if (record.native && graphFs.get(graphId)?.kind !== 'async') {
       const id = host(native.graph.pipelineResolve, record.id, specifier, referrer);
       if (id === undefined) throw named(NotFound, `cannot resolve ${specifier}`);
       const loaded = host(native.graph.pipelineLoad, record.id, graphId, id, attributesJson(attributes));
@@ -490,9 +519,10 @@
   const build = (fs, codeCache) => {
     let fsId = 0;
     if (fs !== undefined) {
-      if (fs === null || typeof fs !== 'object' || fs.kind !== 'sync' || !fsGrants.has(fs))
-        throw invalid('graph fs must be a sync fs grant made by api.fs');
-      fsId = fs.id;
+      if (fs === null || typeof fs !== 'object' || (fs.kind !== 'sync' && fs.kind !== 'async') || !fsGrants.has(fs))
+        throw invalid('graph fs must be a fs grant made by api.fs');
+      if (fs.kind === 'async' && util.shared.fsAsync === undefined) throw invalid('async fs is not available');
+      if (fs.kind === 'sync') fsId = fs.id;
     }
     let kind = 0;
     let bytes = 0;
@@ -513,6 +543,10 @@
       bytes = codeCache.bytes ?? 0;
     }
     const id = host(native.graph.create, fsId, kind, bytes, cacheFsId);
+    if (fs !== undefined) {
+      if (fs.kind === 'async') host(native.graph.asyncFs, id, fs.id, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
+      graphFs.set(id, freeze({ kind: fs.kind, id: fs.id }));
+    }
     return makeGraph(id, freeze({ fs, codeCache }));
   };
 

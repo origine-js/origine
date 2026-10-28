@@ -27,6 +27,7 @@ const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
 const init_loader = @import("init_loader.zig");
 const init_cache = @import("init_cache.zig");
+const json_module = @import("json_module.zig");
 const module_types = @import("../managed/module_types.zig");
 const module_map = @import("../managed/module_map.zig");
 const Runtime = @import("../managed/runtime.zig").Runtime;
@@ -54,9 +55,10 @@ comptime {
 /// What a resolved id was resolved for; the load stage needs it.
 const Info = struct { handler: u32, specifier: []u8, referrer: []u8 };
 
-/// One JS element of a handler's pipeline. The driver's `step(kind, ...)` (src/js/glue/graph.js)
-/// runs it; the numbers are the `kind` it receives.
-const Step = enum(u32) { layer = 0, hook = 1, maker = 2, transform = 3, meta = 4 };
+/// One element of a handler's pipeline that is not run inline. The first five are JS functions the
+/// driver's `step(kind, ...)` (src/js/glue/graph.js) runs, the numbers being the `kind` it receives;
+/// `open` and `read` are the two native calls of an async fs read (no user JS runs for them).
+const Step = enum(u32) { layer = 0, hook = 1, maker = 2, transform = 3, meta = 4, open = 5, read = 6 };
 
 /// A call into the JS driver whose promise has not settled: which element runs and what the chain
 /// needs to go on once it answers. A chain keeps its token across steps; only the end completes it.
@@ -77,6 +79,9 @@ const PendingJs = struct {
     referrer: []u8 = &.{},
     /// The source waiting for its `meta` (owned).
     text: []u8 = &.{},
+    /// An async read: the file once opened, and whether it is a JSON module.
+    file: u32 = 0,
+    json: bool = false,
     settled: bool = false,
 };
 
@@ -366,6 +371,10 @@ fn advanceHooks(self: *Context, scratch: std.mem.Allocator, work: Work, from: us
                 if (served) try self.markServed(work.id);
                 return supplied(self, scratch, work, text);
             },
+            .read => |read| {
+                try startRead(self, work, read.json);
+                return .parked;
+            },
         }
     }
     return error.NotFound;
@@ -440,26 +449,32 @@ fn park(self: *Context, step: Step, work: Work, index: usize, import: u32, text:
     for (work.attributes) |attribute| {
         _ = bag.createDataProperty(parent_ctx, eu.v.str_utf8(isolate, attribute.key).name, binding.string(isolate, attribute.value)) orelse return error.LoaderFailed;
     }
-    const number = struct {
-        fn of(iso: v8.Isolate, value: usize) v8.Value {
-            return eu.v.num_u32(iso, @intCast(value)).numeric.primitive.value;
-        }
-    }.of;
     const function = driver.step.deref();
     const undef = eu.v.undefined_value(isolate).value;
-    const kind = number(isolate, @backingInt(step));
+    const kind = numValue(isolate, @backingInt(step));
     const result = switch (step) {
-        .layer => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, self.id), number(isolate, index), binding.string(isolate, work.specifier), binding.string(isolate, work.referrer), bag.value }),
-        .hook => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, self.id), number(isolate, self.graph.id), number(isolate, index), binding.string(isolate, work.id), bag.value, binding.string(isolate, work.specifier), binding.string(isolate, work.referrer) }),
-        .maker => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, self.id), binding.string(isolate, work.id), binding.string(isolate, text) }),
-        .transform => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, index), binding.string(isolate, work.id), binding.string(isolate, text) }),
-        .meta => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), binding.string(isolate, work.id) }),
+        .layer => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), numValue(isolate, index), binding.string(isolate, work.specifier), binding.string(isolate, work.referrer), bag.value }),
+        .hook => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), numValue(isolate, self.graph.id), numValue(isolate, index), binding.string(isolate, work.id), bag.value, binding.string(isolate, work.specifier), binding.string(isolate, work.referrer) }),
+        .maker => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), binding.string(isolate, work.id), binding.string(isolate, text) }),
+        .transform => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, index), binding.string(isolate, work.id), binding.string(isolate, text) }),
+        .meta => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), binding.string(isolate, work.id) }),
+        .open, .read => unreachable,
     } orelse return failureOf(parent_ctx, isolate, &tc);
+    try track(self, parent_ctx, isolate, result, step, work, index, import, text, 0, false);
+}
 
-    const alloc = host.allocator;
+fn numValue(isolate: v8.Isolate, value: usize) v8.Value {
+    return eu.v.num_u32(isolate, @intCast(value)).numeric.primitive.value;
+}
+
+/// Records the call whose answer is `result` (a promise, or a plain value finished through the same
+/// path after the call returns) and chains the completion callbacks. Requires the creating realm's
+/// context entered and a live HandleScope.
+fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8.Value, step: Step, work: Work, index: usize, import: u32, text: []const u8, file: u32, json: bool) !void {
+    const alloc = self.host.allocator;
     const pending = try alloc.create(PendingJs);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .context = self, .token = work.token, .step = step, .index = @intCast(index), .handler = work.handler, .import = import };
+    pending.* = .{ .context = self, .token = work.token, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json };
     pending.id = try alloc.dupe(u8, work.id);
     errdefer alloc.free(pending.id);
     pending.specifier = try alloc.dupe(u8, work.specifier);
@@ -484,10 +499,92 @@ fn park(self: *Context, step: Step, work: Work, index: usize, import: u32, text:
     pending.attributes = copied;
     try self.pendings.append(alloc, pending);
     errdefer _ = self.pendings.pop();
-    // The driver is an async function, so this is a promise; a plain value is still finished through
-    // the same completion path, after the call returns.
     const promise = if (result.isPromise()) v8.Promise.from_opaque(result.data.handle).? else v8.Promise.from_opaque(Promise.resolved(isolate, parent_ctx, result).data.handle).?;
     try chain(parent_ctx, isolate, promise, pending);
+}
+
+// ---- reading through an async fs grant ---------------------------------------
+//
+// The graph holds the Rust natives that read a file of the grant (open, read all, close); the chain
+// calls them itself and parks on their promises, so the read runs on the grant's io runtime and no
+// user JS is involved. `open` answers the file, `read` its bytes.
+
+/// Starts reading the file `work.id` of the graph's async grant; `json` wraps it as a JSON module.
+fn startRead(self: *Context, work: Work, json: bool) !void {
+    const async_fs = self.graph.async_fs orelse return error.PermissionDenied;
+    const creator = self.creator;
+    if (creator.released) return error.ScopeDisposed;
+    const isolate = creator.scope.runtime.isolate;
+    const parent_ctx = creator.scope.context.deref();
+    parent_ctx.enter();
+    defer parent_ctx.exit();
+    var h_scope: v8.HandleScope = undefined;
+    h_scope.init(isolate);
+    defer h_scope.deinit();
+    var tc: v8.TryCatch = undefined;
+    tc.init(isolate);
+    defer tc.deinit();
+    const undef = eu.v.undefined_value(isolate).value;
+    // dir 0 is the grant's root, open bits 0 read only.
+    const result = async_fs.open.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, 0), binding.string(isolate, work.id), numValue(isolate, 0) }) orelse return failureOf(parent_ctx, isolate, &tc);
+    try track(self, parent_ctx, isolate, result, .open, work, 0, 0, "", 0, json);
+}
+
+/// The file is open: asks for all of its bytes.
+fn continueRead(self: *Context, work: Work, pending: *PendingJs, value: v8.Value, ctx: v8.Context) !void {
+    const async_fs = self.graph.async_fs orelse return error.PermissionDenied;
+    const file = value.u32Value(ctx) orelse return error.InvalidData;
+    const creator = self.creator;
+    if (creator.released) return error.ScopeDisposed;
+    const isolate = creator.scope.runtime.isolate;
+    const parent_ctx = creator.scope.context.deref();
+    parent_ctx.enter();
+    defer parent_ctx.exit();
+    var h_scope: v8.HandleScope = undefined;
+    h_scope.init(isolate);
+    defer h_scope.deinit();
+    var tc: v8.TryCatch = undefined;
+    tc.init(isolate);
+    defer tc.deinit();
+    const undef = eu.v.undefined_value(isolate).value;
+    const unlimited = eu.v.num_f64(isolate, std.math.inf(f64)).numeric.primitive.value;
+    const result = async_fs.read_all.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, file), unlimited }) orelse {
+        closeFile(self, file);
+        return failureOf(parent_ctx, isolate, &tc);
+    };
+    track(self, parent_ctx, isolate, result, .read, work, 0, 0, "", file, pending.json) catch |err| {
+        closeFile(self, file);
+        return err;
+    };
+}
+
+/// Closes a file the chain opened; the answer is of no interest.
+fn closeFile(self: *Context, file: u32) void {
+    const async_fs = self.graph.async_fs orelse return;
+    const creator = self.creator;
+    if (creator.released) return;
+    const isolate = creator.scope.runtime.isolate;
+    const parent_ctx = creator.scope.context.deref();
+    parent_ctx.enter();
+    defer parent_ctx.exit();
+    var h_scope: v8.HandleScope = undefined;
+    h_scope.init(isolate);
+    defer h_scope.deinit();
+    var tc: v8.TryCatch = undefined;
+    tc.init(isolate);
+    defer tc.deinit();
+    const undef = eu.v.undefined_value(isolate).value;
+    const result = async_fs.close.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, file) }) orelse return;
+    // A failed close would be an unhandled rejection; swallow it with a handler that does nothing.
+    if (result.isPromise()) {
+        const promise = v8.Promise.from_opaque(result.data.handle).?;
+        const nothing = v8.Function.init(parent_ctx, ignore, null, 1, .Throw, .HasSideEffect);
+        _ = promise.then2(parent_ctx, nothing, nothing);
+    }
+}
+
+fn ignore(info: v8.FunctionCallbackInfo) callconv(.c) void {
+    _ = info;
 }
 
 const Promise = struct {
@@ -585,8 +682,20 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
         try rt.completeResolve(pending.token, .{ .id = id });
         return;
     }
+    if (pending.step == .open) {
+        try continueRead(self, work, pending, value, ctx);
+        return;
+    }
     const advance: LoadAdvance = switch (pending.step) {
-        .layer => unreachable,
+        .layer, .open => unreachable,
+        .read => blk: {
+            // The bytes of the file; the grant's file is closed whatever happens next.
+            defer closeFile(self, pending.file);
+            const bytes = binding.viewBytes(value) orelse return error.InvalidData;
+            const text = try alloc.dupe(u8, bytes);
+            const source = if (pending.json) try json_module.wrap(alloc, text) else text;
+            break :blk try supplied(self, alloc, work, source);
+        },
         .hook => try resumeHook(self, alloc, ctx, isolate, pending, work, value),
         .maker => blk: {
             const object = value.toObject(ctx) orelse return error.InvalidData;
@@ -618,6 +727,10 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
     if (std.mem.eql(u8, kind, "next")) return advanceHooks(self, alloc, work, pending.index + 1);
     if (std.mem.startsWith(u8, work.id, module_types.origine_prefix)) return error.PermissionDenied;
     if (std.mem.eql(u8, kind, "accept")) {
+        if (self.graph.fs == null and self.graph.async_fs != null) {
+            try startRead(self, work, false);
+            return .parked;
+        }
         const text = try graph_api.acceptStep(.{ .host = self.host, .graph = self.graph, .alloc = alloc }, work.id);
         return supplied(self, alloc, work, text);
     }
@@ -646,6 +759,7 @@ fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     if (pending.settled or self.closed) return;
     pending.settled = true;
     defer retire(self, pending);
+    if (pending.step == .read) closeFile(self, pending.file);
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
     var scratch = std.heap.ArenaAllocator.init(self.host.allocator);

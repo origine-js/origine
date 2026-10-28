@@ -46,7 +46,7 @@ const recipe = ModuleRecipe({ source: ModuleSource.file('./main.js'), import: ha
 
 ## Cost and errors, by name
 
-The builders block nothing, allocate nothing natively, detach nothing and retain no host resource; the costs a call site cannot see are made options. `api.graph` and `api.context` read files with the graph's sync grant inside the load stage, which blocks the isolate thread like `requestSync` does.
+The builders block nothing, allocate nothing natively, detach nothing and retain no host resource; the costs a call site cannot see are made options. `api.graph` and `api.context` read files with the graph's fs grant inside the load stage: a sync grant (`requestSync`) blocks the isolate thread like any sync call, an async one (`requestAsync`) reads on its io runtime and blocks nothing.
 
 ### `module`
 
@@ -83,7 +83,7 @@ The builders block nothing, allocate nothing natively, detach nothing and retain
 
 ### `api.graph` and `api.context`
 
-- `api.graph.narrow({ fs?, codeCache? })`: a graph with those replaced. `fs` is a sync grant (`api.fs.requestSync`); the root `api.graph` has none, so it can only supply text sources and `origine:` modules. `graph.flush()` resolves how many modules' code caches were stored.
+- `api.graph.narrow({ fs?, codeCache? })`: a graph with those replaced. `fs` is a grant `api.fs` made, sync (`api.fs.requestSync`) or async (`await api.fs.requestAsync({ io, ... })`); the root `api.graph` has none, so it can only supply text sources and `origine:` modules. `graph.flush()` resolves how many modules' code caches were stored.
 - `recipe.create(graph)` returns a `ModuleReference`: `name`, `status` (`declared`, `loaded`, `evaluating`, `evaluated`, `errored`), `requests` (`undefined` until loaded; each `{ specifier, attributes, phase, reference }`), `context` (the context it is bound to), `load()`, `evaluate(ctx)` (binds to one context; evaluating in a second is `InvalidInput`), `release()` / `Symbol.dispose` (unpins the module).
 - `api.context.create({ import, graph?, preload? })` returns a `Context`: `import(specifier, { attributes? })` (a reference to the evaluated module), `references`, `graph`, `close()` / `Symbol.dispose`. `import` is required. `preload` entries are `{ source, values }` or `{ module, values }`, run before anything is imported; `values` is deep-frozen plain data and functions only. A context gets no capability unless you pass one through `values`, and never sees the graph.
 - `ImportCache#in(ctx)` is the context's module table: `size`, `delete(id)` (the next import makes and evaluates a new module), `clear()`.

@@ -42,6 +42,9 @@ comptime {
     errno.requireBinding(readSource);
     errno.requireBinding(compileRequests);
     errno.requireBinding(bind);
+    errno.requireBinding(asyncFs);
+    errno.requireBinding(utf8);
+    errno.requireBinding(jsonModule);
     errno.requireBinding(pipelineResolve);
     errno.requireBinding(pipelineLoad);
 }
@@ -422,12 +425,23 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
 pub const CodeCacheKind = enum { none, memory, dir, custom };
 
 /// The artifacts and authority shared by the contexts that use a graph.
+/// The Rust natives that read a file of an async fs grant (`native.fsAsync`: open, read all, close)
+/// and the grant's id. Calling them from Zig runs the read on the grant's io runtime; no user JS runs.
+pub const AsyncFs = struct {
+    id: u32,
+    open: v8.Global.Of(v8.Function),
+    read_all: v8.Global.Of(v8.Function),
+    close: v8.Global.Of(v8.Function),
+};
+
 pub const Graph = struct {
     host: *Host,
     id: u32,
     /// The realm that created it (its allowlist bounds the `origine` hooks used with it).
     owner: *ScopeState,
     fs: ?*fs_api.FsGrant = null,
+    /// Set instead of `fs` for an async grant.
+    async_fs: ?AsyncFs = null,
     kind: CodeCacheKind = .none,
     /// `bytes` cap of the memory cache (0: none).
     cache_bytes: usize = 0,
@@ -443,6 +457,11 @@ pub const Graph = struct {
 
     pub fn deinit(self: *Graph) void {
         const alloc = self.host.allocator;
+        if (self.async_fs) |ops| {
+            ops.open.deinit();
+            ops.read_all.deinit();
+            ops.close.deinit();
+        }
         var it = self.memory.iterator();
         while (it.next()) |entry| {
             alloc.free(entry.key_ptr.*);
@@ -561,6 +580,10 @@ pub const HookResult = union(enum) {
     next,
     /// Source text allocated from the caller's allocator.
     source: []u8,
+    /// The graph reads through an async fs grant: the file named by the id has to be read on its io
+    /// runtime and then continues as `source` (wrapped as a JSON module when `json`). Only the
+    /// context's chain can park for that; the synchronous callers fail `Unsupported`.
+    read: struct { json: bool },
 };
 
 /// Where a hook runs: the graph (fs grant), the realm's `origine` ceiling, the allocator for
@@ -604,12 +627,14 @@ pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attribu
         .fs => {
             if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
             if (attributesAsk(attributes, "type", "json")) return .next;
+            if (env.graph.fs == null and env.graph.async_fs != null) return .{ .read = .{ .json = false } };
             return .{ .source = try readFromGraph(env, id) };
         },
         .json => {
             if (!attributesAsk(attributes, "type", "json")) return .next;
             // The namespace is the host's: a file of the graph never serves an `origine:` id.
             if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
+            if (env.graph.fs == null and env.graph.async_fs != null) return .{ .read = .{ .json = true } };
             const text = try readFromGraph(env, id);
             defer env.alloc.free(text);
             return .{ .source = try json_module.wrap(env.alloc, text) };
@@ -731,6 +756,7 @@ fn hookImpl(state: *ScopeState, call: *Call, handler_id: u32, index: u32, graph_
     return switch (result) {
         .next => null,
         .source => |text| text,
+        .read => error.Unsupported,
     };
 }
 
@@ -807,6 +833,27 @@ pub fn bind(state: *ScopeState, step_fn: v8.Function) Error!void {
     state.driver = .{ .step = .new(isolate, step_fn) };
 }
 
+/// `asyncFs(graph, fsId, open, readAll, close)`: makes the graph read through the async fs grant
+/// `fsId` with the Rust natives of `native.fsAsync`. The graph must have no sync grant.
+pub fn asyncFs(state: *ScopeState, graph_id: u32, fs_id: u32, open_fn: v8.Function, read_fn: v8.Function, close_fn: v8.Function) Error!void {
+    const graph = graphFor(state.host, graph_id) catch |err| return errno.narrow(err);
+    if (graph.fs != null or graph.async_fs != null) return error.InvalidInput;
+    const isolate = state.scope.runtime.isolate;
+    graph.async_fs = .{ .id = fs_id, .open = .new(isolate, open_fn), .read_all = .new(isolate, read_fn), .close = .new(isolate, close_fn) };
+}
+
+/// `utf8(bytes)`: the text of UTF-8 bytes (invalid sequences become U+FFFD, as V8 decodes them).
+pub fn utf8(state: *ScopeState, bytes: []u8) Error![]const u8 {
+    _ = state;
+    return bytes;
+}
+
+/// `jsonModule(text)`: the source of an ES module whose default export is the parsed JSON `text`.
+pub fn jsonModule(state: *ScopeState, call: *Call, text: []const u8) Error![]const u8 {
+    _ = state;
+    return json_module.wrap(call.arena, text) catch |err| return errno.narrow(err);
+}
+
 /// `pipelineResolve(handler, specifier, referrer)`: the whole native resolution of a `native`
 /// handler (undefined when no layer answers). For the JS side's own use of native handlers.
 pub fn pipelineResolve(state: *ScopeState, call: *Call, handler_id: u32, specifier: []const u8, referrer: []const u8) Error!?[]const u8 {
@@ -864,6 +911,7 @@ pub fn loadNative(env: HookEnv, h: *Handler, handler_id: u32, id: []const u8, at
                 supplied = text;
                 break;
             },
+            .read => return error.Unsupported,
         }
     }
     const text = supplied orelse return error.NotFound;

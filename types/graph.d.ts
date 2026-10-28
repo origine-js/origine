@@ -1,4 +1,4 @@
-import type { SyncFs } from "./fs.d.ts";
+import type { AsyncFs, SyncFs } from "./fs.d.ts";
 import type { Context } from "./context.d.ts";
 
 /** The states of a {@link ModuleReference}, those of a V8 module. */
@@ -42,8 +42,12 @@ export interface ModuleReference extends Disposable {
 
 /** What {@link ModuleGraph.narrow} may replace. */
 export interface GraphOptions {
-  /** A sync fs grant (`api.fs.requestSync`): the only authority sources are read with. */
-  readonly fs?: SyncFs;
+  /**
+   * A grant `api.fs` made: the only authority sources are read with. A sync grant (`requestSync`) is read
+   * with the host's blocking read; an async one (`await requestAsync({ io })`) on its io runtime, without
+   * blocking and without entering JS. Anything but a grant `api.fs` made is `InvalidInput`.
+   */
+  readonly fs?: SyncFs | AsyncFs;
   /** `origine:@std/graph/cache`: where V8 code caches are kept. Default: none. */
   readonly codeCache?: import("origine:@std/graph/cache").CodeCache;
 }

@@ -54,18 +54,45 @@ comptime {
 /// What a resolved id was resolved for; the load stage needs it.
 const Info = struct { handler: u32, specifier: []u8, referrer: []u8 };
 
-/// A call into the JS driver whose promise has not settled.
+/// One JS element of a handler's pipeline. The driver's `step(kind, ...)` (src/js/glue/graph.js)
+/// runs it; the numbers are the `kind` it receives.
+const Step = enum(u32) { layer = 0, hook = 1, maker = 2, transform = 3, meta = 4 };
+
+/// A call into the JS driver whose promise has not settled: which element runs and what the chain
+/// needs to go on once it answers. A chain keeps its token across steps; only the end completes it.
 const PendingJs = struct {
     context: *Context,
+    /// The request the chain serves: a resolution for `layer`, a load for every other step.
     token: module_types.LoadToken,
-    kind: enum { resolve, load },
+    step: Step,
+    /// The layer or hook index, or the index of the transformer function.
+    index: u32 = 0,
+    /// The handler whose element runs (for `meta`: the handler of the module made).
+    handler: u32,
+    /// The handler the made module's own imports use, once the maker answered.
+    import: u32 = 0,
     id: []u8 = &.{},
     attributes: []module_types.ImportAttribute = &.{},
-    handler: u32,
     specifier: []u8 = &.{},
     referrer: []u8 = &.{},
+    /// The source waiting for its `meta` (owned).
+    text: []u8 = &.{},
     settled: bool = false,
 };
+
+/// What a chain works on. Borrowed.
+const Work = struct {
+    handler: u32,
+    token: module_types.LoadToken,
+    id: []const u8,
+    specifier: []const u8,
+    referrer: []const u8,
+    attributes: []const module_types.ImportAttribute,
+};
+
+fn workOf(pending: *const PendingJs) Work {
+    return .{ .handler = pending.handler, .token = pending.token, .id = pending.id, .specifier = pending.specifier, .referrer = pending.referrer, .attributes = pending.attributes };
+}
 
 pub const Context = struct {
     host: *Host,
@@ -242,6 +269,7 @@ fn freePending(alloc: std.mem.Allocator, pending: *PendingJs) void {
     alloc.free(pending.attributes);
     alloc.free(pending.specifier);
     alloc.free(pending.referrer);
+    alloc.free(pending.text);
     alloc.destroy(pending);
 }
 
@@ -259,16 +287,13 @@ fn contextFor(state: *ScopeState, id: u32) !*Context {
 fn resolveAsync(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror!module_types.ResolveOutcome {
     const self: *Context = @ptrCast(@alignCast(data.?));
     self.releaseLinks();
-    const host = self.host;
     if (self.root) |name| if (request.referrer.len == 0 and std.mem.eql(u8, request.specifier, name)) return .{ .id = try request.allocator.dupe(u8, name) };
     const handler_id = self.handler_of.get(request.referrer) orelse self.import_handler;
-    const h = try graph_api.handlerFor(host, handler_id);
-    if (h.native) {
-        const id = (try graph_api.resolveNative(h, request.allocator, request.specifier, request.referrer)) orelse return error.NotFound;
-        try self.recordResolved(request.allocator, id, request.import_attributes, handler_id, request.specifier, request.referrer);
-        return .{ .id = id };
-    }
-    return callDriver(self, .resolve, handler_id, request.token, "", request.specifier, request.referrer, request.import_attributes, request.allocator);
+    const work: Work = .{ .handler = handler_id, .token = request.token, .id = "", .specifier = request.specifier, .referrer = request.referrer, .attributes = request.import_attributes };
+    return switch (try advanceResolve(self, request.allocator, work, 0)) {
+        .id => |id| .{ .id = id },
+        .parked => .pending,
+    };
 }
 
 fn cancel(data: ?*anyopaque, token: module_types.LoadToken) void {
@@ -281,31 +306,120 @@ fn cancel(data: ?*anyopaque, token: module_types.LoadToken) void {
 fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {
     const self: *Context = @ptrCast(@alignCast(data.?));
     self.releaseLinks();
-    const host = self.host;
     const key = try Context.infoKey(request.allocator, request.module_id, request.import_attributes);
     const info = self.resolved.get(key) orelse return error.NotFound;
-    const h = try graph_api.handlerFor(host, info.handler);
-    if (h.native) {
-        var served = false;
-        const loaded = try graph_api.loadNative(.{ .host = host, .graph = self.graph, .alloc = request.allocator, .served = &served }, h, info.handler, request.module_id, request.import_attributes);
-        switch (loaded) {
-            .source => |made| {
-                if (served) try self.markServed(request.module_id);
-                try self.setHandler(request.module_id, made.import);
-                return .{ .source = made.source };
+    const work: Work = .{ .handler = info.handler, .token = request.token, .id = request.module_id, .specifier = info.specifier, .referrer = info.referrer, .attributes = request.import_attributes };
+    switch (try advanceHooks(self, request.allocator, work, 0)) {
+        .parked => return .pending,
+        .done => |completion| return switch (completion) {
+            .content => |content| switch (content) {
+                .source => |text| .{ .source = text },
+                .exports => |exports| .{ .exports = exports },
+                .module => |module| .{ .module = module },
             },
-            .diagnostics => |text| return .{ .exception = transformer_api.syntaxError(text) },
-        }
+            .syntax_error => |text| .{ .exception = transformer_api.syntaxError(text) },
+            else => error.InvalidData,
+        },
     }
-    const outcome = try callDriver(self, .load, info.handler, request.token, request.module_id, info.specifier, info.referrer, request.import_attributes, request.allocator);
-    _ = outcome;
-    return .pending;
 }
 
-/// Calls the creating realm's JS driver. Returns the resolver answer (`.id` or `.pending`) for
-/// `.resolve`; for `.load` it always parks the load (`.pending`) and the answer arrives through a
-/// completion. Exceptions the driver throws become the failure of the request.
-fn callDriver(self: *Context, kind: enum { resolve, load }, handler_id: u32, token: module_types.LoadToken, id: []const u8, specifier: []const u8, referrer: []const u8, attributes: []const module_types.ImportAttribute, scratch: std.mem.Allocator) !module_types.ResolveOutcome {
+// ---- the chain: native elements run here, JS elements park the request ------
+//
+// A handler's resolver layers, hooks, maker and transformer run in order. A host element runs
+// right here, whatever the elements around it are. A JS element parks the request (`park`): the
+// driver runs just that function in the creating realm, and when its promise settles the chain goes
+// on from the next element (`fulfilled`), with the same token, until it completes the request.
+
+const ResolveAdvance = union(enum) { id: []const u8, parked };
+const LoadAdvance = union(enum) { done: module_types.Completion, parked };
+
+/// Runs the resolver layers of `work.handler` from index `from`. The id is allocated from `scratch`.
+fn advanceResolve(self: *Context, scratch: std.mem.Allocator, work: Work, from: usize) !ResolveAdvance {
+    const h = try graph_api.handlerFor(self.host, work.handler);
+    var index = from;
+    while (index < h.layers.len) : (index += 1) {
+        if (h.layers[index] == .js) {
+            try park(self, .layer, work, index, 0, "");
+            return .parked;
+        }
+        if (try graph_api.layerStep(h, index, scratch, work.specifier, work.referrer)) |id| {
+            try self.recordResolved(scratch, id, work.attributes, work.handler, work.specifier, work.referrer);
+            return .{ .id = id };
+        }
+    }
+    return error.NotFound;
+}
+
+/// Runs the hooks of `work.handler` from index `from` until one supplies the source, then the maker.
+fn advanceHooks(self: *Context, scratch: std.mem.Allocator, work: Work, from: usize) !LoadAdvance {
+    const h = try graph_api.handlerFor(self.host, work.handler);
+    var index = from;
+    while (index < h.hooks.len) : (index += 1) {
+        if (h.hooks[index] == .js) {
+            try park(self, .hook, work, index, 0, "");
+            return .parked;
+        }
+        var served = false;
+        switch (try graph_api.hookStep(h, index, .{ .host = self.host, .graph = self.graph, .alloc = scratch, .served = &served }, work.id, work.attributes)) {
+            .next => {},
+            .source => |text| {
+                if (served) try self.markServed(work.id);
+                return supplied(self, scratch, work, text);
+            },
+        }
+    }
+    return error.NotFound;
+}
+
+/// The source of `work.id` is known: the maker decides which recipe options apply. The host's own
+/// modules skip it: they reach the context as the host wrote them.
+fn supplied(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8) !LoadAdvance {
+    if (std.mem.startsWith(u8, work.id, module_types.origine_prefix)) {
+        try self.setHandler(work.id, work.handler);
+        return .{ .done = .{ .content = .{ .source = text } } };
+    }
+    const h = try graph_api.handlerFor(self.host, work.handler);
+    switch (h.maker) {
+        .js => {
+            try park(self, .maker, work, 0, 0, text);
+            return .parked;
+        },
+        .inherit => |inherit| {
+            const import = if (inherit.import != 0) inherit.import else work.handler;
+            const spec = inherit.transformer orelse return made(self, scratch, work, text, import);
+            const leaf = spec.leaf(work.id) orelse return made(self, scratch, work, text, import);
+            switch (leaf.*) {
+                .js => |index| {
+                    try park(self, .transform, work, index, import, text);
+                    return .parked;
+                },
+                else => switch (try leaf.apply(scratch, work.id, text)) {
+                    .source => |out| return made(self, scratch, work, out, import),
+                    .diagnostics => |diagnostics| return .{ .done = .{ .syntax_error = diagnostics } },
+                },
+            }
+        },
+    }
+}
+
+/// The module is made: remember which handler answers its imports, then ask for its `import.meta`.
+fn made(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8, import: u32) !LoadAdvance {
+    _ = scratch;
+    try self.setHandler(work.id, import);
+    const h = try graph_api.handlerFor(self.host, import);
+    if (h.meta) {
+        var meta_work = work;
+        meta_work.handler = import;
+        try park(self, .meta, meta_work, 0, import, text);
+        return .parked;
+    }
+    return .{ .done = .{ .content = .{ .source = text } } };
+}
+
+/// Calls the creating realm's JS driver for one element and parks the request on its promise.
+/// `text` is the source a maker or transformer gets (and the one a `meta` step keeps). An exception
+/// the call throws becomes the failure of the request.
+fn park(self: *Context, step: Step, work: Work, index: usize, import: u32, text: []const u8) !void {
     const host = self.host;
     const creator = self.creator;
     if (creator.released) return error.ScopeDisposed;
@@ -323,35 +437,38 @@ fn callDriver(self: *Context, kind: enum { resolve, load }, handler_id: u32, tok
     defer tc.deinit();
 
     const bag = v8.Object.init(isolate);
-    for (attributes) |attribute| {
+    for (work.attributes) |attribute| {
         _ = bag.createDataProperty(parent_ctx, eu.v.str_utf8(isolate, attribute.key).name, binding.string(isolate, attribute.value)) orelse return error.LoaderFailed;
     }
     const number = struct {
-        fn of(iso: v8.Isolate, value: u32) v8.Value {
-            return eu.v.num_u32(iso, value).numeric.primitive.value;
+        fn of(iso: v8.Isolate, value: usize) v8.Value {
+            return eu.v.num_u32(iso, @intCast(value)).numeric.primitive.value;
         }
     }.of;
-    const function = switch (kind) {
-        .resolve => driver.resolve.deref(),
-        .load => driver.load.deref(),
-    };
-    const result = switch (kind) {
-        .resolve => function.call(parent_ctx, eu.v.undefined_value(isolate).value, &.{ number(isolate, handler_id), number(isolate, self.id), binding.string(isolate, specifier), binding.string(isolate, referrer), bag.value }),
-        .load => function.call(parent_ctx, eu.v.undefined_value(isolate).value, &.{ number(isolate, handler_id), number(isolate, self.id), number(isolate, self.graph.id), binding.string(isolate, id), bag.value, binding.string(isolate, specifier), binding.string(isolate, referrer) }),
+    const function = driver.step.deref();
+    const undef = eu.v.undefined_value(isolate).value;
+    const kind = number(isolate, @backingInt(step));
+    const result = switch (step) {
+        .layer => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, self.id), number(isolate, index), binding.string(isolate, work.specifier), binding.string(isolate, work.referrer), bag.value }),
+        .hook => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, self.id), number(isolate, self.graph.id), number(isolate, index), binding.string(isolate, work.id), bag.value, binding.string(isolate, work.specifier), binding.string(isolate, work.referrer) }),
+        .maker => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, self.id), binding.string(isolate, work.id), binding.string(isolate, text) }),
+        .transform => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), number(isolate, index), binding.string(isolate, work.id), binding.string(isolate, text) }),
+        .meta => function.call(parent_ctx, undef, &.{ kind, number(isolate, work.handler), binding.string(isolate, work.id) }),
     } orelse return failureOf(parent_ctx, isolate, &tc);
 
-    // A promise (the driver is an async function): park the request until it settles.
     const alloc = host.allocator;
     const pending = try alloc.create(PendingJs);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .context = self, .token = token, .kind = if (kind == .resolve) .resolve else .load, .handler = handler_id };
-    pending.id = try alloc.dupe(u8, id);
+    pending.* = .{ .context = self, .token = work.token, .step = step, .index = @intCast(index), .handler = work.handler, .import = import };
+    pending.id = try alloc.dupe(u8, work.id);
     errdefer alloc.free(pending.id);
-    pending.specifier = try alloc.dupe(u8, specifier);
+    pending.specifier = try alloc.dupe(u8, work.specifier);
     errdefer alloc.free(pending.specifier);
-    pending.referrer = try alloc.dupe(u8, referrer);
+    pending.referrer = try alloc.dupe(u8, work.referrer);
     errdefer alloc.free(pending.referrer);
-    const copied = try alloc.alloc(module_types.ImportAttribute, attributes.len);
+    if (step == .meta) pending.text = try alloc.dupe(u8, text);
+    errdefer alloc.free(pending.text);
+    const copied = try alloc.alloc(module_types.ImportAttribute, work.attributes.len);
     var done: usize = 0;
     errdefer {
         for (copied[0..done]) |attribute| {
@@ -360,22 +477,17 @@ fn callDriver(self: *Context, kind: enum { resolve, load }, handler_id: u32, tok
         }
         alloc.free(copied);
     }
-    for (attributes, copied) |attribute, *slot| {
+    for (work.attributes, copied) |attribute, *slot| {
         slot.* = .{ .key = try alloc.dupe(u8, attribute.key), .value = try alloc.dupe(u8, attribute.value) };
         done += 1;
     }
     pending.attributes = copied;
     try self.pendings.append(alloc, pending);
     errdefer _ = self.pendings.pop();
-    if (!result.isPromise()) {
-        // Settled synchronously: still finished through the same completion path, after the call returns.
-        const promise = v8.Promise.from_opaque(Promise.resolved(isolate, parent_ctx, result).data.handle).?;
-        try chain(parent_ctx, isolate, promise, pending);
-        _ = scratch;
-        return .pending;
-    }
-    try chain(parent_ctx, isolate, v8.Promise.from_opaque(result.data.handle).?, pending);
-    return .pending;
+    // The driver is an async function, so this is a promise; a plain value is still finished through
+    // the same completion path, after the call returns.
+    const promise = if (result.isPromise()) v8.Promise.from_opaque(result.data.handle).? else v8.Promise.from_opaque(Promise.resolved(isolate, parent_ctx, result).data.handle).?;
+    try chain(parent_ctx, isolate, promise, pending);
 }
 
 const Promise = struct {
@@ -446,31 +558,86 @@ fn fulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
     if (pending.settled or self.closed) return;
     pending.settled = true;
     defer retire(self, pending);
-    const host = self.host;
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
     const rt = self.scope.runtime;
-    var scratch = std.heap.ArenaAllocator.init(host.allocator);
+    var scratch = std.heap.ArenaAllocator.init(self.host.allocator);
     defer scratch.deinit();
-    const alloc = scratch.allocator();
-    switch (pending.kind) {
-        .resolve => {
-            const value = info.get_arg(0);
-            const id = idOf(ctx, isolate, alloc, value) catch {
-                rt.completeResolve(pending.token, .{ .failure = error.InvalidData }) catch {};
-                return;
-            };
-            self.recordResolved(alloc, id, pending.attributes, pending.handler, pending.specifier, pending.referrer) catch {};
-            rt.completeResolve(pending.token, .{ .id = id }) catch {};
-        },
-        .load => {
-            const reply = readReply(self, ctx, isolate, alloc, pending.id, info.get_arg(0)) catch |err| {
-                rt.completeLoad(pending.token, .{ .failure = err }) catch {};
-                return;
-            };
-            rt.completeLoad(pending.token, reply) catch {};
-        },
+    resume_(self, scratch.allocator(), ctx, isolate, pending, info.get_arg(0)) catch |err| {
+        if (pending.step == .layer) rt.completeResolve(pending.token, .{ .failure = err }) catch {} else rt.completeLoad(pending.token, .{ .failure = err }) catch {};
+    };
+}
+
+/// The answer of the element `pending` ran: goes on with the chain, which parks again or completes.
+fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v8.Isolate, pending: *PendingJs, value: v8.Value) !void {
+    const rt = self.scope.runtime;
+    const work = workOf(pending);
+    if (pending.step == .layer) {
+        if (value.isUndefined() or value.isNull()) {
+            switch (try advanceResolve(self, alloc, work, pending.index + 1)) {
+                .id => |id| try rt.completeResolve(pending.token, .{ .id = id }),
+                .parked => {},
+            }
+            return;
+        }
+        const id = try idOf(ctx, isolate, alloc, value);
+        try self.recordResolved(alloc, id, work.attributes, work.handler, work.specifier, work.referrer);
+        try rt.completeResolve(pending.token, .{ .id = id });
+        return;
     }
+    const advance: LoadAdvance = switch (pending.step) {
+        .layer => unreachable,
+        .hook => try resumeHook(self, alloc, ctx, isolate, pending, work, value),
+        .maker => blk: {
+            const object = value.toObject(ctx) orelse return error.InvalidData;
+            const text = (try stringOf(ctx, isolate, alloc, object, "text")) orelse return error.InvalidData;
+            const handler = numberOf(ctx, isolate, object, "handler") orelse return error.InvalidData;
+            break :blk try made(self, alloc, work, text, handler);
+        },
+        .transform => blk: {
+            if (!value.isString()) return error.InvalidData;
+            const text = try stringValue(ctx, isolate, alloc, value);
+            break :blk try made(self, alloc, work, text, pending.import);
+        },
+        .meta => blk: {
+            if (value.isString()) try self.setMeta(work.id, try stringValue(ctx, isolate, alloc, value));
+            break :blk .{ .done = .{ .content = .{ .source = pending.text } } };
+        },
+    };
+    switch (advance) {
+        .done => |completion| try rt.completeLoad(pending.token, completion),
+        .parked => {},
+    }
+}
+
+/// What a JS hook answered: `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link', ... }`. No JS
+/// answer supplies an `origine:` id; the host's own provider is the only way to one.
+fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v8.Isolate, pending: *PendingJs, work: Work, value: v8.Value) !LoadAdvance {
+    const object = value.toObject(ctx) orelse return error.InvalidData;
+    const kind = (try stringOf(ctx, isolate, alloc, object, "kind")) orelse return error.InvalidData;
+    if (std.mem.eql(u8, kind, "next")) return advanceHooks(self, alloc, work, pending.index + 1);
+    if (std.mem.startsWith(u8, work.id, module_types.origine_prefix)) return error.PermissionDenied;
+    if (std.mem.eql(u8, kind, "accept")) {
+        const text = try graph_api.acceptStep(.{ .host = self.host, .graph = self.graph, .alloc = alloc }, work.id);
+        return supplied(self, alloc, work, text);
+    }
+    if (std.mem.eql(u8, kind, "provide")) {
+        const text = (try stringOf(ctx, isolate, alloc, object, "source")) orelse return error.InvalidData;
+        return supplied(self, alloc, work, text);
+    }
+    if (std.mem.eql(u8, kind, "final")) {
+        // A recipe: final, so the maker is skipped, and its own handler answers its imports.
+        const text = (try stringOf(ctx, isolate, alloc, object, "source")) orelse return error.InvalidData;
+        const handler = numberOf(ctx, isolate, object, "handler") orelse return error.InvalidData;
+        return made(self, alloc, work, text, handler);
+    }
+    if (std.mem.eql(u8, kind, "link")) {
+        const other_id = numberOf(ctx, isolate, object, "context") orelse return error.InvalidData;
+        const name = (try stringOf(ctx, isolate, alloc, object, "name")) orelse return error.InvalidData;
+        const mode = (try stringOf(ctx, isolate, alloc, object, "mode")) orelse return error.InvalidData;
+        return .{ .done = .{ .content = try link(self, other_id, name, std.mem.eql(u8, mode, "shared"), alloc) } };
+    }
+    return error.InvalidData;
 }
 
 fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
@@ -488,17 +655,11 @@ fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     // An ImportError code keeps its kind; anything else reaches the module as an `Error` with its message.
     const known = errorOf(ctx, isolate, info.get_arg(0));
     if (known != error.ImportRejected) {
-        switch (pending.kind) {
-            .resolve => rt.completeResolve(pending.token, .{ .failure = known }) catch {},
-            .load => rt.completeLoad(pending.token, .{ .failure = known }) catch {},
-        }
+        if (pending.step == .layer) rt.completeResolve(pending.token, .{ .failure = known }) catch {} else rt.completeLoad(pending.token, .{ .failure = known }) catch {};
         return;
     }
     const text = messageOf(ctx, isolate, alloc, info.get_arg(0)) catch "import rejected";
-    switch (pending.kind) {
-        .resolve => rt.completeResolve(pending.token, .{ .message = text }) catch {},
-        .load => rt.completeLoad(pending.token, .{ .message = text }) catch {},
-    }
+    if (pending.step == .layer) rt.completeResolve(pending.token, .{ .message = text }) catch {} else rt.completeLoad(pending.token, .{ .message = text }) catch {};
 }
 
 /// `name: message` of a thrown value, for a failure that is not one of the closed ImportError kinds.
@@ -509,38 +670,17 @@ fn messageOf(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, val
     return std.fmt.allocPrint(alloc, "{s}: {s}", .{ name, message });
 }
 
-/// A resolver reply: the id string, or an object with a string `id`.
-fn idOf(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, value: v8.Value) ![]u8 {
-    if (value.isString()) {
-        const text = value.toString(ctx) orelse return error.InvalidData;
-        const buffer = try alloc.alloc(u8, text.lenUtf8(isolate));
-        return buffer[0..text.writeUtf8(isolate, buffer)];
-    }
-    const object = value.toObject(ctx) orelse return error.InvalidData;
-    return (try stringOf(ctx, isolate, alloc, object, "id")) orelse error.InvalidData;
+fn stringValue(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, value: v8.Value) ![]u8 {
+    const text = value.toString(ctx) orelse return error.InvalidData;
+    const buffer = try alloc.alloc(u8, text.lenUtf8(isolate));
+    return buffer[0..text.writeUtf8(isolate, buffer)];
 }
 
-/// Turns the load answer of the JS driver into the content to complete the load with. Records what
-/// the context keeps about the module (its handler, `import.meta` data) and refuses to let a JS
-/// answer serve an `origine:` id the native provider did not.
-fn readReply(self: *Context, ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, id: []const u8, value: v8.Value) !module_types.Completion {
+/// A resolver reply: the id string, or an object with a string `id`.
+fn idOf(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, value: v8.Value) ![]u8 {
+    if (value.isString()) return stringValue(ctx, isolate, alloc, value);
     const object = value.toObject(ctx) orelse return error.InvalidData;
-    const kind = (try stringOf(ctx, isolate, alloc, object, "kind")) orelse return error.InvalidData;
-    if (std.mem.eql(u8, kind, "source")) {
-        if (std.mem.startsWith(u8, id, module_types.origine_prefix) and !self.served.contains(id)) return error.PermissionDenied;
-        const source = (try stringOf(ctx, isolate, alloc, object, "source")) orelse return error.InvalidData;
-        if (numberOf(ctx, isolate, object, "handler")) |handler| try self.setHandler(id, handler);
-        if (try stringOf(ctx, isolate, alloc, object, "meta")) |json| try self.setMeta(id, json);
-        return .{ .content = .{ .source = source } };
-    }
-    if (std.mem.eql(u8, kind, "link")) {
-        if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return error.PermissionDenied;
-        const other_id = numberOf(ctx, isolate, object, "context") orelse return error.InvalidData;
-        const name = (try stringOf(ctx, isolate, alloc, object, "name")) orelse return error.InvalidData;
-        const mode = (try stringOf(ctx, isolate, alloc, object, "mode")) orelse return error.InvalidData;
-        return .{ .content = try link(self, other_id, name, std.mem.eql(u8, mode, "shared"), alloc) };
-    }
-    return error.InvalidData;
+    return (try stringOf(ctx, isolate, alloc, object, "id")) orelse error.InvalidData;
 }
 
 /// The content that makes the module `name` of context `other_id` available to `self`: the module

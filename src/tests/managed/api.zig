@@ -1040,6 +1040,47 @@ test "graph: a settled driver call is freed and a second evaluate waits for the 
     try t.expectEqual(@as(usize, 0), fx.host.contexts.items[0].pendings.items.len);
 }
 
+test "graph: a handler with functions in it runs its host elements natively and calls the driver only for the functions" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import, MakeRecipe, Transform } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const calls = [];
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(relative()).layer(({ specifier }) => { calls.push('layer:' + specifier); return specifier === 'virtual' ? { id: 'virtual' } : undefined; }),
+        \\    hooks: [
+        \\      async r => { calls.push('hook:' + r.id); return r.id === 'virtual' ? Import.provide(ModuleSource.text('export const v = 5;')) : Import.next(); },
+        \\      fsProvider({ read: 'copy' }),
+        \\    ],
+        \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.txt': async text => { calls.push('transform'); return text + ' export const t = 1;'; } }) }),
+        \\  });
+        \\  out.plan = handler.plan.map(e => e.stage + ':' + e.kind).join(',');
+        \\  const ctx = await api.context.create({ import: handler, graph });
+        \\  await ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler }).create(graph).evaluate(ctx);
+        \\  out.calls = calls.sort().join(',');
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "dep.js", .data = "export const k = 10;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "native.js", .data = "export const n = 20;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "x.txt", .data = "export const base = 1;" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.js", .data = "import { v } from 'virtual'; import { k } from './dep.js'; import { n } from './native.js'; import { t } from './x.txt'; globalThis.sum = v + k + n + t;" });
+    try fx.run();
+    try check(fx.scope, "report.plan === 'resolver:native,resolver:js,hooks:js,hooks:native,maker:native,transformer:js,cache:native'");
+    // './dep.js', './native.js' and './x.txt' resolve in the host's relative layer, so the layer function only
+    // sees 'virtual'; the hook function sees each of the four modules; the transformer function only the .txt.
+    try check(fx.scope, "report.calls === 'hook:dep.js,hook:native.js,hook:virtual,hook:x.txt,layer:virtual,transform'");
+    try check(fx.rt.scopes.items[1], "sum === 36");
+    try t.expectEqual(@as(usize, 6), fx.host.driver_calls);
+}
+
 test "graph: origineProvider serves an allowlist and JS cannot forge origine: modules" {
     var fx: Fixture = undefined;
     try fx.setup(
@@ -1082,8 +1123,9 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
     try check(fx.scope, "report.forged.includes('PermissionDenied') && report.forgedStd.includes('PermissionDenied')");
     try check(fx.scope, "report.excludeServed === 'ok' && report.excludeDenied.includes('PermissionDenied') && report.empty.includes('NotFound')");
     try check(fx.rt.scopes.items[1], "len === 6");
-    // Only the two imports through the handler with a JS hook entered the driver (resolve and load each).
-    try t.expectEqual(@as(usize, 4), fx.host.driver_calls);
+    // Only the two imports through the handler with a JS hook entered the driver, and only for the hook
+    // (its resolver layer is a host layer).
+    try t.expectEqual(@as(usize, 2), fx.host.driver_calls);
 }
 
 test "graph: the origine ceiling of a context is the exact union of its hooks" {

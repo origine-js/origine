@@ -98,8 +98,9 @@ fn duplicateList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []
 // ---- transformers ----------------------------------------------------------
 
 pub const TransformerSpec = union(enum) {
-    /// A function in the creating realm: only the JS driver can run it.
-    js,
+    /// A function in the creating realm, the `u32`th of the handler's transformer functions: only
+    /// the JS driver can run it.
+    js: u32,
     oxc: oxc.Options,
     by_extension: []const struct { ext: []const u8, spec: TransformerSpec },
 
@@ -113,6 +114,23 @@ pub const TransformerSpec = union(enum) {
         };
     }
 
+    /// The spec that applies to module `id`: itself, or the entry of a by-extension table with the
+    /// longest matching extension (null when none matches, so the source stays as it is).
+    pub fn leaf(self: *const TransformerSpec, id: []const u8) ?*const TransformerSpec {
+        switch (self.*) {
+            .js, .oxc => return self,
+            .by_extension => |entries| {
+                const path = id[0 .. std.mem.indexOfAny(u8, id, "?#") orelse id.len];
+                var best: ?usize = null;
+                for (entries, 0..) |entry, index| {
+                    if (path.len <= entry.ext.len or !std.mem.endsWith(u8, path, entry.ext)) continue;
+                    if (best == null or entry.ext.len > entries[best.?].ext.len) best = index;
+                }
+                return entries[best orelse return null].spec.leaf(id);
+            },
+        }
+    }
+
     /// Transforms `source` (module `id`) into `alloc`; the input is returned unchanged when no entry
     /// matches. A `js` spec is never run here (callers check `isNative` or go through the driver).
     pub fn apply(self: *const TransformerSpec, alloc: std.mem.Allocator, id: []const u8, source: []const u8) !transformer_api.Outcome {
@@ -122,23 +140,13 @@ pub const TransformerSpec = union(enum) {
                 if (!oxc.enabled) return error.Unsupported;
                 return oxc.run(@ptrCast(@constCast(options)), .{ .allocator = alloc, .module_id = id, .source = source });
             },
-            .by_extension => |entries| {
-                const path = id[0 .. std.mem.indexOfAny(u8, id, "?#") orelse id.len];
-                var best: ?usize = null;
-                for (entries, 0..) |entry, index| {
-                    if (path.len <= entry.ext.len or !std.mem.endsWith(u8, path, entry.ext)) continue;
-                    if (best == null or entry.ext.len > entries[best.?].ext.len) best = index;
-                }
-                const found = best orelse return .{ .source = source };
-                return found_apply(&entries[found].spec, alloc, id, source);
+            .by_extension => {
+                const found = self.leaf(id) orelse return .{ .source = source };
+                return found.apply(alloc, id, source);
             },
         }
     }
 };
-
-fn found_apply(spec: *const TransformerSpec, alloc: std.mem.Allocator, id: []const u8, source: []const u8) !transformer_api.Outcome {
-    return spec.apply(alloc, id, source);
-}
 
 /// Reads a transformer spec from JSON into `alloc` (kept for the life of the handler).
 fn parseTransformer(alloc: std.mem.Allocator, value: std.json.Value) !TransformerSpec {
@@ -146,7 +154,10 @@ fn parseTransformer(alloc: std.mem.Allocator, value: std.json.Value) !Transforme
         .object => |object| object,
         else => return error.InvalidInput,
     };
-    if (object.get("js") != null) return .js;
+    if (object.get("js")) |index| return .{ .js = switch (index) {
+        .integer => |number| std.math.cast(u32, number) orelse return error.InvalidInput,
+        else => return error.InvalidInput,
+    } };
     const host = switch (object.get("host") orelse return error.InvalidInput) {
         .string => |text| text,
         else => return error.InvalidInput,
@@ -788,15 +799,12 @@ fn compileRequestsImpl(state: *ScopeState, call: *Call, source: []const u8, name
     return out.finish();
 }
 
-/// `bind(resolve, load)`: the JS driver of the calling realm (functions the glue defines), kept
-/// for the contexts this realm creates.
-pub fn bind(state: *ScopeState, resolve_fn: v8.Function, load_fn: v8.Function) Error!void {
+/// `bind(step)`: the JS driver of the calling realm (a function the glue defines: `step(kind, ...)`
+/// runs one JS element of a handler, see `context.Step`), kept for the contexts this realm creates.
+pub fn bind(state: *ScopeState, step_fn: v8.Function) Error!void {
     const isolate = state.scope.runtime.isolate;
-    if (state.driver) |old| {
-        old.resolve.deinit();
-        old.load.deinit();
-    }
-    state.driver = .{ .resolve = .new(isolate, resolve_fn), .load = .new(isolate, load_fn) };
+    if (state.driver) |old| old.step.deinit();
+    state.driver = .{ .step = .new(isolate, step_fn) };
 }
 
 /// `pipelineResolve(handler, specifier, referrer)`: the whole native resolution of a `native`

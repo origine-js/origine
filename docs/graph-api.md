@@ -24,16 +24,15 @@ All of it is implemented except what the last row lists. Tests: `src/tests/manag
 What the implementation does differently from the proposal this page started as:
 
 1. **One identity table per context, shared by all its handlers** (the scope's `ModuleMap`), not one per cache object. `ImportCache.native({ retain, entries })` of the context's `import` handler sets how the table keeps modules; the cache option of other handlers is not consulted.
-2. **A handler that is not fully native runs its whole pipeline in the JS driver.** The driver calls the host for the native elements (`layer`, `hook`, `transform`, `readSource`), but the loop is JS. Only `handler.native === true` guarantees that no import enters JS (tests assert `host.driver_calls`).
-3. **Reading files needs a sync fs grant.** `narrow({ fs })` takes `api.fs.requestSync(...)`; an async grant is `InvalidInput`. Only a grant object `api.fs` itself made counts: a lookalike `{ kind: 'sync', id }` with a guessed id is `InvalidInput`, so a realm that was handed `api.graph` cannot reach the grants of the realm that gave it. The host reads with its own blocking read inside the load stage (native handlers) or in the driver.
-4. **`CodeCache.custom` is store-only.** `load` is not consulted; `store(key, bytes)` is called at `graph.flush()`.
-5. **`meta` lives on the handler only.** The maker returns `{ import?, transformer? }`.
-6. **`ModuleReference.status` has no separate `instantiated`**: a reference goes `declared`, `loaded`, `evaluating`, `evaluated` or `errored`. `requests[].reference` are one level deep: they are `declared` until `load()` is called on them.
-7. **The origine ceiling** (what `origineProvider` may include) comes from the context's import handler only; the init scope is unrestricted. A hook that names more than that is `PermissionDenied` (`Unsupported` in a context whose handler serves nothing).
-8. **A root module is addressed by its name.** `evaluate` and preloads register the source under the module's `name` and import that name, bypassing the resolver; the name must be unused in the context's table (`InvalidInput`).
-9. **`'hardened'` freezes the exported graph in place** (the hardener's rule), so the source context's exported objects become frozen too.
-10. **Errors from JS hooks**: an `ImportError` kind keeps its kind; anything else, `ImportError.other(message)` included, reaches the importing module as an `Error` with `name: message`.
-11. **Oxc transformers are plain descriptors** (`ts()` returns `{ host: 'oxc', kind: 'transformer', transform, options }`), no longer callable functions.
+2. **Reading files needs a sync fs grant.** `narrow({ fs })` takes `api.fs.requestSync(...)`; an async grant is `InvalidInput`. Only a grant object `api.fs` itself made counts: a lookalike `{ kind: 'sync', id }` with a guessed id is `InvalidInput`, so a realm that was handed `api.graph` cannot reach the grants of the realm that gave it. The host reads with its own blocking read inside the load stage (native handlers) or in the driver.
+3. **`CodeCache.custom` is store-only.** `load` is not consulted; `store(key, bytes)` is called at `graph.flush()`.
+4. **`meta` lives on the handler only.** The maker returns `{ import?, transformer? }`.
+5. **`ModuleReference.status` has no separate `instantiated`**: a reference goes `declared`, `loaded`, `evaluating`, `evaluated` or `errored`. `requests[].reference` are one level deep: they are `declared` until `load()` is called on them.
+6. **The origine ceiling** (what `origineProvider` may include) comes from the context's import handler only; the init scope is unrestricted. A hook that names more than that is `PermissionDenied` (`Unsupported` in a context whose handler serves nothing).
+7. **A root module is addressed by its name.** `evaluate` and preloads register the source under the module's `name` and import that name, bypassing the resolver; the name must be unused in the context's table (`InvalidInput`).
+8. **`'hardened'` freezes the exported graph in place** (the hardener's rule), so the source context's exported objects become frozen too.
+9. **Errors from JS hooks**: an `ImportError` kind keeps its kind; anything else, `ImportError.other(message)` included, reaches the importing module as an `Error` with `name: message`.
+10. **Oxc transformers are plain descriptors** (`ts()` returns `{ host: 'oxc', kind: 'transformer', transform, options }`), no longer callable functions.
 
 ## Facts that shape the design
 
@@ -91,7 +90,7 @@ There is no `origineNamespace` flag. `origine()` only canonicalises `origine:` i
 
 ### Native plans
 
-`ImportHandler.make` classifies each element: a host descriptor (frozen `{ host, kind, ... }`) is validated against the graph's grants and compiled to a native step; a function is a JS barrier. Consecutive native steps are fused into one plan exposed through the existing managed `Resolver` and `Loader`; a barrier parks the entry, runs in the creating realm during the load stage, and resumes the native steps. A fully native handler never enters JS (`init_loader.zig` is that chain written by hand today). `ImportCache` and `ResolveCache` are native only: they sit behind V8's synchronous link. The cost is visible: `handler.plan` and `handler.native`. A handler with `native === true` is plain data and can be cloned to a child isolate as its `import` option.
+`ImportHandler.make` classifies each element: a host descriptor (frozen `{ host, kind, ... }`) is validated against the graph's grants and compiled to a native step; a function is a JS barrier. Consecutive native steps are fused into one plan exposed through the existing managed `Resolver` and `Loader`; a barrier parks the entry, runs in the creating realm during the load stage, and resumes the native steps. A fully native handler never enters JS (`init_loader.zig` is that chain written by hand today), and in a handler that also has functions the host elements still run in Zig: the context's chain (`context.zig`: `advanceResolve`, `advanceHooks`, the maker, `made`) runs them itself and calls the driver once per function it reaches, with the same token until the request completes (`host.driver_calls` counts those calls; tests assert them). `reference.load()` has no request to park, so it runs a handler with functions through a small loop in JS (`resolveInJs`, `loadInJs`) that calls the same steps. `ImportCache` and `ResolveCache` are native only: they sit behind V8's synchronous link. The cost is visible: `handler.plan` and `handler.native`. A handler with `native === true` is plain data and can be cloned to a child isolate as its `import` option.
 
 ### Cross-context imports
 

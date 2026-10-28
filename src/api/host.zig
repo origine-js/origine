@@ -175,7 +175,7 @@ pub const ScopeState = struct {
     }
 };
 
-pub const Driver = struct { resolve: v8.Global.Of(v8.Function), load: v8.Global.Of(v8.Function) };
+pub const Driver = struct { step: v8.Global.Of(v8.Function) };
 
 const ModuleState = struct { id: []const u8, bindings: module_api.Bindings, ptr: *anyopaque };
 
@@ -453,10 +453,7 @@ pub const Host = struct {
             owned.bindings.destroy(state, owned.ptr);
         }
         state.module_states.deinit(alloc);
-        if (state.driver) |driver| {
-            driver.resolve.deinit();
-            driver.load.deinit();
-        }
+        if (state.driver) |driver| driver.step.deinit();
         if (state.errno_buffer) |buffer| buffer.deinit();
         alloc.destroy(state);
     }

@@ -8,8 +8,9 @@
 //
 // Import handlers (origine:@std/graph/import) are registered with the host once, flattened to JSON:
 // every host descriptor is run by the host, every function is run here, by the *driver*
-// (`driverResolve`, `driverLoad`), in the creating realm. A handler with no function in it never
-// reaches the driver: the host runs its whole pipeline natively. See docs/graph-api.md.
+// (`steps`: one layer, hook, maker, transformer or `meta` at a time), in the creating realm. The
+// host runs the chain and calls the driver only when it reaches a function, so a handler with no
+// function in it never reaches the driver. See docs/graph-api.md.
 (native, util) => {
   'use strict';
   const { freeze, take, failure, own, errors, fsGrants } = util;
@@ -37,16 +38,22 @@
   const byId = [];
 
   const descriptorHost = value => value !== null && typeof value === 'object' && typeof value.host === 'string';
-  /// The part of a transformer the host needs, as plain data: the oxc ones are native functions that
-  /// carry `{ host: 'oxc', transform, options }`; a plain function is a JS barrier.
-  const transformerSpec = t => {
+  /// The part of a transformer the host needs, as plain data: the oxc ones are descriptors that
+  /// carry `{ host: 'oxc', transform, options }`; a function is a JS barrier, the `fns.length - 1`th
+  /// of the handler's transformer functions (`fns` collects them, in the order the host numbers them).
+  const transformerSpec = (t, fns) => {
     if (t === undefined || t === null) return null;
-    if (typeof t === 'function') return { js: true };
+    if (typeof t === 'function') {
+      fns.push(t);
+      return { js: fns.length - 1 };
+    }
     if (descriptorHost(t) && t.host === 'byExtension')
-      return { host: 'byExtension', entries: t.entries.map(([extension, inner]) => [extension, transformerSpec(inner)]) };
+      return { host: 'byExtension', entries: t.entries.map(([extension, inner]) => [extension, transformerSpec(inner, fns)]) };
     if (descriptorHost(t)) return { host: t.host, transform: t.transform, options: t.options ?? null };
     throw invalid('not a transformer');
   };
+  /// A host transformer on its own, as the host's `transform` native takes it.
+  const hostSpec = t => ({ host: t.host, transform: t.transform, options: t.options ?? null });
 
   const flatten = handler => {
     const resolver = handler.resolver;
@@ -81,13 +88,14 @@
       }
     }
     const maker = handler.maker;
+    const transformerFns = [];
     let makerSpec;
     let makerImport = 0;
     if (typeof maker.fn === 'function') {
       makerSpec = { js: true };
     } else {
       if (maker.import !== undefined) makerImport = register(maker.import).id;
-      makerSpec = { host: 'maker', import: makerImport, transformer: transformerSpec(maker.transformer) };
+      makerSpec = { host: 'maker', import: makerImport, transformer: transformerSpec(maker.transformer, transformerFns) };
     }
     const spec = {
       layers,
@@ -96,7 +104,7 @@
       cache: { retain: handler.cache.retain, entries: handler.cache.entries ?? null },
       meta: handler.meta !== null,
     };
-    return { spec, layerFns, hookFns };
+    return { spec, layerFns, hookFns, transformerFns };
   };
 
   const register = handler => {
@@ -104,13 +112,14 @@
     const known = handlers.get(handler);
     if (known !== undefined) return known;
     bindDriver();
-    const { spec, layerFns, hookFns } = flatten(handler);
+    const { spec, layerFns, hookFns, transformerFns } = flatten(handler);
     const id = host(native.graph.handler, JSON.stringify(spec));
     const record = freeze({
       id,
       handler,
       layerFns,
       hookFns,
+      transformerFns,
       native: handler.native,
       retain: handler.cache.retain,
       entries: handler.cache.entries,
@@ -141,7 +150,7 @@
       }
       return best === null ? text : applyTransformer(best[1], id, text);
     }
-    return host(native.graph.transform, JSON.stringify(transformerSpec(t)), id, text);
+    return host(native.graph.transform, JSON.stringify(hostSpec(t)), id, text);
   };
 
   /// The text of a `ModuleSource`: read through the graph's fs grant or given, then its transformer chain.
@@ -153,28 +162,15 @@
 
   // ---- the driver ------------------------------------------------------------------------------
 
-  /// The host calls the driver synchronously, and a child's `import()` is such a call from inside the
-  /// child's own evaluation. Waiting one microtask first means no layer, hook, maker, transformer or
-  /// `meta` of the creating realm ever runs on the child's stack: they run when it has unwound.
+  /// The host's chain of a handler runs its host elements itself and calls `step` only for a function
+  /// of this realm: one layer, hook, maker, transformer or `meta` at a time, each answering data. The
+  /// host calls it synchronously, and a child's `import()` is such a call from inside the child's own
+  /// evaluation, so every step waits one microtask first: no function of the creating realm ever runs
+  /// on the child's stack, they run when it has unwound.
   const settled = () => Promise.resolve();
 
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
-
-  /// Resolves `specifier` through the layers of handler `hid`; functions run here, host layers in the host.
-  const driverResolve = async (hid, ctxId, specifier, referrer, attributes) => {
-    await settled();
-    const record = byId[hid];
-    const request = freeze({ specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
-    for (let index = 0; index < record.layerFns.length; index++) {
-      const fn = record.layerFns[index];
-      const answer = fn !== null ? await fn(request) : host(native.graph.layer, hid, index, specifier, referrer);
-      if (answer === undefined) continue;
-      const id = typeof answer === 'string' ? answer : own(answer, 'id');
-      if (typeof id !== 'string' || id === '') throw named(InvalidData, 'a resolver layer must answer an id');
-      return id;
-    }
-    throw named(NotFound, `cannot resolve ${specifier}`);
-  };
+  const NEXT = freeze({ kind: 'next' });
 
   /// Reads the state behind a reference (`link` verdicts name another context's module).
   const referenceState = new WeakMap();
@@ -187,60 +183,35 @@
     return JSON.stringify(data);
   };
 
-  /// Makes a module of `text` supplied for `id`: runs the maker and returns the load answer.
-  const make = async (record, hid, id, text) => {
-    const maker = record.handler.maker;
-    let options;
-    if (typeof maker.fn === 'function') {
-      options =
-        (await maker.fn(
-          freeze({ id, source: freeze({ kind: 'text', text, map: freeze({ kind: 'none' }), transformers: freeze([]), native: true }) }),
-        )) ?? {};
-    } else {
-      options = { import: maker.import, transformer: maker.transformer };
-    }
-    const childRecord = options.import !== undefined ? register(options.import) : record;
-    const out = await applyTransformer(options.transformer, id, text);
-    return { text: out, handler: childRecord.id, record: childRecord };
-  };
-
-  /// The load stage for handler `hid`: hooks in order, then the maker. Answers the data the host
-  /// completes the load with: `{ kind: 'source', source, handler, meta }` or `{ kind: 'link', ... }`.
-  const driverLoad = async (hid, ctxId, graphId, id, attributes, specifier, referrer) => {
-    await settled();
-    const record = byId[hid];
-    const resolved = freeze({ id, attributes: freeze({ ...attributes }), specifier, referrer, phase: 'evaluation' });
-    const json = attributesJson(attributes);
-    let supplied;
-    let final = null;
-    for (let index = 0; index < record.hookFns.length && supplied === undefined; index++) {
-      const fn = record.hookFns[index];
-      let verdict;
-      if (fn !== null) {
-        verdict = await fn(resolved);
-        if (verdict === null || typeof verdict !== 'object' || typeof verdict.kind !== 'string')
-          throw named(InvalidData, 'a hook must return an Import verdict');
-      } else {
-        const text = host(native.graph.hook, hid, index, graphId, ctxId, id, json);
-        verdict = text === undefined ? freeze({ kind: 'next' }) : freeze({ kind: 'text', text });
-      }
+  const steps = {
+    /// A resolver layer that is a function: the id it answers, or undefined to pass.
+    layer: async (hid, ctxId, index, specifier, referrer, attributes) => {
+      await settled();
+      const request = freeze({ specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
+      const answer = await byId[hid].layerFns[index](request);
+      if (answer === undefined) return undefined;
+      const id = typeof answer === 'string' ? answer : own(answer, 'id');
+      if (typeof id !== 'string' || id === '') throw named(InvalidData, 'a resolver layer must answer an id');
+      return id;
+    },
+    /// A hook that is a function: its verdict as data `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link' }`.
+    hook: async (hid, ctxId, graphId, index, id, attributes, specifier, referrer) => {
+      await settled();
+      const resolved = freeze({ id, attributes: freeze({ ...attributes }), specifier, referrer, phase: 'evaluation' });
+      const verdict = await byId[hid].hookFns[index](resolved);
+      if (verdict === null || typeof verdict !== 'object' || typeof verdict.kind !== 'string')
+        throw named(InvalidData, 'a hook must return an Import verdict');
       switch (verdict.kind) {
         case 'next':
-          break;
-        case 'text':
-          supplied = verdict.text;
-          break;
+          return NEXT;
         case 'accept':
-          supplied = host(native.graph.readSource, graphId, id);
-          break;
+          return freeze({ kind: 'accept' });
         case 'provide':
           if (verdict.recipe !== undefined) {
-            supplied = await sourceText(verdict.recipe.source, graphId, id);
-            final = verdict.recipe;
-          } else {
-            supplied = await sourceText(verdict.source, graphId, id);
+            const source = await sourceText(verdict.recipe.source, graphId, id);
+            return freeze({ kind: 'final', source, handler: register(verdict.recipe.import).id });
           }
-          break;
+          return freeze({ kind: 'provide', source: await sourceText(verdict.source, graphId, id) });
         case 'link': {
           const state = referenceState.get(verdict.reference);
           if (state === undefined || state.context === null || state.status !== 'evaluated')
@@ -252,21 +223,81 @@
         default:
           throw named(InvalidData, 'unknown verdict');
       }
+    },
+    /// A maker that is a function: the made module's source and the handler of its imports.
+    maker: async (hid, ctxId, id, text) => {
+      await settled();
+      const record = byId[hid];
+      const source = freeze({ kind: 'text', text, map: freeze({ kind: 'none' }), transformers: freeze([]), native: true });
+      const options = (await record.handler.maker.fn(freeze({ id, source }))) ?? {};
+      const child = options.import !== undefined ? register(options.import) : record;
+      return freeze({ text: await applyTransformer(options.transformer, id, text), handler: child.id });
+    },
+    /// A transformer function the host's maker reached (the `index`th of the handler's).
+    transform: async (hid, index, id, text) => {
+      await settled();
+      return applyTransformer(byId[hid].transformerFns[index], id, text);
+    },
+    /// The `import.meta` data of a made module, as JSON.
+    meta: async (hid, id) => {
+      await settled();
+      return metaOf(byId[hid], id);
+    },
+  };
+  const stepByKind = [steps.layer, steps.hook, steps.maker, steps.transform, steps.meta];
+
+  /// The pipeline of a handler with functions in it, run from JS: for `reference.load()`, which asks
+  /// for the sources of a module's dependencies and has no request to park.
+  const resolveInJs = async (hid, specifier, referrer, attributes) => {
+    const record = byId[hid];
+    for (let index = 0; index < record.layerFns.length; index++) {
+      const id =
+        record.layerFns[index] !== null
+          ? await steps.layer(hid, 0, index, specifier, referrer, attributes)
+          : host(native.graph.layer, hid, index, specifier, referrer);
+      if (id !== undefined) return id;
+    }
+    throw named(NotFound, `cannot resolve ${specifier}`);
+  };
+
+  /// Answers `{ kind: 'source', source, handler, meta }` or the `link` reply of a hook.
+  const loadInJs = async (hid, graphId, id, attributes, specifier, referrer) => {
+    const record = byId[hid];
+    const json = attributesJson(attributes);
+    let supplied;
+    for (let index = 0; index < record.hookFns.length && supplied === undefined; index++) {
+      let reply;
+      if (record.hookFns[index] !== null) {
+        reply = await steps.hook(hid, 0, graphId, index, id, attributes, specifier, referrer);
+      } else {
+        const text = host(native.graph.hook, hid, index, graphId, 0, id, json);
+        reply = text === undefined ? NEXT : freeze({ kind: 'provide', source: text });
+      }
+      if (reply.kind === 'accept') supplied = host(native.graph.readSource, graphId, id);
+      else if (reply.kind === 'provide') supplied = reply.source;
+      else if (reply.kind === 'final') return freeze({ kind: 'source', source: reply.source, handler: reply.handler, meta: await metaOf(byId[reply.handler], id) });
+      else if (reply.kind === 'link') return reply;
     }
     if (supplied === undefined) throw named(NotFound, `${id} is not provided`);
-    if (final !== null) {
-      const finalRecord = register(final.import);
-      return freeze({ kind: 'source', source: supplied, handler: finalRecord.id, meta: await metaOf(finalRecord, id) });
+    const maker = record.handler.maker;
+    let text;
+    let child;
+    if (typeof maker.fn === 'function') {
+      const made = await steps.maker(hid, 0, id, supplied);
+      text = made.text;
+      child = byId[made.handler];
+    } else {
+      child = maker.import !== undefined ? register(maker.import) : record;
+      text = await applyTransformer(maker.transformer, id, supplied);
     }
-    const made = await make(record, hid, id, supplied);
-    return freeze({ kind: 'source', source: made.text, handler: made.handler, meta: await metaOf(made.record, id) });
+    return freeze({ kind: 'source', source: text, handler: child.id, meta: await metaOf(child, id) });
   };
 
   let bound = false;
   /// Hands the driver to the host the first time a handler is registered (a snapshot has no natives).
   const bindDriver = () => {
     if (bound) return;
-    host(native.graph.bind, driverResolve, driverLoad);
+    host(native.graph.bind, (kind, ...args) => stepByKind[kind](...args));
     bound = true;
   };
 
@@ -280,8 +311,8 @@
       if (loaded.diagnostics !== undefined) throw new SyntaxError(loaded.diagnostics);
       return { id, source: loaded.source, handler: loaded.handler, meta: undefined };
     }
-    const id = await driverResolve(record.id, 0, specifier, referrer, attributes);
-    const answer = await driverLoad(record.id, 0, graphId, id, attributes, specifier, referrer);
+    const id = await resolveInJs(record.id, specifier, referrer, attributes);
+    const answer = await loadInJs(record.id, graphId, id, attributes, specifier, referrer);
     return { id, answer };
   };
 

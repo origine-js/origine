@@ -489,6 +489,7 @@ impl HostState {
         self.events.borrow_mut().clear();
         self.pending.clear();
         self.chan_waits.clear();
+        crate::channel::release_owned(self.isolate);
         self.completions.borrow_mut().clear();
         let ids: Vec<u32> = self.runtimes.keys().copied().collect();
         for id in ids {

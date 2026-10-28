@@ -68,6 +68,9 @@ uint8_t origine_api_has_work(void *isolate);
 int64_t origine_api_pollable(void *isolate);
 /* Interrupts a blocking origine_api_poll. Thread-safe. */
 void origine_api_wake(void *isolate);
+/* Closes the channel end `handle` (an unknown handle is ignored). Thread-safe; for the thread of an
+ * isolate that is going away, for the ends it was given. */
+void origine_api_channel_close(uint32_t handle);
 
 #ifdef __cplusplus
 }

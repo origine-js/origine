@@ -89,8 +89,17 @@
         const { tx, rx } = native.channel.create(capacity);
         return freeze({ tx: makeSender(tx), rx: makeReceiver(rx) });
       },
-      sender: handle => makeSender(handleOf(handle, 'handle')),
-      receiver: handle => makeReceiver(handleOf(handle, 'handle')),
+      // Taking an end over makes this isolate its owner: it is closed when the isolate goes away.
+      sender(handle) {
+        ready();
+        native.channel.adopt(handleOf(handle, 'handle'));
+        return makeSender(handle);
+      },
+      receiver(handle) {
+        ready();
+        native.channel.adopt(handleOf(handle, 'handle'));
+        return makeReceiver(handle);
+      },
     }),
   });
 };

@@ -114,7 +114,9 @@ test "channel: values, order, backpressure and close within one isolate" {
         \\  try { await again.tx.send(1); } catch (e) { out.broken = e.name; }
         \\  try { channel({ capacity: 0 }); } catch (e) { out.cap = e.name; }
         \\  try { tx.close(); } catch (e) { out.stale = e.name; }
-        \\  out.reattached = typeof sender(again.tx.handle).send === 'function' && typeof receiver(again.rx.handle).recv === 'function';
+        \\  const fresh = channel({ capacity: 1 });
+        \\  out.reattached = typeof sender(fresh.tx.handle).send === 'function' && typeof receiver(fresh.rx.handle).recv === 'function';
+        \\  try { receiver(again.rx.handle); } catch (e) { out.adopt = e.name; }
         \\}
     );
     defer p.deinit();
@@ -122,7 +124,7 @@ test "channel: values, order, backpressure and close within one isolate" {
     try check(p.scope, "report.clone && report.blocked && report.first === 'first' && report.second === 'second'");
     try check(p.scope, "report.fn === 'TypeError' && report.moved && report.shared === 7");
     try check(p.scope, "report.open === 'x' && report.rest === 'y' && report.eof === 'NotConnected'");
-    try check(p.scope, "report.broken === 'BrokenPipe' && report.cap === 'TypeError' && report.stale === 'BadHandle' && report.reattached");
+    try check(p.scope, "report.broken === 'BrokenPipe' && report.cap === 'TypeError' && report.stale === 'BadHandle' && report.reattached && report.adopt === 'BadHandle'");
 }
 
 /// Waits for the parent to publish the channel handles in `handles.txt`, then starts the child.
@@ -212,4 +214,51 @@ test "channel: two isolates on two threads exchange messages and share memory" {
     try t.expect(!launch.failed);
     try t.expectEqual(m.Api.ThreadIsolateOutcome.completed, outcome.?);
     try check(p.scope, "report.got === '2,4,6' && report.shared === 42");
+}
+
+test "channel: the ends of an isolate that dies are closed" {
+    var p: Parent = undefined;
+    try p.setup("parent.js",
+        \\import { Dir, IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const { channel } = api.host.threading;
+        \\  const out = globalThis.report = {};
+        \\  const toChild = channel({ capacity: 1 }), fromChild = channel({ capacity: 1 });
+        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'handles.txt', 'w'));
+        \\  sync.fileWriteAll(f, Uint8Array.from(toChild.rx.handle + ' ' + fromChild.tx.handle, c => c.charCodeAt(0)));
+        \\  sync.fileClose(f);
+        \\  // The child takes both ends over and then dies without closing them.
+        \\  try { await fromChild.rx.recv(); out.ended = false; } catch (e) { out.ended = e.name; }
+        \\  // Its receiver is closed too: nobody reads toChild any more.
+        \\  try { for (;;) await toChild.tx.send(1); } catch (e) { out.broken = e.name; }
+        \\}
+    );
+    defer p.deinit();
+    try p.tmp.dir.writeFile(t.io, .{ .sub_path = "child.js", .data =
+        \\export function main(api) {
+        \\  const { receiver, sender } = api.host.threading;
+        \\  const args = api.host.env.args();
+        \\  receiver(Number(args[1]));
+        \\  sender(Number(args[2]));
+        \\  throw new Error('child dies');
+        \\}
+    });
+    const child_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/child.js", .{p.tmp.sub_path});
+    defer t.allocator.free(child_path);
+    const buffers = if (v8.V8.isSandboxEnabled())
+        try v8.ArrayBuffer.Allocator.fromSandbox()
+    else
+        try v8.ArrayBuffer.Allocator.fromZig(t.allocator);
+    defer buffers.deinit();
+    var launch: Launch = .{ .parent = &p, .buffers = buffers, .child_path = child_path };
+    const launcher = try std.Thread.spawn(.{}, Launch.run, .{&launch});
+    const ran = p.run();
+    launcher.join();
+    const outcome: ?m.Api.ThreadIsolateOutcome = if (launch.child) |child| child.join() else null;
+    defer if (launch.child) |child| child.destroy();
+    try ran;
+    try t.expect(!launch.failed);
+    try t.expectEqual(m.Api.ThreadIsolateOutcome.failed, outcome.?);
+    try check(p.scope, "report.ended === 'NotConnected' && report.broken === 'BrokenPipe'");
 }

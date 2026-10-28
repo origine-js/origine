@@ -20,6 +20,7 @@ pub(crate) static NATIVES: &[RawNative] = &[
     channel::NATIVE_CHANNEL_CREATE,
     channel::NATIVE_CHANNEL_CLONE,
     channel::NATIVE_CHANNEL_CLOSE,
+    channel::NATIVE_CHANNEL_ADOPT,
     channel::NATIVE_CHANNEL_SEND,
     channel::NATIVE_CHANNEL_RECV,
     io::NATIVE_IO_CREATE,

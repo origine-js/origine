@@ -65,3 +65,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn origine_api_wake(isolate: *mut ::core::ffi::c_void);
 }
+unsafe extern "C" {
+    pub fn origine_api_channel_close(handle: u32);
+}

@@ -37,9 +37,17 @@ enum End {
     Receiver,
 }
 
+/// One handle: its kind, its channel and the isolate (by address) that owns it. An isolate closes
+/// the ends it owns when it goes away; `adopt` moves ownership.
+struct Entry {
+    end: End,
+    chan: Chan,
+    owner: usize,
+}
+
 struct Registry {
     next: u32,
-    ends: HashMap<u32, (End, Chan)>,
+    ends: HashMap<u32, Entry>,
 }
 
 static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
@@ -59,17 +67,17 @@ fn bad_handle() -> NativeError {
 /// The channel behind `id` if it is an end of kind `end`.
 fn find(id: u32, end: End) -> Result<Chan, NativeError> {
     match registry().as_ref().and_then(|registry| registry.ends.get(&id)) {
-        Some((kind, chan)) if *kind == end => Ok(Arc::clone(chan)),
+        Some(entry) if entry.end == end => Ok(Arc::clone(&entry.chan)),
         _ => Err(bad_handle()),
     }
 }
 
-fn add_end(end: End, chan: Chan) -> Result<u32, NativeError> {
+fn add_end(end: End, chan: Chan, owner: usize) -> Result<u32, NativeError> {
     let mut guard = registry();
     let registry = guard.get_or_insert_with(|| Registry { next: 1, ends: HashMap::new() });
     let id = registry.next;
     registry.next = id.checked_add(1).ok_or(NativeError::Errno(errno::QUOTA_EXCEEDED))?;
-    registry.ends.insert(id, (end, chan));
+    registry.ends.insert(id, Entry { end, chan, owner });
     Ok(id)
 }
 
@@ -207,7 +215,7 @@ pub struct Ends {
 /// `native.channel.create(capacity)`: a channel holding at most `capacity` (>= 1) messages.
 /// Returns `{ tx, rx }`, the handles of its ends.
 #[native(side_effect = "any", path = "channel.create")]
-fn channel_create(capacity: u32) -> Result<Ends, NativeError> {
+fn channel_create(host: &mut HostState, capacity: u32) -> Result<Ends, NativeError> {
     if capacity == 0 {
         return Err(NativeError::Errno(errno::INVALID_INPUT));
     }
@@ -219,8 +227,9 @@ fn channel_create(capacity: u32) -> Result<Ends, NativeError> {
         recv_waiters: Vec::new(),
         send_waiters: Vec::new(),
     }));
-    let tx = add_end(End::Sender, Arc::clone(&chan))?;
-    let rx = match add_end(End::Receiver, chan) {
+    let owner = host.isolate;
+    let tx = add_end(End::Sender, Arc::clone(&chan), owner)?;
+    let rx = match add_end(End::Receiver, chan, owner) {
         Ok(rx) => rx,
         Err(error) => {
             if let Some(registry) = registry().as_mut() {
@@ -235,10 +244,10 @@ fn channel_create(capacity: u32) -> Result<Ends, NativeError> {
 /// `native.channel.clone(tx)`: another sender handle of the same channel. `BadHandle` for a
 /// handle that is not an open sender.
 #[native(side_effect = "any", path = "channel.clone")]
-fn channel_clone(tx: u32) -> Result<u32, NativeError> {
+fn channel_clone(host: &mut HostState, tx: u32) -> Result<u32, NativeError> {
     let chan = find(tx, End::Sender)?;
     lock(&chan).senders += 1;
-    match add_end(End::Sender, Arc::clone(&chan)) {
+    match add_end(End::Sender, Arc::clone(&chan), host.isolate) {
         Ok(id) => Ok(id),
         Err(error) => {
             lock(&chan).senders -= 1;
@@ -252,9 +261,15 @@ fn channel_clone(tx: u32) -> Result<u32, NativeError> {
 /// `BadHandle` for an unknown or already closed handle.
 #[native(side_effect = "any", path = "channel.close")]
 fn channel_close(handle: u32) -> Result<(), NativeError> {
-    let (end, chan) = registry().as_mut().and_then(|registry| registry.ends.remove(&handle)).ok_or_else(bad_handle)?;
-    let mut state = lock(&chan);
-    let waiters = match end {
+    let entry = registry().as_mut().and_then(|registry| registry.ends.remove(&handle)).ok_or_else(bad_handle)?;
+    finish_end(entry);
+    Ok(())
+}
+
+/// Detaches a removed end from its channel and wakes whoever waited on it.
+fn finish_end(entry: Entry) {
+    let mut state = lock(&entry.chan);
+    let waiters = match entry.end {
         End::Sender => {
             state.senders -= 1;
             if state.senders == 0 { std::mem::take(&mut state.recv_waiters) } else { Vec::new() }
@@ -267,6 +282,39 @@ fn channel_close(handle: u32) -> Result<(), NativeError> {
     };
     drop(state);
     wake_all(waiters);
+}
+
+/// Closes every end owned by `isolate`: the isolate is going away, so a peer waiting on one of them
+/// finds the channel closed instead of waiting forever. Called when the Host state is dropped.
+pub(crate) fn release_owned(isolate: usize) {
+    let owned: Vec<Entry> = {
+        let mut guard = registry();
+        let Some(registry) = guard.as_mut() else { return };
+        let handles: Vec<u32> = registry.ends.iter().filter(|(_, entry)| entry.owner == isolate).map(|(handle, _)| *handle).collect();
+        handles.into_iter().filter_map(|handle| registry.ends.remove(&handle)).collect()
+    };
+    for entry in owned {
+        finish_end(entry);
+    }
+}
+
+/// `origine_api_channel_close(handle)`: closes an end from outside any isolate (the thread of an
+/// isolate that is going away uses it for the ends it was given). An unknown handle is ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn origine_api_channel_close(handle: u32) {
+    let entry = registry().as_mut().and_then(|registry| registry.ends.remove(&handle));
+    if let Some(entry) = entry {
+        finish_end(entry);
+    }
+}
+
+/// `native.channel.adopt(handle)`: makes the calling isolate the owner of an end, so that it is closed
+/// when this isolate goes away. `BadHandle` for an unknown or closed handle.
+#[native(side_effect = "any", path = "channel.adopt")]
+fn channel_adopt(host: &mut HostState, handle: u32) -> Result<(), NativeError> {
+    let mut guard = registry();
+    let entry = guard.as_mut().and_then(|registry| registry.ends.get_mut(&handle)).ok_or_else(bad_handle)?;
+    entry.owner = host.isolate;
     Ok(())
 }
 

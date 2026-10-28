@@ -204,6 +204,8 @@ pub const Host = struct {
     /// True while a JS loader callback runs inside Runtime.pump's scope iteration;
     /// creating a scope then would invalidate that iteration.
     in_loader: bool = false,
+    /// Set by an owner on another thread to end `settle` with `error.Terminated`.
+    stop: ?*const std.atomic.Value(bool) = null,
     /// Only scripts actually loaded are retained; flush after execution to include lazy code.
     glue_unbound: [glue_script.module_count]?v8.Global.Of(v8.UnboundScript) = @splat(null),
 
@@ -702,6 +704,7 @@ pub const Host = struct {
     /// Fails with `Stalled` when it is pending and nothing can still make progress.
     pub fn settle(self: *Host, rt: *Runtime, platform: v8.Platform, promise: v8.Global.Of(v8.Promise)) !void {
         while (true) {
+            if (self.stop) |flag| if (flag.load(.acquire)) return error.Terminated;
             rt.pumpPlatform(platform);
             {
                 var session: Runtime.Session = undefined;

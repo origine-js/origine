@@ -29,7 +29,7 @@ export type {
   IoErrnoTable,
 } from "./errors.d.ts";
 export type { EnvCap, EnvNarrow } from "./env.d.ts";
-export type { HostCap, ThreadingCap } from "./host.d.ts";
+export type { ChannelOptions, HostCap, Receiver, SendOptions, Sender, ThreadingCap } from "./host.d.ts";
 export type {
   Access,
   AsyncFs,

@@ -20,7 +20,9 @@ pub mod decode;
 pub mod encode;
 mod fs;
 pub mod host;
+mod channel;
 mod io;
+pub mod message;
 pub mod native;
 mod net;
 pub mod pinned;
@@ -70,7 +72,9 @@ pub unsafe extern "C" fn origine_api_attach_isolate(isolate: *mut c_void) -> boo
             return false;
         };
         sys::register_waker(ptr as usize, tx);
-        isolate.set_slot(HostState::new(rx));
+        let mut state = HostState::new(rx);
+        state.isolate = ptr as usize;
+        isolate.set_slot(state);
         true
     });
     attached.unwrap_or(false)

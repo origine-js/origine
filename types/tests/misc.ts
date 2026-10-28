@@ -15,6 +15,14 @@ export const main: Main = async (api: Api) => {
   // @ts-expect-error parallelism is read-only
   api.host.threading.parallelism = 2;
   eprintln("cpus", cpus);
+  const { tx, rx } = api.host.threading.channel({ capacity: 2 });
+  await tx.send({ a: 1 }, { transfer: [new ArrayBuffer(1)] });
+  const message: unknown = await rx.recv();
+  for await (const each of rx) eprintln("message", String(each));
+  api.host.threading.sender(tx.handle).close();
+  // @ts-expect-error capacity is required
+  api.host.threading.channel({});
+  eprintln("sent", String(message));
   const narrowed = api.host.env.narrow({ allow: ["HOME"] });
   const names: readonly string[] = narrowed.list();
   void names;

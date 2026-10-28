@@ -15,6 +15,7 @@ const eu = @import("@util");
 const binding = @import("binding.zig");
 const func = binding.func;
 const env_api = @import("env.zig");
+const errno = @import("errno.zig");
 const threading_api = @import("threading.zig");
 const fs_api = @import("fs.zig");
 const graph_api = @import("graph.zig");
@@ -317,6 +318,22 @@ pub const Host = struct {
         }
     }
 
+    /// Attaches the Rust API to the isolate on first need. Failures leave it detached and retryable.
+    fn ensureRust(self: *Host, env: binding.Env) !void {
+        if (self.rust_isolate != null) return;
+        if (!origine_api_attach_isolate(env.isolate.handle)) return error.BootstrapFailed;
+        self.rust_isolate = env.isolate;
+        self.configureRust(env.isolate);
+    }
+
+    /// `native.threading.attach(native)`: installs `native.channel` into the glue's native table. Done
+    /// on the first use of a channel so that `api.host` alone never attaches the Rust API.
+    fn attachChannels(state: *ScopeState, call: *binding.Call, native: v8.Object) errno.Error!void {
+        const env = call.env();
+        state.host.ensureRust(env) catch |err| return errno.narrow(err);
+        state.host.installRustNatives(env, native, state, "channel") catch |err| return errno.narrow(err);
+    }
+
     /// Hands the embedder's ceiling to the Rust side (right after attach).
     fn configureRust(self: *Host, isolate: v8.Isolate) void {
         const runtime = self.runtime orelse RuntimeConfig{ .max_runtimes = 0 };
@@ -564,6 +581,7 @@ pub const Host = struct {
                     .args = func(env_api.args, .{ .side_effect = .none }),
                     .get = func(env_api.get, .{ .side_effect = .none }),
                     .list = func(env_api.list, .{ .side_effect = .none }),
+                    .attach = func(attachChannels, .{ .side_effect = .any }),
                 },
                 .threading = .{
                     .parallelism = func(threading_api.parallelism, .{ .side_effect = .none }),
@@ -629,11 +647,7 @@ pub const Host = struct {
             else => null,
         };
         if (rust_namespace) |namespace| {
-            if (host.rust_isolate == null) {
-                if (!origine_api_attach_isolate(env.isolate.handle)) return error.BootstrapFailed;
-                host.rust_isolate = env.isolate;
-                host.configureRust(env.isolate);
-            }
+            try host.ensureRust(env);
             try host.installRustNatives(env, native, state, namespace);
         }
         return if (needs_factory) (try host.compileGlue(state.scope, module)).object.value else eu.v.undefined_value(env.isolate).value;

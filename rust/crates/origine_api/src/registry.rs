@@ -13,10 +13,15 @@ use std::sync::OnceLock;
 
 use crate::abi_gen::{self, origine_api_native};
 use crate::native::{Needs, RawNative, SideEffect};
-use crate::{fs, io, net, sub};
+use crate::{channel, fs, io, net, sub};
 
 /// Every native, in registration order.
 pub(crate) static NATIVES: &[RawNative] = &[
+    channel::NATIVE_CHANNEL_CREATE,
+    channel::NATIVE_CHANNEL_CLONE,
+    channel::NATIVE_CHANNEL_CLOSE,
+    channel::NATIVE_CHANNEL_SEND,
+    channel::NATIVE_CHANNEL_RECV,
     io::NATIVE_IO_CREATE,
     io::NATIVE_IO_CLOSE,
     io::NATIVE_IO_SLEEP,
@@ -148,7 +153,7 @@ mod tests {
         let registry = include_str!("registry.rs");
         let mut found = 0;
         for (module, source) in
-            [("io", include_str!("io.rs")), ("fs", include_str!("fs.rs")), ("net", include_str!("net.rs")), ("sub", include_str!("sub.rs"))]
+            [("io", include_str!("io.rs")), ("fs", include_str!("fs.rs")), ("net", include_str!("net.rs")), ("sub", include_str!("sub.rs")), ("channel", include_str!("channel.rs"))]
         {
             for name in native_fns(source) {
                 let entry = format!("{module}::NATIVE_{},", name.to_uppercase());

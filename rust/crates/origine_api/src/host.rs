@@ -123,6 +123,10 @@ pub struct HostState {
     clock_start: Instant,
     completions: CompletionQueue,
     wake: WakeRx,
+    /// Channel operations parked until the other side acts; settled by `channel::service`.
+    pub(crate) chan_waits: Vec<crate::channel::Wait>,
+    /// The address of the isolate this state belongs to: the key other threads wake it by.
+    pub(crate) isolate: usize,
 }
 
 impl HostState {
@@ -146,6 +150,8 @@ impl HostState {
             clock_start: Instant::now(),
             completions: Rc::default(),
             wake,
+            chan_waits: Vec::new(),
+            isolate: 0,
         }
     }
 
@@ -330,7 +336,7 @@ impl HostState {
                 live += 1;
             }
         }
-        live as i64 + (self.completions.borrow().len() + self.events.borrow().len()) as i64
+        live as i64 + (self.completions.borrow().len() + self.events.borrow().len() + self.chan_waits.len()) as i64
     }
 
     fn any_ready(&self) -> bool {
@@ -482,6 +488,7 @@ impl HostState {
         self.subs.clear();
         self.events.borrow_mut().clear();
         self.pending.clear();
+        self.chan_waits.clear();
         self.completions.borrow_mut().clear();
         let ids: Vec<u32> = self.runtimes.keys().copied().collect();
         for id in ids {
@@ -531,6 +538,7 @@ fn turn(scope: &mut v8::PinScope<'_, '_, ()>) -> usize {
     let closed = host.step_draining();
     let completions = host.take_completions();
     let mut settled = closed.len() + completions.len();
+    settled += crate::channel::service(scope);
     crate::sub::refill(scope);
     settled += crate::sub::deliver_all(scope);
     for pending in closed {

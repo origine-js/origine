@@ -597,6 +597,8 @@ pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attribu
         },
         .json => {
             if (!attributesAsk(attributes, "type", "json")) return .next;
+            // The namespace is the host's: a file of the graph never serves an `origine:` id.
+            if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
             const text = try readFromGraph(env, id);
             defer env.alloc.free(text);
             return .{ .source = try json_module.wrap(env.alloc, text) };

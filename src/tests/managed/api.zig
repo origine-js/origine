@@ -1083,6 +1083,35 @@ test "graph: the origine ceiling of a context is the exact union of its hooks" {
     }
 }
 
+test "graph: a file of the graph never serves an origine: id, not even as json" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { origine, relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider, json } from 'origine:@std/graph/providers';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const graph = api.graph.narrow({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()).layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
+        \\  const ctx = await api.context.create({ import: handler, graph });
+        \\  const run = (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(graph).evaluate(ctx).then(() => 'ok', e => e.message);
+        \\  out.json = await run('a', "import d from 'origine:@std/text' with { type: 'json' }; globalThis.d = d;");
+        \\  out.plain = await run('b', "import 'origine:@std/text'");
+        \\  out.file = await run('c', "import d from './data.json' with { type: 'json' }; globalThis.k = d.k;");
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.createDirPath(t.io, "origine:@std");
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "origine:@std/text", .data = "{\"shadow\": true}" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "data.json", .data = "{\"k\": 7}" });
+    try fx.run();
+    // No hook serves it (the host's own provider is not in the chain): not found, nothing read from the file.
+    try check(fx.scope, "report.json.includes('NotFound') && report.plain.includes('NotFound') && report.file === 'ok'");
+    try check(fx.rt.scopes.items[1], "typeof d === 'undefined' && k === 7");
+}
+
 test "graph: link shares or hardens the module of another context" {
     var fx: Fixture = undefined;
     try fx.setup(

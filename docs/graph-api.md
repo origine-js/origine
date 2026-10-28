@@ -15,7 +15,7 @@ All of it is implemented except what the last row lists. Tests: `src/tests/manag
 | Native plans | A handler with no JS function runs entirely in Zig (`Handler.native`); see Native plans. |
 | `Import.link` | `'hardened'` over `Content.exports`, `'shared'` over `Content.module`; the spike below showed V8 accepts the latter. |
 | Refcounted module table | `retain: 'all' \| 'used'`, pins (`ModuleMap.pin`), `delete`, `clear`, `entries` cap, `ModuleMap.sweep`. |
-| Code caches | `none`, `memory`, `dir` (the `__oricache__` format) and `custom` (stores only). |
+| Code caches | `none`, `memory`, `dir` (the `__oricache__` format) and `custom` (`load` before a module compiles, `store` at `graph.flush()`). |
 | `Snapshot.prepare` and baked contexts (multi-context `init_snapshot`) | Later, and the module graph's: the `api.isolate` snapshot step stays single-context. |
 | Source and defer phases | Not implemented; `ModuleImportPhase` names them, only `Evaluation` works. |
 
@@ -25,14 +25,13 @@ What the implementation does differently from the proposal this page started as:
 
 1. **One identity table per context, shared by all its handlers** (the scope's `ModuleMap`), not one per cache object. `ImportCache.native({ retain, entries })` of the context's `import` handler sets how the table keeps modules; the cache option of other handlers is not consulted.
 2. **A graph reads with one fs grant, sync or async, and only one `api.fs` made.** `narrow({ fs })` takes `api.fs.requestSync(...)` or `await api.fs.requestAsync(...)`; a lookalike `{ kind, id }` with a guessed id is `InvalidInput`, so a realm that was handed `api.graph` cannot reach the grants of the realm that gave it. A sync grant is read by the host with its own blocking read inside the load stage. An async grant is read on its io runtime: the context's chain calls the grant's Rust natives (open, read all, close) itself and parks on their promises, so the read completes through `completeLoad` and no JS function runs (`CodeCache.dir` still needs a sync grant, since the cache writes with the host's own file calls).
-3. **`CodeCache.custom` is store-only.** `load` is not consulted; `store(key, bytes)` is called at `graph.flush()`.
-4. **`meta` lives on the handler only.** The maker returns `{ import?, transformer? }`.
-5. **`ModuleReference.status` has no separate `instantiated`**: a reference goes `declared`, `loaded`, `evaluating`, `evaluated` or `errored`. `requests[].reference` are one level deep: they are `declared` until `load()` is called on them.
-6. **The origine ceiling** (what `origineProvider` may include) comes from the context's import handler only; the init scope is unrestricted. A hook that names more than that is `PermissionDenied` (`Unsupported` in a context whose handler serves nothing).
-7. **A root module is addressed by its name.** `evaluate` and preloads register the source under the module's `name` and import that name, bypassing the resolver; the name must be unused in the context's table (`InvalidInput`).
-8. **`'hardened'` freezes the exported graph in place** (the hardener's rule), so the source context's exported objects become frozen too.
-9. **Errors from JS hooks**: an `ImportError` kind keeps its kind; anything else, `ImportError.other(message)` included, reaches the importing module as an `Error` with `name: message`.
-10. **Oxc transformers are plain descriptors** (`ts()` returns `{ host: 'oxc', kind: 'transformer', transform, options }`), no longer callable functions.
+3. **`meta` lives on the handler only.** The maker returns `{ import?, transformer? }`.
+4. **`ModuleReference.status` has no separate `instantiated`**: a reference goes `declared`, `loaded`, `evaluating`, `evaluated` or `errored`. `requests[].reference` are one level deep: they are `declared` until `load()` is called on them.
+5. **The origine ceiling** (what `origineProvider` may include) comes from the context's import handler only; the init scope is unrestricted. A hook that names more than that is `PermissionDenied` (`Unsupported` in a context whose handler serves nothing).
+6. **A root module is addressed by its name.** `evaluate` and preloads register the source under the module's `name` and import that name, bypassing the resolver; the name must be unused in the context's table (`InvalidInput`).
+7. **`'hardened'` freezes the exported graph in place** (the hardener's rule), so the source context's exported objects become frozen too.
+8. **Errors from JS hooks**: an `ImportError` kind keeps its kind; anything else, `ImportError.other(message)` included, reaches the importing module as an `Error` with `name: message`.
+9. **Oxc transformers are plain descriptors** (`ts()` returns `{ host: 'oxc', kind: 'transformer', transform, options }`), no longer callable functions.
 
 ## Facts that shape the design
 
@@ -110,7 +109,7 @@ There is no `origineNamespace` flag. `origine()` only canonicalises `origine:` i
 |---|---|---|
 | `ResolveCache` | (referrer, specifier, attributes, phase) -> id | native memo |
 | `ImportCache` | (id, attributes) -> reference | one native table per context; `retain: 'all' \| 'used'` is required |
-| `CodeCache` | (id, source hash) -> V8 code-cache bytes | `none`, `memory`, `dir` (the `__oricache__` format), `custom` |
+| `CodeCache` | (id, source hash) -> V8 code-cache bytes | `none`, `memory`, `dir` (the `__oricache__` format), `custom` (`key` is `{ id, hash }`, the hash being the lowercase hex BLAKE3 digest of the exact text V8 compiles; `load(key, source)` runs once a module's source is final and before it compiles, `store(key, blob)` at `graph.flush()`; the blob is opaque and carries the hash of its source, so one made for another text, a throwing `load` or a non-blob answer is a miss, never an error) |
 
 Artifacts (source, transform output, code-cache bytes) are evictable and bounded. A reference is freed when its table entry, live JS handles and dependents' edges are gone; `delete(key)` is an identity reset (the next import makes a new reference and evaluates again). `'used'` frees unused entries automatically at the price of re-evaluation. A module a context already linked cannot be unloaded from it. Handles are explicit (`release()`, `using`); freeing on GC is a known gap shared with scopes.
 
@@ -165,4 +164,3 @@ Question 1: what the name promises. 2: hidden cost. 3: another way. 4: shed word
 ## Open
 
 - How a declared dependency reference is adopted when the evaluating context's table already holds its key (today `evaluate` of the dependency's reference would fail `InvalidInput` for the taken name).
-- Prefetching `CodeCache.custom` loads in the driver (would need a source hash in JS).

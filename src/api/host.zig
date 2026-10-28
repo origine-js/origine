@@ -600,6 +600,7 @@ pub const Host = struct {
                         .bind = func(graph_api.bind, .{ .side_effect = .any }),
                         .asyncFs = func(graph_api.asyncFs, .{ .side_effect = .any }),
                         .utf8 = func(graph_api.utf8, .{ .side_effect = .any }),
+                        .sourceHash = func(graph_api.sourceHash, .{ .side_effect = .any }),
                         .jsonModule = func(graph_api.jsonModule, .{ .side_effect = .any }),
                         .pipelineResolve = func(graph_api.pipelineResolve, .{ .side_effect = .any }),
                         .pipelineLoad = func(graph_api.pipelineLoad, .{ .side_effect = .any }),

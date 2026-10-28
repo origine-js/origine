@@ -79,7 +79,7 @@ The builders block nothing, allocate nothing natively, detach nothing and retain
 
 - `ImportCache.native({ retain, entries? })`: `retain` is required. `'all'` keeps entries for the context's lifetime; `'used'` drops an entry once nothing holds it, so a later import evaluates the module again. `entries` caps the table.
 - `ResolveCache.native({ entries? })`.
-- `CodeCache.none`, `CodeCache.memory({ bytes? })`, `CodeCache.dir(fs, { bytes? })` (the `__oricache__` format; touches the disk when used), `CodeCache.custom({ load, store })` (yours, may be async, run in the creating realm).
+- `CodeCache.none`, `CodeCache.memory({ bytes? })`, `CodeCache.dir(fs, { bytes? })` (the `__oricache__` format; touches the disk when used), `CodeCache.custom({ load, store })` (yours, may be async, run in the creating realm): `key` is `{ id, hash }` with the lowercase hex BLAKE3 digest of the exact text V8 compiles (after every transformer); `store(key, blob)` runs at `graph.flush()` with an opaque `Uint8Array` to keep whole; `load(key, source)` runs once a module's source is final and before it compiles, and returns the blob kept under that key or `undefined`. A blob made for another text (each blob carries the hash of its own source), by another V8 build or with other flags, a throwing `load` and any other answer are misses, never errors.
 
 ### `api.graph` and `api.context`
 

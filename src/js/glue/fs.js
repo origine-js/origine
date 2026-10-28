@@ -10,7 +10,19 @@
 // everything that observes what exists (reads, stat, directory listings, opening read-only).
 (
   native,
-  { freeze, errno, take, failure, own, joinPath, ioHandles, closedIo, fsGrants, shared, errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported } },
+  {
+    freeze,
+    errno,
+    take,
+    failure,
+    own,
+    joinPath,
+    ioHandles,
+    closedIo,
+    fsGrants,
+    shared,
+    errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported },
+  },
 ) => {
   // Python-style open modes -> native bits (write 1, create 2, truncate 4,
   // exclusive 8). Handles always allow reading when writable, so `x` and `x+`

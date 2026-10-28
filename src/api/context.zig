@@ -55,10 +55,10 @@ comptime {
 /// What a resolved id was resolved for; the load stage needs it.
 const Info = struct { handler: u32, specifier: []u8, referrer: []u8 };
 
-/// One element of a handler's pipeline that is not run inline. The first five are JS functions the
+/// One element of a handler's pipeline that is not run inline. The first six are JS functions the
 /// driver's `step(kind, ...)` (src/js/glue/graph.js) runs, the numbers being the `kind` it receives;
 /// `open` and `read` are the two native calls of an async fs read (no user JS runs for them).
-const Step = enum(u32) { layer = 0, hook = 1, maker = 2, transform = 3, meta = 4, open = 5, read = 6 };
+const Step = enum(u32) { layer = 0, hook = 1, maker = 2, transform = 3, meta = 4, cacheload = 5, open = 6, read = 7 };
 
 /// A call into the JS driver whose promise has not settled: which element runs and what the chain
 /// needs to go on once it answers. A chain keeps its token across steps; only the end completes it.
@@ -77,7 +77,7 @@ const PendingJs = struct {
     attributes: []module_types.ImportAttribute = &.{},
     specifier: []u8 = &.{},
     referrer: []u8 = &.{},
-    /// The source waiting for its `meta` (owned).
+    /// The source waiting for its `meta` or its code cache (owned).
     text: []u8 = &.{},
     /// An async read: the file once opened, and whether it is a JSON module.
     file: u32 = 0,
@@ -422,6 +422,16 @@ fn made(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8
         try park(self, .meta, meta_work, 0, import, text);
         return .parked;
     }
+    return finish(self, work, text);
+}
+
+/// The source V8 will compile is final: a `custom` code cache gets to load what it kept for this exact
+/// text (its answer lands in the graph, where the compile finds it), then the load completes.
+fn finish(self: *Context, work: Work, text: []const u8) !LoadAdvance {
+    if (self.graph.kind == .custom and !std.mem.startsWith(u8, work.id, module_types.origine_prefix)) {
+        try park(self, .cacheload, work, 0, 0, text);
+        return .parked;
+    }
     return .{ .done = .{ .content = .{ .source = text } } };
 }
 
@@ -458,6 +468,10 @@ fn park(self: *Context, step: Step, work: Work, index: usize, import: u32, text:
         .maker => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), binding.string(isolate, work.id), binding.string(isolate, text) }),
         .transform => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, index), binding.string(isolate, work.id), binding.string(isolate, text) }),
         .meta => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), binding.string(isolate, work.id) }),
+        .cacheload => blk: {
+            const hex = std.fmt.bytesToHex(sourceHash(text), .lower);
+            break :blk function.call(parent_ctx, undef, &.{ kind, numValue(isolate, self.graph.id), binding.string(isolate, work.id), binding.string(isolate, &hex), binding.string(isolate, text) });
+        },
         .open, .read => unreachable,
     } orelse return failureOf(parent_ctx, isolate, &tc);
     try track(self, parent_ctx, isolate, result, step, work, index, import, text, 0, false);
@@ -481,7 +495,7 @@ fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8
     errdefer alloc.free(pending.specifier);
     pending.referrer = try alloc.dupe(u8, work.referrer);
     errdefer alloc.free(pending.referrer);
-    if (step == .meta) pending.text = try alloc.dupe(u8, text);
+    if (step == .meta or step == .cacheload) pending.text = try alloc.dupe(u8, text);
     errdefer alloc.free(pending.text);
     const copied = try alloc.alloc(module_types.ImportAttribute, work.attributes.len);
     var done: usize = 0;
@@ -710,8 +724,9 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
         },
         .meta => blk: {
             if (value.isString()) try self.setMeta(work.id, try stringValue(ctx, isolate, alloc, value));
-            break :blk .{ .done = .{ .content = .{ .source = pending.text } } };
+            break :blk try finish(self, work, pending.text);
         },
+        .cacheload => .{ .done = .{ .content = .{ .source = pending.text } } },
     };
     switch (advance) {
         .done => |completion| try rt.completeLoad(pending.token, completion),
@@ -760,6 +775,11 @@ fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     pending.settled = true;
     defer retire(self, pending);
     if (pending.step == .read) closeFile(self, pending.file);
+    // A code cache that fails to load is a miss, not a reason to fail the import.
+    if (pending.step == .cacheload) {
+        self.scope.runtime.completeLoad(pending.token, .{ .content = .{ .source = pending.text } }) catch {};
+        return;
+    }
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
     var scratch = std.heap.ArenaAllocator.init(self.host.allocator);
@@ -925,12 +945,16 @@ fn cacheStore(data: ?*anyopaque, request: module_types.CodeCacheRequest, bytes: 
             hook.store(hook.data, request, bytes);
         },
         .custom => {
+            // The blob a custom store keeps starts with the hash of the source the cache was made for,
+            // so one returned for another text is recognised and ignored (V8 only compares lengths).
             const alloc = graph.host.allocator;
             const id = alloc.dupe(u8, request.module_id) catch return;
-            const copy = alloc.dupe(u8, bytes) catch {
+            const copy = alloc.alloc(u8, hash.len + bytes.len) catch {
                 alloc.free(id);
                 return;
             };
+            @memcpy(copy[0..hash.len], &hash);
+            @memcpy(copy[hash.len..], bytes);
             graph.fresh.append(alloc, .{ .id = id, .hash = hash, .bytes = copy }) catch {
                 alloc.free(id);
                 alloc.free(copy);
@@ -1188,13 +1212,16 @@ fn flushImpl(state: *ScopeState, call: *Call, graph_id: u32) !v8.Value {
     return out.finish();
 }
 
-/// `cachePut(graph, id, hashHex, bytes)`: hands a code cache a `custom` store loaded to the graph,
-/// valid for the exact source whose hash is `hashHex`.
+/// `cachePut(graph, id, hashHex, blob)`: hands the graph a blob a `custom` store loaded: its first 32
+/// bytes are the hash of the source it was made for, which must be `hashHex` (otherwise it is ignored),
+/// then V8's bytes.
 pub fn cachePut(state: *ScopeState, graph_id: u32, id: []const u8, hash_hex: []const u8, bytes: []u8) Error!void {
     const graph = graph_api.graphFor(state.host, graph_id) catch |err| return errno.narrow(err);
     var hash: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&hash, hash_hex) catch return error.InvalidInput;
-    graph.remember(id, hash, bytes);
+    // A blob made for another source text is a miss, not an error.
+    if (bytes.len <= hash.len or !std.mem.eql(u8, bytes[0..hash.len], &hash)) return;
+    graph.remember(id, hash, bytes[hash.len..]);
 }
 
 /// Records that the native `origine` hook served `id` for the context `context_id` of `state`'s

@@ -44,6 +44,7 @@ comptime {
     errno.requireBinding(bind);
     errno.requireBinding(asyncFs);
     errno.requireBinding(utf8);
+    errno.requireBinding(sourceHash);
     errno.requireBinding(jsonModule);
     errno.requireBinding(pipelineResolve);
     errno.requireBinding(pipelineLoad);
@@ -846,6 +847,17 @@ pub fn asyncFs(state: *ScopeState, graph_id: u32, fs_id: u32, open_fn: v8.Functi
 pub fn utf8(state: *ScopeState, bytes: []u8) Error![]const u8 {
     _ = state;
     return bytes;
+}
+
+/// `sourceHash(text)`: the lowercase hex BLAKE3 digest of `text`, which keys a code cache.
+pub fn sourceHash(state: *ScopeState, call: *Call, text: []const u8) Error![]const u8 {
+    _ = state;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(text, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const out = call.allocSlice(u8, hex.len);
+    @memcpy(out, &hex);
+    return out;
 }
 
 /// `jsonModule(text)`: the source of an ES module whose default export is the parsed JSON `text`.

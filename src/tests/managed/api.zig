@@ -1455,6 +1455,55 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
     try t.expect(seen >= 2);
 }
 
+test "graph: CodeCache.custom loads before a module compiles and treats anything but its own blob as a miss" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider } from 'origine:@std/graph/providers';
+        \\import { CodeCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const ro = api.fs.requestSync({ access: 'r' });
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  const store = new Map();
+        \\  const calls = [];
+        \\  const keyOf = k => k.id + '@' + k.hash;
+        \\  const custom = answer => CodeCache.custom({
+        \\    load: async (key, source) => { calls.push('load:' + key.id + ':' + key.hash.length + ':' + (typeof source === 'string' && source.includes('add'))); return answer ? answer(key) : store.get(keyOf(key)); },
+        \\    store: async (key, blob) => { store.set(keyOf(key), blob); },
+        \\  });
+        \\  const run = async codeCache => {
+        \\    const graph = api.graph.narrow({ fs: ro, codeCache });
+        \\    const ctx = await api.context.create({ import: handler, graph });
+        \\    await ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler }).create(graph).evaluate(ctx);
+        \\    return graph.flush();
+        \\  };
+        \\  out.first = await run(custom());
+        \\  out.stored = store.size;
+        \\  out.loads = calls.filter(c => c.startsWith('load:')).sort().join(',');
+        \\  out.hit = await run(custom());
+        \\  // every key gets the same blob: only the module it was made for takes it, the other one is a miss
+        \\  const first = [...store.values()][0];
+        \\  out.wrong = await run(custom(() => first));
+        \\  out.throwing = await run(custom(() => { throw new Error('store down'); }));
+        \\  out.junk = await run(custom(() => new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])));
+        \\  out.notBytes = await run(custom(() => 'text'));
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "dep.js", .data = "export function add(a, b) { return a + b; }" });
+    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.js", .data = "import { add } from './dep.js'; globalThis.sum = add(20, 22);" });
+    try fx.run();
+    try check(fx.scope, "report.first === 1 + 1 && report.stored === 2 && report.hit === 0");
+    // load sees the module id, a 64 hex digit key and the source text; main.js has no `add` call text... it does: 'add'.
+    try check(fx.scope, "report.loads.startsWith('load:dep.js:64:true,load:main.js:64:true')");
+    try check(fx.scope, "report.wrong === 1 && report.throwing === 2 && report.junk === 2 && report.notBytes === 2");
+}
+
 test "graph: retain used frees unused modules, delete resets identity, release unpins" {
     var fx: Fixture = undefined;
     try fx.setup(

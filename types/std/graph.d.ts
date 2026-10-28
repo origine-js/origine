@@ -331,11 +331,12 @@ declare module "origine:@std/graph/cache" {
         readonly kind: "codeCache";
         readonly native: false;
         readonly load: (key: CodeCacheKey, source: string) => Uint8Array | undefined | Promise<Uint8Array | undefined>;
-        readonly store: (key: CodeCacheKey, bytes: Uint8Array) => void | Promise<void>;
+        readonly store: (key: CodeCacheKey, blob: Uint8Array) => void | Promise<void>;
       };
   export interface CodeCacheKey {
+    /** The module id (the `name` of a root module). */
     readonly id: string;
-    /** Hash of the exact text V8 compiled (after any transformer). */
+    /** Lowercase hex BLAKE3 digest of the exact text V8 compiles (after every transformer). */
     readonly hash: string;
   }
   export const CodeCache: {
@@ -345,10 +346,15 @@ declare module "origine:@std/graph/cache" {
     memory(options?: { readonly bytes?: number }): CodeCache;
     /** Files in the directory an `api.fs` grant allows, in the `__oricache__` format. Touches the disk; written at `graph.flush()`. */
     dir(fs: object, options?: { readonly bytes?: number }): CodeCache;
-    /** Your own store; both functions may be async and run in the creating realm. */
+    /**
+     * Your own store; both functions may be async and run in the creating realm. `store(key, blob)` runs at
+     * `graph.flush()` with an opaque blob to keep whole; `load(key, source)` runs once a module's source is
+     * final, before it compiles, and returns the blob kept under that key or `undefined`. A blob made for
+     * another source text or V8 build, or a rejected `load`, is a miss, never an error.
+     */
     custom(options: {
       readonly load: (key: CodeCacheKey, source: string) => Uint8Array | undefined | Promise<Uint8Array | undefined>;
-      readonly store: (key: CodeCacheKey, bytes: Uint8Array) => void | Promise<void>;
+      readonly store: (key: CodeCacheKey, blob: Uint8Array) => void | Promise<void>;
     }): CodeCache;
   };
 }

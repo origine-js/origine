@@ -71,9 +71,18 @@ export const CodeCache = freeze({
     if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant');
     return withCapacity('codeCacheDir', 'codeCache', 'bytes', capacity('CodeCache.dir', 'bytes', own(options, 'bytes')), { fs });
   },
-  /// Your own store. `load(key, source)` returns the cached bytes (`Uint8Array`) or `undefined`;
-  /// `store(key, bytes)` saves them. Both may be async and run in the creating realm. `key` is
-  /// `{ id, hash }`; a cache is valid for the exact source text it was made from.
+  /// Your own store, for modules the graph compiles. Both functions may be async and run in the
+  /// creating realm.
+  ///
+  /// - `key` is `{ id, hash }`: the module id (its `name` for a root module) and the lowercase hex
+  ///   BLAKE3 digest of the exact text V8 compiles, after every transformer, so a key identifies one
+  ///   source text of one module.
+  /// - `store(key, blob)` runs at `graph.flush()` for each module that compiled without a usable
+  ///   cache. `blob` is an opaque `Uint8Array`: keep it whole and unchanged.
+  /// - `load(key, source)` runs once the source of a module is final and before it compiles, with that
+  ///   text. Return the blob kept under that same key, or `undefined`. A blob that was made for another
+  ///   text, by another V8 build or with other flags, a rejection of `load`, or any other answer, is a
+  ///   miss: the module compiles without a cache. Nothing here is an error.
   custom(options) {
     const load = own(options, 'load');
     const store = own(options, 'store');

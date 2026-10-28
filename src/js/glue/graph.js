@@ -189,6 +189,24 @@
   /// on the child's stack, they run when it has unwound.
   const settled = () => Promise.resolve();
 
+  /// The `custom` code cache of each graph by graph id.
+  const graphCache = new Map();
+
+  /// Asks the graph's `custom` cache for the blob it kept for `id` compiled from `text` (`hash` is the
+  /// lowercase hex BLAKE3 digest of `text`) and hands it to the host, which keeps it only if the hash
+  /// inside it is `hash`. A cache that throws, or returns anything else, is a miss.
+  const loadCache = async (graphId, id, hash, text) => {
+    const cache = graphCache.get(graphId);
+    if (cache === undefined) return;
+    try {
+      const blob = await cache.load(freeze({ id, hash }), text);
+      if (blob instanceof Uint8Array) {
+        native.context.cachePut(graphId, id, hash, blob);
+        take();
+      }
+    } catch {}
+  };
+
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
   const NEXT = freeze({ kind: 'next' });
 
@@ -263,8 +281,13 @@
       await settled();
       return metaOf(byId[hid], id);
     },
+    /// The graph's `custom` code cache gets to load what it kept for the final source of `id`.
+    cacheload: async (graphId, id, hash, text) => {
+      await settled();
+      await loadCache(graphId, id, hash, text);
+    },
   };
-  const stepByKind = [steps.layer, steps.hook, steps.maker, steps.transform, steps.meta];
+  const stepByKind = [steps.layer, steps.hook, steps.maker, steps.transform, steps.meta, steps.cacheload];
 
   /// The pipeline of a handler with functions in it, run from JS: for `reference.load()`, which asks
   /// for the sources of a module's dependencies and has no request to park.
@@ -304,7 +327,8 @@
       }
       if (reply.kind === 'accept') supplied = await readText(graphId, id);
       else if (reply.kind === 'provide') supplied = reply.source;
-      else if (reply.kind === 'final') return freeze({ kind: 'source', source: reply.source, handler: reply.handler, meta: await metaOf(byId[reply.handler], id) });
+      else if (reply.kind === 'final')
+        return freeze({ kind: 'source', source: reply.source, handler: reply.handler, meta: await metaOf(byId[reply.handler], id) });
       else if (reply.kind === 'link') return reply;
     }
     if (supplied === undefined) throw named(NotFound, `${id} is not provided`);
@@ -415,6 +439,8 @@
         try {
           await ensureText(state);
           const meta = state.meta ?? (await metaOf(state.record, state.name));
+          const cacheGraph = graphId(state.graph);
+          if (graphCache.has(cacheGraph)) await loadCache(cacheGraph, state.name, host(native.graph.sourceHash, state.text), state.text);
           await native.context.evaluateSource(contextId, state.name, state.text, state.record.id, meta ?? '');
           const code = take();
           if (code !== 0) throw failure(code);
@@ -543,8 +569,10 @@
       bytes = codeCache.bytes ?? 0;
     }
     const id = host(native.graph.create, fsId, kind, bytes, cacheFsId);
+    if (kind === 3) graphCache.set(id, codeCache);
     if (fs !== undefined) {
-      if (fs.kind === 'async') host(native.graph.asyncFs, id, fs.id, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
+      if (fs.kind === 'async')
+        host(native.graph.asyncFs, id, fs.id, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
       graphFs.set(id, freeze({ kind: fs.kind, id: fs.id }));
     }
     return makeGraph(id, freeze({ fs, codeCache }));

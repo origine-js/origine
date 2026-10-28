@@ -30,8 +30,8 @@ pub fn build(b: *std.Build) void {
     // disk and costs a decode (about 0.1 ms for the 0.5 MB engine snapshot) plus the expanded copy on the heap.
     const v8_icu = b.option(IcuMode, "v8_icu", "ICU data in the executable: compressed (zstd, expanded on first Intl use; default) or raw (about 7 MB larger, no expansion)") orelse .compressed;
     const engine_snapshot = b.option(Embedding, "engine_snapshot", "Engine snapshot embedded in the executable: raw (default) or compressed (LZ4 HC, expanded at startup)") orelse .raw;
-    const user_snapshot = b.option(Embedding, "user_snapshot", "Init snapshot cache files in __oricache__: raw (default) or compressed (LZ4 HC)") orelse .raw;
-    const user_codecache = b.option(Embedding, "user_codecache", "Code cache files in __oricache__: raw (default) or compressed (LZ4 HC)") orelse .raw;
+    const user_snapshot = b.option(Embedding, "user_snapshot", "Init snapshot files in the global cache: raw (default) or compressed (LZ4 HC)") orelse .raw;
+    const user_codecache = b.option(Embedding, "user_codecache", "Code cache files in the global cache: raw (default) or compressed (LZ4 HC)") orelse .raw;
     const config = b.addOptions();
     config.addOption(bool, "typescript", typescript);
     config.addOption(bool, "user_snapshot_compressed", user_snapshot == .compressed);

@@ -25,7 +25,7 @@ fn hashId(data: ?*anyopaque, id: []const u8) anyerror!?Hash {
     return out;
 }
 
-test "init cache: the entry path follows the __pycache__ layout and tracks the specifier" {
+test "init cache: names are content hashes in one flat directory" {
     const host = try m.Api.Host.create(t.allocator, .{});
     defer host.destroy();
     ensureV8();
@@ -35,15 +35,35 @@ test "init cache: the entry path follows the __pycache__ layout and tracks the s
     defer bare.deinit();
     var other = try cache.entryFor(t.allocator, host, "app/other.js");
     defer other.deinit();
-    try t.expect(std.mem.startsWith(u8, nested.path, "app/__oricache__/init.js."));
-    try t.expect(std.mem.endsWith(u8, nested.path, ".v8-snapshot"));
-    try t.expect(std.mem.startsWith(u8, bare.path, "__oricache__/init.js."));
+    // A flat `<32 hex digits>.v8-snapshot`: no directory, nothing of the path in the name.
+    try t.expectEqual(@as(usize, 32 + ".v8-snapshot".len), nested.name.len);
+    try t.expect(std.mem.endsWith(u8, nested.name, ".v8-snapshot"));
+    try t.expect(std.mem.indexOfScalar(u8, nested.name, '/') == null);
+    try t.expect(!std.mem.eql(u8, nested.name, bare.name));
+    try t.expect(!std.mem.eql(u8, nested.name, other.name));
     try t.expect(!std.mem.eql(u8, &nested.key, &bare.key));
     try t.expect(!std.mem.eql(u8, &nested.key, &other.key));
     var again = try cache.entryFor(t.allocator, host, "app/init.js");
     defer again.deinit();
-    try t.expectEqualStrings(nested.path, again.path);
+    try t.expectEqualStrings(nested.name, again.name);
     try t.expectEqualSlices(u8, &nested.key, &again.key);
+
+    // The working directory is in the name (module ids are relative to it) but not in the header key,
+    // so a snapshot exported from one directory still loads where the sources are the same.
+    const fp = cache.cachedEngineKey(host);
+    var here = try cache.entryWithKey(t.allocator, fp, "init.js", "/work/a");
+    defer here.deinit();
+    var there = try cache.entryWithKey(t.allocator, fp, "init.js", "/work/b");
+    defer there.deinit();
+    try t.expect(!std.mem.eql(u8, here.name, there.name));
+    try t.expectEqualSlices(u8, &here.key, &there.key);
+    // Another runtime fingerprint changes both.
+    var other_fp = fp;
+    other_fp[0] ^= 1;
+    var changed = try cache.entryWithKey(t.allocator, other_fp, "init.js", "/work/a");
+    defer changed.deinit();
+    try t.expect(!std.mem.eql(u8, here.name, changed.name));
+    try t.expect(!std.mem.eql(u8, &here.key, &changed.key));
 }
 
 test "init cache: store then load round-trips; every kind of staleness is a miss" {
@@ -70,34 +90,18 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
     try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.no_file, why);
 
-    // Files of other engines are swept, whatever source they belong to; files of this engine
-    // (even of another source) and anything that is not a cache file stay.
-    const tag = std.fs.path.basename(entry.path)["init.js.".len..][0..12];
-    const keep = try std.fmt.allocPrint(t.allocator, "app/__oricache__/other.js.{s}.v8-snapshot", .{tag});
-    defer t.allocator.free(keep);
-    try tmp.dir.createDirPath(t.io, "app/__oricache__");
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/init.js.aaaaaaaaaaaa.v8-snapshot", .data = "old" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/other.js.bbbbbbbbbbbb.v8-snapshot", .data = "old" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/dep.js.cccccccccccc.v8-code-cache", .data = "old" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/notes.txt", .data = "mine" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/odd.zzzzzzzzzzzz.v8-snapshot", .data = "not a tag" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = keep, .data = "keep" });
-    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image);
-    for ([_][]const u8{ "init.js.aaaaaaaaaaaa.v8-snapshot", "other.js.bbbbbbbbbbbb.v8-snapshot", "dep.js.cccccccccccc.v8-code-cache" }) |gone| {
-        const path = try std.fmt.allocPrint(t.allocator, "app/__oricache__/{s}", .{gone});
-        defer t.allocator.free(path);
-        try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, path, .{}));
-    }
-    _ = try tmp.dir.statFile(t.io, keep, .{});
-    _ = try tmp.dir.statFile(t.io, "app/__oricache__/notes.txt", .{});
-    _ = try tmp.dir.statFile(t.io, "app/__oricache__/odd.zzzzzzzzzzzz.v8-snapshot", .{});
-    // No temporary file is left behind.
+    // Storing writes exactly one file, leaves every other file alone and leaves no temporary behind.
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "notes.txt", .data = "mine" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "0000.v8-snapshot", .data = "somebody else's" });
+    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image, 0);
+    _ = try tmp.dir.statFile(t.io, "notes.txt", .{});
+    _ = try tmp.dir.statFile(t.io, "0000.v8-snapshot", .{});
     var count: usize = 0;
-    var dir = try tmp.dir.openDir(t.io, "app/__oricache__", .{ .iterate = true });
+    var dir = try tmp.dir.openDir(t.io, ".", .{ .iterate = true });
     defer dir.close(t.io);
     var it = dir.iterate();
     while (try it.next(t.io)) |_| count += 1;
-    try t.expectEqual(@as(usize, 4), count);
+    try t.expectEqual(@as(usize, 3), count);
 
     var hit = cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, null) orelse return error.TestExpectedHit;
     defer hit.deinit();
@@ -108,20 +112,25 @@ test "init cache: store then load round-trips; every kind of staleness is a miss
     var changed_salt: u8 = 2;
     try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, .{ .data = &changed_salt, .hash = hashId }, &why) == null);
     try t.expectEqual(cache.Miss.source_changed, why);
+    // A file that does not fit is deleted on the spot; the new snapshot would replace it.
+    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, entry.name, .{}));
+    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image, 0);
     // A different engine/specifier key is a miss even at the same path.
     var foreign = try cache.entryFor(t.allocator, host, "app/init.js");
     defer foreign.deinit();
     foreign.key[0] ^= 1;
     try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &foreign, hasher, &why) == null);
     try t.expectEqual(cache.Miss.key_changed, why);
+    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, entry.name, .{}));
+    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image, 0);
     // Truncated and garbage files (behind a valid meta word) are misses, not errors.
     const no_features = [_]u8{ 0, 0, 0, 0 };
     const truncated = try std.mem.concat(t.allocator, u8, &.{ &no_features, image.bytes[0 .. image.bytes.len / 2] });
     defer t.allocator.free(truncated);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = truncated });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.name, .data = truncated });
     try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = &no_features ++ "not a snapshot".* });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.name, .data = &no_features ++ "not a snapshot".* });
     try t.expect(cache.load(t.allocator, .{ .handle = tmp.dir.handle }, &entry, hasher, &why) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
     // A loaded image owns stable, aligned bytes even after the file is overwritten
@@ -183,8 +192,8 @@ test "init cache: packed snapshot files shrink, read back, and are rejected by r
     var why: cache.Miss = undefined;
     const lz4 = cache.meta.lz4;
 
-    try cache.storeWith(t.allocator, root, &entry, &image, true);
-    const stat = try tmp.dir.statFile(t.io, entry.path, .{});
+    try cache.storeWith(t.allocator, root, &entry, &image, true, 0);
+    const stat = try tmp.dir.statFile(t.io, entry.name, .{});
     try t.expect(stat.size < image.bytes.len);
     var hit = cache.loadWith(t.allocator, root, &entry, hasher, null, lz4) orelse return error.TestExpectedHit;
     defer hit.deinit();
@@ -195,7 +204,7 @@ test "init cache: packed snapshot files shrink, read back, and are rejected by r
     try t.expectEqual(cache.Miss.format_changed, why);
 
     // A raw file says so too: readers with or without LZ4 take it.
-    try cache.storeWith(t.allocator, root, &entry, &image, false);
+    try cache.storeWith(t.allocator, root, &entry, &image, false, 0);
     inline for (.{ lz4, 0 }) |can_read| {
         var raw = cache.loadWith(t.allocator, root, &entry, hasher, null, can_read) orelse return error.TestExpectedHit;
         defer raw.deinit();
@@ -203,18 +212,18 @@ test "init cache: packed snapshot files shrink, read back, and are rejected by r
     }
 
     // A damaged meta word and a layout version this engine does not know are misses.
-    const stored = try tmp.dir.readFileAlloc(t.io, entry.path, t.allocator, .unlimited);
+    const stored = try tmp.dir.readFileAlloc(t.io, entry.name, t.allocator, .unlimited);
     defer t.allocator.free(stored);
     stored[0] ^= 0x20; // a feature bit flips: the parity no longer matches
-    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = stored });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.name, .data = stored });
     try t.expect(cache.loadWith(t.allocator, root, &entry, hasher, &why, lz4) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
     std.mem.writeInt(u32, stored[0..4], 0x8000_0001, .little); // version 1, parity valid
-    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = stored });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.name, .data = stored });
     try t.expect(cache.loadWith(t.allocator, root, &entry, hasher, &why, lz4) == null);
     try t.expectEqual(cache.Miss.format_changed, why);
     // Shorter than the word.
-    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.path, .data = "ab" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = entry.name, .data = "ab" });
     try t.expect(cache.loadWith(t.allocator, root, &entry, hasher, &why, lz4) == null);
     try t.expectEqual(cache.Miss.bad_file, why);
 }
@@ -251,7 +260,7 @@ test "init cache: code cache files encode and decode in both kinds; readers with
     }
 }
 
-test "init cache: code caches are stored beside the source and only served for identical text" {
+test "init cache: code caches are named by their source text and only served for it" {
     ensureV8();
     const host = try m.Api.Host.create(t.allocator, .{});
     defer host.destroy();
@@ -264,37 +273,61 @@ test "init cache: code caches are stored beside the source and only served for i
     const request: m.CodeCacheRequest = .{ .allocator = arena.allocator(), .module_id = "app/mod.js", .source = "export const a = 1;" };
     try t.expect(hook.load(hook.data, request) == null);
 
-    try tmp.dir.createDirPath(t.io, "app/__oricache__");
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/mod.js.aaaaaaaaaaaa.v8-code-cache", .data = "stale" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/mod.js.aaaaaaaaaaaa.v8-snapshot", .data = "other engine, other kind" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "app/__oricache__/README", .data = "not a cache file" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "README", .data = "not a cache file" });
     const payload = "0123456789abcdef";
     hook.store(hook.data, request, payload);
-    const path = try std.fmt.allocPrint(t.allocator, "app/__oricache__/mod.js.{s}.v8-code-cache", .{state.tag});
-    defer t.allocator.free(path);
-    _ = try tmp.dir.statFile(t.io, path, .{});
-    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, "app/__oricache__/mod.js.aaaaaaaaaaaa.v8-code-cache", .{}));
-    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, "app/__oricache__/mod.js.aaaaaaaaaaaa.v8-snapshot", .{}));
-    _ = try tmp.dir.statFile(t.io, "app/__oricache__/README", .{});
-
+    // One file straight in the directory, named by the source text and the runtime, not by the path.
+    const name = cache.codeFileName(state.fp, null, false, request.source);
+    _ = try tmp.dir.statFile(t.io, &name, .{});
+    _ = try tmp.dir.statFile(t.io, "README", .{});
     const served = hook.load(hook.data, request) orelse return error.TestExpectedHit;
     try t.expectEqualStrings(payload, served);
     try t.expectEqual(@as(usize, 0), @intFromPtr(served.ptr) % 8);
-    // Different text (even of the same length) is a miss.
+
+    // The same text under another module id shares the file; different text is a miss.
+    var elsewhere = request;
+    elsewhere.module_id = "other/place/copy.js";
+    try t.expectEqualStrings(payload, hook.load(hook.data, elsewhere) orelse return error.TestExpectedHit);
     var changed = request;
     changed.source = "export const a = 2;";
     try t.expect(hook.load(hook.data, changed) == null);
-    // A damaged file is a miss.
-    const bytes = try tmp.dir.readFileAlloc(t.io, path, t.allocator, .unlimited);
+    // The name covers the runtime fingerprint, and whether it is a host glue script.
+    var other_fp = state.fp;
+    other_fp[0] ^= 1;
+    try t.expect(!std.mem.eql(u8, &name, &cache.codeFileName(other_fp, null, false, request.source)));
+    try t.expect(!std.mem.eql(u8, &name, &cache.codeFileName(state.fp, null, true, request.source)));
+
+    // Another startup blob (an init snapshot) is another file: V8 would refuse the cache.
+    try t.expect(!std.mem.eql(u8, &name, &cache.codeFileName(state.fp, cache.blobDigest("blob"), false, request.source)));
+    // A damaged file is a miss and is deleted.
+    const bytes = try tmp.dir.readFileAlloc(t.io, &name, t.allocator, .unlimited);
     defer t.allocator.free(bytes);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = path, .data = bytes[0 .. bytes.len - 1] });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = &name, .data = bytes[0 .. bytes.len - 1] });
     try t.expect(hook.load(hook.data, request) == null);
+    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, &name, .{}));
+    // The rejected hook (V8 refused the bytes) deletes the file too.
+    hook.store(hook.data, request, payload);
+    _ = try tmp.dir.statFile(t.io, &name, .{});
+    hook.rejected.?(hook.data, request);
+    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, &name, .{}));
+    // A state that may not write stores nothing.
+    state.writable = false;
+    hook.store(hook.data, request, payload);
+    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, &name, .{}));
+    state.writable = true;
     // Embedded modules are never written.
     var embedded = request;
     embedded.module_id = "origine:@std/io";
     hook.store(hook.data, embedded, payload);
     try t.expect(hook.load(hook.data, embedded) == null);
-    try t.expectError(error.FileNotFound, tmp.dir.statFile(t.io, "origine:@std/__oricache__", .{}));
+    // A graph's cache directory keeps the files in a subdirectory of the grant root.
+    var flat = cache.CodeCacheState.initFlat(host, .{ .handle = tmp.dir.handle });
+    const flat_hook = flat.hook();
+    flat_hook.store(flat_hook.data, request, payload);
+    const flat_path = try std.fmt.allocPrint(t.allocator, "{s}/{s}", .{ cache.dir_name, name });
+    defer t.allocator.free(flat_path);
+    _ = try tmp.dir.statFile(t.io, flat_path, .{});
+    try t.expectEqualStrings(payload, flat_hook.load(flat_hook.data, request) orelse return error.TestExpectedHit);
 }
 
 fn resolved(referrer: []const u8, specifier: []const u8) ![]const u8 {
@@ -322,7 +355,7 @@ test "relative specifiers keep the root of an absolute referrer" {
 /// One thread of the concurrency test: stores the same entry over and over and reads it back.
 fn hammer(image: *const m.init_snapshot.Image, entry: *const cache.Entry, root: m.sys.Dir, hasher: m.init_snapshot.SourceHasher, failures: *std.atomic.Value(u32)) void {
     for (0..25) |_| {
-        cache.store(t.allocator, root, entry, image) catch {
+        cache.store(t.allocator, root, entry, image, 0) catch {
             _ = failures.fetchAdd(1, .monotonic);
             continue;
         };
@@ -355,7 +388,7 @@ test "init cache: several threads storing and loading one entry never see a part
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     // The file exists before the readers start: every later read must hit.
-    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image);
+    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image, 0);
     var failures: std.atomic.Value(u32) = .init(0);
     var threads: [4]std.Thread = undefined;
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, hammer, .{ &image, &entry, m.sys.Dir{ .handle = tmp.dir.handle }, hasher, &failures });
@@ -363,7 +396,7 @@ test "init cache: several threads storing and loading one entry never see a part
     try t.expectEqual(@as(u32, 0), failures.load(.monotonic));
     // No temporary file is left behind.
     var count: usize = 0;
-    var dir = try tmp.dir.openDir(t.io, "app/__oricache__", .{ .iterate = true });
+    var dir = try tmp.dir.openDir(t.io, ".", .{ .iterate = true });
     defer dir.close(t.io);
     var it = dir.iterate();
     while (try it.next(t.io)) |item| {

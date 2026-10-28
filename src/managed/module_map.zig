@@ -353,6 +353,7 @@ pub const ModuleMap = struct {
                 defer source.deinit();
                 const module = v8.ScriptCompiler.compileModule(iso, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
                 const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
+                if (cache_object != null and !accepted) if (self.scope.options.code_cache) |hook| if (hook.rejected) |discard| discard(hook.data, cache_request);
                 if (self.scope.options.code_cache != null and !accepted) entry.cache_source = try self.scope.runtime.allocator.dupe(u8, text);
                 entry.module = .new(iso, module);
                 try self.indexModule(entry);

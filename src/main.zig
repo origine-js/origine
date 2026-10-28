@@ -42,24 +42,44 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var environ_map = try init.environ.createMap(alloc);
     defer environ_map.deinit();
     const environ = &environ_map;
-    var engine = Engine.init(.{ .trace = &trace });
+    var engine = Engine.init(.{ .trace = &trace, .thread_pool_size = v8Workers(environ) });
     defer engine.deinit();
-    const snapshot = embeddedSnapshot(alloc, environ);
-    // The V8 sandbox only accepts ArrayBuffer memory inside itself, so a sandboxed V8 gets
-    // backing stores from its own pages; builds without it use the Zig allocator.
-    const buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator") =
-        if (v8.V8.isSandboxEnabled()) .sandbox else .{ .zig = alloc };
+    const snapshot = embeddedSnapshot(alloc);
+    // One backing-store allocator for the whole process, shared by the init snapshot and the
+    // runtime. The V8 sandbox only accepts ArrayBuffer memory inside itself, so a sandboxed V8
+    // gets it from its own pages; builds without it use the Zig allocator. Declared after
+    // `engine`, so it is released before V8 is disposed.
+    const buffer_allocator = if (v8.V8.isSandboxEnabled())
+        try v8.ArrayBuffer.Allocator.fromSandbox()
+    else
+        try v8.ArrayBuffer.Allocator.fromZig(alloc);
+    defer buffer_allocator.deinit();
     if (args.len > 1) return runInit(alloc, environ, engine, args, &trace, buffer_allocator, snapshot);
     return runRepl(alloc, environ, engine, &trace, buffer_allocator, snapshot);
 }
 
+/// Background workers of the V8 platform (garbage collection, compilation): `ORIGINE_V8_WORKERS=n`.
+/// 0 lets V8 choose from the CPU count. The default is 1, enough for one isolate; a program that
+/// runs several (`api.isolate`) may want more. A value that is not a number is ignored.
+fn v8Workers(environ: *const std.process.Environ.Map) u32 {
+    const text = environ.get("ORIGINE_V8_WORKERS") orelse return 1;
+    return std.fmt.parseInt(u32, text, 10) catch 1;
+}
+
 /// Builds the host every entry point runs with: the working directory read/write with sync and
 /// async access, all `user_args`, and the whole environment. `env` is caller-owned storage.
-fn createHost(alloc: std.mem.Allocator, environ: *const std.process.Environ.Map, user_args: []const []const u8, env: []m.Api.EnvPair, cwd: m.sys.Dir) !*m.Api.Host {
+fn createHost(
+    alloc: std.mem.Allocator,
+    environ: *const std.process.Environ.Map,
+    user_args: []const []const u8,
+    env: []m.Api.EnvPair,
+    cwd: m.sys.Dir,
+    isolates: m.Api.IsolateConfig,
+) !*m.Api.Host {
     const keys = environ.keys();
     const values = environ.values();
     for (keys, values, env) |key, value, *out| out.* = .{ .name = key, .value = value };
-    return m.Api.Host.create(alloc, .{ .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{} });
+    return m.Api.Host.create(alloc, .{ .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{}, .isolates = isolates });
 }
 
 /// Starts the REPL with the same host API as an init module: `api` is a global and `import`
@@ -69,14 +89,14 @@ fn runRepl(
     environ: *const std.process.Environ.Map,
     engine: Engine,
     trace: *StartupTrace,
-    buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator"),
+    buffer_allocator: v8.ArrayBuffer.Allocator,
     engine_snapshot: ?[]align(16) const u8,
 ) !void {
     const env = try alloc.alloc(m.Api.EnvPair, environ.keys().len);
     defer alloc.free(env);
     var cwd = try m.sys.Dir.cwd().openDir(".", .{ .iterate = true });
     defer cwd.close();
-    const host = try createHost(alloc, environ, &.{}, env, cwd);
+    const host = try createHost(alloc, environ, &.{}, env, cwd, .{ .platform = engine.platform, .array_buffer_allocator = buffer_allocator, .engine_snapshot = engine_snapshot });
     var rt: ?*m.Runtime = null;
     // The host releases V8 handles, so it goes before the runtime.
     defer {
@@ -86,7 +106,7 @@ fn runRepl(
     const references = try host.externalReferences(alloc);
     defer alloc.free(references);
     rt = try m.Runtime.create(alloc, .{
-        .array_buffer_allocator = buffer_allocator,
+        .array_buffer_allocator = .{ .borrowed = buffer_allocator },
         .snapshot = engine_snapshot,
         .external_references = m.init_snapshot.referenceTable(references),
     });
@@ -109,8 +129,8 @@ fn runRepl(
 /// Runs `args[1]` as the init module: evaluates it, then calls its exported
 /// `main(api)` with every permission granted (the CLI grants the working directory
 /// read/write with sync and async access (async runtimes through `api.io`), all arguments after the init path, and the whole
-/// environment). The evaluated init graph is cached as a snapshot in `__oricache__` next to
-/// the init file: the first run creates it, later runs restore it instead of evaluating the
+/// environment). The evaluated init graph is cached as a snapshot in the global cache (`cache_dir.zig`):
+/// the first run creates it, later runs restore it instead of evaluating the
 /// init again. Borrows everything through return.
 fn runInit(
     alloc: std.mem.Allocator,
@@ -118,7 +138,7 @@ fn runInit(
     engine: Engine,
     args: []const [:0]const u8,
     trace: *StartupTrace,
-    buffer_allocator: @FieldType(m.Runtime.Options, "array_buffer_allocator"),
+    buffer_allocator: v8.ArrayBuffer.Allocator,
     engine_snapshot: ?[]align(16) const u8,
 ) !void {
     const user_args = try alloc.alloc([]const u8, args.len - 1);
@@ -128,14 +148,24 @@ fn runInit(
     defer alloc.free(env);
     var cwd = try m.sys.Dir.cwd().openDir(".", .{ .iterate = true });
     defer cwd.close();
-    const host = try createHost(alloc, environ, user_args, env, cwd);
+    const host = try createHost(alloc, environ, user_args, env, cwd, .{ .platform = engine.platform, .array_buffer_allocator = buffer_allocator, .engine_snapshot = engine_snapshot });
     // The host releases V8 handles, so it goes before the runtime; the snapshot image backs
     // the runtime's heap, so it goes after.
     var image: ?m.init_snapshot.Image = null;
     var rt: ?*m.Runtime = null;
-    const caching = environ.get("ORIGINE_NO_SNAPSHOT") == null;
-    const engine_key = m.Api.init_cache.engineKey(host);
-    var code_cache = m.Api.init_cache.CodeCacheState.initWithKey(engine_key, host, m.sys.Dir.cwd());
+    // The global cache (see `cache_dir.zig`): where it is, how big, and which of its two uses are on.
+    var settings = try m.Api.cache_dir.settingsFrom(alloc, environ);
+    defer settings.deinit(alloc);
+    const cache: ?m.sys.Dir = if (settings.dir_path) |path| m.Api.cache_dir.openDir(path) else null;
+    defer if (cache) |dir| dir.close();
+    const snapshotting = settings.snapshot and cache != null;
+    const code_caching = settings.code and cache != null;
+    const may_store = settings.budget != 0;
+    var code_cache: m.Api.init_cache.CodeCacheState = undefined;
+    if (cache) |dir| {
+        code_cache = m.Api.init_cache.CodeCacheState.init(host, dir);
+        code_cache.writable = may_store;
+    }
     defer {
         host.destroy();
         if (rt) |runtime| runtime.destroy();
@@ -145,17 +175,21 @@ fn runInit(
     // isolate that makes it and to the one that restores it.
     const references = try host.externalReferences(alloc);
     defer alloc.free(references);
-    if (caching) image = initSnapshot(alloc, environ, host, references, args[1], engine_snapshot, engine_key);
+    if (snapshotting) image = initSnapshot(alloc, environ, host, cache.?, may_store, references, args[1], buffer_allocator, engine_snapshot);
     trace.mark("init_snapshot");
+    // V8 takes a code cache only from an isolate booted from the same startup blob: name the files by it.
+    if (code_caching) if (image) |*cached| {
+        code_cache.boot = m.Api.init_cache.blobDigest(cached.blob);
+    };
     rt = try m.Runtime.create(alloc, .{
-        .array_buffer_allocator = buffer_allocator,
+        .array_buffer_allocator = .{ .borrowed = buffer_allocator },
         .snapshot = if (image) |*cached| cached.blob else engine_snapshot,
         .external_references = m.init_snapshot.referenceTable(references),
     });
     trace.mark("runtime_isolate");
     var options = host.initOptions();
     if (image) |*cached| options.init_snapshot = &cached.table;
-    if (caching) options.code_cache = code_cache.hook();
+    if (code_caching) options.code_cache = code_cache.hook();
     const scope = try rt.?.createScope(options);
     trace.mark("create_scope");
     var error_info: m.ErrorInfo = .{};
@@ -172,32 +206,45 @@ fn runInit(
     }
     // Modules that compiled without a V8 code cache (not in the snapshot) get one now that
     // their code has run, so lazily compiled functions are in it.
-    if (caching) {
+    if (code_caching) {
         _ = scope.flushCodeCache();
         host.flushGlueCache(scope);
     }
+    // A run that stored something may have taken the cache over its budget: drop the least recently
+    // used files. A fully warm run stores nothing and never scans the directory.
+    if (cache) |dir| if (m.Api.cache_dir.wroteSomething()) {
+        const stats = m.Api.cache_dir.evict(alloc, dir, settings.budget, m.sys.realtimeNs()) catch |err| blk: {
+            if (environ.get("ORIGINE_SNAPSHOT_LOG") != null) m.stderr.print("cache: not trimmed ({s})\n", .{@errorName(err)});
+            break :blk null;
+        };
+        if (stats) |done| if (environ.get("ORIGINE_SNAPSHOT_LOG") != null) {
+            m.stderr.print("cache: {d} files, {d} bytes, deleted {d} ({d} bytes)\n", .{ done.files, done.bytes, done.deleted, done.freed });
+        };
+    };
 }
 
-/// The cached snapshot of the init graph at `specifier`, created and stored on a miss. Null
-/// means "run without": no cache directory, an init that cannot be snapshotted (it throws,
-/// waits on I/O or imports a host module) or any other failure; the normal path then reports
-/// whatever is wrong with the init. With ORIGINE_SNAPSHOT_LOG set, says why on stderr.
-/// Borrows everything through return.
+/// The cached snapshot of the init graph at `specifier`, created and (unless `may_store` is false,
+/// a budget of 0) stored in the cache directory `cache` on a miss. Null means "run without": an
+/// init that cannot be snapshotted (it throws, waits on I/O or imports a host module) or any other
+/// failure; the normal path then reports whatever is wrong with the init. With ORIGINE_SNAPSHOT_LOG
+/// set, says why on stderr. Borrows everything through return.
 fn initSnapshot(
     alloc: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
     host: *m.Api.Host,
+    cache: m.sys.Dir,
+    may_store: bool,
     references: []const ?*const anyopaque,
     specifier: []const u8,
+    buffer_allocator: v8.ArrayBuffer.Allocator,
     engine_snapshot: ?[]align(16) const u8,
-    engine_key: m.Api.init_cache.Hash,
 ) ?m.init_snapshot.Image {
     const verbose = environ.get("ORIGINE_SNAPSHOT_LOG") != null;
-    var entry = m.Api.init_cache.entryWithKey(alloc, engine_key, specifier) catch return null;
+    var entry = m.Api.init_cache.entryFor(alloc, host, specifier) catch return null;
     defer entry.deinit();
     var miss: m.Api.init_cache.Miss = undefined;
-    if (m.Api.init_cache.load(alloc, m.sys.Dir.cwd(), &entry, m.Api.init_cache.sourceHasher(host), &miss)) |hit| {
-        if (verbose) m.stderr.print("init snapshot: reused {s}\n", .{entry.path});
+    if (m.Api.init_cache.load(alloc, cache, &entry, m.Api.init_cache.sourceHasher(host), &miss)) |hit| {
+        if (verbose) m.stderr.print("init snapshot: reused {s}\n", .{entry.name});
         return hit;
     }
     if (verbose) m.stderr.print("init snapshot: cache miss ({s})\n", .{@tagName(miss)});
@@ -212,15 +259,17 @@ fn initSnapshot(
         .hooks = host.snapshotHooks(),
         .external_references = m.init_snapshot.referenceTable(references),
         .base_snapshot = engine_snapshot,
+        .array_buffer_allocator = buffer_allocator,
     }) catch |err| {
         if (verbose) m.stderr.print("init snapshot: not created ({s})\n", .{@errorName(err)});
         return null;
     };
-    m.Api.init_cache.store(alloc, m.sys.Dir.cwd(), &entry, &created) catch |err| {
+    if (!may_store) return created;
+    m.Api.init_cache.store(alloc, cache, &entry, &created, 0) catch |err| {
         if (verbose) m.stderr.print("init snapshot: not stored ({s})\n", .{@errorName(err)});
         return created;
     };
-    if (verbose) m.stderr.print("init snapshot: created {s}\n", .{entry.path});
+    if (verbose) m.stderr.print("init snapshot: created {s}\n", .{entry.name});
     return created;
 }
 
@@ -234,12 +283,11 @@ const snapshot_compressed = build_options.has_snapshot and build_options.engine_
 const embedded_raw: [if (snapshot_compressed) 0 else embedded_snapshot.len]u8 align(16) =
     if (snapshot_compressed) .{} else embedded_snapshot.*;
 
-/// Returns the embedded snapshot, or null to use V8's built-in seed (no embedded blob, or
-/// ORIGINE_NO_SNAPSHOT is set for comparison runs). A compressed blob is expanded into a 16-byte
+/// Returns the embedded snapshot, or null to use V8's built-in seed (no embedded blob). A compressed blob is expanded into a 16-byte
 /// aligned buffer that lives for the rest of the process; the data is produced by the build, so a
 /// blob that fails to expand is a build defect and aborts.
-fn embeddedSnapshot(alloc: std.mem.Allocator, environ: *const std.process.Environ.Map) ?[]align(16) const u8 {
-    if (embedded_snapshot.len == 0 or environ.get("ORIGINE_NO_SNAPSHOT") != null) return null;
+fn embeddedSnapshot(alloc: std.mem.Allocator) ?[]align(16) const u8 {
+    if (embedded_snapshot.len == 0) return null;
     if (snapshot_compressed) {
         return lz4.unpack(alloc, embedded_snapshot) catch |err| std.debug.panic("embedded engine snapshot: {s}", .{@errorName(err)});
     }

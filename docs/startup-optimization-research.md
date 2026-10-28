@@ -190,7 +190,7 @@ A separate interleaved experiment used three batches of 60 runs per case. The mi
 |---|---:|---:|---:|
 | Warm init snapshot | 9.851 | 11.348 | 12.301 |
 | Init snapshot absent, rebuilt synchronously | 18.774 | 20.620 | 21.847 |
-| Existing `ORIGINE_NO_SNAPSHOT=1` mode | 14.096 | 15.621 | 16.805 |
+| `ORIGINE_NO_SNAPSHOT=1` mode (at the time of this batch it also disabled the engine snapshot and code caches; it no longer does) | 14.096 | 15.621 | 16.805 |
 
 Compare within this batch set: its baseline is slower than earlier batches, so cross-session subtraction is invalid. Still, a missing init snapshot adds roughly **9 ms** to the median within the controlled comparison. The last row disables both engine/init snapshots and code caching; it does not isolate just one of those features.
 

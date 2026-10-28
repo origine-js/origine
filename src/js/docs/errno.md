@@ -63,7 +63,7 @@ the draft stage). `0` is "no error" and is never a member.
 | `FilesystemLoop` | 15 | `ELOOP`: too many symlinks |
 | `InvalidFilename` | 16 | `ENAMETOOLONG` or a name the file system cannot encode |
 | `CrossesDevices` | 17 | `EXDEV`: a rename across file systems |
-| `PermissionDenied` | 20 | every denial: the grant's (`..`, an absolute path, a `__oricache__` component, a write on a read-only grant, a read on a write-only one, a request above the host ceiling) and the OS's (`EACCES`, `EPERM`) |
+| `PermissionDenied` | 20 | every denial: the grant's (`..`, an absolute path, a `__codecache__` component, a write on a read-only grant, a read on a write-only one, a request above the host ceiling) and the OS's (`EACCES`, `EPERM`) |
 | `ReadOnlyFilesystem` | 21 | `EROFS` |
 | `ResourceBusy` | 22 | `EBUSY`, `ETXTBSY` |
 | `Unsupported` | 23 | |

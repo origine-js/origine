@@ -288,7 +288,7 @@
       return new Snapshot(SNAPSHOT_TOKEN, checked(native.snapshot.fromRaw(bytesArg(bytes))));
     }
     /**
-     * A snapshot from the bytes `origineDataBlob()` made (the file format of `__oricache__`) for the
+     * A snapshot from the bytes `origineDataBlob()` made (the file format of the global cache) for the
      * same `init` by this same build. `InvalidData` for a damaged file, another build or init, or
      * source files that changed since.
      */
@@ -305,7 +305,7 @@
       return checked(native.snapshot.blob(snapshotIds.get(this)));
     }
     /**
-     * A `Uint8Array` with the bytes of the `__oricache__` snapshot file for this snapshot. `compress`
+     * A `Uint8Array` with the bytes of the cache's snapshot file for this snapshot. `compress`
      * (default false) packs it with LZ4 and needs a build with LZ4 snapshots. `Unsupported` for a
      * snapshot from `fromRaw`.
      */

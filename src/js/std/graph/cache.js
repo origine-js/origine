@@ -65,11 +65,11 @@ export const CodeCache = freeze({
   memory(options = {}) {
     return withCapacity('codeCacheMemory', 'codeCache', 'bytes', capacity('CodeCache.memory', 'bytes', own(options, 'bytes')), {});
   },
-  /// Files in the directory `fs` (a grant of `api.fs` with write access) grants, one per module at
-  /// `__oricache__/<16 hex digits of BLAKE3(module id)>.<engine tag>.v8-code-cache`: the id only picks the
-  /// name, so a virtual id or one with `..` stays inside `__oricache__`. Each file holds the hash of the
-  /// source it was made from and is ignored for any other text. Reads and
-  /// writes touch the disk; writes happen at `graph.flush()`.
+  /// Files in the directory `fs` (a grant of `api.fs` with write access) grants, one per distinct source
+  /// text at `__codecache__/<32 hex digits of BLAKE3(runtime, module kind, source text)>.v8-code-cache`:
+  /// the module id is not in the name, so a virtual id or one with `..` stays inside `__codecache__` and
+  /// identical sources share a file. Each file holds the hash of the source it was made from and is
+  /// ignored for any other text. Reads and writes touch the disk; writes happen at `graph.flush()`.
   dir(fs, options = {}) {
     if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant');
     return withCapacity('codeCacheDir', 'codeCache', 'bytes', capacity('CodeCache.dir', 'bytes', own(options, 'bytes')), { fs });

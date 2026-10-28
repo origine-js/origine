@@ -277,6 +277,10 @@ pub const CreateOptions = struct {
     /// Frozen-intrinsics engine snapshot (see `snapshot.create`) to build on, which makes
     /// creation faster and the result identical to a normal start. Borrowed through return.
     base_snapshot: ?[]align(16) const u8 = null,
+    /// Backing-store allocator for the creation isolate, shared with the runtime that restores
+    /// the blob so the process keeps one sandbox allocator. Borrowed through return. Null makes
+    /// a default allocator for this call only.
+    array_buffer_allocator: ?v8.ArrayBuffer.Allocator = null,
 };
 
 pub const CreateError = error{
@@ -291,11 +295,12 @@ pub const CreateError = error{
 };
 
 /// Evaluates `options.specifier` and returns the serialized result. V8 must be initialized.
-/// Borrows options (and the callbacks' data) through return; runs the loader on the calling
-/// thread. Everything it creates is released before it returns, whether it succeeds or not.
+/// Borrows options (and the callbacks' data, and `array_buffer_allocator` if set) through
+/// return; runs the loader on the calling thread. Everything it creates is released before it
+/// returns, whether it succeeds or not.
 pub fn create(alloc: std.mem.Allocator, options: CreateOptions) !Image {
-    const aba = v8.ArrayBuffer.Allocator.initDefault();
-    defer aba.deinit();
+    const aba = options.array_buffer_allocator orelse v8.ArrayBuffer.Allocator.initDefault();
+    defer if (options.array_buffer_allocator == null) aba.deinit();
     var params = v8.Isolate.CreateParams.init();
     params.array_buffer_allocator = aba;
     params.external_references = options.external_references orelse externalReferences();

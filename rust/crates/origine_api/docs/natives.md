@@ -47,7 +47,7 @@ Guest-facing timer and deadline helpers are documented in
 ## `native.fsAsync`
 
 `request(ioId, root, access)` creates a grant; every other op takes `(fs, id)` handles. Order of
-checks, like Zig: path validation (`InvalidInput` for NUL, `PermissionDenied` for `..`, absolute and `__oricache__`), then the grant's access (`PermissionDenied`: a mutation on a read-only grant, an observation on a write-only one), then
+checks, like Zig: path validation (`InvalidInput` for NUL, `PermissionDenied` for `..`, absolute and `__codecache__`), then the grant's access (`PermissionDenied`: a mutation on a read-only grant, an observation on a write-only one), then
 the handles (`BadHandle` unknown/closed, `StaleHandle` closing), then the OS. These checks run
 synchronously, so a bad call returns a rejected promise without starting a task.
 

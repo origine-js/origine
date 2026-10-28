@@ -16,7 +16,7 @@ const f = rs.File.open('a.txt'); f.read(buf); f.close();
 rs.OpenOptions.new().write(true).create(true).open('b.txt');
 ```
 
-A grant is the object `requestSync` / `requestAsync` returned. The host stamps it with a secret that
+A grant is the object `requestSync` / `requestAsync` returned. The host builds it with a secret that
 a script cannot read, copy or inherit, so a copy with every property (`{ ...grant }`, `Object.assign`,
 `Object.create(grant)`, a `Proxy`) still runs the same operations but is not a grant where one is the
 authority: `api.graph.narrow({ fs })` and `CodeCache.dir(fs)` reject it with `InvalidInput`.
@@ -77,7 +77,7 @@ or `api.fs` async ops (`fileReadInto`, `fileReadAlloc`).
 ## Symlinks and confinement
 
 Paths are confined to the grant's root **lexically** only (no `..`, no absolute path, no
-`__oricache__` component: `PermissionDenied`; a NUL byte: `InvalidInput`). Symlinks are not
+`__codecache__` component: `PermissionDenied`; a NUL byte: `InvalidInput`). Symlinks are not
 resolved by that check, so `metadata`, `try_exists`, `File.open` and friends, which follow a symlink,
 can leave the root when the root contains a link that points outside it. Do not grant a root you do
 not trust the contents of until confinement of symlinks is decided.

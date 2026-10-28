@@ -349,11 +349,12 @@ declare module "origine:@std/graph/cache" {
     /** Kept in the graph's memory and shared by its contexts; `bytes` caps it. */
     memory(options?: { readonly bytes?: number }): CodeCache;
     /**
-     * Files in the directory an `api.fs` grant allows (it needs write access), one per module at
-     * `__oricache__/<16 hex digits of BLAKE3(module id)>.<engine tag>.v8-code-cache`. The id only picks the
-     * name, so a virtual id (`app:/x.js`, `https://...`) or one with `..` cannot land outside `__oricache__`
-     * or depend on the working directory; each file holds the hash of the source it was made from and is
-     * ignored for any other text. Touches the disk; written at `graph.flush()`.
+     * Files in the directory an `api.fs` grant allows (it needs write access), one per distinct source text
+     * at `__codecache__/<32 hex digits of BLAKE3(runtime, module kind, source text)>.v8-code-cache`. The
+     * module id is not in the name, so a virtual id (`app:/x.js`, `https://...`) or one with `..` cannot land
+     * outside `__codecache__` or depend on the working directory, and identical sources share a file; each file
+     * holds the hash of the source it was made from and is ignored for any other text. Touches the disk;
+     * written at `graph.flush()`.
      */
     dir(fs: object, options?: { readonly bytes?: number }): CodeCache;
     /**

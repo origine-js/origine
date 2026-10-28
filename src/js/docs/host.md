@@ -12,7 +12,7 @@ A heap snapshot in memory (types: `types/host.d.ts`). A new isolate started from
 
 ```js
 const snapshot = api.host.Snapshot.create({ init: './worker.js' });   // blocks this thread while the graph is evaluated
-const bytes = snapshot.origineDataBlob();     // same format as a file in __oricache__
+const bytes = snapshot.origineDataBlob();     // same format as a file in the global cache
 const later = api.host.Snapshot.fromOrigineDataBlob(bytes, { init: './worker.js' });
 api.isolate.create({ init: './worker.js', snapshot: later });
 ```
@@ -24,7 +24,7 @@ api.isolate.create({ init: './worker.js', snapshot: later });
 | `Snapshot.fromOrigineDataBlob(bytes, { init })` | From the bytes `origineDataBlob()` made. A file only fits the build that made it, the same `init` and the same source files: anything else is `InvalidData` (a packed file in a build without LZ4 snapshots is `Unsupported`). |
 | `snapshot.init` | The specifier it was made for, `undefined` after `fromRaw`. |
 | `snapshot.blob()` | A `Uint8Array` copy of the raw V8 blob. |
-| `snapshot.origineDataBlob({ compress? })` | A `Uint8Array` copy in the file format of `__oricache__` (a `meta` word, then the module table and the blob), so JavaScript can keep it on disk. `compress: true` packs it with LZ4 and needs a build with LZ4 snapshots (`Unsupported` otherwise). `Unsupported` after `fromRaw`. |
+| `snapshot.origineDataBlob({ compress? })` | A `Uint8Array` copy in the file format of the global cache (a `meta` word, then the module table and the blob), so JavaScript can keep it on disk. `compress: true` packs it with LZ4 and needs a build with LZ4 snapshots (`Unsupported` otherwise). `Unsupported` after `fromRaw`. |
 | `snapshot.close()` | Releases the memory; isolates already started from it keep their own hold. `BadHandle` afterwards. |
 
 ## `host.threading`

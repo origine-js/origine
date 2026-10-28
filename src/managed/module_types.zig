@@ -174,4 +174,8 @@ pub const CodeCache = struct {
     /// Persists freshly produced bytes (borrowed for the call). Best effort: failures are
     /// the hook's to swallow.
     store: *const fn (data: ?*anyopaque, request: CodeCacheRequest, bytes: []const u8) void,
+    /// Called when V8 refuses the bytes `load` returned for `request` (they were made by another
+    /// build or flag set): the hook may discard them. The module is compiled without them and its
+    /// fresh cache goes to `store`.
+    rejected: ?*const fn (data: ?*anyopaque, request: CodeCacheRequest) void = null,
 };

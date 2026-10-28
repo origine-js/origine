@@ -40,9 +40,11 @@ origine path/to/init.js [args...]
   [docs/repl.md](docs/repl.md). It has no `api`.
 - **With a path:** the file is the *init module*. origine evaluates it, calls its exported
   `main(api)` (which may be `async`) and runs until the returned promise settles. `.ts`, `.tsx`
-  and `.jsx` files are transformed by oxc. The evaluated init graph is cached in a snapshot
-  under an `__oricache__/` directory next to the file, so later runs skip evaluation;
-  `ORIGINE_NO_SNAPSHOT=1` disables the caches.
+  and `.jsx` files are transformed by oxc. The evaluated init graph is cached in a snapshot in a
+  global cache (`~/.cache/origine/code_caches`, or `$ORIGINE_CACHE_DIR`; V8 code caches live there too),
+  so later runs skip evaluation. The cache holds at most `ORIGINE_CACHE_BUDGET` (default 1200 MiB) and drops
+  the least recently used files first. `ORIGINE_NO_SNAPSHOT=1` turns the init snapshot off,
+  `ORIGINE_NO_CODE_CACHE=1` the code caches.
 
 ```js
 // init.js

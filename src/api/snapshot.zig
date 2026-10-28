@@ -140,7 +140,7 @@ fn fromRawImpl(state: *ScopeState, bytes: []u8) !u32 {
     return register(state, rec);
 }
 
-/// `native.snapshot.fromFile(bytes, init)`: a snapshot from the bytes of an `__oricache__` snapshot
+/// `native.snapshot.fromFile(bytes, init)`: a snapshot from the bytes of a cache snapshot
 /// file made for `init` by this build (`file`). `InvalidData` for a damaged file, one made by another
 /// build or for another init, or whose source files changed since; `Unsupported` for a packed file
 /// when this build cannot unpack.
@@ -178,7 +178,7 @@ pub fn blob(state: *ScopeState, call: *Call, id: u32) errno.Error!v8.Value {
     return call.bytesValue(rec.blob()) catch |err| return errno.narrow(err);
 }
 
-/// `native.snapshot.file(id, compress)`: a `Uint8Array` with the bytes of the `__oricache__` snapshot
+/// `native.snapshot.file(id, compress)`: a `Uint8Array` with the bytes of the cache snapshot
 /// file for this snapshot. `Unsupported` for a bare blob (it has no module table) and for `compress`
 /// in a build without LZ4 snapshots.
 pub fn file(state: *ScopeState, call: *Call, id: u32, compress: bool) errno.Error!v8.Value {

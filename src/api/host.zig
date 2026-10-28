@@ -237,6 +237,8 @@ pub const Host = struct {
     link: ?ParentLink = null,
     /// Snapshots the guest made or loaded, by id (index + 1); `null` once closed. Released by `destroy`.
     snapshots: std.ArrayList(?*snapshot_api.Record) = .empty,
+    /// `init_cache.engineKey` of this host, computed on first use (it hashes every embedded module).
+    engine_key: ?[32]u8 = null,
     /// Isolates this Host created, in id order (id = index + 1); terminated and joined by `destroy`.
     children: std.ArrayList(*ThreadIsolate) = .empty,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
@@ -640,6 +642,7 @@ pub const Host = struct {
         return factory;
     }
 
+        if (cache_object != null and !accepted) if (hook) |h| if (h.rejected) |discard| discard(h.data, .{ .allocator = cache_arena.allocator(), .module_id = text.cache_id, .source = text.source });
     /// First-access callback: binds only this capability's natives to the private template.
     /// Borrows local arguments; installed callbacks retain scope-owned state until teardown.
     /// Returns a local JS factory only for the no-snapshot fallback, otherwise undefined.

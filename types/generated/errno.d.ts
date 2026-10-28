@@ -14,7 +14,7 @@ export interface IoErrnoTable {
   readonly InvalidFilename: 16;
   /** EXDEV: a rename across file systems. */
   readonly CrossesDevices: 17;
-  /** Every denial: the grant's own (`..`, absolute paths, `__oricache__`, an access or ceiling that does not allow the call) and the OS's (EACCES, EPERM). */
+  /** Every denial: the grant's own (`..`, absolute paths, `__codecache__`, an access or ceiling that does not allow the call) and the OS's (EACCES, EPERM). */
   readonly PermissionDenied: 20;
   /** EROFS. */
   readonly ReadOnlyFilesystem: 21;

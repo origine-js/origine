@@ -47,8 +47,8 @@ pub const FileRef = struct {
 };
 
 /// Rejects NUL (`InvalidInput`: a malformed path) and, as policy denials (`PermissionDenied`, like
-/// the OS's own), absolute paths, `..` components and the engine's `__oricache__` directories
-/// (snapshots and code caches are trusted by V8, so a guest must not be able to plant them).
+/// the OS's own), absolute paths, `..` components and the `__codecache__` directories
+/// of a graph's code caches (V8 trusts them, so a guest must not be able to plant them).
 /// Lexical only: symlinks inside the root are not resolved here, so following one can leave the
 /// root (docs/api-design.md). The Rust twin is `clean` in rust/crates/origine_api_fs.
 pub fn cleanPath(path: []const u8) !void {
@@ -228,11 +228,12 @@ const access_read: u32 = 1;
 const access_write: u32 = 2;
 
 /// `native.fsRequest(root?, access)`: opens a sync grant over the host directory (or a
-/// subdirectory of it) and returns its ops object. The host config is the ceiling:
+/// subdirectory of it) and returns `[grant, ops]`: the grant object the host built (see `newGrant`) and
+/// the natives bound to it. The host config is the ceiling:
 /// a read-only host rejects a write request with `PermissionDenied` (it is never silently
 /// downgraded), and `sync = false` denies the request. `access` is the bits above; anything else is
 /// `InvalidInput`. (Async grants live in the Rust runtime: `native.fsAsync`.)
-pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Object {
+pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Value {
     const host = state.host;
     const alloc = host.allocator;
     if (access == 0 or access > (access_read | access_write)) return error.InvalidInput;
@@ -272,7 +273,88 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Ob
         .fileSync = func(fileSync, .{ .side_effect = .any }),
     });
     try call.set(ops, "id", grant.id);
-    return ops;
+    var pair = call.array();
+    try pair.push(try newGrant(call.env(), .sync, grant.id));
+    try pair.push(ops);
+    return pair.finish();
+}
+
+// ---- fs.requestAsync ---------------------------------------------------------
+
+/// An async request in flight: the Rust runtime opens the grant; the host builds the grant object when
+/// its promise settles, and settles the guest's promise with it.
+pub const AsyncRequest = struct {
+    host: *Host,
+    state: *ScopeState,
+    io: u32,
+    resolver: v8.Global.Of(v8.Promise.Resolver),
+};
+
+/// `native.fsRequestAsync(request, io, root, access)`: calls `request` (`native.fsAsync.request`, the
+/// Rust native that opens the grant on `io`) and resolves with the grant object the host builds from
+/// its answer. A rejection passes through unchanged. Nothing but this call makes an async grant.
+pub fn requestAsync(state: *ScopeState, call: *Call, request_fn: v8.Function, io: u32, root: []const u8, access: u32) !v8.Promise {
+    const host = state.host;
+    const alloc = host.allocator;
+    if (access == 0 or access > (access_read | access_write)) return error.InvalidInput;
+    const undef = eu.v.undefined_value(call.isolate).value;
+    const args = [_]v8.Value{ eu.v.num_u32(call.isolate, io).numeric.primitive.value, binding.string(call.isolate, root), eu.v.num_u32(call.isolate, access).numeric.primitive.value };
+    const answer = request_fn.call(call.ctx, undef, &args) orelse return error.JavaScriptException;
+    const promise = v8.Promise.from_opaque(answer.data.handle) orelse return error.Unexpected;
+    const resolver = eu.v.promise_resolver(call.ctx) orelse return error.Unexpected;
+    const pending = try alloc.create(AsyncRequest);
+    errdefer alloc.destroy(pending);
+    pending.* = .{ .host = host, .state = state, .io = io, .resolver = .new(call.isolate, resolver) };
+    errdefer pending.resolver.deinit();
+    try host.async_requests.append(alloc, pending);
+    errdefer _ = host.async_requests.pop();
+    const data = eu.v.external(call.isolate, pending).value.data;
+    const on_ok = v8.Function.init(call.ctx, requestGranted, data, 1, .Throw, .HasSideEffect);
+    const on_err = v8.Function.init(call.ctx, requestDenied, data, 1, .Throw, .HasSideEffect);
+    _ = promise.then2(call.ctx, on_ok, on_err) orelse return error.Unexpected;
+    return resolver.getPromise();
+}
+
+fn finishRequest(pending: *AsyncRequest) void {
+    const host = pending.host;
+    pending.resolver.deinit();
+    for (host.async_requests.items, 0..) |item, index| if (item == pending) {
+        _ = host.async_requests.swapRemove(index);
+        break;
+    };
+    host.allocator.destroy(pending);
+}
+
+fn requestGranted(info: v8.FunctionCallbackInfo) callconv(.c) void {
+    const pending = binding.externalPointer(AsyncRequest, info);
+    defer finishRequest(pending);
+    const isolate = info.isolate();
+    const ctx = isolate.getCurrentContext();
+    const reply = info.get_arg(0).toObject(ctx) orelse return rejectWith(pending, ctx, binding.string(isolate, "bad grant answer"));
+    const id_value = reply.get(ctx, binding.string(isolate, "id")) orelse return rejectWith(pending, ctx, binding.string(isolate, "bad grant answer"));
+    if (!id_value.isNumber()) return rejectWith(pending, ctx, binding.string(isolate, "bad grant answer"));
+    const id = id_value.u32Value(ctx) orelse return rejectWith(pending, ctx, binding.string(isolate, "bad grant answer"));
+    pending.host.async_grants.append(pending.host.allocator, .{ .id = id, .owner = pending.state, .io = pending.io }) catch return rejectWith(pending, ctx, binding.string(isolate, "out of memory"));
+    const grant = newGrant(.{ .isolate = isolate, .ctx = ctx }, .async, id) catch return rejectWith(pending, ctx, binding.string(isolate, "grant failed"));
+    _ = pending.resolver.deref().resolve(ctx, grant.value);
+}
+
+fn requestDenied(info: v8.FunctionCallbackInfo) callconv(.c) void {
+    const pending = binding.externalPointer(AsyncRequest, info);
+    defer finishRequest(pending);
+    _ = pending.resolver.deref().reject(info.isolate().getCurrentContext(), info.get_arg(0));
+}
+
+fn rejectWith(pending: *AsyncRequest, ctx: v8.Context, reason: v8.Value) void {
+    _ = pending.resolver.deref().reject(ctx, reason);
+}
+
+/// `native.fsAsyncClosed(io)`: the io runtime `io` was closed, so the async grants opened on it are
+/// no longer accepted as an authority (the Rust runtime refuses their operations too).
+pub fn asyncClosed(state: *ScopeState, io: u32) !void {
+    for (state.host.async_grants.items) |*grant| if (grant.io == io and grant.owner == state) {
+        grant.closed = true;
+    };
 }
 
 // ---- the secret that makes an object a grant -------------------------------
@@ -284,37 +366,27 @@ pub const GrantKind = enum(u1) { sync = 0, async = 1 };
 /// Rust runtime's id of an async one.
 pub const GrantRef = struct { kind: GrantKind, id: u32 };
 
-/// An async grant the host stamped: the Rust runtime owns the grant, so Zig keeps only who got it.
-pub const AsyncGrant = struct { id: u32, owner: *ScopeState };
+/// An async grant the host built: the Rust runtime owns the grant, so Zig keeps who got it, on which
+/// io runtime, and whether that runtime was closed (`fsAsyncClosed`) or the realm went away.
+pub const AsyncGrant = struct { id: u32, owner: *ScopeState, io: u32, closed: bool = false };
 
 fn grantKey(isolate: v8.Isolate) v8.Private {
     return v8.Private.forApi(isolate, v8.String.initUtf8(isolate, "origine:fs-grant"));
 }
 
-/// `native.fsBrand(object, kind, id)`: marks `object` as the grant `id` (0 sync, 1 async) that `state`'s
-/// realm was given. The mark is a V8 private symbol: JS cannot read, copy, clone, spread, proxy or
-/// inherit it, so an object that was not stamped here is not a grant, whatever properties it has. A
-/// sync grant must exist, belong to this realm and be open; an object is stamped once.
-pub fn brand(state: *ScopeState, call: *Call, target: v8.Object, kind: u32, id: u32) !void {
-    const host = state.host;
-    const which = std.enums.fromInt(GrantKind, kind) orelse return error.InvalidInput;
-    switch (which) {
-        .sync => _ = try syncGrantOf(state, id),
-        .async => {
-            var known = false;
-            for (host.async_grants.items) |grant| {
-                if (grant.id == id and grant.owner == state) known = true;
-            }
-            if (!known) try host.async_grants.append(host.allocator, .{ .id = id, .owner = state });
-        },
-    }
-    const key = grantKey(call.isolate);
-    if (target.hasPrivate(call.ctx, key) orelse return error.Unexpected) return error.InvalidInput;
-    const value = eu.v.num_f64(call.isolate, @as(f64, @floatFromInt(kind)) * 4294967296.0 + @as(f64, @floatFromInt(id))).numeric.primitive.value;
-    if (!(target.setPrivate(call.ctx, key, value) orelse return error.Unexpected)) return error.Unexpected;
+/// A grant object as the host builds it: `{ kind, id }` carrying the secret, which is set here and
+/// nowhere else. The glue adds the operations and freezes it; it cannot give an object the secret or change
+/// whose grant this is.
+fn newGrant(env: binding.Env, kind: GrantKind, id: u32) !v8.Object {
+    const object = eu.v.object(env.isolate);
+    try binding.set(env, object, "kind", @as([]const u8, if (kind == .sync) "sync" else "async"));
+    try binding.set(env, object, "id", id);
+    const number = @as(f64, @floatFromInt(@backingInt(kind))) * 4294967296.0 + @as(f64, @floatFromInt(id));
+    if (!(object.setPrivate(env.ctx, grantKey(env.isolate), eu.v.num_f64(env.isolate, number).numeric.primitive.value) orelse return error.Unexpected)) return error.Unexpected;
+    return object;
 }
 
-/// The grant `value` is, if the host stamped it for this realm: what `narrow({ fs })` and
+/// The grant `object` is, if the host built it for this realm: what `narrow({ fs })` and
 /// `CodeCache.dir` call to learn what they were handed. Anything else is `InvalidInput`.
 pub fn grantOf(state: *ScopeState, call: *Call, object: v8.Object) !GrantRef {
     const stamp = object.getPrivate(call.ctx, grantKey(call.isolate)) orelse return error.InvalidInput;
@@ -326,7 +398,7 @@ pub fn grantOf(state: *ScopeState, call: *Call, object: v8.Object) !GrantRef {
     switch (kind) {
         .sync => _ = try syncGrantOf(state, id),
         .async => {
-            for (state.host.async_grants.items) |known| if (known.id == id and known.owner == state) return .{ .kind = .async, .id = id };
+            for (state.host.async_grants.items) |known| if (known.id == id and known.owner == state and !known.closed) return .{ .kind = .async, .id = id };
             return error.InvalidInput;
         },
     }

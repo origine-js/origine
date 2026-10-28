@@ -69,7 +69,7 @@ Host codes are 1-9 (`UNEXPECTED` is Rust's `Other`; also the name of any unknown
 Rust's (`AddrInUse`): it is a sockets name, left for that module.
 
 Policy: `InvalidInput` is a malformed argument or path (a NUL byte, an empty entry name, a bad open
-mode); `PermissionDenied` is every denial, the grant's own (`..`, absolute paths, `__oricache__`
+mode); `PermissionDenied` is every denial, the grant's own (`..`, absolute paths, `__codecache__`
 components, a request or operation the grant's access or the embedder's ceiling does not allow) and
 the OS's (`EACCES` and `EPERM` alike). `TooManyOpenFiles` and `Io` have no Rust kind (Rust reports
 `EMFILE`/`ENFILE`/`EIO` as uncategorized); `Interrupted` and the rest stay `Unexpected`.

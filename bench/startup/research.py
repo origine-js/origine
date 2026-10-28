@@ -22,6 +22,7 @@ import resource
 import shutil
 import statistics
 import subprocess
+import tempfile
 import time
 
 import typer
@@ -43,16 +44,23 @@ def summarize(values: list[int]) -> dict[str, float]:
     }
 
 
+def cache_dir_for(case: dict) -> Path:
+    """The global cache of one case: a directory of its own, so runs never see each other's files."""
+    return Path(tempfile.gettempdir()) / ("origine-bench-cache-" + str(case.get("name", "default")))
+
+
 def invoke(case: dict, trace: bool) -> dict:
     """Own one child until completion; retain only numeric measurements, never env contents."""
     if case.get("reset_init_cache", False):
         # Only the fixture cache created by this harness; this is not a cold OS-page-cache run.
-        shutil.rmtree(Path(case["cwd"]) / "examples/typescript/__oricache__", ignore_errors=True)
+        shutil.rmtree(cache_dir_for(case), ignore_errors=True)
     env = dict(os.environ)
     for key in ["V8_STARTUP_TRACE", "ORIGINE_SNAPSHOT_LOG", "ORIGINE_NO_SNAPSHOT",
+                "ORIGINE_NO_CODE_CACHE", "ORIGINE_CACHE_DIR", "ORIGINE_CACHE_BUDGET",
                 "ORIGINE_RESEARCH_FLAGS", "ORIGINE_RESEARCH_THREADS",
                 "ORIGINE_RESEARCH_SINGLE_PLATFORM", "ORIGINE_RESEARCH_RETAIN_ENGINE"]:
         env.pop(key, None)
+    env["ORIGINE_CACHE_DIR"] = str(cache_dir_for(case))
     env.update(case.get("env", {}))
     if trace:
         env["V8_STARTUP_TRACE"] = "1"

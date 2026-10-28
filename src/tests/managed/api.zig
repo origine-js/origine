@@ -1300,7 +1300,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  out.imported = (await ctx.import('./dep.js')).status;
         \\  const run = async (g, c, text, name) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(g).evaluate(c).then(() => 'ok', e => e.message);
         \\  out.missing = await run(graph, ctx, "import './nope.js'", 'm1');
-        \\  out.oricache = await run(graph, ctx, "import './__oricache__/x.js'", 'm2');
+        \\  out.codecache = await run(graph, ctx, "import './__codecache__/x.js'", 'm2');
         \\  const wo = await api.fs.requestAsync({ io, access: 'w' });
         \\  const writeOnly = api.graph.narrow({ fs: wo });
         \\  const wctx = await api.context.create({ import: handler, graph: writeOnly });
@@ -1320,7 +1320,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
     try fx.run();
     try check(fx.scope, "report.native === true && report.status === 'evaluated' && report.imported === 'evaluated'");
     try check(fx.scope, "report.requests === './dep.js=dep.js/declared,./data.json=data.json/declared'");
-    try check(fx.scope, "report.missing.includes('NotFound') && report.oricache.includes('PermissionDenied') && report.writeOnly.includes('PermissionDenied')");
+    try check(fx.scope, "report.missing.includes('NotFound') && report.codecache.includes('PermissionDenied') && report.writeOnly.includes('PermissionDenied')");
     try check(fx.scope, "report.accept === 'ok'");
     try check(fx.rt.scopes.items[1], "answer === 42");
     // The native handler and the accept hook's own read: only the JS hook (accept) entered the driver.
@@ -1552,7 +1552,7 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
     try check(fx.scope, "report.none === '0:0'");
     try check(fx.scope, "report.custom === '2:0' && report.stored.split(',').length === 2 && report.stored.includes('dep.js:true:true')");
     try check(fx.scope, "report.dir === '2:0' && report.dirAgain === '0:0'");
-    var cache_dir = try fx.tmp.dir.openDir(t.io, "__oricache__", .{ .iterate = true });
+    var cache_dir = try fx.tmp.dir.openDir(t.io, "__codecache__", .{ .iterate = true });
     defer cache_dir.close(t.io);
     var seen: usize = 0;
     var it = cache_dir.iterate();
@@ -1642,7 +1642,7 @@ test "graph: CodeCache.dir keeps the files of virtual and escaping module ids in
     try fx.run();
     // Four modules compile without a cache once, and a second graph finds all four on disk.
     try check(fx.scope, "report.first === 4 && report.second === 0");
-    var cache_dir = try fx.tmp.dir.openDir(t.io, "cache/__oricache__", .{ .iterate = true });
+    var cache_dir = try fx.tmp.dir.openDir(t.io, "cache/__codecache__", .{ .iterate = true });
     defer cache_dir.close(t.io);
     var files: usize = 0;
     var it = cache_dir.iterate();
@@ -3921,7 +3921,7 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\    emptyEntry: io => cwd.createDir(io, ''),
         \\    dotdot: io => cwd.openFile(io, '../x'),
         \\    absolute: io => cwd.openFile(io, '/etc/passwd'),
-        \\    cacheDir: io => cwd.createFile(io, 'a/__oricache__/x'),
+        \\    cacheDir: io => cwd.createFile(io, 'a/__codecache__/x'),
         \\    nameTooLong: io => cwd.createFile(io, 'a'.repeat(300)),
         \\    loopStat: io => cwd.statFile(io, 'loop'),
         \\    loopOpen: io => cwd.openFile(io, 'loop'),

@@ -14,5 +14,5 @@
     "noImplicitAny": false
   },
   "include": ["../index.d.ts", "../../examples/**/*.js", "../../examples/**/*.ts", "../../bench/*.js", "../../bench/tcp/bench.origine.js"],
-  "exclude": ["../../**/__oricache__"]
+  "exclude": ["../../**/__oricache__", "../../**/__codecache__"]
 }

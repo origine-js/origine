@@ -535,8 +535,8 @@ pub fn graphFor(host: *Host, id: u32) !*Graph {
 /// `create(fs?, cacheKind, bytes, cacheFs?, sourceBytes)`: a graph. `fs` is a grant `api.fs` made, as
 /// the host stamped it (`fs.brand`): a sync one is read by the host, an async one is attached with
 /// `asyncFs`; without one `fs` hooks are `PermissionDenied`. `cacheKind` is 0 none, 1 memory, 2 dir
-/// (`cacheFs`, a sync grant with write access, is where `__oricache__` lives), 3 custom. Anything that is
-/// not a stamped grant of this realm is `InvalidInput`.
+/// (`cacheFs`, a sync grant with write access, is where `__codecache__` lives), 3 custom. Anything that is
+/// not a grant of this realm is `InvalidInput`.
 /// `sourceBytes` (at least 1) is the largest source file the graph reads.
 pub fn graphCreate(state: *ScopeState, call: *Call, fs: ?v8.Object, cache_kind: u32, bytes: f64, cache_fs: ?v8.Object, source_bytes: f64) Error!u32 {
     return graphCreateImpl(state, call, fs, cache_kind, bytes, cache_fs, source_bytes) catch |err| return errno.narrow(err);

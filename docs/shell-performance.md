@@ -41,8 +41,9 @@ methods, and network classes/prototypes before startup. Their private context
 template contains no host pointers or native authority. Runtime getters only
 bind native namespaces on demand; they do not recreate or harden those classes.
 
-Cache controls for comparisons: `ORIGINE_NO_SNAPSHOT=1` disables the engine and init
-snapshots and code caches; `ORIGINE_SNAPSHOT_LOG=1` reports init-snapshot hit, miss
+Cache controls for comparisons: `ORIGINE_NO_SNAPSHOT=1` turns the init snapshot off (the embedded engine snapshot is always used),
+`ORIGINE_NO_CODE_CACHE=1` the code and glue caches, `ORIGINE_CACHE_DIR` / `ORIGINE_CACHE_BUDGET` place and
+bound the global cache; `ORIGINE_SNAPSHOT_LOG=1` reports init-snapshot hit, miss
 (with the reason), create and skip on stderr.
 
 For new investigations, `lib/v8_zig/build-tools/scripts/measure-startup.py` measures traced

@@ -123,7 +123,7 @@ export interface Snapshot {
   /** A copy of the raw V8 blob. */
   blob(): Uint8Array;
   /**
-   * A copy of the snapshot in the file format of `__oricache__`: it carries the table that restores the
+   * A copy of the snapshot in the file format of the global cache: it carries the table that restores the
    * modules, and fits only this build, this `init` and these sources. `Unsupported` for a snapshot
    * from `fromRaw`, which has no table.
    */

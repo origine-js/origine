@@ -227,8 +227,8 @@ fn paths_are_validated_before_anything_else() {
             ("../x", errno::PERMISSION_DENIED),
             ("a/../b", errno::PERMISSION_DENIED),
             ("/etc/passwd", errno::PERMISSION_DENIED),
-            ("__oricache__", errno::PERMISSION_DENIED),
-            ("a/__oricache__/x", errno::PERMISSION_DENIED),
+            ("__codecache__", errno::PERMISSION_DENIED),
+            ("a/__codecache__/x", errno::PERMISSION_DENIED),
             ("a\0b", errno::INVALID_INPUT),
             ("../a\0b", errno::INVALID_INPUT),
         ] {
@@ -238,7 +238,7 @@ fn paths_are_validated_before_anything_else() {
             assert_eq!(code(g.symlink_stat(0, bad)), expected, "{bad:?}");
             assert_eq!(code(g.delete_tree(0, bad)), expected, "{bad:?}");
         }
-        assert!(g.stat(0, "__oricache__x").is_ok(), "only whole components are reserved");
+        assert!(g.stat(0, "__codecache__x").is_ok(), "only whole components are reserved");
         assert_eq!(code(g.open_file(0, "", R)), errno::INVALID_INPUT);
         assert_eq!(code(g.create_dir(0, "")), errno::INVALID_INPUT);
         for root in ["", ".", "./."] {

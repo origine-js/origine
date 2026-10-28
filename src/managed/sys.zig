@@ -87,6 +87,12 @@ pub const File = struct {
         return statOf(try file.inner().stat());
     }
 
+    /// Sets the access and modification times, in nanoseconds since the Unix epoch. The file system
+    /// may store less precision.
+    pub fn setTimes(file: File, atime_ns: i128, mtime_ns: i128) fs_light.File.UpdateTimesError!void {
+        return file.inner().updateTimes(atime_ns, mtime_ns);
+    }
+
     pub fn sync(file: File) fs_light.File.SyncError!void {
         return file.inner().sync();
     }
@@ -385,6 +391,21 @@ pub const Dir = struct {
         return it;
     }
 };
+
+/// Wall-clock time in nanoseconds since the Unix epoch (what file times are in); not monotonic.
+pub fn realtimeNs() i128 {
+    if (is_windows) return 0; // no wall clock wrapper yet: the cache then treats every file as brand new
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 0;
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+/// The absolute path of the working directory written to `buffer`; returns its length.
+pub fn currentDirPath(buffer: []u8) error{Unsupported}!usize {
+    if (is_windows) return error.Unsupported;
+    const result = std.c.getcwd(buffer.ptr, buffer.len) orelse return error.Unsupported;
+    return std.mem.sliceTo(@as([*:0]u8, @ptrCast(result)), 0).len;
+}
 
 extern "c" fn proc_pidpath(pid: c_int, buffer: [*]u8, size: u32) c_int;
 

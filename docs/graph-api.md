@@ -15,7 +15,7 @@ All of it is implemented except what the last row lists. Tests: `src/tests/manag
 | Native plans | A handler with no JS function runs entirely in Zig (`Handler.native`); see Native plans. |
 | `Import.link` | `'hardened'` over `Content.exports` (data copied in the creating realm), `'shared'` over `Content.module`; the spike below showed V8 accepts the latter. |
 | Refcounted module table | `retain: 'all' \| 'used'`, pins (`ModuleMap.pin`), `delete`, `clear`, `entries` cap, `ModuleMap.sweep`. |
-| Code caches | `none`, `memory`, `dir` (one file per module under `__oricache__` of the cache grant, named from a hash of the module id) and `custom` (`load` before a module compiles, `store` at `graph.flush()`). |
+| Code caches | `none`, `memory`, `dir` (one file per distinct source text under `__codecache__` of the cache grant, named from a hash of the runtime, the module kind and the source) and `custom` (`load` before a module compiles, `store` at `graph.flush()`). |
 | `Snapshot.prepare` and baked contexts (multi-context `init_snapshot`) | Later, and the module graph's: the `api.isolate` snapshot step stays single-context. |
 | Source and defer phases | Not implemented; `ModuleImportPhase` names them, only `Evaluation` works. |
 
@@ -110,7 +110,7 @@ There is no `origineNamespace` flag. `origine()` only canonicalises `origine:` i
 |---|---|---|
 | `ResolveCache` | (referrer, specifier, attributes, phase) -> id | native memo |
 | `ImportCache` | (id, attributes) -> reference | one native table per context; `retain: 'all' \| 'used'` is required |
-| `CodeCache` | (id, source hash) -> V8 code-cache bytes | `none`, `memory`, `dir` (`__oricache__/<16 hex digits of BLAKE3(id)>.<engine tag>.v8-code-cache` of the cache grant: the id only picks the name, so virtual ids and ids with `..` stay inside it; each file holds its source's hash), `custom` (`key` is `{ id, hash }`, the hash being the lowercase hex BLAKE3 digest of the exact text V8 compiles; `load(key, source)` runs once a module's source is final and before it compiles, `store(key, blob)` at `graph.flush()`; the blob is opaque and carries the hash of its source, so one made for another text, a throwing `load` or a non-blob answer is a miss, never an error) |
+| `CodeCache` | (id, source hash) -> V8 code-cache bytes | `none`, `memory`, `dir` (`__codecache__/<32 hex digits of BLAKE3(runtime, module kind, source text)>.v8-code-cache` of the cache grant: the id is not in the name, so virtual ids and ids with `..` stay inside it; each file holds its source's hash), `custom` (`key` is `{ id, hash }`, the hash being the lowercase hex BLAKE3 digest of the exact text V8 compiles; `load(key, source)` runs once a module's source is final and before it compiles, `store(key, blob)` at `graph.flush()`; the blob is opaque and carries the hash of its source, so one made for another text, a throwing `load` or a non-blob answer is a miss, never an error) |
 
 Artifacts (source, transform output, code-cache bytes) are evictable and bounded. A reference is freed when its table entry, live JS handles and dependents' edges are gone; `delete(key)` is an identity reset (the next import makes a new reference and evaluates again). `'used'` frees unused entries automatically at the price of re-evaluation. A module a context already linked cannot be unloaded from it. Handles are explicit (`release()`, `using`); freeing on GC is a known gap shared with scopes (`WeakRef` and `FinalizationRegistry` exist in a realm, but their instances are not exportable values, and nothing here relies on them).
 

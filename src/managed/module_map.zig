@@ -30,6 +30,8 @@ const Entry = struct {
     cache_key: []const u8,
     cached: bool = true,
     id: ModuleId,
+    /// The table the entry lives in (`Resolver.namespace_of`); part of its key.
+    namespace: u32 = 0,
     attributes: []const ImportAttribute,
     module: ?v8.Global.Of(v8.Module) = null,
     /// Next entry whose module has the same identity hash (see `ModuleMap.by_identity`).
@@ -69,6 +71,8 @@ const Task = struct {
     root: ?*Entry,
     resolver: v8.Global.Of(v8.Promise.Resolver),
     settled: bool = false,
+    /// The table `root` is fetched into once its resolution settles.
+    namespace: u32 = 0,
     /// While `root` is null: the token of its resolution and the request (arena-owned strings).
     root_token: ?LoadToken = null,
     specifier: []const u8 = "",
@@ -136,7 +140,7 @@ pub const ModuleMap = struct {
         var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
         defer scratch.deinit();
         const attributes = try normalizeAttributes(scratch.allocator(), key.import_attributes);
-        const encoded = try cacheKey(scratch.allocator(), key.module_id, attributes);
+        const encoded = try cacheKey(scratch.allocator(), key.namespace, key.module_id, attributes);
         const entry = self.entries.get(encoded) orelse return null;
         if (entry.failure) |failure| {
             if (error_info) |out| out.exception = .new(iso, failure.deref());
@@ -144,6 +148,15 @@ pub const ModuleMap = struct {
         }
         const module = entry.module orelse return null;
         return .new(iso, module.deref());
+    }
+
+    /// `get` for a module known by its id alone: the first table that holds it (without attributes). The
+    /// module is absent, still loading, or failed as for `get`. Returns a caller-owned persistent handle.
+    pub fn getAny(self: *ModuleMap, id: []const u8) !?v8.Global.Of(v8.Module) {
+        const entry = for (self.all_entries.items) |candidate| {
+            if (candidate.cached and !candidate.dead and candidate.attributes.len == 0 and std.mem.eql(u8, candidate.id, id)) break candidate;
+        } else return null;
+        return self.get(.{ .module_id = id, .namespace = entry.namespace }, null);
     }
 
     /// Borrows scope at its stable address until deinit; owns an initially empty
@@ -195,12 +208,12 @@ pub const ModuleMap = struct {
 
     /// Borrows inputs and alloc through the resolver call. The resolver's
     /// contract returns bytes owned by alloc; errors transfer no result storage.
-    fn resolve(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) !Resolved {
+    fn resolve(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, referrer_namespace: u32, attributes: []const ImportAttribute) !Resolved {
         const enabled = self.scope.options.origine_namespace;
         if (!enabled and std.mem.startsWith(u8, specifier, origine_prefix)) return error.OrigineNamespaceDisabled;
         const resolver = self.scope.options.resolver orelse return .{ .id = try alloc.dupe(u8, specifier) };
         const rt = self.scope.runtime;
-        var request: ResolveRequest = .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .import_attributes = attributes };
+        var request: ResolveRequest = .{ .allocator = alloc, .context = self.ctx(), .scope_id = self.scope.id, .specifier = specifier, .referrer = referrer, .referrer_namespace = referrer_namespace, .import_attributes = attributes };
         const resolve_async = resolver.resolve_async orelse {
             const id = try resolver.resolve(resolver.data, request);
             if (!enabled and std.mem.startsWith(u8, id, origine_prefix)) return error.OrigineNamespaceDisabled;
@@ -252,16 +265,19 @@ pub const ModuleMap = struct {
     }
     /// Borrows id/attributes through return; returns an alloc-owned framed key.
     /// Caller frees it with alloc, including when later cache lookup fails.
-    fn cacheKey(alloc: std.mem.Allocator, id: []const u8, attributes: []const ImportAttribute) ![]const u8 {
-        // Length framing makes IDs and attribute pairs unambiguous.
-        var size = try componentSize(id);
+    fn cacheKey(alloc: std.mem.Allocator, namespace: u32, id: []const u8, attributes: []const ImportAttribute) ![]const u8 {
+        // Length framing makes IDs and attribute pairs unambiguous; the table number leads.
+        var prefix: [16]u8 = undefined;
+        const lead = std.fmt.bufPrint(&prefix, "n{d}.", .{namespace}) catch unreachable;
+        var size = try std.math.add(usize, lead.len, try componentSize(id));
         for (attributes) |attr| {
             size = try std.math.add(usize, size, try componentSize(attr.key));
             size = try std.math.add(usize, size, try componentSize(attr.value));
         }
         const key = try alloc.alloc(u8, size);
         errdefer alloc.free(key);
-        var written = (std.fmt.bufPrint(key, "{d}:{s}", .{ id.len, id }) catch unreachable).len;
+        @memcpy(key[0..lead.len], lead);
+        var written = lead.len + (std.fmt.bufPrint(key[lead.len..], "{d}:{s}", .{ id.len, id }) catch unreachable).len;
         for (attributes) |attr| written += (std.fmt.bufPrint(key[written..], "{d}:{s}{d}:{s}", .{ attr.key.len, attr.key, attr.value.len, attr.value }) catch unreachable).len;
         std.debug.assert(written == key.len);
         return key;
@@ -269,7 +285,7 @@ pub const ModuleMap = struct {
     /// Borrows id/attributes/key through return and copies them into map-owned
     /// storage. Returns an Entry owned by this ModuleMap; callers do not free it.
     /// Partial allocations on error remain map-owned until ModuleMap.deinit.
-    fn allocEntry(self: *ModuleMap, id: []const u8, attributes: []const ImportAttribute, key: []const u8) !*Entry {
+    fn allocEntry(self: *ModuleMap, namespace: u32, id: []const u8, attributes: []const ImportAttribute, key: []const u8) !*Entry {
         const alloc = self.scope.runtime.allocator;
         try self.entries.ensureUnusedCapacity(alloc, 1);
         try self.all_entries.ensureUnusedCapacity(alloc, 1);
@@ -279,16 +295,16 @@ pub const ModuleMap = struct {
             .key = try self.arenaAllocator().dupe(u8, attribute.key),
             .value = try self.arenaAllocator().dupe(u8, attribute.value),
         };
-        entry.* = .{ .id = try self.arenaAllocator().dupe(u8, id), .attributes = owned_attributes, .cache_key = try self.arenaAllocator().dupe(u8, key) };
+        entry.* = .{ .namespace = namespace, .id = try self.arenaAllocator().dupe(u8, id), .attributes = owned_attributes, .cache_key = try self.arenaAllocator().dupe(u8, key) };
         self.all_entries.appendAssumeCapacity(entry);
         return entry;
     }
     /// Borrows id, attributes, and alloc through return. Returns an Entry owned
     /// by this ModuleMap; caller-owned temporary key storage remains with alloc.
-    fn fetch(self: *ModuleMap, alloc: std.mem.Allocator, id: []const u8, attributes: []const ImportAttribute) anyerror!*Entry {
-        const key = try cacheKey(alloc, id, attributes);
+    fn fetch(self: *ModuleMap, alloc: std.mem.Allocator, namespace: u32, id: []const u8, attributes: []const ImportAttribute) anyerror!*Entry {
+        const key = try cacheKey(alloc, namespace, id, attributes);
         if (self.entries.get(key)) |entry| return entry;
-        const entry = try self.allocEntry(id, attributes, key);
+        const entry = try self.allocEntry(namespace, id, attributes, key);
         self.entries.putAssumeCapacity(entry.cache_key, entry);
         var tc_scope: v8.TryCatch = undefined;
         tc_scope.init(self.isolate());
@@ -305,7 +321,7 @@ pub const ModuleMap = struct {
         const rt = self.scope.runtime;
         const token = rt.next_load_token;
         rt.next_load_token = std.math.add(LoadToken, token, 1) catch return error.LoadTokenExhausted;
-        switch (try loader.load(loader.data, .{ .allocator = self.arenaAllocator(), .context = self.ctx(), .scope_id = self.scope.id, .module_id = entry.id, .token = token, .import_attributes = entry.attributes })) {
+        switch (try loader.load(loader.data, .{ .allocator = self.arenaAllocator(), .context = self.ctx(), .scope_id = self.scope.id, .module_id = entry.id, .namespace = entry.namespace, .token = token, .import_attributes = entry.attributes })) {
             .source => |source| try self.compile(entry, .{ .source = source }),
             .exports => |exports| try self.compile(entry, .{ .exports = exports }),
             .module => |linked| try self.compile(entry, .{ .module = linked }),
@@ -368,9 +384,9 @@ pub const ModuleMap = struct {
                     const alloc = scratch.allocator();
                     const attributes = try self.readAttributes(alloc, request.getImportAttributes().?, 3);
                     const specifier = try string(alloc, iso, request.getSpecifier().?);
-                    switch (try self.resolve(alloc, specifier, entry.id, attributes)) {
+                    switch (try self.resolve(alloc, specifier, entry.id, entry.namespace, attributes)) {
                         .id => |id| {
-                            const dependency = try self.fetch(alloc, id, attributes);
+                            const dependency = try self.fetch(alloc, self.dependencyNamespace(entry.namespace, entry.id), id, attributes);
                             entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = dependency.attributes, .entry = dependency });
                         },
                         .pending => |token| {
@@ -425,7 +441,7 @@ pub const ModuleMap = struct {
                 _ = task.resolver.deref().reject(self.ctx(), self.settledFailure(completion, &tc_scope, err));
                 return true;
             };
-            task.root = self.fetch(alloc, resolved, task.attributes) catch |err| {
+            task.root = self.fetch(alloc, task.namespace, resolved, task.attributes) catch |err| {
                 task.settled = true;
                 _ = task.resolver.deref().reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
                 return true;
@@ -440,7 +456,7 @@ pub const ModuleMap = struct {
                     self.fail(entry, self.settledFailure(completion, &tc_scope, err));
                     return true;
                 };
-                const dependency = self.fetch(alloc, resolved, request.attributes) catch |err| {
+                const dependency = self.fetch(alloc, self.dependencyNamespace(entry.namespace, entry.id), resolved, request.attributes) catch |err| {
                     self.fail(entry, tc_scope.getException() orelse self.errorValue(err));
                     return true;
                 };
@@ -551,8 +567,8 @@ pub const ModuleMap = struct {
         defer scratch.deinit();
         const entries = try scratch.allocator().alloc(*Entry, modules.len);
         for (modules, entries) |module, *entry| {
-            const key = try cacheKey(scratch.allocator(), module.id, module.attributes);
-            entry.* = try self.allocEntry(module.id, module.attributes, key);
+            const key = try cacheKey(scratch.allocator(), 0, module.id, module.attributes);
+            entry.* = try self.allocEntry(0, module.id, module.attributes, key);
             self.entries.putAssumeCapacity(entry.*.cache_key, entry.*);
             const data = self.ctx().getDataFromSnapshotOnce(module.data_index) orelse return error.InvalidSnapshot;
             const restored = v8.Module.from_opaque(data.handle) orelse return error.InvalidSnapshot;
@@ -594,14 +610,23 @@ pub const ModuleMap = struct {
         return self.entries.count();
     }
 
+    /// How many modules table `namespace` holds.
+    pub fn countNamespace(self: *const ModuleMap, namespace: u32) usize {
+        var count: usize = 0;
+        for (self.all_entries.items) |entry| {
+            if (entry.cached and !entry.dead and entry.namespace == namespace) count += 1;
+        }
+        return count;
+    }
+
     /// Keeps the module `id` (attributes none) alive until `unpin` of the returned serial: a
     /// holder outside the map (a reference handle) pins what it uses. Returns 0 when the table
     /// has no such module. Requires the entered context.
     pub fn pin(self: *ModuleMap, id: []const u8) !u32 {
-        var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
-        defer scratch.deinit();
-        const encoded = try cacheKey(scratch.allocator(), id, &.{});
-        const entry = self.entries.get(encoded) orelse return 0;
+        // The first table that holds the module (without attributes) under that id.
+        const entry = for (self.all_entries.items) |candidate| {
+            if (candidate.cached and !candidate.dead and candidate.attributes.len == 0 and std.mem.eql(u8, candidate.id, id)) break candidate;
+        } else return 0;
         if (entry.serial == 0) {
             self.next_serial += 1;
             entry.serial = self.next_serial;
@@ -631,12 +656,14 @@ pub const ModuleMap = struct {
         if (self.driving or self.preparing_depth != 0 or self.sweeping) return;
         self.sweeping = true;
         defer self.sweeping = false;
-        const used = self.scope.options.retain == .used;
-        if (self.scope.options.table_limit) |limit| {
-            var cached = self.entries.count();
+        // Each table over its cap drops its oldest unpinned entries first.
+        for (self.all_entries.items) |first| {
+            if (!first.cached) continue;
+            const limit = self.scope.policyOf(first.namespace).limit orelse continue;
+            var cached = self.countNamespace(first.namespace);
             for (self.all_entries.items) |entry| {
                 if (cached <= limit) break;
-                if (entry.cached and entry.pins == 0 and !entry.preparing and entry.pending == null) {
+                if (entry.namespace == first.namespace and entry.cached and entry.pins == 0 and !entry.preparing and entry.pending == null) {
                     _ = self.entries.remove(entry.cache_key);
                     entry.cached = false;
                     cached -= 1;
@@ -645,6 +672,7 @@ pub const ModuleMap = struct {
         }
         self.resetVisited();
         for (self.all_entries.items) |entry| {
+            const used = self.scope.policyOf(entry.namespace).retain == .used;
             const held = entry.pins != 0 or entry.grace or entry.preparing or entry.pending != null or entry.unresolved.items.len != 0 or (entry.cached and !used);
             if (held) self.mark(entry);
         }
@@ -734,11 +762,30 @@ pub const ModuleMap = struct {
     /// is deep-copied. Returns a local promise valid in the caller's HandleScope;
     /// use a persistent Global to keep it after that scope ends.
     pub fn start(self: *ModuleMap, specifier: []const u8, referrer: []const u8, raw_attributes: []const ImportAttribute) !v8.Promise {
+        return self.startIn(0, specifier, referrer, raw_attributes);
+    }
+
+    /// `start` for a root import (empty `referrer`) into table `namespace`.
+    pub fn startIn(self: *ModuleMap, namespace: u32, specifier: []const u8, referrer: []const u8, raw_attributes: []const ImportAttribute) !v8.Promise {
         var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
         defer scratch.deinit();
         const alloc = scratch.allocator();
         const attributes = normalizeAttributes(alloc, raw_attributes) catch |err| return self.rejected(self.errorValue(err));
-        return self.startNormalized(alloc, specifier, referrer, attributes);
+        return self.startNormalized(alloc, namespace, specifier, referrer, attributes);
+    }
+
+    /// The table the imports of `referrer` (in table `referrer_namespace`) live in.
+    fn dependencyNamespace(self: *ModuleMap, referrer_namespace: u32, referrer: []const u8) u32 {
+        const resolver = self.scope.options.resolver orelse return referrer_namespace;
+        const hook = resolver.namespace_of orelse return referrer_namespace;
+        return hook(resolver.data, referrer_namespace, referrer);
+    }
+
+    /// The table of a module known by id only (a dynamic `import()` names its referrer that way): the
+    /// first live entry with that id.
+    fn namespaceOfId(self: *ModuleMap, id: []const u8) u32 {
+        for (self.all_entries.items) |entry| if (!entry.dead and std.mem.eql(u8, entry.id, id)) return entry.namespace;
+        return 0;
     }
 
     /// Borrows exception through return; returns a rejected local promise in
@@ -752,7 +799,7 @@ pub const ModuleMap = struct {
 
     /// Borrows request slices and alloc until the synchronous resolution/load
     /// setup returns. Returned Promise is a local handle in the caller's scope.
-    fn startNormalized(self: *ModuleMap, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) !v8.Promise {
+    fn startNormalized(self: *ModuleMap, alloc: std.mem.Allocator, root_namespace: u32, specifier: []const u8, referrer: []const u8, attributes: []const ImportAttribute) !v8.Promise {
         self.preparing_depth += 1;
         defer self.preparing_depth -= 1;
         const resolver = eu.v.promise_resolver(self.ctx()) orelse return error.JavaScriptException;
@@ -760,13 +807,15 @@ pub const ModuleMap = struct {
         var tc_scope: v8.TryCatch = undefined;
         tc_scope.init(self.isolate());
         defer tc_scope.deinit();
-        const resolved = self.resolve(alloc, specifier, referrer, attributes) catch |err| {
+        const referrer_namespace = if (referrer.len == 0) root_namespace else self.namespaceOfId(referrer);
+        const target_namespace = if (referrer.len == 0 and root_namespace != 0) root_namespace else self.dependencyNamespace(referrer_namespace, referrer);
+        const resolved = self.resolve(alloc, specifier, referrer, referrer_namespace, attributes) catch |err| {
             _ = resolver.reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
             return promise;
         };
         switch (resolved) {
             .id => |id| {
-                const root = self.fetch(alloc, id, attributes) catch |err| {
+                const root = self.fetch(alloc, target_namespace, id, attributes) catch |err| {
                     _ = resolver.reject(self.ctx(), tc_scope.getException() orelse self.errorValue(err));
                     return promise;
                 };
@@ -782,6 +831,7 @@ pub const ModuleMap = struct {
                 try self.tasks.append(self.scope.runtime.allocator, .{
                     .root = null,
                     .resolver = retained,
+                    .namespace = target_namespace,
                     .root_token = token,
                     .specifier = try self.arenaAllocator().dupe(u8, specifier),
                     .attributes = owned_attributes,
@@ -851,7 +901,7 @@ pub const ModuleMap = struct {
         var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
         defer scratch.deinit();
         const attributes = try normalizeAttributes(scratch.allocator(), key.import_attributes);
-        const encoded = try cacheKey(scratch.allocator(), key.module_id, attributes);
+        const encoded = try cacheKey(scratch.allocator(), key.namespace, key.module_id, attributes);
         const target = self.entries.get(encoded) orelse return 0;
         const count = self.invalidate(target);
         self.sweep();
@@ -888,11 +938,15 @@ pub const ModuleMap = struct {
     /// Borrows self through return; removes active mappings, retaining retired
     /// entry storage/handles until map deinit. Errors retain the map unchanged.
     /// Requires the owning runtime thread and no active load/compile callback.
-    pub fn clearCache(self: *ModuleMap) !usize {
+    pub fn clearCache(self: *ModuleMap, namespace: ?u32) !usize {
         if (self.driving or self.preparing_depth != 0) return error.ImportCacheBusy;
-        const count = self.entries.count();
-        self.entries.clearRetainingCapacity();
-        for (self.all_entries.items) |entry| entry.cached = false;
+        var count: usize = 0;
+        for (self.all_entries.items) |entry| {
+            if (!entry.cached or (namespace != null and entry.namespace != namespace.?)) continue;
+            _ = self.entries.remove(entry.cache_key);
+            entry.cached = false;
+            count += 1;
+        }
         self.sweep();
         return count;
     }
@@ -906,10 +960,10 @@ pub const ModuleMap = struct {
         var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
         defer scratch.deinit();
         const attributes = try normalizeAttributes(scratch.allocator(), key.import_attributes);
-        const encoded = try cacheKey(scratch.allocator(), key.module_id, attributes);
+        const encoded = try cacheKey(scratch.allocator(), key.namespace, key.module_id, attributes);
         const old = self.entries.get(encoded);
         // Reserve before invalidation so allocation failure leaves the old lookup intact.
-        const replacement = try self.allocEntry(key.module_id, attributes, encoded);
+        const replacement = try self.allocEntry(key.namespace, key.module_id, attributes, encoded);
         if (old) |entry| _ = self.invalidate(entry);
         self.entries.putAssumeCapacity(replacement.cache_key, replacement);
         var tc_scope: v8.TryCatch = undefined;
@@ -1035,7 +1089,7 @@ pub fn importMeta(ctx: v8.Context, module: v8.Module, meta: v8.Object) callconv(
     const scope = fromContext(ctx) orelse return;
     const entry = scope.module_map.find(module) orelse return;
     _ = meta.createDataProperty(ctx, eu.v.str_utf8(scope.runtime.isolate, "url").name, eu.v.str_utf8(scope.runtime.isolate, entry.id).name.primitive.value);
-    if (scope.options.meta) |hook| hook.init(hook.data, .{ .context = ctx, .scope_id = scope.id, .module_id = entry.id, .meta = meta });
+    if (scope.options.meta) |hook| hook.init(hook.data, .{ .context = ctx, .scope_id = scope.id, .module_id = entry.id, .namespace = entry.namespace, .meta = meta });
 }
 /// Borrows callback locals in the entered context through return; scratch
 /// allocations are released on success/error. Returns a local module handle
@@ -1091,7 +1145,7 @@ fn dynamicStart(registry: *ModuleMap, alloc: std.mem.Allocator, resource: v8.Val
     const parsed = try registry.readAttributes(alloc, attributes, 2);
     const referrer = if (resource.isString()) try string(alloc, registry.isolate(), v8.String.from_opaque(resource.data.handle).?) else "";
     const text = try string(alloc, registry.isolate(), specifier);
-    return registry.startNormalized(alloc, text, referrer, parsed);
+    return registry.startNormalized(alloc, 0, text, referrer, parsed);
 }
 
 /// Borrows slices and nested strings through comparison; returns a copied

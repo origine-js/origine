@@ -1200,23 +1200,26 @@ test "graph: an origineProvider with no std serves what its creator has and cann
     , false, &.{});
     defer fx.deinit();
     try fx.run();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const graph_api = m.Api.graph_api;
+    const cache = try graph_api.cacheCreate(stateOfContext(fx.host, fx.host.contexts.values()[0]), 0, -1);
     const spec = struct {
-        fn of(comptime filter_json: []const u8) []const u8 {
-            return "{\"layers\":[{\"host\":\"origine\"}],\"hooks\":[{\"host\":\"origine\",\"std\":" ++ filter_json ++ "}],\"maker\":{\"host\":\"maker\",\"import\":0,\"transformer\":null},\"cache\":{\"retain\":\"all\",\"entries\":null},\"meta\":false}";
+        fn of(alloc: std.mem.Allocator, filter_json: []const u8, table: u32) ![]u8 {
+            return std.fmt.allocPrint(alloc, "{{\"layers\":[{{\"host\":\"origine\"}}],\"hooks\":[{{\"host\":\"origine\",\"std\":{s}}}],\"maker\":{{\"host\":\"maker\",\"import\":0,\"transformer\":null}},\"cache\":{{\"id\":{d}}},\"meta\":false}}", .{ filter_json, table });
         }
     };
-    const graph_api = m.Api.graph_api;
     const narrow_state = stateOfContext(fx.host, fx.host.contexts.values()[0]);
     // The default is the creating context's own set, no more.
-    const inherited = try graph_api.handler(narrow_state, spec.of("{\"all\":true}"));
+    const inherited = try graph_api.handler(narrow_state, try spec.of(arena.allocator(), "{\"all\":true}", cache));
     const filter = fx.host.handlers.get(inherited).?.hooks[0].origine;
     try t.expect(filter.allows("text") and filter.allows("io") and !filter.allows("fs") and !filter.allows("debug"));
     // Asking for more by name is still refused.
-    try t.expectError(error.PermissionDenied, graph_api.handler(narrow_state, spec.of("{\"include\":[\"fs\"]}")));
-    try t.expectError(error.PermissionDenied, graph_api.handler(narrow_state, spec.of("{\"exclude\":[]}")));
+    try t.expectError(error.PermissionDenied, graph_api.handler(narrow_state, try spec.of(arena.allocator(), "{\"include\":[\"fs\"]}", cache)));
+    try t.expectError(error.PermissionDenied, graph_api.handler(narrow_state, try spec.of(arena.allocator(), "{\"exclude\":[]}", cache)));
     // An exclude-style creator passes its exclusions on.
     const wide_state = stateOfContext(fx.host, fx.host.contexts.values()[1]);
-    const wide = fx.host.handlers.get(try graph_api.handler(wide_state, spec.of("{\"all\":true}"))).?.hooks[0].origine;
+    const wide = fx.host.handlers.get(try graph_api.handler(wide_state, try spec.of(arena.allocator(), "{\"all\":true}", cache))).?.hooks[0].origine;
     try t.expect(wide.allows("text") and wide.allows("debug") and !wide.allows("fs"));
 }
 
@@ -1822,6 +1825,56 @@ test "graph: CodeCache.dir keeps the files of virtual and escaping module ids in
     try t.expectEqual(@as(usize, 2), names);
 }
 
+test "graph: ImportCache objects name separate tables, also inside one context" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { ImportCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const handlerFor = cache => ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => Import.provide(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const n = globalThis.count;`))],
+        \\    cache,
+        \\  });
+        \\  const entry = (handler, name) => ModuleRecipe({ source: ModuleSource.text("import { n } from 'dep'; globalThis['seen' + n] = true;"), import: handler, name }).create(api.graph);
+        \\  // One cache object for two handlers: the module 'dep' is one module in the context.
+        \\  const shared = ImportCache.native({ retain: 'all' });
+        \\  const one = await api.context.create({ import: handlerFor(shared) });
+        \\  await entry(handlerFor(shared), 'a.js').evaluate(one);
+        \\  out.sameCache = (await one.import('dep')).name + ':' + shared.size;
+        \\  // Two cache objects: one module per object, in the same context.
+        \\  const left = ImportCache.native({ retain: 'all' });
+        \\  const right = ImportCache.native({ retain: 'all' });
+        \\  const two = await api.context.create({ import: handlerFor(left) });
+        \\  await entry(handlerFor(right), 'b.js').evaluate(two);
+        \\  await two.import('dep');
+        \\  out.sizes = left.size + ',' + right.size;
+        \\  // delete() on one is not seen by the other.
+        \\  out.deleted = left.delete('dep') + ':' + left.size + ',' + right.size;
+        \\  // Retention is per object: a 'used' table frees what a reference does not hold, an 'all' one keeps it.
+        \\  const used = ImportCache.native({ retain: 'used' });
+        \\  const mixed = await api.context.create({ import: handlerFor(used) });
+        \\  await entry(handlerFor(shared), 'c.js').evaluate(mixed);
+        \\  (await mixed.import('dep')).release();
+        \\  out.mixed = used.size + ',' + shared.size;
+        \\  // size counts every context that uses the object.
+        \\  out.across = shared.size;
+        \\  out.cleared = shared.clear() + ':' + shared.size + ',' + right.size;
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.sameCache === 'dep:2'");
+    // Context one: dep and a.js; context two: left holds dep (from ctx.import) and right holds b.js and its dep.
+    try check(fx.scope, "report.sizes === '1,2' && report.deleted === '1:0,2' && report.mixed === '0,4' && report.across === 4 && report.cleared === '4:0,2'");
+    try check(fx.rt.scopes.items[1], "count === 1");
+    try check(fx.rt.scopes.items[2], "count === 2");
+}
+
 test "graph: retain used frees unused modules, delete resets identity, release unpins" {
     var fx: Fixture = undefined;
     try fx.setup(
@@ -1842,29 +1895,29 @@ test "graph: retain used frees unused modules, delete resets identity, release u
         \\  const handler = handlerFor(used);
         \\  const ctx = await api.context.create({ import: handler });
         \\  const first = await ctx.import('m1');
-        \\  out.held = used.in(ctx).size + ':' + ctx.references.length;
+        \\  out.held = used.size + ':' + ctx.references.length;
         \\  const same = await ctx.import('m1');
         \\  out.same = same === first;
         \\  first.release();
-        \\  out.released = used.in(ctx).size + ':' + ctx.references.length + ':' + first.status;
+        \\  out.released = used.size + ':' + ctx.references.length + ':' + first.status;
         \\  await ctx.import('m1').then(r => r.release());
-        \\  out.afterRelease = used.in(ctx).size;
+        \\  out.afterRelease = used.size;
         \\  // retain 'all': delete is an identity reset.
         \\  const all = ImportCache.native({ retain: 'all' });
         \\  const keep = await api.context.create({ import: handlerFor(all) });
         \\  const one = await keep.import('m2');
-        \\  out.table = all.in(keep).size;
-        \\  out.deleted = all.in(keep).delete('m2');
-        \\  out.afterDelete = all.in(keep).size;
+        \\  out.table = all.size;
+        \\  out.deleted = all.delete('m2');
+        \\  out.afterDelete = all.size;
         \\  const two = await keep.import('m2');
-        \\  out.reimported = (two !== one) + ':' + all.in(keep).size;
-        \\  out.cleared = all.in(keep).clear() + ':' + all.in(keep).size;
-        \\  out.bad = (() => { try { all.in({}); } catch (e) { return e.name; } })();
+        \\  out.reimported = (two !== one) + ':' + all.size;
+        \\  out.cleared = all.clear() + ':' + all.size;
+        \\  out.bad = (() => { try { all.delete(1); } catch (e) { return e.name; } })();
         \\  // a cap on the table drops the oldest unpinned modules.
         \\  const capped = ImportCache.native({ retain: 'all', entries: 2 });
         \\  const small = await api.context.create({ import: handlerFor(capped) });
         \\  for (const id of ['a', 'b', 'c', 'd']) (await small.import(id)).release();
-        \\  out.capped = capped.in(small).size <= 2;
+        \\  out.capped = capped.size <= 2;
         \\}
     , false, &.{});
     defer fx.deinit();

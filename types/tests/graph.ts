@@ -67,8 +67,10 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   // @ts-expect-error exports() takes no argument
   reference.exports(ctx.context);
   const stored: number = await graph.flush();
-  const view = ImportCache.native({ retain: "used" }).in(ctx.context);
+  const view = ImportCache.native({ retain: "used" });
   void [requests, stored, view.size, view.delete("a"), view.clear()];
+  // @ts-expect-error a table is not looked up through a context
+  view.in(ctx.context);
   reference.release();
 }
 const provided: Verdict = Import.provide(recipe);

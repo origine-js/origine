@@ -180,9 +180,26 @@ pub const Scope = struct {
         /// Cap on the table, in modules: over it, the oldest unpinned entries are dropped from the
         /// table (and freed if nothing else holds them).
         table_limit: ?usize = null,
+        /// Retention and cap per table, for a scope with several (`Resolver.namespace_of`): asked
+        /// when a table is swept. Without it `retain` and `table_limit` apply to every table.
+        table_policy: ?TablePolicy = null,
     };
 
     pub const Retain = enum { all, used };
+
+    /// What a table does with a module nothing else holds, and how many it keeps.
+    pub const Policy = struct { retain: Retain = .all, limit: ?usize = null };
+
+    pub const TablePolicy = struct {
+        data: ?*anyopaque = null,
+        call: *const fn (data: ?*anyopaque, namespace: u32) Policy,
+    };
+
+    /// The policy of table `namespace`.
+    pub fn policyOf(self: *const Scope, namespace: u32) Policy {
+        if (self.options.table_policy) |hook| return hook.call(hook.data, namespace);
+        return .{ .retain = self.options.retain, .limit = self.options.table_limit };
+    }
 
     pub const Disposer = struct {
         data: ?*anyopaque = null,
@@ -356,13 +373,18 @@ pub const Scope = struct {
     /// Returns a count; no caller-owned memory is freed. Existing references remain valid.
     /// Compatibility entry point for module_map.clear; modifies the same ModuleMap.
     pub fn clearImportCache(self: *Scope) !usize {
-        return self.mutateImportCache(.clear, null);
+        return self.mutateImportCache(.{ .clear = null }, null);
+    }
+
+    /// `clearImportCache` for the one table `namespace`.
+    pub fn clearImportNamespace(self: *Scope, namespace: u32) !usize {
+        return self.mutateImportCache(.{ .clear = namespace }, null);
     }
 
     const CacheMutation = union(enum) {
         delete: module_types.ImportCacheKey,
         update: struct { key: module_types.ImportCacheKey, content: module_types.Content },
-        clear,
+        clear: ?u32,
     };
 
     /// Applies one cache mutation inside a Session. Borrows operation payloads and
@@ -377,7 +399,7 @@ pub const Scope = struct {
         errdefer session.retainException(error_info);
         return switch (operation) {
             .delete => |key| try self.module_map.deleteCache(key),
-            .clear => try self.module_map.clearCache(),
+            .clear => |namespace| try self.module_map.clearCache(namespace),
             .update => |update| blk: {
                 try self.module_map.updateCache(update.key, update.content, error_info);
                 break :blk 0;
@@ -392,13 +414,18 @@ pub const Scope = struct {
     /// error_info follows ErrorInfo ownership for synchronous exceptions only;
     /// resolution/link/evaluation failures normally reject the returned promise instead.
     pub fn importModuleWithAttributes(self: *Scope, specifier: []const u8, attributes: []const module_types.ImportAttribute, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Promise) {
+        return self.importIn(0, specifier, attributes, error_info);
+    }
+
+    /// `importModuleWithAttributes` into table `namespace` (see `Resolver.namespace_of`).
+    pub fn importIn(self: *Scope, namespace: u32, specifier: []const u8, attributes: []const module_types.ImportAttribute, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Promise) {
         if (error_info) |out| out.deinit();
         if (self.disposed) return error.ScopeDisposed;
         var session: Session = undefined;
         session.init(self);
         defer session.deinit();
         errdefer session.retainException(error_info);
-        return .new(session.isolate(), try self.module_map.start(specifier, "", attributes));
+        return .new(session.isolate(), try self.module_map.startIn(namespace, specifier, "", attributes));
     }
 
     /// Borrows name/handle through return. V8 copies name and retains the value;

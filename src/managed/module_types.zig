@@ -10,7 +10,9 @@ pub const ModuleId = []const u8;
 pub const origine_prefix = "origine:";
 /// Caller-owned key. Public cache operations borrow it, including nested strings,
 /// only until the operation returns; they never take ownership of caller memory.
-pub const ModuleMapKey = struct { module_id: ModuleId, import_attributes: []const ImportAttribute = &.{} };
+/// `namespace` names the table the module lives in: a host may keep several side by side in one scope
+/// (`Resolver.namespace_of`); 0 is the only one for a scope that does not.
+pub const ModuleMapKey = struct { module_id: ModuleId, import_attributes: []const ImportAttribute = &.{}, namespace: u32 = 0 };
 /// Compatibility alias. Cache entries are entries in the per-scope ModuleMap.
 pub const ImportCacheKey = ModuleMapKey;
 /// Borrowed UTF-8 key/value strings; the containing API defines their lifetime.
@@ -27,6 +29,8 @@ pub const ResolveRequest = struct {
     /// Request strings and attributes are borrowed only during the callback.
     specifier: []const u8,
     referrer: ModuleId,
+    /// The table `referrer` lives in (see `Resolver.namespace_of`).
+    referrer_namespace: u32 = 0,
     import_attributes: []const ImportAttribute = &.{},
     /// Names this request when `Resolver.resolve_async` answers `.pending`; later passed to
     /// `Runtime.completeResolve`. Unique among pending loads and resolutions of the runtime.
@@ -51,6 +55,10 @@ pub const Resolver = struct {
     resolve_async: ?*const fn (data: ?*anyopaque, request: ResolveRequest) anyerror!ResolveOutcome = null,
     /// Called during Runtime.destroy or scope teardown for tokens still pending. `data` is still borrowed.
     cancel: ?*const fn (data: ?*anyopaque, token: LoadToken) void = null,
+    /// Which table the modules that `referrer` (in table `referrer_namespace`; the empty id is a root import)
+    /// imports live in. The same id imported through two tables is two modules. Without it every
+    /// module lives in table 0.
+    namespace_of: ?*const fn (data: ?*anyopaque, referrer_namespace: u32, referrer: ModuleId) u32 = null,
 };
 fn unsupportedSync(_: ?*anyopaque, _: ResolveRequest) anyerror!ModuleId {
     return error.AsyncResolverOnly;
@@ -88,6 +96,8 @@ pub const LoadRequest = struct {
     scope_id: usize,
     /// Runtime-owned immutable bytes, valid until Runtime.destroy begins.
     module_id: ModuleId,
+    /// The table the module lives in (see `Resolver.namespace_of`).
+    namespace: u32 = 0,
     token: LoadToken,
     /// Runtime-owned array and nested strings, valid until Runtime.destroy begins.
     import_attributes: []const ImportAttribute,
@@ -137,6 +147,8 @@ pub const MetaRequest = struct {
     context: v8.Context,
     scope_id: usize,
     module_id: ModuleId,
+    /// The table the module lives in (see `Resolver.namespace_of`).
+    namespace: u32 = 0,
     meta: v8.Object,
 };
 /// Optional host hook that adds properties to a module's `import.meta` the first

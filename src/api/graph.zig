@@ -52,6 +52,8 @@ comptime {
     errno.requireBinding(handlerPin);
     errno.requireBinding(handlerUnpin);
     errno.requireBinding(handlersFreed);
+    errno.requireBinding(cacheCreate);
+    errno.requireBinding(cacheAlive);
 }
 
 // ---- std allowlist ---------------------------------------------------------
@@ -242,6 +244,16 @@ pub const Maker = union(enum) {
 
 pub const Retain = enum { all, used };
 
+/// What an `ImportCache` object is to the host: the name of a table (the `namespace` of
+/// its modules in every context) and how it keeps them. The modules themselves live in the contexts'
+/// module maps.
+pub const CacheTable = struct {
+    id: u32 = 0,
+    retain: Retain,
+    /// Cap on the modules the table holds.
+    entries: ?usize,
+};
+
 pub const Handler = struct {
     id: u32 = 0,
     /// Held by the JS side while an operation that is not a context (a `reference.load()`) uses it.
@@ -251,8 +263,8 @@ pub const Handler = struct {
     layers: []Layer,
     hooks: []Hook,
     maker: Maker,
-    retain: Retain,
-    entries: ?usize,
+    /// The `ImportCache` the modules this handler's pipeline finds are kept in (`CacheTable.id`).
+    cache: u32,
     /// A `meta` function exists (always a JS barrier).
     meta: bool,
     /// No JS function anywhere: the whole pipeline runs natively.
@@ -303,7 +315,7 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
     };
     const result = try gpa.create(Handler);
     errdefer gpa.destroy(result);
-    result.* = .{ .gpa = gpa, .arena = .init(gpa), .layers = &.{}, .hooks = &.{}, .maker = .js, .retain = .all, .entries = null, .meta = false, .native = true };
+    result.* = .{ .gpa = gpa, .arena = .init(gpa), .layers = &.{}, .hooks = &.{}, .maker = .js, .cache = 0, .meta = false, .native = true };
     errdefer result.deinit();
     const alloc = result.arena.allocator();
 
@@ -420,11 +432,8 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
         .object => |object| object,
         else => return error.InvalidInput,
     };
-    const retain = jsonString(cache.get("retain")) orelse return error.InvalidInput;
-    result.retain = std.meta.stringToEnum(Retain, retain) orelse return error.InvalidInput;
-    if (cache.get("entries")) |value| switch (value) {
-        .integer => |number| result.entries = std.math.cast(usize, number) orelse return error.InvalidInput,
-        .null => {},
+    result.cache = switch (cache.get("id") orelse return error.InvalidInput) {
+        .integer => |number| std.math.cast(u32, number) orelse return error.InvalidInput,
         else => return error.InvalidInput,
     };
     if (root.get("meta")) |value| {
@@ -750,6 +759,7 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         },
         else => {},
     };
+    if (host.caches.get(parsed.cache) == null) return error.StaleHandle;
     const id = try host.handlers.issue();
     parsed.id = id;
     try host.handlers.put(host.allocator, id, parsed);
@@ -766,6 +776,27 @@ pub fn handlerPin(state: *ScopeState, id: u32) Error!void {
 pub fn handlerUnpin(state: *ScopeState, id: u32) Error!void {
     const found = state.host.handlers.get(id) orelse return;
     if (found.pins > 0) found.pins -= 1;
+}
+
+/// `cacheCreate(retain, entries)`: a table for an `ImportCache` object. `retain` is 0 for `all` and 1 for
+/// `used`; `entries` is its cap (negative: none). The JS side names the table in the handlers made with it.
+pub fn cacheCreate(state: *ScopeState, retain: u32, entries: f64) Error!u32 {
+    return cacheCreateImpl(state, retain, entries) catch |err| return errno.narrow(err);
+}
+
+fn cacheCreateImpl(state: *ScopeState, retain: u32, entries: f64) !u32 {
+    const host = state.host;
+    const mode = std.enums.fromInt(Retain, retain) orelse return error.InvalidInput;
+    const created = try host.allocator.create(CacheTable);
+    errdefer host.allocator.destroy(created);
+    created.* = .{ .id = try host.caches.issue(), .retain = mode, .entries = if (entries >= 0) @intFromFloat(entries) else null };
+    try host.caches.put(host.allocator, created.id, created);
+    return created.id;
+}
+
+/// `cacheAlive(cache)`: whether the table still exists. Tables go with the last handler that names them.
+pub fn cacheAlive(state: *ScopeState, id: u32) Error!bool {
+    return state.host.caches.get(id) != null;
 }
 
 /// `handlersFreed()`: the ids of handlers freed since the last call, so the JS side drops their records.
@@ -813,6 +844,18 @@ pub fn sweepHandlers(host: *Host) void {
         found.deinit();
         alloc.destroy(found);
         host.freed_handlers.appendAssumeCapacity(id);
+    }
+    // A table lives while a handler names it.
+    var named: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer named.deinit(alloc);
+    for (host.handlers.values()) |found| named.put(alloc, found.cache, {}) catch return;
+    var unused: std.ArrayList(u32) = .empty;
+    defer unused.deinit(alloc);
+    for (host.caches.values()) |table| if (!named.contains(table.id)) unused.append(alloc, table.id) catch return;
+    for (unused.items) |id| {
+        const table = host.caches.get(id).?;
+        host.caches.remove(id);
+        alloc.destroy(table);
     }
 }
 

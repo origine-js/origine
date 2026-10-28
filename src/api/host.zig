@@ -223,6 +223,8 @@ pub const Host = struct {
     /// frees the rest.
     graphs: registry.Registry(graph_api.Graph) = .{},
     handlers: registry.Registry(graph_api.Handler) = .{},
+    /// The `ImportCache` tables handlers name; one lives as long as a handler uses it.
+    caches: registry.Registry(graph_api.CacheTable) = .{},
     contexts: registry.Registry(context_api.Context) = .{},
     imports: std.ArrayList(*context_api.ImportState) = .empty,
     /// Calls into the JS driver whose context was freed before the promise settled; each is freed by
@@ -307,6 +309,8 @@ pub const Host = struct {
             alloc.destroy(item);
         }
         self.handlers.deinit(alloc);
+        for (self.caches.values()) |table| alloc.destroy(table);
+        self.caches.deinit(alloc);
         self.freed_handlers.deinit(alloc);
         for (self.graphs.values()) |item| {
             item.deinit();
@@ -710,15 +714,17 @@ pub const Host = struct {
                         .handlerPin = func(graph_api.handlerPin, .{ .side_effect = .any }),
                         .handlerUnpin = func(graph_api.handlerUnpin, .{ .side_effect = .any }),
                         .handlersFreed = func(graph_api.handlersFreed, .{ .side_effect = .any }),
+                        .cacheCreate = func(graph_api.cacheCreate, .{ .side_effect = .any }),
+                        .cacheAlive = func(graph_api.cacheAlive, .{ .side_effect = .any }),
                     },
                     .context = .{
                         .create = func(context_api.create, .{ .side_effect = .any }),
                         .importSpecifier = func(context_api.importSpecifier, .{ .side_effect = .any }),
                         .evaluateSource = func(context_api.evaluateSource, .{ .side_effect = .any }),
                         .close = func(context_api.close, .{ .side_effect = .any }),
-                        .tableSize = func(context_api.tableSize, .{ .side_effect = .any }),
-                        .tableDelete = func(context_api.tableDelete, .{ .side_effect = .any }),
-                        .tableClear = func(context_api.tableClear, .{ .side_effect = .any }),
+                        .cacheSize = func(context_api.cacheSize, .{ .side_effect = .any }),
+                        .cacheDelete = func(context_api.cacheDelete, .{ .side_effect = .any }),
+                        .cacheClear = func(context_api.cacheClear, .{ .side_effect = .any }),
                         .flush = func(context_api.flush, .{ .side_effect = .any }),
                         .cachePut = func(context_api.cachePut, .{ .side_effect = .any }),
                         .pin = func(context_api.pin, .{ .side_effect = .any }),

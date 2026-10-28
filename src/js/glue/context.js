@@ -4,7 +4,6 @@
 (native, util) => {
   'use strict';
   const { freeze, take, failure, own } = util;
-  const TABLE = Symbol.for('origine:@std/graph/table');
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
@@ -67,26 +66,6 @@
             refsById.delete(id);
             native.context.close(id);
             take();
-          },
-          /// The view `ImportCache#in` returns: this context's identity table.
-          [TABLE]() {
-            return freeze({
-              get size() {
-                return host(native.context.tableSize, id);
-              },
-              // A forgotten module is no longer the context's: the references that named it stay
-              // usable handles of the old module, and an import of it now makes a new one.
-              delete: moduleId => {
-                const count = host(native.context.tableDelete, id, String(moduleId));
-                for (const known of refs) if (known.name === String(moduleId)) refs.delete(known);
-                return count;
-              },
-              clear: () => {
-                const count = host(native.context.tableClear, id);
-                refs.clear();
-                return count;
-              },
-            });
           },
         };
         freeze(context);

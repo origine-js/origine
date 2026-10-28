@@ -43,9 +43,9 @@ comptime {
     errno.requireBinding(importSpecifier);
     errno.requireBinding(evaluateSource);
     errno.requireBinding(close);
-    errno.requireBinding(tableSize);
-    errno.requireBinding(tableDelete);
-    errno.requireBinding(tableClear);
+    errno.requireBinding(cacheSize);
+    errno.requireBinding(cacheDelete);
+    errno.requireBinding(cacheClear);
     errno.requireBinding(flush);
     errno.requireBinding(cachePut);
     errno.requireBinding(pin);
@@ -70,6 +70,8 @@ pub const PendingJs = struct {
     context: ?*Context,
     /// The request the chain serves: a resolution for `layer`, a load for every other step.
     token: module_types.LoadToken,
+    namespace: u32 = 0,
+    referrer_namespace: u32 = 0,
     step: Step,
     /// The layer or hook index, or the index of the transformer function.
     index: u32 = 0,
@@ -95,6 +97,10 @@ pub const PendingJs = struct {
 const Work = struct {
     handler: u32,
     token: module_types.LoadToken,
+    /// The table the module `id` lives in (the `ImportCache` of the handler that resolved it).
+    namespace: u32,
+    /// The table the importer lives in, for a resolution.
+    referrer_namespace: u32 = 0,
     id: []const u8,
     specifier: []const u8,
     referrer: []const u8,
@@ -102,7 +108,7 @@ const Work = struct {
 };
 
 fn workOf(pending: *const PendingJs) Work {
-    return .{ .handler = pending.handler, .token = pending.token, .id = pending.id, .specifier = pending.specifier, .referrer = pending.referrer, .attributes = pending.attributes };
+    return .{ .handler = pending.handler, .token = pending.token, .namespace = pending.namespace, .referrer_namespace = pending.referrer_namespace, .id = pending.id, .specifier = pending.specifier, .referrer = pending.referrer, .attributes = pending.attributes };
 }
 
 pub const Context = struct {
@@ -178,6 +184,10 @@ pub const Context = struct {
         return false;
     }
 
+    fn cacheOfHandler(self: *Context, handler: u32) u32 {
+        return tableOfHandler(self.host, handler);
+    }
+
     fn releaseLinks(self: *Context) void {
         for (self.link_values.items) |value| value.deinit();
         self.link_values.clearRetainingCapacity();
@@ -232,21 +242,38 @@ pub const Context = struct {
         slot.value_ptr.* = value;
     }
 
-    fn setHandler(self: *Context, id: []const u8, handler: u32) !void {
+    /// `namespace` and `id` as one map key (storage from `alloc`): the same id in two tables is two modules.
+    fn tableKey(alloc: std.mem.Allocator, namespace: u32, id: []const u8) ![]u8 {
+        return std.fmt.allocPrint(alloc, "{d}\x00{s}", .{ namespace, id });
+    }
+
+    fn handlerOf(self: *Context, scratch: std.mem.Allocator, namespace: u32, id: []const u8) ?u32 {
+        const key = tableKey(scratch, namespace, id) catch return null;
+        return self.handler_of.get(key);
+    }
+
+    fn setHandler(self: *Context, namespace: u32, id: []const u8, handler: u32) !void {
         const alloc = self.host.allocator;
-        const slot = try self.handler_of.getOrPut(alloc, id);
-        if (!slot.found_existing) slot.key_ptr.* = try alloc.dupe(u8, id);
+        var buffer: [256]u8 = undefined;
+        var fallback = std.heap.FixedBufferAllocator.init(&buffer);
+        const probe = tableKey(fallback.allocator(), namespace, id) catch try tableKey(alloc, namespace, id);
+        defer if (probe.ptr != &buffer) alloc.free(probe);
+        const slot = try self.handler_of.getOrPut(alloc, probe);
+        if (!slot.found_existing) slot.key_ptr.* = try alloc.dupe(u8, probe);
         slot.value_ptr.* = handler;
     }
 
-    fn setMeta(self: *Context, id: []const u8, json: []const u8) !void {
+    fn setMeta(self: *Context, namespace: u32, id: []const u8, json: []const u8) !void {
         const alloc = self.host.allocator;
         const text = try alloc.dupe(u8, json);
         errdefer alloc.free(text);
-        const slot = try self.meta.getOrPut(alloc, id);
+        const key = try tableKey(alloc, namespace, id);
+        errdefer alloc.free(key);
+        const slot = try self.meta.getOrPut(alloc, key);
         if (slot.found_existing) {
             alloc.free(slot.value_ptr.*);
-        } else slot.key_ptr.* = try alloc.dupe(u8, id);
+            alloc.free(key);
+        } else slot.key_ptr.* = key;
         slot.value_ptr.* = text;
     }
 
@@ -256,8 +283,9 @@ pub const Context = struct {
     }
 
     /// `id` and the attributes joined into one map key (borrowed storage from `alloc`).
-    fn infoKey(alloc: std.mem.Allocator, id: []const u8, attributes: []const module_types.ImportAttribute) ![]u8 {
+    fn infoKey(alloc: std.mem.Allocator, namespace: u32, id: []const u8, attributes: []const module_types.ImportAttribute) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
+        try out.print(alloc, "{d}\x00", .{namespace});
         try out.appendSlice(alloc, id);
         for (attributes) |attribute| {
             try out.append(alloc, 0);
@@ -268,9 +296,9 @@ pub const Context = struct {
         return out.toOwnedSlice(alloc);
     }
 
-    fn recordResolved(self: *Context, scratch: std.mem.Allocator, id: []const u8, attributes: []const module_types.ImportAttribute, handler: u32, specifier: []const u8, referrer: []const u8) !void {
+    fn recordResolved(self: *Context, scratch: std.mem.Allocator, namespace: u32, id: []const u8, attributes: []const module_types.ImportAttribute, handler: u32, specifier: []const u8, referrer: []const u8) !void {
         const alloc = self.host.allocator;
-        const key = try infoKey(scratch, id, attributes);
+        const key = try infoKey(scratch, namespace, id, attributes);
         if (self.resolved.contains(key)) return;
         const specifier_copy = try alloc.dupe(u8, specifier);
         errdefer alloc.free(specifier_copy);
@@ -317,12 +345,37 @@ fn resolveAsync(data: ?*anyopaque, request: module_types.ResolveRequest) anyerro
     const self: *Context = @ptrCast(@alignCast(data.?));
     self.releaseLinks();
     if (self.root) |name| if (request.referrer.len == 0 and std.mem.eql(u8, request.specifier, name)) return .{ .id = try request.allocator.dupe(u8, name) };
-    const handler_id = self.handler_of.get(request.referrer) orelse self.import_handler;
-    const work: Work = .{ .handler = handler_id, .token = request.token, .id = "", .specifier = request.specifier, .referrer = request.referrer, .attributes = request.import_attributes };
+    const handler_id = self.handlerOf(request.allocator, request.referrer_namespace, request.referrer) orelse self.import_handler;
+    const work: Work = .{ .handler = handler_id, .token = request.token, .namespace = self.cacheOfHandler(handler_id), .referrer_namespace = request.referrer_namespace, .id = "", .specifier = request.specifier, .referrer = request.referrer, .attributes = request.import_attributes };
     return switch (try advanceResolve(self, request.allocator, work, 0)) {
         .id => |id| .{ .id = id },
         .parked => .pending,
     };
+}
+
+/// The table the modules found through handler `handler` live in.
+fn tableOfHandler(host: *Host, handler: u32) u32 {
+    const found = host.handlers.get(handler) orelse return 0;
+    return found.cache;
+}
+
+/// `Resolver.namespace_of`: the imports of a module live in the table of the handler that governs them.
+fn namespaceOfHook(data: ?*anyopaque, referrer_namespace: u32, referrer: module_types.ModuleId) u32 {
+    const self: *Context = @ptrCast(@alignCast(data.?));
+    var buffer: [512]u8 = undefined;
+    var fallback = std.heap.FixedBufferAllocator.init(&buffer);
+    const handler = self.handlerOf(fallback.allocator(), referrer_namespace, referrer) orelse self.import_handler;
+    return tableOfHandler(self.host, handler);
+}
+
+/// `Scope.Options.table_policy`: what the table `namespace` (an `ImportCache`) does with its modules.
+fn tablePolicy(data: ?*anyopaque, namespace: u32) Scope.Policy {
+    const host: *Host = @ptrCast(@alignCast(data.?));
+    const table = host.caches.get(namespace) orelse return .{};
+    return .{ .retain = switch (table.retain) {
+        .all => .all,
+        .used => .used,
+    }, .limit = table.entries };
 }
 
 fn cancel(data: ?*anyopaque, token: module_types.LoadToken) void {
@@ -335,9 +388,9 @@ fn cancel(data: ?*anyopaque, token: module_types.LoadToken) void {
 fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {
     const self: *Context = @ptrCast(@alignCast(data.?));
     self.releaseLinks();
-    const key = try Context.infoKey(request.allocator, request.module_id, request.import_attributes);
+    const key = try Context.infoKey(request.allocator, request.namespace, request.module_id, request.import_attributes);
     const info = self.resolved.get(key) orelse return error.NotFound;
-    const work: Work = .{ .handler = info.handler, .token = request.token, .id = request.module_id, .specifier = info.specifier, .referrer = info.referrer, .attributes = request.import_attributes };
+    const work: Work = .{ .handler = info.handler, .token = request.token, .namespace = request.namespace, .id = request.module_id, .specifier = info.specifier, .referrer = info.referrer, .attributes = request.import_attributes };
     switch (try advanceHooks(self, request.allocator, work, 0)) {
         .parked => return .pending,
         .done => |completion| return switch (completion) {
@@ -372,7 +425,7 @@ fn advanceResolve(self: *Context, scratch: std.mem.Allocator, work: Work, from: 
             return .parked;
         }
         if (try graph_api.layerStep(h, index, scratch, work.specifier, work.referrer)) |id| {
-            try self.recordResolved(scratch, id, work.attributes, work.handler, work.specifier, work.referrer);
+            try self.recordResolved(scratch, work.namespace, id, work.attributes, work.handler, work.specifier, work.referrer);
             return .{ .id = id };
         }
     }
@@ -408,7 +461,7 @@ fn advanceHooks(self: *Context, scratch: std.mem.Allocator, work: Work, from: us
 /// modules skip it: they reach the context as the host wrote them.
 fn supplied(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8) !LoadAdvance {
     if (std.mem.startsWith(u8, work.id, module_types.origine_prefix)) {
-        try self.setHandler(work.id, work.handler);
+        try self.setHandler(work.namespace, work.id, work.handler);
         return .{ .done = .{ .content = .{ .source = text } } };
     }
     const h = try graph_api.handlerFor(self.host, work.handler);
@@ -438,7 +491,7 @@ fn supplied(self: *Context, scratch: std.mem.Allocator, work: Work, text: []cons
 /// The module is made: remember which handler answers its imports, then ask for its `import.meta`.
 fn made(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8, import: u32) !LoadAdvance {
     _ = scratch;
-    try self.setHandler(work.id, import);
+    try self.setHandler(work.namespace, work.id, import);
     const h = try graph_api.handlerFor(self.host, import);
     if (h.meta) {
         var meta_work = work;
@@ -512,7 +565,7 @@ fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8
     const alloc = self.host.allocator;
     const pending = try alloc.create(PendingJs);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .host = self.host, .context = self, .token = work.token, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json };
+    pending.* = .{ .host = self.host, .context = self, .token = work.token, .namespace = work.namespace, .referrer_namespace = work.referrer_namespace, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json };
     pending.id = try alloc.dupe(u8, work.id);
     errdefer alloc.free(pending.id);
     pending.specifier = try alloc.dupe(u8, work.specifier);
@@ -719,7 +772,7 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
             return;
         }
         const id = try idOf(ctx, isolate, alloc, value);
-        try self.recordResolved(alloc, id, work.attributes, work.handler, work.specifier, work.referrer);
+        try self.recordResolved(alloc, work.namespace, id, work.attributes, work.handler, work.specifier, work.referrer);
         try rt.completeResolve(pending.token, .{ .id = id });
         return;
     }
@@ -751,7 +804,7 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
             break :blk try made(self, alloc, work, text, pending.import);
         },
         .meta => blk: {
-            if (value.isString()) try self.setMeta(work.id, try stringValue(ctx, isolate, alloc, value));
+            if (value.isString()) try self.setMeta(work.namespace, work.id, try stringValue(ctx, isolate, alloc, value));
             break :blk try finish(self, work, pending.text);
         },
         .cacheload => .{ .done = .{ .content = .{ .source = pending.text } } },
@@ -858,7 +911,7 @@ fn link(self: *Context, other_id: u32, name: []const u8, shared: bool) !module_t
     const host = self.host;
     const other = host.contexts.get(other_id) orelse return error.BadHandle;
     if (other.closed or other.creator != self.creator) return error.BadHandle;
-    const held = (try other.scope.module_map.get(.{ .module_id = name }, null)) orelse return error.NotFound;
+    const held = (try other.scope.module_map.getAny(name)) orelse return error.NotFound;
     errdefer held.deinit();
     try self.link_modules.append(host.allocator, held);
     const module = held.deref();
@@ -900,7 +953,7 @@ pub fn namespaceOf(state: *ScopeState, id: u32, name: []const u8) Error!v8.Value
 
 fn namespaceImpl(state: *ScopeState, id: u32, name: []const u8) !v8.Value {
     const context = try contextFor(state, id);
-    const held = (try context.scope.module_map.get(.{ .module_id = name }, null)) orelse return error.NotFound;
+    const held = (try context.scope.module_map.getAny(name)) orelse return error.NotFound;
     defer held.deinit();
     const module = held.deref();
     // V8 aborts on the namespace of a module that is not instantiated; only an evaluated one is shared.
@@ -921,7 +974,11 @@ pub fn hardenExports(state: *ScopeState, value: v8.Value) Error!void {
 
 fn metaHook(data: ?*anyopaque, request: module_types.MetaRequest) void {
     const self: *Context = @ptrCast(@alignCast(data.?));
-    if (self.meta.get(request.module_id)) |json| applyJson(self, request, json);
+    var key_buffer: [512]u8 = undefined;
+    var key_alloc = std.heap.FixedBufferAllocator.init(&key_buffer);
+    if (Context.tableKey(key_alloc.allocator(), request.namespace, request.module_id)) |key| {
+        if (self.meta.get(key)) |json| applyJson(self, request, json);
+    } else |_| {}
     if (self.served.contains(request.module_id)) init_loader.meta(self.host, request);
 }
 
@@ -1070,16 +1127,12 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
     context.ceiling = try Context.ceilingOfHandler(context.ceiling_arena.allocator(), h);
     var options: Scope.Options = .{
         .origine_namespace = true,
-        .resolver = .{ .data = context, .resolve_async = resolveAsync, .cancel = cancel },
+        .resolver = .{ .data = context, .resolve_async = resolveAsync, .cancel = cancel, .namespace_of = namespaceOfHook },
         .loader = .{ .data = context, .load = load },
         .meta = .{ .data = context, .init = metaHook },
         .on_dispose = host.disposer(),
         .on_freed = host.freer(),
-        .retain = switch (h.retain) {
-            .all => .all,
-            .used => .used,
-        },
-        .table_limit = h.entries,
+        .table_policy = .{ .data = host, .call = tablePolicy },
     };
     if (graph.kind != .none) options.code_cache = .{ .data = context, .load = cacheLoad, .store = cacheStore };
     const scope = try state.scope.runtime.createScope(options);
@@ -1203,7 +1256,7 @@ pub fn importSpecifier(state: *ScopeState, call: *Call, id: u32, specifier: []co
 
 fn importImpl(state: *ScopeState, call: *Call, id: u32, specifier: []const u8, attributes: []const u8) !v8.Promise {
     const context = try contextFor(state, id);
-    const promise = try context.scope.importModuleWithAttributes(specifier, try attributesOf(call, attributes), null);
+    const promise = try context.scope.importIn(context.cacheOfHandler(context.import_handler), specifier, try attributesOf(call, attributes), null);
     return startImport(call, state, context, promise);
 }
 
@@ -1218,16 +1271,19 @@ fn evaluateImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8, sour
     const context = try contextFor(state, id);
     _ = try graph_api.handlerFor(state.host, handler);
     if (name.len == 0 or std.mem.startsWith(u8, name, module_types.origine_prefix)) return error.InvalidInput;
-    if (try context.scope.module_map.get(.{ .module_id = name }, null)) |existing| {
+    // The module lives in the table of the handler that governs its imports.
+    const table = context.cacheOfHandler(handler);
+    if (try context.scope.module_map.get(.{ .module_id = name, .namespace = table }, null)) |existing| {
         existing.deinit();
         return error.InvalidInput;
     }
-    try context.scope.updateImportCache(.{ .module_id = name }, .{ .source = source }, null);
-    try context.setHandler(name, handler);
-    if (meta.len != 0) try context.setMeta(name, meta);
+    // The handler is known before the source compiles: compiling resolves the module's imports through it.
+    try context.setHandler(table, name, handler);
+    if (meta.len != 0) try context.setMeta(table, name, meta);
+    try context.scope.updateImportCache(.{ .module_id = name, .namespace = table }, .{ .source = source }, null);
     context.root = name;
     defer context.root = null;
-    const promise = try context.scope.importModule(name, null);
+    const promise = try context.scope.importIn(table, name, &.{}, null);
     return startImport(call, state, context, promise);
 }
 
@@ -1246,24 +1302,34 @@ pub fn closeContext(host: *Host, context: *Context) void {
     context.scope.runtime.disposeScope(context.scope);
 }
 
-/// `tableSize(context)`: the modules the context's identity table holds.
-pub fn tableSize(state: *ScopeState, id: u32) Error!u32 {
-    const context = contextFor(state, id) catch |err| return errno.narrow(err);
-    return @intCast(context.scope.module_map.cachedCount());
-}
-
-/// `tableDelete(context, id)`: forgets the module `id` (and what imported it) so the next import of
-/// it makes a new one. Returns how many entries it dropped.
-pub fn tableDelete(state: *ScopeState, id: u32, module_id: []const u8) Error!u32 {
-    const context = contextFor(state, id) catch |err| return errno.narrow(err);
-    const count = context.scope.deleteImportCache(.{ .module_id = module_id }) catch |err| return errno.narrow(err);
+/// `cacheSize(cache)`: how many modules the table `cache` holds, in the contexts this realm created.
+pub fn cacheSize(state: *ScopeState, cache: u32) Error!u32 {
+    var count: usize = 0;
+    for (state.host.contexts.values()) |context| {
+        if (context.closed or context.creator != state) continue;
+        count += context.scope.module_map.countNamespace(cache);
+    }
     return @intCast(count);
 }
 
-/// `tableClear(context)`: forgets every module of the table.
-pub fn tableClear(state: *ScopeState, id: u32) Error!u32 {
-    const context = contextFor(state, id) catch |err| return errno.narrow(err);
-    const count = context.scope.clearImportCache() catch |err| return errno.narrow(err);
+/// `cacheDelete(cache, id)`: forgets the module `id` (and what imported it) in the table `cache` of every
+/// context this realm created, so the next import of it makes a new one. Returns how many entries it dropped.
+pub fn cacheDelete(state: *ScopeState, cache: u32, module_id: []const u8) Error!u32 {
+    var count: usize = 0;
+    for (state.host.contexts.values()) |context| {
+        if (context.closed or context.creator != state) continue;
+        count += context.scope.deleteImportCache(.{ .module_id = module_id, .namespace = cache }) catch |err| return errno.narrow(err);
+    }
+    return @intCast(count);
+}
+
+/// `cacheClear(cache)`: forgets every module of the table `cache` in every context this realm created.
+pub fn cacheClear(state: *ScopeState, cache: u32) Error!u32 {
+    var count: usize = 0;
+    for (state.host.contexts.values()) |context| {
+        if (context.closed or context.creator != state) continue;
+        count += context.scope.clearImportNamespace(cache) catch |err| return errno.narrow(err);
+    }
     return @intCast(count);
 }
 
@@ -1378,10 +1444,11 @@ fn preloadModuleImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8,
     errdefer if (pending.values) |held| held.deinit();
     try host.preloads.append(alloc, pending);
     errdefer _ = host.preloads.pop();
-    try context.scope.updateImportCache(.{ .module_id = name }, .{ .source = source }, null);
+    const table = context.cacheOfHandler(context.import_handler);
+    try context.scope.updateImportCache(.{ .module_id = name, .namespace = table }, .{ .source = source }, null);
     context.root = name;
     defer context.root = null;
-    const loading = try context.scope.importModule(name, null);
+    const loading = try context.scope.importIn(table, name, &.{}, null);
     defer loading.deinit();
     const data = eu.v.external(call.isolate, pending).value.data;
     var session: Scope.Session = undefined;

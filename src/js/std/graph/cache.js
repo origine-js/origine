@@ -24,28 +24,44 @@ const capacity = (what, name, value) => {
 };
 const withCapacity = (host, kind, name, value, rest) => freeze({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
 
-const TABLE = Symbol.for('origine:@std/graph/table');
-/// The identity table of a context: `{ size, delete(id), clear() }`. `delete(id)` forgets the module
-/// (and what imported it), so the next import of it makes and evaluates a new one, while the old one
-/// keeps working; `clear()` forgets every module. All the handlers of a context share this one table.
-function inContext(ctx) {
-  const view = ctx?.[TABLE];
-  if (typeof view !== 'function') throw invalid('ImportCache#in: expected a context');
-  return view();
-}
+const OPS = Symbol.for('origine:@std/graph/cache-ops');
+/// What reaches the host: `api.graph` (or `api.context`) installs it in the realm.
+const ops = () => {
+  const found = globalThis[OPS];
+  if (found === undefined)
+    throw freeze({ errno: ERRNO.io.Unsupported, name: 'Unsupported', message: 'ImportCache needs api.graph or api.context' });
+  return found;
+};
 
 export const ImportCache = freeze({
-  /// The native table. `retain` is required because it changes what re-importing does:
-  /// `'all'` keeps every entry for the context's lifetime (module identity as in ESM);
-  /// `'used'` drops an entry once no handle, dependent or live reference holds it, so a later import
-  /// evaluates the module again. `entries` caps the table (readable as `size`/`entries` on the view).
+  /// A table of modules (id + attributes -> module), named by this object: handlers made with the same
+  /// object keep their modules in the same table, handlers made with two objects keep two modules for
+  /// one id, also inside one context. `retain` is required because it changes what re-importing does:
+  /// `'all'` keeps every entry for the context's lifetime (module identity as in ESM); `'used'` drops an
+  /// entry once no handle, dependent or live reference holds it, so a later import evaluates the module
+  /// again. `entries` caps the table. `size` counts the modules it holds, `delete(id)` forgets one (and
+  /// what imported it) so the next import makes and evaluates a new module while the old one keeps
+  /// working, and `clear()` forgets all of them.
   native(options) {
     const retain = own(options, 'retain');
     if (retain !== 'all' && retain !== 'used') throw invalid("ImportCache.native: retain must be 'all' or 'used'");
     const descriptor = withCapacity('importCache', 'cache', 'entries', capacity('ImportCache.native', 'entries', own(options, 'entries')), {
       retain,
     });
-    return freeze({ ...descriptor, in: inContext });
+    const cache = {
+      ...descriptor,
+      get size() {
+        return ops().size(cache);
+      },
+      delete(id) {
+        if (typeof id !== 'string') throw invalid('ImportCache#delete: id must be a string');
+        return ops().delete(cache, id);
+      },
+      clear() {
+        return ops().clear(cache);
+      },
+    };
+    return freeze(cache);
   },
 });
 

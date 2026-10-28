@@ -76,6 +76,17 @@
   /// A host transformer on its own, as the host's `transform` native takes it.
   const hostSpec = t => ({ host: t.host, transform: t.transform, options: t.options ?? null });
 
+  /// The host's table for an `ImportCache` object: made when a handler first names it, again if the host freed it
+  /// (it goes with the last handler that names it).
+  const cacheIds = new WeakMap();
+  const cacheId = cache => {
+    const known = cacheIds.get(cache);
+    if (known !== undefined && host(native.graph.cacheAlive, known)) return known;
+    const id = host(native.graph.cacheCreate, cache.retain === 'used' ? 1 : 0, cache.entries ?? -1);
+    cacheIds.set(cache, id);
+    return id;
+  };
+
   const flatten = handler => {
     const resolver = handler.resolver;
     const layers = [];
@@ -124,7 +135,7 @@
       layers,
       hooks,
       maker: makerSpec,
-      cache: { retain: handler.cache.retain, entries: handler.cache.entries ?? null },
+      cache: { id: cacheId(handler.cache) },
       meta: handler.meta !== null,
     };
     return { spec, layerFns, hookFns, hookHosts, transformerFns };
@@ -146,8 +157,6 @@
       hookHosts,
       transformerFns,
       native: handler.native,
-      retain: handler.cache.retain,
-      entries: handler.cache.entries,
     });
     handlers.set(handler, record);
     byId.set(id, record);
@@ -587,6 +596,40 @@
   const contextRefs = new WeakMap();
   /// context id -> the references bound to it (the same sets as `contextRefs`); `link` verdicts name a module by context id
   const refsById = new Map();
+
+  // `ImportCache#size`, `delete` and `clear` (origine:@std/graph/cache) reach the host through this one object:
+  // a std module is pure data and holds no natives. They act on the contexts this realm created. A reference
+  // to a module the cache forgot leaves `context.references`; it stays a usable handle of the old module.
+  const forgetRefs = (cache, moduleId) => {
+    const id = cacheIds.get(cache);
+    for (const refs of refsById.values()) {
+      for (const known of refs) {
+        const state = referenceState.get(known);
+        if (state !== undefined && cacheIds.get(state.handler.cache) === id && (moduleId === undefined || known.name === moduleId))
+          refs.delete(known);
+      }
+    }
+  };
+  const cacheOps = freeze({
+    size: cache => (cacheIds.has(cache) ? host(native.context.cacheSize, cacheIds.get(cache)) : 0),
+    delete(cache, moduleId) {
+      if (!cacheIds.has(cache)) return 0;
+      const count = host(native.context.cacheDelete, cacheIds.get(cache), moduleId);
+      forgetRefs(cache, moduleId);
+      return count;
+    },
+    clear(cache) {
+      if (!cacheIds.has(cache)) return 0;
+      const count = host(native.context.cacheClear, cacheIds.get(cache));
+      forgetRefs(cache);
+      return count;
+    },
+  });
+  try {
+    Object.defineProperty(globalThis, Symbol.for('origine:@std/graph/cache-ops'), { value: cacheOps });
+  } catch {
+    // Already defined: the realm keeps the first one.
+  }
 
   /// The text of a reference made from a recipe (read, transformed) once.
   const ensureText = async state => {

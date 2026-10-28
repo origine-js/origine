@@ -302,18 +302,24 @@ declare module "origine:@std/graph/providers" {
 }
 
 declare module "origine:@std/graph/cache" {
-  /** The identity table: (id, attributes) -> module, one native table per context. */
+  /**
+   * A table of modules: (id, attributes) -> module. The object is the table's name: handlers made with the
+   * same object keep their modules in the same table, handlers made with two objects keep two modules for
+   * one id, also inside one context. Keep one object per table you want to inspect.
+   */
   export type ImportCache = {
     readonly host: "importCache";
     readonly kind: "cache";
+    /** How many modules the table holds, in the contexts this realm created. Needs `api.graph` or `api.context`. */
+    readonly size: number;
     /**
-     * The identity table of `ctx`: `size` is how many modules it holds, `delete(id)` forgets a module (and
-     * what imported it) so the next import makes and evaluates a new one while the old one keeps working,
-     * `clear()` forgets all. Every handler of a context shares this one table. Both return how many
-     * modules they dropped. Throws `InvalidInput` for a non-context.
+     * Forgets the module `id` (and what imported it) in every context this realm created, so the next import
+     * makes and evaluates a new one while the old one keeps working. Returns how many modules it dropped.
      */
-    in(ctx: import("../context.d.ts").Context): { readonly size: number; delete(id: string): number; clear(): number };
-    /** `'all'`: entries live as long as the context. `'used'`: dropped once nothing holds them, so a later import evaluates the module again. */
+    delete(id: string): number;
+    /** Forgets every module of the table, in every context this realm created. Returns how many it dropped. */
+    clear(): number;
+    /** `'all'`: entries live as long as the context. `'used'`: dropped once nothing holds them, so a later import evaluates the module again. Per table. */
     readonly retain: "all" | "used";
     /** Cap on the table, in entries. */
     readonly entries?: number;

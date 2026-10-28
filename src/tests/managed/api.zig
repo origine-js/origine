@@ -1201,15 +1201,34 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
         \\import { CodeCache } from 'origine:@std/graph/cache';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
+        \\  const io = api.io.create({});
         \\  const real = api.fs.requestSync({ access: 'r' });
         \\  const rw = api.fs.requestSync({ access: 'rw' });
+        \\  const remote = await api.fs.requestAsync({ io, access: 'r' });
         \\  const name = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
-        \\  // ids are small integers: a lookalike with a guessed id is not a grant.
-        \\  out.forged = name(() => api.graph.narrow({ fs: { kind: 'sync', id: real.id } }));
-        \\  out.forgedFrozen = name(() => api.graph.narrow({ fs: Object.freeze({ kind: 'sync', id: real.id, errno: real.errno }) }));
-        \\  out.copy = name(() => api.graph.narrow({ fs: { ...real } }));
-        \\  out.forgedCache = name(() => api.graph.narrow({ codeCache: CodeCache.dir({ kind: 'sync', id: rw.id }) }));
+        \\  // Every way a script can copy a grant: the copy has all of its properties and is not a grant, because
+        \\  // the host's secret on the real object cannot be read, copied, cloned, spread, proxied or inherited.
+        \\  const copies = grant => [
+        \\    { kind: grant.kind, id: grant.id },
+        \\    Object.freeze({ kind: grant.kind, id: grant.id, errno: grant.errno }),
+        \\    { ...grant },
+        \\    Object.assign({}, grant),
+        \\    Object.defineProperties({}, Object.getOwnPropertyDescriptors(grant)),
+        \\    Object.freeze(Object.defineProperties({}, Object.getOwnPropertyDescriptors(grant))),
+        \\    Object.create(grant),
+        \\    new Proxy(grant, {}),
+        \\    new Proxy(grant, { getOwnPropertyDescriptor: (target, key) => Reflect.getOwnPropertyDescriptor(target, key), get: (target, key) => target[key] }),
+        \\  ];
+        \\  out.forged = [...copies(real), ...copies(remote)].map(copy => name(() => api.graph.narrow({ fs: copy })));
+        \\  out.forgedCache = copies(rw).map(copy => name(() => api.graph.narrow({ codeCache: CodeCache.dir(copy) })));
+        \\  out.notObjects = [1, 'sync', () => {}, 0n].map(value => name(() => api.graph.narrow({ fs: value })));
+        \\  // A real grant still works, across narrow, as the graph's fs and as the cache's.
         \\  out.real = name(() => api.graph.narrow({ fs: real, codeCache: CodeCache.dir(rw) }));
+        \\  out.async = name(() => api.graph.narrow({ fs: remote }));
+        \\  out.chained = name(() => api.graph.narrow({ fs: real }).narrow({ codeCache: CodeCache.memory() }).narrow({ fs: remote }));
+        \\  // An async grant cannot be a cache directory (the cache is written with the host's own file calls).
+        \\  out.asyncCache = name(() => api.graph.narrow({ codeCache: CodeCache.dir(remote) }));
+        \\  await io.close();
         \\}
     , true, &.{});
     defer fx.deinit();

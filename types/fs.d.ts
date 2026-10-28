@@ -117,7 +117,12 @@ export type AsyncFsOps = { readonly [K in keyof Shared]: Fn<Shared[K], Promise<S
   readonly [K in keyof AsyncOnly]: Fn<AsyncOnly[K], Promise<AsyncOnly[K][1]>>;
 } & { readonly [K in keyof Moving]: Fn<Moving[K], Promise<Moving[K][1]>> };
 
-/** A blocking grant from `api.fs.requestSync`: operations run on the isolate thread. */
+/**
+ * A blocking grant from `api.fs.requestSync`: operations run on the isolate thread. What makes the
+ * object a grant is a secret the host stamped on it, which a script cannot read or copy: a copy of every
+ * property (`{ ...grant }`, `Object.assign`, `Object.create(grant)`, a `Proxy`) calls the same operations but is
+ * not accepted where a grant is the authority (`api.graph.narrow({ fs })`, `CodeCache.dir`: `InvalidInput`).
+ */
 export interface SyncFs extends SyncFsOps {
   readonly kind: "sync";
   /** Id of the grant. */
@@ -126,7 +131,10 @@ export interface SyncFs extends SyncFsOps {
   readonly errno: Uint32Array;
 }
 
-/** A genuinely asynchronous grant from `api.fs.requestAsync`: operations run on the `io` it was requested with. */
+/**
+ * A genuinely asynchronous grant from `api.fs.requestAsync`: operations run on the `io` it was requested
+ * with. Stamped by the host like {@link SyncFs}: only the object `requestAsync` resolved with is a grant.
+ */
 export interface AsyncFs extends AsyncFsOps {
   readonly kind: "async";
   /** Id of the grant. */

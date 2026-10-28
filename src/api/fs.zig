@@ -6,6 +6,7 @@
 //! binding boundary, so the ops only see checked values.
 const std = @import("std");
 const v8 = @import("@v8");
+const eu = @import("@util");
 const binding = @import("binding.zig");
 const init_cache = @import("init_cache.zig");
 const func = binding.func;
@@ -272,6 +273,70 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Ob
     });
     try call.set(ops, "id", grant.id);
     return ops;
+}
+
+// ---- the secret that makes an object a grant -------------------------------
+
+/// Which kind of grant an object is.
+pub const GrantKind = enum(u1) { sync = 0, async = 1 };
+
+/// A grant a script presented, as the host knows it. `id` is the host's id of a sync grant, or the
+/// Rust runtime's id of an async one.
+pub const GrantRef = struct { kind: GrantKind, id: u32 };
+
+/// An async grant the host stamped: the Rust runtime owns the grant, so Zig keeps only who got it.
+pub const AsyncGrant = struct { id: u32, owner: *ScopeState };
+
+fn grantKey(isolate: v8.Isolate) v8.Private {
+    return v8.Private.forApi(isolate, v8.String.initUtf8(isolate, "origine:fs-grant"));
+}
+
+/// `native.fsBrand(object, kind, id)`: marks `object` as the grant `id` (0 sync, 1 async) that `state`'s
+/// realm was given. The mark is a V8 private symbol: JS cannot read, copy, clone, spread, proxy or
+/// inherit it, so an object that was not stamped here is not a grant, whatever properties it has. A
+/// sync grant must exist, belong to this realm and be open; an object is stamped once.
+pub fn brand(state: *ScopeState, call: *Call, target: v8.Object, kind: u32, id: u32) !void {
+    const host = state.host;
+    const which = std.enums.fromInt(GrantKind, kind) orelse return error.InvalidInput;
+    switch (which) {
+        .sync => _ = try syncGrantOf(state, id),
+        .async => {
+            var known = false;
+            for (host.async_grants.items) |grant| {
+                if (grant.id == id and grant.owner == state) known = true;
+            }
+            if (!known) try host.async_grants.append(host.allocator, .{ .id = id, .owner = state });
+        },
+    }
+    const key = grantKey(call.isolate);
+    if (target.hasPrivate(call.ctx, key) orelse return error.Unexpected) return error.InvalidInput;
+    const value = eu.v.num_f64(call.isolate, @as(f64, @floatFromInt(kind)) * 4294967296.0 + @as(f64, @floatFromInt(id))).numeric.primitive.value;
+    if (!(target.setPrivate(call.ctx, key, value) orelse return error.Unexpected)) return error.Unexpected;
+}
+
+/// The grant `value` is, if the host stamped it for this realm: what `narrow({ fs })` and
+/// `CodeCache.dir` call to learn what they were handed. Anything else is `InvalidInput`.
+pub fn grantOf(state: *ScopeState, call: *Call, object: v8.Object) !GrantRef {
+    const stamp = object.getPrivate(call.ctx, grantKey(call.isolate)) orelse return error.InvalidInput;
+    if (!stamp.isNumber()) return error.InvalidInput;
+    const number = stamp.numberValue(call.ctx) orelse return error.InvalidInput;
+    const raw: u64 = @intFromFloat(number);
+    const kind = std.enums.fromInt(GrantKind, @as(u1, @intCast(raw >> 32))) orelse return error.InvalidInput;
+    const id: u32 = @truncate(raw);
+    switch (kind) {
+        .sync => _ = try syncGrantOf(state, id),
+        .async => {
+            for (state.host.async_grants.items) |known| if (known.id == id and known.owner == state) return .{ .kind = .async, .id = id };
+            return error.InvalidInput;
+        },
+    }
+    return .{ .kind = kind, .id = id };
+}
+
+/// The open sync grant `id` of `state`'s realm.
+pub fn syncGrantOf(state: *ScopeState, id: u32) !*FsGrant {
+    for (state.host.grants.items) |grant| if (grant.id == id and grant.owner == state and !grant.closed) return grant;
+    return error.InvalidInput;
 }
 
 // ---- ops: (state, [call], args...) -> result ---------------------------------

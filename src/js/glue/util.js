@@ -42,12 +42,8 @@ native => {
   // accepts only live members of the first set (the Rust natives validate the id again).
   const ioHandles = new WeakSet();
   const closedIo = new WeakSet();
-  // Fs grants made by this scope's `api.fs`; the graph accepts only these as the authority it reads
-  // with (an object with the right `kind` and `id` is not a grant: ids can be guessed).
-  const fsGrants = new WeakSet();
-
   // Parts one factory publishes for another (the graph glue for the context glue).
   const shared = {};
 
-  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo, fsGrants, shared };
+  return { freeze, freezeMethods, errno, take, errors, failure, own, joinPath, ioHandles, closedIo, shared };
 };

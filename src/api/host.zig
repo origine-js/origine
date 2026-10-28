@@ -212,6 +212,8 @@ pub const Host = struct {
     modules: []const module_api.Module,
     transformers: transformer_api.Registry,
     grants: std.ArrayList(*fs_api.FsGrant) = .empty,
+    /// Async grants stamped for a realm (`fs.brand`); the Rust runtime owns the grants themselves.
+    async_grants: std.ArrayList(fs_api.AsyncGrant) = .empty,
     states: std.ArrayList(*ScopeState) = .empty,
     /// The module graph: graphs, registered import handlers, contexts and their imports in flight.
     /// Ids are never reused (`registry.zig`). A context is freed with its scope, a handler when no live
@@ -270,6 +272,7 @@ pub const Host = struct {
             alloc.destroy(grant);
         }
         self.grants.deinit(alloc);
+        self.async_grants.deinit(alloc);
         for (self.states.items) |state| self.releaseState(state);
         self.states.deinit(alloc);
         for (self.imports.items) |pending| {
@@ -670,6 +673,7 @@ pub const Host = struct {
             }),
             .fs => try call.object(ScopeState, state, .{
                 .fsRequest = func(fs_api.request, .{ .side_effect = .any }),
+                .fsBrand = func(fs_api.brand, .{ .side_effect = .any }),
             }),
             .graph, .context => blk: {
                 const object = try call.object(ScopeState, state, .{
@@ -737,7 +741,7 @@ pub const Host = struct {
         const keys: []const []const u8 = switch (module) {
             .host => &.{ "env", "threading", "snapshot" },
             .isolate => &.{"isolate"},
-            .fs => &.{"fsRequest"},
+            .fs => &.{ "fsRequest", "fsBrand" },
             else => &.{},
         };
         for (keys) |property| {

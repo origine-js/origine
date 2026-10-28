@@ -13,7 +13,7 @@
 // function in it never reaches the driver. See docs/graph-api.md.
 (native, util) => {
   'use strict';
-  const { freeze, take, failure, own, errors, fsGrants } = util;
+  const { freeze, take, failure, own, errors } = util;
   const { InvalidInput, NotFound, PermissionDenied, Unsupported, InvalidData } = errors;
 
   const HANDLER = Symbol.for('origine:@std/graph/handler');
@@ -636,16 +636,12 @@
 
   const build = (fs, codeCache, sourceBytes = DEFAULT_SOURCE_BYTES) => {
     if (!Number.isSafeInteger(sourceBytes) || sourceBytes < 1) throw invalid('sourceBytes must be a positive integer');
-    let fsId = 0;
-    if (fs !== undefined) {
-      if (fs === null || typeof fs !== 'object' || (fs.kind !== 'sync' && fs.kind !== 'async') || !fsGrants.has(fs))
-        throw invalid('graph fs must be a fs grant made by api.fs');
-      if (fs.kind === 'async' && util.shared.fsAsync === undefined) throw invalid('async fs is not available');
-      if (fs.kind === 'sync') fsId = fs.id;
-    }
+    // The host decides what is a grant (it stamped the object itself); `kind` and `id` are read only
+    // after it accepted the object, and a grant is frozen.
+    if (fs !== undefined && (fs === null || typeof fs !== 'object')) throw invalid('graph fs must be a fs grant made by api.fs');
     let kind = 0;
     let bytes = 0;
-    let cacheFsId = 0;
+    let cacheFs;
     if (codeCache !== undefined) {
       if (codeCache.kind !== 'codeCache') throw invalid('codeCache must be a CodeCache');
       if (codeCache.native === false) kind = 3;
@@ -653,19 +649,18 @@
         kind = cacheKinds[codeCache.host] ?? -1;
         if (kind < 0) throw invalid('unknown CodeCache');
         if (kind === 2) {
-          const grant = codeCache.fs;
-          if (grant === null || typeof grant !== 'object' || grant.kind !== 'sync' || !fsGrants.has(grant))
-            throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
-          cacheFsId = grant.id;
+          cacheFs = codeCache.fs;
+          if (cacheFs === null || typeof cacheFs !== 'object') throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
         }
       }
       bytes = codeCache.bytes ?? 0;
     }
-    const id = host(native.graph.create, fsId, kind, bytes, cacheFsId, sourceBytes);
+    if (fs !== undefined && fs.kind === 'async' && util.shared.fsAsync === undefined) throw invalid('async fs is not available');
+    const id = host(native.graph.create, fs, kind, bytes, cacheFs, sourceBytes);
     if (kind === 3) graphCache.set(id, codeCache);
     if (fs !== undefined) {
       if (fs.kind === 'async')
-        host(native.graph.asyncFs, id, fs.id, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
+        host(native.graph.asyncFs, id, fs, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
       graphFs.set(id, freeze({ kind: fs.kind, id: fs.id, limit: sourceBytes }));
     }
     return makeGraph(id, freeze({ fs, codeCache, sourceBytes }));

@@ -532,12 +532,14 @@ pub fn graphFor(host: *Host, id: u32) !*Graph {
     return found;
 }
 
-/// `create(fsId | 0, cacheKind, bytes, cacheFsId | 0)`: a graph. `fsId` is the id of a sync fs grant
-/// whose root sources are read from (0: none, so `fs` hooks are `PermissionDenied`). `cacheKind` is
-/// 0 none, 1 memory, 2 dir (`cacheFsId` names the grant whose root holds `__oricache__`), 3 custom.
+/// `create(fs?, cacheKind, bytes, cacheFs?, sourceBytes)`: a graph. `fs` is a grant `api.fs` made, as
+/// the host stamped it (`fs.brand`): a sync one is read by the host, an async one is attached with
+/// `asyncFs`; without one `fs` hooks are `PermissionDenied`. `cacheKind` is 0 none, 1 memory, 2 dir
+/// (`cacheFs`, a sync grant with write access, is where `__oricache__` lives), 3 custom. Anything that is
+/// not a stamped grant of this realm is `InvalidInput`.
 /// `sourceBytes` (at least 1) is the largest source file the graph reads.
-pub fn graphCreate(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32, source_bytes: f64) Error!u32 {
-    return graphCreateImpl(state, fs_id, cache_kind, bytes, cache_fs_id, source_bytes) catch |err| return errno.narrow(err);
+pub fn graphCreate(state: *ScopeState, call: *Call, fs: ?v8.Object, cache_kind: u32, bytes: f64, cache_fs: ?v8.Object, source_bytes: f64) Error!u32 {
+    return graphCreateImpl(state, call, fs, cache_kind, bytes, cache_fs, source_bytes) catch |err| return errno.narrow(err);
 }
 
 /// `close(graph)`: the graph takes no more contexts or references, and is freed (with the code
@@ -558,12 +560,7 @@ pub fn releaseGraph(host: *Host, graph: *Graph) void {
     host.allocator.destroy(graph);
 }
 
-fn grantFor(host: *Host, id: u32) !*fs_api.FsGrant {
-    for (host.grants.items) |grant| if (grant.id == id and !grant.closed) return grant;
-    return error.BadHandle;
-}
-
-fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, cache_fs_id: u32, source_bytes: f64) !u32 {
+fn graphCreateImpl(state: *ScopeState, call: *Call, fs: ?v8.Object, cache_kind: u32, bytes: f64, cache_fs: ?v8.Object, source_bytes: f64) !u32 {
     const host = state.host;
     const alloc = host.allocator;
     const kind = std.enums.fromInt(CodeCacheKind, cache_kind) orelse return error.InvalidInput;
@@ -572,13 +569,19 @@ fn graphCreateImpl(state: *ScopeState, fs_id: u32, cache_kind: u32, bytes: f64, 
     const created = try alloc.create(Graph);
     errdefer alloc.destroy(created);
     created.* = .{ .host = host, .id = try host.graphs.issue(), .owner = state, .source_limit = @intFromFloat(source_bytes), .kind = kind, .cache_bytes = @intFromFloat(bytes) };
-    if (fs_id != 0) {
-        const grant = try grantFor(host, fs_id);
-        if (!grant.read) return error.PermissionDenied;
-        created.fs = grant;
+    if (fs) |object| {
+        const ref = try fs_api.grantOf(state, call, object);
+        // An async grant is attached by `asyncFs`; the graph has no sync one.
+        if (ref.kind == .sync) {
+            const grant = try fs_api.syncGrantOf(state, ref.id);
+            if (!grant.read) return error.PermissionDenied;
+            created.fs = grant;
+        }
     }
     if (kind == .dir) {
-        const grant = try grantFor(host, cache_fs_id);
+        const ref = try fs_api.grantOf(state, call, cache_fs orelse return error.InvalidInput);
+        if (ref.kind != .sync) return error.InvalidInput;
+        const grant = try fs_api.syncGrantOf(state, ref.id);
         if (!grant.write) return error.PermissionDenied;
         created.dir_state = init_cache.CodeCacheState.initFlat(host, grant.root);
     }
@@ -943,13 +946,16 @@ pub fn bind(state: *ScopeState, step_fn: v8.Function) Error!void {
     state.driver = .{ .step = .new(isolate, step_fn) };
 }
 
-/// `asyncFs(graph, fsId, open, readAll, close)`: makes the graph read through the async fs grant
-/// `fsId` with the Rust natives of `native.fsAsync`. The graph must have no sync grant.
-pub fn asyncFs(state: *ScopeState, graph_id: u32, fs_id: u32, open_fn: v8.Function, read_fn: v8.Function, close_fn: v8.Function) Error!void {
+/// `asyncFs(graph, grant, open, readAll, close)`: makes the graph read through the async fs grant
+/// `grant` (an object the host stamped) with the Rust natives of `native.fsAsync`. The graph must have
+/// no sync grant.
+pub fn asyncFs(state: *ScopeState, call: *Call, graph_id: u32, grant: v8.Object, open_fn: v8.Function, read_fn: v8.Function, close_fn: v8.Function) Error!void {
     const graph = graphFor(state.host, graph_id) catch |err| return errno.narrow(err);
     if (graph.fs != null or graph.async_fs != null) return error.InvalidInput;
+    const ref = fs_api.grantOf(state, call, grant) catch |err| return errno.narrow(err);
+    if (ref.kind != .async) return error.InvalidInput;
     const isolate = state.scope.runtime.isolate;
-    graph.async_fs = .{ .id = fs_id, .open = .new(isolate, open_fn), .read_all = .new(isolate, read_fn), .close = .new(isolate, close_fn) };
+    graph.async_fs = .{ .id = ref.id, .open = .new(isolate, open_fn), .read_all = .new(isolate, read_fn), .close = .new(isolate, close_fn) };
 }
 
 /// `utf8(bytes)`: the text of UTF-8 bytes (invalid sequences become U+FFFD, as V8 decodes them).

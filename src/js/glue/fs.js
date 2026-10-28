@@ -19,7 +19,6 @@
     joinPath,
     ioHandles,
     closedIo,
-    fsGrants,
     shared,
     errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported },
   },
@@ -493,9 +492,11 @@
         if (!spec.sync) throw failure(PermissionDenied);
         const ops = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
-        const granted = freeze({ kind: 'sync', id: ops.id, errno, ...makeOps(ops) });
-        fsGrants.add(granted);
-        return granted;
+        const granted = { kind: 'sync', id: ops.id, errno, ...makeOps(ops) };
+        // The host stamps the object with a secret only it can read: what the graph accepts as a grant.
+        native.fsBrand(granted, 0, ops.id);
+        if (errno[0] !== 0) throw failure(take());
+        return freeze(granted);
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),
@@ -510,9 +511,10 @@
         return native.fsAsync
           .request(io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access)
           .then(granted => {
-            const made = freeze({ kind: 'async', id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) });
-            fsGrants.add(made);
-            return made;
+            const made = { kind: 'async', id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) };
+            native.fsBrand(made, 1, granted.id);
+            if (errno[0] !== 0) throw failure(take());
+            return freeze(made);
           });
       },
     });

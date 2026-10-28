@@ -12,7 +12,7 @@
 // reaches the driver: the host runs its whole pipeline natively. See docs/graph-api.md.
 (native, util) => {
   'use strict';
-  const { freeze, take, failure, own, errors } = util;
+  const { freeze, take, failure, own, errors, fsGrants } = util;
   const { InvalidInput, NotFound, PermissionDenied, Unsupported, InvalidData } = errors;
 
   const HANDLER = Symbol.for('origine:@std/graph/handler');
@@ -459,8 +459,8 @@
   const build = (fs, codeCache) => {
     let fsId = 0;
     if (fs !== undefined) {
-      if (fs === null || typeof fs !== 'object' || fs.kind !== 'sync' || !Number.isSafeInteger(fs.id))
-        throw invalid('graph fs must be a sync fs grant');
+      if (fs === null || typeof fs !== 'object' || fs.kind !== 'sync' || !fsGrants.has(fs))
+        throw invalid('graph fs must be a sync fs grant made by api.fs');
       fsId = fs.id;
     }
     let kind = 0;
@@ -474,8 +474,8 @@
         if (kind < 0) throw invalid('unknown CodeCache');
         if (kind === 2) {
           const grant = codeCache.fs;
-          if (grant === null || typeof grant !== 'object' || grant.kind !== 'sync' || !Number.isSafeInteger(grant.id))
-            throw invalid('CodeCache.dir needs a sync fs grant');
+          if (grant === null || typeof grant !== 'object' || grant.kind !== 'sync' || !fsGrants.has(grant))
+            throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
           cacheFsId = grant.id;
         }
       }

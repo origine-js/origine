@@ -1153,6 +1153,28 @@ test "graph: a file of the graph never serves an origine: id, not even as json" 
     try check(fx.rt.scopes.items[1], "typeof d === 'undefined' && k === 7");
 }
 
+test "graph: only a grant that api.fs made can be the authority of a graph" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { CodeCache } from 'origine:@std/graph/cache';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const real = api.fs.requestSync({ access: 'r' });
+        \\  const rw = api.fs.requestSync({ access: 'rw' });
+        \\  const name = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
+        \\  // ids are small integers: a lookalike with a guessed id is not a grant.
+        \\  out.forged = name(() => api.graph.narrow({ fs: { kind: 'sync', id: real.id } }));
+        \\  out.forgedFrozen = name(() => api.graph.narrow({ fs: Object.freeze({ kind: 'sync', id: real.id, errno: real.errno }) }));
+        \\  out.copy = name(() => api.graph.narrow({ fs: { ...real } }));
+        \\  out.forgedCache = name(() => api.graph.narrow({ codeCache: CodeCache.dir({ kind: 'sync', id: rw.id }) }));
+        \\  out.real = name(() => api.graph.narrow({ fs: real, codeCache: CodeCache.dir(rw) }));
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.forged === 'InvalidInput' && report.forgedFrozen === 'InvalidInput' && report.copy === 'InvalidInput' && report.forgedCache === 'InvalidInput' && report.real === 'ok'");
+}
+
 test "graph: link shares or hardens the module of another context" {
     var fx: Fixture = undefined;
     try fx.setup(

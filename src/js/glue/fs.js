@@ -10,7 +10,7 @@
 // everything that observes what exists (reads, stat, directory listings, opening read-only).
 (
   native,
-  { freeze, errno, take, failure, own, joinPath, ioHandles, closedIo, errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported } },
+  { freeze, errno, take, failure, own, joinPath, ioHandles, closedIo, fsGrants, errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported } },
 ) => {
   // Python-style open modes -> native bits (write 1, create 2, truncate 4,
   // exclusive 8). Handles always allow reading when writable, so `x` and `x+`
@@ -479,7 +479,9 @@
         if (!spec.sync) throw failure(PermissionDenied);
         const ops = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
-        return freeze({ kind: 'sync', id: ops.id, errno, ...makeOps(ops) });
+        const granted = freeze({ kind: 'sync', id: ops.id, errno, ...makeOps(ops) });
+        fsGrants.add(granted);
+        return granted;
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),
@@ -493,7 +495,11 @@
         if (!spec.async || native.fsAsync === undefined) return Promise.reject(failure(PermissionDenied));
         return native.fsAsync
           .request(io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access)
-          .then(granted => freeze({ kind: 'async', id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) }));
+          .then(granted => {
+            const made = freeze({ kind: 'async', id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) });
+            fsGrants.add(made);
+            return made;
+          });
       },
     });
   }

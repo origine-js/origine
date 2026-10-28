@@ -243,7 +243,8 @@
           break;
         case 'link': {
           const state = referenceState.get(verdict.reference);
-          if (state === undefined || state.context === null) throw named(InvalidInput, 'link needs a reference bound to a context');
+          if (state === undefined || state.context === null || state.status !== 'evaluated')
+            throw named(InvalidInput, 'link needs a reference that is evaluated in a context');
           return freeze({ kind: 'link', context: state.context, name: state.name, mode: verdict.mode });
         }
         case 'reject':

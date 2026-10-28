@@ -556,6 +556,10 @@ fn link(self: *Context, other_id: u32, name: []const u8, shared: bool, alloc: st
     errdefer held.deinit();
     try self.link_modules.append(host.allocator, held);
     const module = held.deref();
+    // Only an evaluated module can be linked into another context: V8 aborts on the namespace of one
+    // that is not instantiated, and a module that is not yet instantiated would be instantiated by
+    // the importer, in the wrong context.
+    if (module.getStatus() != 4) return error.InvalidInput;
     if (shared or other == self) return .{ .module = module };
     const other_ctx = other.scope.context.deref();
     other_ctx.enter();

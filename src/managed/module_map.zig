@@ -577,6 +577,11 @@ pub const ModuleMap = struct {
             if (!entry.cached) continue;
             const module = (entry.module orelse continue).deref();
             if (entry.failure != null or entry.preparing) continue;
+            // A module of a graph that failed to link was compiled but never instantiated, and V8
+            // aborts the process on the namespace of one that is not (uninstantiated, instantiating
+            // or errored).
+            const status = module.getStatus();
+            if (status < 2 or status == 5) continue;
             const candidate = module.getModuleNamespace() orelse continue;
             if (candidate.strictEquals(namespace)) return entry.id;
         }

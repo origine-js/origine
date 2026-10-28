@@ -1190,6 +1190,46 @@ test "graph: link shares or hardens the module of another context" {
     try check(fx.rt.scopes.items[2], "hard[0] === 2 && hard[1] === 'function' && hard[2] === true && hard[3] === 'a'");
 }
 
+test "graph: link refuses a module that is still evaluating and a failed import does not break later ones" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  let parked;
+        \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
+        \\  const a = await api.context.create({ import: leaf, preload: [{ source: '(values) => { globalThis.park = values.park; }', values: { park: resolve => { parked = resolve; } } }] });
+        \\  const slow = ModuleRecipe({ source: ModuleSource.text('export const n = 1; await new Promise(r => park(r));'), import: leaf, name: 'slow' }).create(api.graph);
+        \\  const running = slow.evaluate(a);
+        \\  for (let i = 0; i < 1000 && parked === undefined; i++) await Promise.resolve();
+        \\  out.status = slow.status;
+        \\  const linker = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => (r.id === 'slow' ? Import.link(slow, { mode: 'hardened' }) : Import.next())],
+        \\  });
+        \\  const run = async (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: linker, name }).create(api.graph).evaluate(await api.context.create({ import: linker })).then(() => 'ok', e => e.message);
+        \\  out.early = await run('early', "import { n } from 'slow';");
+        \\  parked();
+        \\  await running;
+        \\  out.late = await run('late', "import { n } from 'slow'; globalThis.n = n;");
+        \\  // A failed import leaves modules that were compiled but never instantiated in the table;
+        \\  // a later successful import in the same context must not trip over them.
+        \\  const ctx = await api.context.create({ import: linker });
+        \\  const make = (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: linker, name }).create(api.graph);
+        \\  out.failed = await make('f1', "import 'nowhere'; import 'also-nowhere'").evaluate(ctx).then(() => 'ok', e => e.message);
+        \\  out.after = await make('ok1', 'globalThis.fine = 1;').evaluate(ctx).then(() => 'ok', e => e.message);
+        \\  out.imported = await ctx.import('slow').then(r => r.status, e => e.message);
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.status === 'evaluating' && report.early.includes('InvalidInput') && report.late === 'ok'");
+    try check(fx.scope, "report.failed.includes('NotFound') && report.after === 'ok' && report.imported === 'evaluated'");
+}
+
 test "graph: native plans with oxc, json, import maps and accept never enter JS" {
     if (!m.Api.oxc.enabled) return error.SkipZigTest;
     var fx: Fixture = undefined;

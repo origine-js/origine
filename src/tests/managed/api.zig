@@ -999,6 +999,47 @@ test "graph: JS layers and hooks never run on the stack of a child's import()" {
     try check(fx.rt.scopes.items[1], "done === 1");
 }
 
+test "graph: a settled driver call is freed and a second evaluate waits for the first" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const js = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
+        \\    hooks: [async r => Import.provide(ModuleSource.text(`export const id = '${r.id}';`))],
+        \\  });
+        \\  const kept = await api.context.create({ import: js });
+        \\  for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) await kept.import(id);
+        \\  out.imports = kept.references.length;
+        \\  // Two evaluate calls for one context: the second settles with the first, after the module ran.
+        \\  let done = 0;
+        \\  const plain = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
+        \\  const ctx = await api.context.create({ import: plain, preload: [{ source: '(values) => { globalThis.finish = values.finish; }', values: { finish: () => { done++; } } }] });
+        \\  const ref = ModuleRecipe({ source: ModuleSource.text('await Promise.resolve(); await Promise.resolve(); finish();'), import: plain, name: 'tla' }).create(api.graph);
+        \\  const first = ref.evaluate(ctx);
+        \\  const second = ref.evaluate(ctx);
+        \\  out.same = first === second;
+        \\  await second;
+        \\  out.afterSecond = done;
+        \\  await first;
+        \\  out.runs = done;
+        \\  // A failure reaches both callers, and the reference can be tried again.
+        \\  const bad = ModuleRecipe({ source: ModuleSource.text('await Promise.resolve(); throw new Error("boom");'), import: plain, name: 'bad' }).create(api.graph);
+        \\  const failures = await Promise.all([bad.evaluate(ctx).then(() => 'ok', e => e.name), bad.evaluate(ctx).then(() => 'ok', e => e.name)]);
+        \\  out.failures = failures.join(',') + ':' + bad.status;
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.imports === 6 && report.same && report.afterSecond === 1 && report.runs === 1 && report.failures === 'ModuleError,ModuleError:errored'");
+    // Every call into the driver settled, so none is kept.
+    try t.expectEqual(@as(usize, 0), fx.host.contexts.items[0].pendings.items.len);
+}
+
 test "graph: origineProvider serves an allowlist and JS cannot forge origine: modules" {
     var fx: Fixture = undefined;
     try fx.setup(

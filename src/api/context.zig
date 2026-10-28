@@ -431,11 +431,21 @@ fn numberOf(ctx: v8.Context, isolate: v8.Isolate, object: v8.Object, name: []con
     return value.u32Value(ctx);
 }
 
+/// Forgets a settled call into the driver and frees it; its other callback can never run.
+fn retire(self: *Context, pending: *PendingJs) void {
+    for (self.pendings.items, 0..) |item, index| if (item == pending) {
+        _ = self.pendings.swapRemove(index);
+        break;
+    };
+    freePending(self.host.allocator, pending);
+}
+
 fn fulfilled(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const pending = binding.externalPointer(PendingJs, info);
     const self = pending.context;
     if (pending.settled or self.closed) return;
     pending.settled = true;
+    defer retire(self, pending);
     const host = self.host;
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
@@ -468,6 +478,7 @@ fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const self = pending.context;
     if (pending.settled or self.closed) return;
     pending.settled = true;
+    defer retire(self, pending);
     const isolate = info.isolate();
     const ctx = isolate.getCurrentContext();
     var scratch = std.heap.ArenaAllocator.init(self.host.allocator);

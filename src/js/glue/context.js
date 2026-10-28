@@ -16,7 +16,7 @@
       /// (scripts, `ctx.import`) and is required: it decides what the realm can load. `graph` defaults to
       /// `api.graph`.
       async create(options) {
-        const { register, rootGraph, graphId, contexts, contextRefs, makeReference, host, invalid, named } = shared();
+        const { register, rootGraph, graphId, contexts, contextRefs, refsById, makeReference, host, invalid, named } = shared();
         const handler = own(options, 'import');
         const graph = own(options, 'graph') ?? rootGraph();
         const preload = own(options, 'preload') ?? [];
@@ -60,9 +60,11 @@
             return freeze([...refs]);
           },
           close() {
+            refsById.delete(id);
             host(native.context.close, id);
           },
           [dispose]() {
+            refsById.delete(id);
             native.context.close(id);
             take();
           },
@@ -90,6 +92,7 @@
         freeze(context);
         contexts.set(context, id);
         contextRefs.set(context, refs);
+        refsById.set(id, refs);
         for (let index = 0; index < preload.length; index++) {
           const values = own(preload[index], 'values');
           const script = own(preload[index], 'source');
@@ -103,6 +106,7 @@
               await done;
             }
           } catch (error) {
+            refsById.delete(id);
             native.context.close(id);
             take();
             throw error;

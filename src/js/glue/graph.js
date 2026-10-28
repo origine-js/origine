@@ -322,10 +322,9 @@
         const answer = await pipeline(state.record, graphId(state.graph), specifier, state.name, attributes);
         let reference;
         if (answer.answer !== undefined && answer.answer.kind === 'link') {
-          reference = [...allReferences].find(candidate => {
-            const other = referenceState.get(candidate);
-            return other.context === answer.answer.context && other.name === answer.answer.name;
-          });
+          for (const candidate of refsById.get(answer.answer.context) ?? []) {
+            if (candidate.name === answer.answer.name) reference = candidate;
+          }
         } else {
           const source = answer.answer !== undefined ? answer.answer.source : answer.source;
           const handler = answer.answer !== undefined ? answer.answer.handler : answer.handler;
@@ -337,35 +336,39 @@
       state.status = 'loaded';
       return this;
     }
-    /// Binds the reference to `ctx` (one context per reference) and evaluates it there.
-    async evaluate(ctx) {
+    /// Binds the reference to `ctx` (one context per reference) and evaluates it there. Another call
+    /// for the same context waits for the first one and settles the same way.
+    evaluate(ctx) {
       const state = this.#state;
-      if (state.released) throw named(errors.BadHandle, 'released');
+      if (state.released) return Promise.reject(named(errors.BadHandle, 'released'));
       const contextId = contexts.get(ctx);
-      if (contextId === undefined) throw invalid('evaluate: expected a context');
-      if (state.context !== null) {
-        if (state.context !== contextId) throw invalid('this reference is bound to another context');
-        return;
-      }
-      await ensureText(state);
+      if (contextId === undefined) return Promise.reject(invalid('evaluate: expected a context'));
+      if (state.context !== null && state.context !== contextId)
+        return Promise.reject(invalid('this reference is bound to another context'));
+      if (state.evaluation !== undefined) return state.evaluation;
       state.context = contextId;
       state.contextObject = ctx;
       contextRefs.get(ctx)?.add(this);
       state.status = 'evaluating';
-      try {
-        const meta = state.meta ?? (await metaOf(state.record, state.name));
-        await native.context.evaluateSource(contextId, state.name, state.text, state.record.id, meta ?? '');
-        const code = take();
-        if (code !== 0) throw failure(code);
-        state.pin = host(native.context.pin, contextId, state.name);
-        state.status = 'evaluated';
-      } catch (error) {
-        state.status = 'errored';
-        contextRefs.get(ctx)?.delete(this);
-        state.context = null;
-        state.contextObject = undefined;
-        throw error;
-      }
+      state.evaluation = (async () => {
+        try {
+          await ensureText(state);
+          const meta = state.meta ?? (await metaOf(state.record, state.name));
+          await native.context.evaluateSource(contextId, state.name, state.text, state.record.id, meta ?? '');
+          const code = take();
+          if (code !== 0) throw failure(code);
+          state.pin = host(native.context.pin, contextId, state.name);
+          state.status = 'evaluated';
+        } catch (error) {
+          state.status = 'errored';
+          contextRefs.get(ctx)?.delete(this);
+          state.context = null;
+          state.contextObject = undefined;
+          state.evaluation = undefined;
+          throw error;
+        }
+      })();
+      return state.evaluation;
     }
     /// Lets the host free what the reference pins; the handle is unusable afterwards. With
     /// `retain: 'used'` the module is freed once nothing else holds it.
@@ -373,7 +376,6 @@
       const state = this.#state;
       if (state.released) return;
       state.released = true;
-      allReferences.delete(this);
       if (state.contextObject !== undefined) contextRefs.get(state.contextObject)?.delete(this);
       if (state.pin !== 0 && state.context !== null) {
         native.context.unpin(state.context, state.pin);
@@ -389,7 +391,8 @@
   const contexts = new WeakMap();
   /// context object -> the references bound to it
   const contextRefs = new WeakMap();
-  const allReferences = new Set();
+  /// context id -> the references bound to it (the same sets as `contextRefs`); `link` verdicts name a module by context id
+  const refsById = new Map();
 
   /// The text of a reference made from a recipe (read, transformed) once.
   const ensureText = async state => {
@@ -410,10 +413,10 @@
       contextObject: extra?.contextObject,
       meta: undefined,
       pin: 0,
+      evaluation: undefined,
       released: false,
     };
     const reference = new ModuleReference(state);
-    allReferences.add(reference);
     if (state.contextObject !== undefined) contextRefs.get(state.contextObject)?.add(reference);
     return reference;
   };
@@ -498,6 +501,7 @@
     rootGraph,
     contexts,
     contextRefs,
+    refsById,
     makeReference,
     referenceState,
     host,

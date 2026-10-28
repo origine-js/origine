@@ -10,6 +10,7 @@ pub const Engine = struct {
     platform: v8.Platform,
 
     pub const Options = struct {
+        /// V8's background workers (0: V8 chooses from the CPU count). Isolates on several threads share them.
         thread_pool_size: u32 = 1,
         idle_task_support: bool = true,
         /// Optional trace borrowed only until init returns; never retained.

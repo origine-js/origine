@@ -380,11 +380,16 @@ fn tagOfName(name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Numbers the temporary files of this process: the pid separates processes, this separates the
+/// threads (isolates) of one.
+var temporary_counter: std.atomic.Value(u32) = .init(0);
+
 /// Writes `data` to `path` under `root` atomically (a temporary file beside it, then rename),
-/// creating the directory on demand. The pid keeps concurrent writers from sharing a temporary.
+/// creating the directory on demand. The pid and a per-process counter keep concurrent writers, in
+/// other processes or on other threads, from sharing a temporary.
 fn writeAtomic(alloc: std.mem.Allocator, root: sys.Dir, path: []const u8, data: []const u8) !void {
     try root.createDirPath(std.fs.path.dirname(path).?);
-    const temporary = try std.fmt.allocPrint(alloc, "{s}.{d}.tmp", .{ path, std.c.getpid() });
+    const temporary = try std.fmt.allocPrint(alloc, "{s}.{d}.{d}.tmp", .{ path, std.c.getpid(), temporary_counter.fetchAdd(1, .monotonic) });
     defer alloc.free(temporary);
     errdefer root.deleteFile(temporary) catch {};
     try root.writeFile(.{ .sub_path = temporary, .data = data });

@@ -318,3 +318,57 @@ test "relative specifiers keep the root of an absolute referrer" {
     defer t.allocator.free(rel);
     try t.expectEqualStrings("app/dep.js", rel);
 }
+
+/// One thread of the concurrency test: stores the same entry over and over and reads it back.
+fn hammer(image: *const m.init_snapshot.Image, entry: *const cache.Entry, root: m.sys.Dir, hasher: m.init_snapshot.SourceHasher, failures: *std.atomic.Value(u32)) void {
+    for (0..25) |_| {
+        cache.store(t.allocator, root, entry, image) catch {
+            _ = failures.fetchAdd(1, .monotonic);
+            continue;
+        };
+        // A reader sees the whole file or none of it, never a half-written one.
+        if (cache.load(t.allocator, root, entry, hasher, null)) |found| {
+            var loaded = found;
+            if (!std.mem.eql(u8, loaded.blob, image.blob)) _ = failures.fetchAdd(1, .monotonic);
+            loaded.deinit();
+        } else _ = failures.fetchAdd(1, .monotonic);
+    }
+}
+
+test "init cache: several threads storing and loading one entry never see a partial file" {
+    ensureV8();
+    const host = try m.Api.Host.create(t.allocator, .{});
+    defer host.destroy();
+    var entry = try cache.entryFor(t.allocator, host, "app/init.js");
+    defer entry.deinit();
+    var salt: u8 = 1;
+    const hasher: m.init_snapshot.SourceHasher = .{ .data = &salt, .hash = hashId };
+    var label: [128]u8 = undefined;
+    var image = try m.init_snapshot.create(t.allocator, .{
+        .key = entry.key,
+        .identity = cache.identity(&label),
+        .scope = .{ .resolver = .{ .resolve = Memory.resolve }, .loader = .{ .load = load } },
+        .specifier = "app/init.js",
+        .source_hasher = hasher,
+    });
+    defer image.deinit();
+    var tmp = t.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    // The file exists before the readers start: every later read must hit.
+    try cache.store(t.allocator, .{ .handle = tmp.dir.handle }, &entry, &image);
+    var failures: std.atomic.Value(u32) = .init(0);
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, hammer, .{ &image, &entry, m.sys.Dir{ .handle = tmp.dir.handle }, hasher, &failures });
+    for (threads) |thread| thread.join();
+    try t.expectEqual(@as(u32, 0), failures.load(.monotonic));
+    // No temporary file is left behind.
+    var count: usize = 0;
+    var dir = try tmp.dir.openDir(t.io, "app/__oricache__", .{ .iterate = true });
+    defer dir.close(t.io);
+    var it = dir.iterate();
+    while (try it.next(t.io)) |item| {
+        try t.expect(!std.mem.endsWith(u8, item.name, ".tmp"));
+        count += 1;
+    }
+    try t.expectEqual(@as(usize, 1), count);
+}

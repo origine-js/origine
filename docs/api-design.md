@@ -25,7 +25,7 @@ Rust natives in `rust/crates/origine_api*`. Tests: `src/tests/managed/api.zig`. 
 | `api.graph`, `api.context` | The module graph ([graph-api.md](graph-api.md)): `api.graph.narrow({fs, codeCache})`, `recipe.create(graph)` giving a `ModuleReference` (`load`, `evaluate(ctx)`, `release`), and `api.context.create({import, graph?, preload?})` giving a realm with `import(specifier)`, `references` and `close()`. Replaces `api.scope`. See 4.5. |
 | Transformers | The init scope transforms `.ts .mts .cts .tsx .jsx` through oxc by default (`Host.Config.transformers`). Contexts transform what their handler's maker, or a source's `withTransformer`, names; the oxc ones are descriptors run natively (4.5). |
 | Intrinsics snapshot | Done (engine level, below the init snapshot): `managed.snapshot.create` builds a startup snapshot whose default context is already frozen; `Runtime.Options.snapshot` consumes it. The build runs `src/snapshot_tool.zig` (same V8 archive and `Engine.init` flags) and embeds the result in the executable (`build_options.has_snapshot`; cross builds skip it and use V8's built-in seed). `ORIGINE_NO_SNAPSHOT=1` disables it for comparison runs. Scope bootstrap helpers are restored from the snapshot instead of recompiled ([startup research](startup-optimization-research.md)). |
-| `isolate` | Absent (reserved name, see 4.6). |
+| `isolate`, `host.threading`, `host.Snapshot` | Done (see 4.6): isolates on other threads, ports and channels, heap snapshots. |
 
 Measured when the engine snapshot landed (release V8, debug app build, one scope; current numbers are in [shell-performance.md](shell-performance.md)): `Context::New` 3.75 ms average (7.6 ms first) with the unfrozen built-in seed, because each context installs features and freezes the intrinsic graph, versus 0.18 ms restored from a finalized custom snapshot. Scope creation drops from about 4.3 ms to about 0.55 ms; the snapshot takes 7.5 ms and about 400 KB and is generated at build time. Isolate creation (about 2.5 ms) is unchanged.
 
@@ -110,7 +110,7 @@ interface Api {
   host:    HostCap;     // machine and process: `host.env` (args and environment variables)
   graph:   ModuleGraph; // sources, code caches and the authority modules are produced with
   context: ContextCap;  // realms whose imports run through an import handler
-  isolate: IsolateCap;  // create isolates (not implemented)
+  isolate: IsolateCap;  // isolates on other threads (where the embedder allows them; not in BasicApi)
 }   // each capability has its own narrow(); there is no api-level narrow
 ```
 
@@ -178,9 +178,19 @@ await recipe.create(graph).evaluate(ctx);   // or: await ctx.import("dep")
 - **Preload scripts and `values`.** Each preload is evaluated in the context before it imports anything, as `(values) => { ... }`. `values` is a hardened (deep-frozen) value built in the parent; values that cross a context boundary follow `Scope.harden`: plain data and functions only. `{ module, values }` evaluates an ES module (`preload:<index>`) whose default export, if a function, is called with `values` and awaited. A failing preload rejects `create` with a `ModuleError` and closes the context.
 - **Cross-context imports.** `Import.link(reference, { mode })` makes a context use another context's evaluated module: `'hardened'` links a snapshot of its exports (plain data copied and frozen, functions and classes shared and frozen in place), `'shared'` links the V8 module itself (live bindings, the other realm's objects; V8 accepts it, see the spike in graph-api.md).
 
-### 4.6 `isolate`
+### 4.6 `isolate`, `host.threading`, `host.Snapshot`
 
-Not implemented. Reserved name. Constraints already fixed: it is an `api` capability, it is narrowable (count, heap limit), and it returns handles, never shared objects. Cross-isolate values would be structured-clone only.
+Implemented. References: [host.md](../src/js/docs/host.md) (ports, channels, snapshots) and [isolate.md](../src/js/docs/isolate.md); types in `types/host.d.ts` and `types/isolate.d.ts`.
+
+- **`api.isolate`** starts a V8 isolate with its own heap, `Host` and I/O runtimes on another thread (`src/api/thread_isolate.zig`). `create({ init, args?, env?, data?, transfer?, snapshot? })` returns `{ id, terminate(), join() }`. The new isolate runs `main(api, data)` where `data` is the structured clone of what the creator passed; `args` and `env` are copied, and nothing is inherited. There is no implicit channel: talking to the creator means passing a port in `data`. It is a separate capability, not part of the basic api, and exists only where the embedder passes `Config.isolates` (platform, a thread-safe ArrayBuffer allocator, the engine snapshot, a `max` of isolates per host); otherwise it is `PermissionDenied`.
+- **Authority.** A created isolate is **not** narrowed by its creator: its init module decides what it does, within the embedder's ceiling (the same fs root, runtime limits and isolate limit). This differs from `graph`/`context`, whose children get nothing. Nothing is shared except what crosses a message: values are structured-clone only, `SharedArrayBuffer`s are shared by reference (so `Atomics` works across isolates), and `ArrayBuffer`s and ports move only when listed in a transfer list.
+- **Lifetime.** Destroying a host terminates and joins every isolate it created, so the V8 engine outlives them all. The ports an isolate was given are closed when its thread ends, however it ends (a crash, `terminate`, an init that never loaded), so a peer is never left waiting. `terminate` interrupts running JavaScript at once; a thread blocked in I/O notices within about 100 ms.
+- **`host.threading`.** `parallelism` (logical CPUs) and `Channel`: `new Channel({ mode })` makes two connected ports, `[port, remotePort]`, in the same two read modes as `api.net` handles: `'pull'` (`recv()`, `for await`) and `'event'` (`register('message', fn)`), converted with `toEvent()`/`toPull()`. A message is `{ identity, data, transfer }`; `identity` names the sending isolate. Natives and codec: `rust/crates/origine_api/src/channel.rs` and `message.rs` (V8 `ValueSerializer`; a port is a host object that moves between isolates, owned by whichever isolate holds it and closed with it).
+- **`host.Snapshot`.** `create({ init })` evaluates an init graph in a throwaway isolate on the calling thread and snapshots the heap; `fromRaw`, `fromOrigineDataBlob`, `blob()` and `origineDataBlob()` convert to and from the raw V8 blob and the `__oricache__` file format. `create({ snapshot })` starts an isolate whose graph is already evaluated; the snapshot is reference counted so the isolate keeps it alive. A snapshot file fits only the build, the init specifier and the source files it was made from.
+- **Concurrency of the init cache.** The `__oricache__` writers (`init_cache.zig`) write a temporary file named from the pid and a per-process counter and rename it into place, so threads and processes can store the same entry at once and a reader sees a whole file or none; a test hammers one entry from four threads. Isolates do not write the cache themselves: only the process entry point does.
+- **V8 workers.** The platform's background threads (`Engine.Options.thread_pool_size`) are shared by all isolates; `ORIGINE_V8_WORKERS=n` sets them in the shell (default 1, 0 lets V8 choose from the CPU count).
+
+Not done: an I/O runtime that runs on another thread than its owner (the `io` capability stays on the isolate thread that made it), and passing a module recipe or import handler (rather than a specifier) to `create` and `Snapshot.create`.
 
 ## 5. Narrowing (monotonic attenuation)
 

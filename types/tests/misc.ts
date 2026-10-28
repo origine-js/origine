@@ -23,6 +23,12 @@ export const main: Main = async (api: Api) => {
   // @ts-expect-error capacity is required
   api.host.threading.channel({});
   eprintln("sent", String(message));
+  const worker = api.isolate.create({ init: "child.js", capacity: 2, args: ["a"], env: { A: "b" }, data: { n: 1 } });
+  await worker.tx.send("hi");
+  const exit = await worker.join();
+  eprintln(exit.status, exit.error ?? "ok", api.isolate.parent?.data);
+  // @ts-expect-error capacity is required
+  api.isolate.create({ init: "child.js" });
   const narrowed = api.host.env.narrow({ allow: ["HOME"] });
   const names: readonly string[] = narrowed.list();
   void names;

@@ -1,7 +1,7 @@
 // `api.host`: facts about the machine and process the program runs on. Evaluated as an expression
 // by src/api/glue.zig: `(native, util) => makeHostCap`. `makeHostCap()` builds the namespace.
 // `api.host.env` takes a Set of visible names, or null for all (`makeEnvCap(allow)`).
-(native, { freeze, freezeMethods, own }) => {
+(native, { freeze, freezeMethods, own, shared }) => {
   function makeEnvCap(allow) {
     const visible = name => allow === null || allow.has(name);
     return freezeMethods({
@@ -73,6 +73,9 @@
         }
       },
     });
+
+  // `api.isolate` builds its ends and its own channels from the same pieces.
+  shared.channels = { ready, makeSender, makeReceiver };
 
   return () => ({
     env: makeEnvCap(null),

@@ -16,6 +16,7 @@ const Host = host_api.Host;
 const Runtime = @import("../managed/runtime.zig").Runtime;
 const init_snapshot = @import("../managed/init_snapshot.zig");
 const ErrorInfo = @import("../managed/errors.zig").ErrorInfo;
+const abi = @import("api_abi.zig");
 
 pub const Options = struct {
     /// Module specifier of the child's init module (its exported `main(api)` runs). Copied.
@@ -30,6 +31,13 @@ pub const Options = struct {
     platform: v8.Platform,
     /// The shared read-only engine snapshot, or null for V8's built-in seed.
     engine_snapshot: ?[]align(16) const u8 = null,
+    /// What the child's `api.isolate.parent` is made of; null for a plain thread isolate.
+    link: ?host_api.ParentLink = null,
+    /// Lets the child create isolates in turn (null: it cannot).
+    isolates: ?host_api.IsolateConfig = null,
+    /// Channel ends closed when the thread is done (after its outcome is recorded), whether or not
+    /// the child took them over. Copied.
+    release: []const u32 = &.{},
 };
 
 /// How the thread ended. `failed` carries the error name in `failure`.
@@ -43,6 +51,8 @@ pub const ThreadIsolate = struct {
     /// Spinlock around `isolate`: `terminate` must not race the thread disposing it.
     lock: std.atomic.Value(bool) = .init(false),
     isolate: ?v8.Isolate = null,
+    /// Set (with release ordering) once the thread recorded its outcome and is about to exit.
+    finished: std.atomic.Value(bool) = .init(false),
     outcome: Outcome = .completed,
     failure_buffer: [64]u8 = undefined,
     failure_len: usize = 0,
@@ -82,6 +92,8 @@ pub const ThreadIsolate = struct {
             made_env += 1;
         }
         self.options.env = env;
+        self.options.release = try allocator.dupe(u32, options.release);
+        errdefer allocator.free(self.options.release);
         self.thread = try std.Thread.spawn(.{}, threadMain, .{self});
         return self;
     }
@@ -118,6 +130,7 @@ pub const ThreadIsolate = struct {
             allocator.free(pair.value);
         }
         allocator.free(self.options.env);
+        allocator.free(self.options.release);
         allocator.free(self.options.init);
         allocator.destroy(self);
     }
@@ -131,6 +144,11 @@ pub const ThreadIsolate = struct {
     }
 
     fn threadMain(self: *ThreadIsolate) void {
+        // After the outcome is recorded: a peer woken by a closed end then reads the final outcome.
+        defer {
+            self.finished.store(true, .release);
+            for (self.options.release) |handle| abi.origine_api_channel_close(handle);
+        }
         self.execute() catch |err| {
             if (self.stop.load(.acquire)) {
                 self.outcome = .terminated;
@@ -154,6 +172,8 @@ pub const ThreadIsolate = struct {
             .env = options.env,
             .fs = options.fs,
             .runtime = options.runtime,
+            .link = options.link,
+            .isolates = options.isolates,
         });
         host.stop = &self.stop;
         var rt: ?*Runtime = null;

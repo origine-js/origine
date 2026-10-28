@@ -7,6 +7,7 @@
 pub const Host = @import("api/host.zig").Host;
 pub const Config = @import("api/host.zig").Config;
 pub const ThreadIsolate = @import("api/thread_isolate.zig").ThreadIsolate;
+pub const IsolateConfig = @import("api/host.zig").IsolateConfig;
 pub const ThreadIsolateOutcome = @import("api/thread_isolate.zig").Outcome;
 pub const FsConfig = @import("api/host.zig").FsConfig;
 pub const RuntimeConfig = @import("api/host.zig").RuntimeConfig;

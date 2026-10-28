@@ -17,6 +17,8 @@ const func = binding.func;
 const env_api = @import("env.zig");
 const errno = @import("errno.zig");
 const threading_api = @import("threading.zig");
+const isolate_api = @import("isolate.zig");
+pub const ThreadIsolate = @import("thread_isolate.zig").ThreadIsolate;
 const fs_api = @import("fs.zig");
 const graph_api = @import("graph.zig");
 const context_api = @import("context.zig");
@@ -89,7 +91,26 @@ pub const RuntimeConfig = struct {
 /// cannot report its next delayed-task deadline, so the wait is capped and the platform pumped again.
 const platform_poll_ns: i64 = 100 * std.time.ns_per_ms;
 
+/// What a child isolate's `api.isolate.parent` is made of: the channel ends it was given (receiver
+/// and sender handles) and the id of the stashed `data` message (0: none).
+pub const ParentLink = struct { rx: u32, tx: u32, data: u64 };
+
+/// What `api.isolate.create` needs from the embedder; without it the guest has no `api.isolate`.
+/// Everything is borrowed and must outlive the Host and every isolate it spawned.
+pub const IsolateConfig = struct {
+    platform: v8.Platform,
+    /// Must be safe to use from several threads (the process-wide one is).
+    array_buffer_allocator: v8.ArrayBuffer.Allocator,
+    engine_snapshot: ?[]align(16) const u8 = null,
+    /// Most isolates this Host may create over its lifetime.
+    max: u32 = 256,
+};
+
 pub const Config = struct {
+    /// Enables `api.isolate`.
+    isolates: ?IsolateConfig = null,
+    /// Set for a Host that runs a child isolate: its `api.isolate.parent`.
+    link: ?ParentLink = null,
     args: []const []const u8 = &.{},
     env: []const env_api.Pair = &.{},
     fs: ?FsConfig = null,
@@ -200,6 +221,10 @@ pub const Host = struct {
     /// function in it never does (tests assert it).
     driver_calls: usize = 0,
     next_fs_id: u32 = 1,
+    isolates: ?IsolateConfig = null,
+    link: ?ParentLink = null,
+    /// Isolates this Host created, in id order (id = index + 1); terminated and joined by `destroy`.
+    children: std.ArrayList(*ThreadIsolate) = .empty,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
     rust_isolate: ?v8.Isolate = null,
     /// Set by an owner on another thread to end `settle` with `error.Terminated`.
@@ -211,7 +236,7 @@ pub const Host = struct {
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
     pub fn create(allocator: std.mem.Allocator, config: Config) !*Host {
         const host = try allocator.create(Host);
-        host.* = .{ .allocator = allocator, .args = config.args, .env = config.env, .fs = config.fs, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers } };
+        host.* = .{ .allocator = allocator, .args = config.args, .env = config.env, .fs = config.fs, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers }, .isolates = config.isolates, .link = config.link };
         return host;
     }
 
@@ -219,6 +244,12 @@ pub const Host = struct {
     /// `Runtime.destroy` (it releases V8 persistent handles).
     pub fn destroy(self: *Host) void {
         const alloc = self.allocator;
+        for (self.children.items) |child| {
+            child.terminate();
+            _ = child.join();
+            child.destroy();
+        }
+        self.children.deinit(alloc);
         if (self.rust_isolate) |isolate| origine_api_detach_isolate(isolate.handle);
         for (self.grants.items) |grant| {
             grant.deinit();
@@ -578,10 +609,10 @@ pub const Host = struct {
                     .args = func(env_api.args, .{ .side_effect = .none }),
                     .get = func(env_api.get, .{ .side_effect = .none }),
                     .list = func(env_api.list, .{ .side_effect = .none }),
-                    .attach = func(attachChannels, .{ .side_effect = .any }),
                 },
                 .threading = .{
                     .parallelism = func(threading_api.parallelism, .{ .side_effect = .none }),
+                    .attach = func(attachChannels, .{ .side_effect = .any }),
                 },
             }),
             .fs => try call.object(ScopeState, state, .{
@@ -632,10 +663,23 @@ pub const Host = struct {
                 }
                 break :blk object;
             },
+            .isolate => blk: {
+                if (host.isolates == null) return error.PermissionDenied;
+                break :blk try call.object(ScopeState, state, .{
+                    .isolate = .{
+                        .spawn = func(isolate_api.spawn, .{ .side_effect = .any }),
+                        .terminate = func(isolate_api.terminate, .{ .side_effect = .any }),
+                        .outcome = func(isolate_api.outcome, .{ .side_effect = .any }),
+                        .failure = func(isolate_api.failure, .{ .side_effect = .any }),
+                        .link = func(isolate_api.link, .{ .side_effect = .none }),
+                    },
+                });
+            },
             .io, .net => eu.v.object(env.isolate),
         };
         const keys: []const []const u8 = switch (module) {
             .host => &.{ "env", "threading" },
+            .isolate => &.{"isolate"},
             .fs => &.{"fsRequest"},
             else => &.{},
         };

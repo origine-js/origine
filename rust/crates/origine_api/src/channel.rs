@@ -60,6 +60,10 @@ fn lock(chan: &Chan) -> MutexGuard<'_, State> {
     chan.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Values stashed by `channel.stash` until `channel.unstash` takes them: how `isolate.create` hands
+/// its `data` to the new isolate. Process-wide, like the channels.
+static STASH: Mutex<Option<(u64, HashMap<u64, Message>)>> = Mutex::new(None);
+
 fn bad_handle() -> NativeError {
     NativeError::Errno(errno::BAD_HANDLE)
 }
@@ -256,6 +260,57 @@ fn channel_clone(host: &mut HostState, tx: u32) -> Result<u32, NativeError> {
     }
 }
 
+/// `native.channel.stash(value, transfer?)`: serializes `value` (moving the `transfer` buffers, like
+/// `send`) and keeps it until `unstash`. Returns an id.
+#[native(side_effect = "any", path = "channel.stash")]
+fn channel_stash<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    transfer: Option<v8::Local<'s, v8::Array>>,
+) -> Result<f64, NativeError> {
+    let buffers = transfer_list(scope, transfer)?;
+    let message = message::encode(scope, value, &buffers)?;
+    let mut guard = STASH.lock().unwrap_or_else(PoisonError::into_inner);
+    let (next, map) = guard.get_or_insert_with(|| (1, HashMap::new()));
+    let id = *next;
+    *next += 1;
+    map.insert(id, message);
+    // Ids stay below 2^53, so they are exact as JS numbers.
+    Ok(id as f64)
+}
+
+/// `native.channel.unstash(id)`: the stashed value, rebuilt in this isolate; the stash entry is
+/// consumed. `NotFound` for an unknown or already taken id.
+#[native(side_effect = "any", path = "channel.unstash")]
+fn channel_unstash<'s>(scope: &mut v8::PinScope<'s, '_>, id: f64) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let message = (id >= 1.0 && id.fract() == 0.0)
+        .then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64))))
+        .flatten()
+        .ok_or(NativeError::Errno(errno::NOT_FOUND))?;
+    message::decode(scope, message)
+}
+
+/// `native.channel.discard(id)`: discards a stashed value that will never be taken (`NotFound` if gone).
+#[native(side_effect = "any", path = "channel.discard")]
+fn channel_discard(id: f64) -> Result<(), NativeError> {
+    let gone = (id >= 1.0 && id.fract() == 0.0)
+        .then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64))))
+        .flatten();
+    gone.map(drop).ok_or(NativeError::Errno(errno::NOT_FOUND))
+}
+
+fn transfer_list<'s>(scope: &mut v8::PinScope<'s, '_>, transfer: Option<v8::Local<'s, v8::Array>>) -> Result<Vec<v8::Local<'s, v8::ArrayBuffer>>, NativeError> {
+    let mut buffers = Vec::new();
+    if let Some(list) = transfer {
+        for index in 0..list.length() {
+            let item = list.get_index(scope, index).ok_or_else(|| NativeError::type_error("cannot read the transfer list"))?;
+            let buffer = v8::Local::<v8::ArrayBuffer>::try_from(item).map_err(|_| NativeError::type_error("the transfer list holds only ArrayBuffers"))?;
+            buffers.push(buffer);
+        }
+    }
+    Ok(buffers)
+}
+
 /// `native.channel.close(handle)`: closes a sender (the last one lets `recv` drain and then fail
 /// `NotConnected`) or the receiver (queued messages are dropped and `send` fails `BrokenPipe`).
 /// `BadHandle` for an unknown or already closed handle.
@@ -343,14 +398,7 @@ fn channel_send<'s>(
     transfer: Option<v8::Local<'s, v8::Array>>,
 ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
     find(tx, End::Sender)?;
-    let mut buffers = Vec::new();
-    if let Some(list) = transfer {
-        for index in 0..list.length() {
-            let item = list.get_index(scope, index).ok_or_else(|| NativeError::type_error("cannot read the transfer list"))?;
-            let buffer = v8::Local::<v8::ArrayBuffer>::try_from(item).map_err(|_| NativeError::type_error("the transfer list holds only ArrayBuffers"))?;
-            buffers.push(buffer);
-        }
-    }
+    let buffers = transfer_list(scope, transfer)?;
     let message = message::encode(scope, value, &buffers)?;
     let (resolver, pending) = promise(scope)?;
     let promise = resolver.get_promise(scope);

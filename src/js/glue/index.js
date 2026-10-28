@@ -11,6 +11,7 @@
     host: undefined,
     graph: undefined,
     context: undefined,
+    isolate: undefined,
     io: { parent: null, backends: undefined, max: Infinity, live: 0 },
     net: undefined,
   };
@@ -20,7 +21,7 @@
   const full = {};
   const basic = {};
   // `context` is built on the parts `graph` publishes, so binding it binds `graph` first.
-  const needs = { context: 'graph' };
+  const needs = { context: 'graph', isolate: 'host' };
   const access = name => {
     if (needs[name] !== undefined) access(needs[name]);
     if (!bound[name]) {
@@ -38,11 +39,11 @@
     }
     return capabilities[name];
   };
-  for (const name of ['fs', 'host', 'graph', 'context', 'io', 'net']) {
+  for (const name of ['fs', 'host', 'graph', 'context', 'isolate', 'io', 'net']) {
     const get = freeze(() => access(name));
     const descriptor = { get, enumerable: true, configurable: false };
     Object.defineProperty(full, name, descriptor);
-    if (name !== 'io' && name !== 'net') Object.defineProperty(basic, name, descriptor);
+    if (name !== 'io' && name !== 'net' && name !== 'isolate') Object.defineProperty(basic, name, descriptor);
   }
   // Private context embedder data holds this bundle; guest code receives only an API.
   return [freeze(full), freeze(basic), native, util.errno, prepare];

@@ -9,28 +9,41 @@ const check = @import("support.zig").check;
 const Isolate = m.Api.ThreadIsolate;
 
 /// An init module in a tmp dir run in this thread's isolate with the dir as fs root.
-const Parent = struct {
+pub const Parent = struct {
     tmp: t.TmpDir,
     rt: *m.Runtime,
     host: *m.Api.Host,
     scope: *m.Scope,
     init_path: []u8,
+    /// The host's arguments borrow this until `deinit`.
+    argv: [1][]const u8,
 
-    fn setup(self: *Parent, name: []const u8, source: []const u8) !void {
+    pub fn setup(self: *Parent, name: []const u8, source: []const u8) !void {
+        return self.setupWith(name, source, null);
+    }
+
+    /// `isolates` enables `api.isolate`; the host's argument is the init path (the way the process entry point passes it).
+    pub fn setupWith(self: *Parent, name: []const u8, source: []const u8, isolates: ?m.Api.IsolateConfig) !void {
         ensureV8();
         self.tmp = t.tmpDir(.{ .iterate = true });
         errdefer self.tmp.cleanup();
         try self.tmp.dir.writeFile(t.io, .{ .sub_path = name, .data = source });
         self.init_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.tmp.sub_path, name });
         errdefer t.allocator.free(self.init_path);
+        self.argv = .{self.init_path};
         self.rt = try m.Runtime.create(t.allocator, .{});
         errdefer self.rt.destroy();
-        self.host = try m.Api.Host.create(t.allocator, .{ .fs = .{ .root = .{ .handle = self.tmp.dir.handle } }, .runtime = .{} });
+        self.host = try m.Api.Host.create(t.allocator, .{
+            .args = &self.argv,
+            .fs = .{ .root = .{ .handle = self.tmp.dir.handle } },
+            .runtime = .{},
+            .isolates = isolates,
+        });
         errdefer self.host.destroy();
         self.scope = try self.rt.createScope(self.host.initOptions());
     }
 
-    fn run(self: *Parent) !void {
+    pub fn run(self: *Parent) !void {
         var error_info: m.ErrorInfo = .{};
         defer error_info.deinit();
         self.host.run(self.scope, support.engine.platform, self.init_path, &error_info) catch |err| {
@@ -56,7 +69,7 @@ const Parent = struct {
         std.debug.print("init failed: {s}\n", .{buffer[0..length]});
     }
 
-    fn deinit(self: *Parent) void {
+    pub fn deinit(self: *Parent) void {
         self.host.destroy();
         self.rt.destroy();
         t.allocator.free(self.init_path);

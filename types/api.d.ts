@@ -4,6 +4,7 @@ import type { IoCap } from "./io.d.ts";
 import type { NetCap } from "./net.d.ts";
 import type { ContextCap } from "./context.d.ts";
 import type { ModuleGraph } from "./graph.d.ts";
+import type { IsolateCap } from "./isolate.d.ts";
 
 /**
  * The host API handed to `main`: every permission a program has. Frozen. Narrow a capability
@@ -24,6 +25,8 @@ export interface Api {
   readonly graph: ModuleGraph;
   /** Realms whose imports run through an import handler. */
   readonly context: ContextCap;
+  /** Isolates on other threads (where the embedder allows them). */
+  readonly isolate: IsolateCap;
 }
 
 /** The part of {@link Api} every embedder provides. */

@@ -61,6 +61,7 @@ wrap the same commands. `just` with no arguments lists every recipe.
 | `just test-repl` | Drives the REPL in a pseudo-terminal ([repl](repl.md)) |
 
 `oxfmt` and `oxlint` run through `vpx` at the versions pinned in the `justfile`.
+(if `vpx` is not in `PATH`, check `~/.vite-plus/bin`)
 
 ## Release V8 by default
 

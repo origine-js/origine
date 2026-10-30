@@ -29,23 +29,26 @@ declare module "origine:@std/io" {
    */
   export type Outcome<F extends Fs, T> = F extends SyncFs ? T : Promise<T>;
 
-  /** A frozen `{ errno, name }` error value of the I/O domain: what failed fs and net operations throw or reject with. */
+  /** An Error subclass instance of the I/O domain: what failed fs and net operations throw or reject with. */
   export type IoError = ThrownIoError;
 
-  /** A frozen `{ errno, name }` error value of the host domain (`BadHandle`, `StaleHandle`, `Canceled`, `Unexpected`). */
+  /** An Error subclass instance of the host domain (`BadHandle`, `StaleHandle`, `Canceled`, `Unexpected`). */
   export type HostError = ThrownHostError;
 
   /** The static side of {@link IoError}: the I/O error codes by name (like `ERRNO.io`) and helpers. */
   export interface IoErrorStatics extends IoErrnoTable {
+    new (code: IoErrnoCode, message?: string): IoError;
+    readonly prototype: IoError;
+    nameOf(code: number): IoErrnoName | HostErrnoName;
     /** The name of `code`, of either domain; `'Unexpected'` for an unknown one. */
     name(code: number): IoErrnoName | HostErrnoName;
     /** Whether `value` (a code, or anything with an `errno`) is `code`. Narrows an unknown caught value to that error. */
     is(value: number, code: number): boolean;
     is<C extends IoErrnoCode>(value: unknown, code: C): value is IoErrorByCode<C>;
-    /** A frozen `{ errno, name }` error value for `code`. */
-    of<C extends IoErrnoCode>(code: C): IoErrorByCode<C>;
+    /** An Error subclass instance for `code`. */
+    of<C extends IoErrnoCode>(code: C, message?: string): IoErrorByCode<C>;
     /**
-     * For a sync call: throws a frozen `{ errno, name }` (an {@link IoError} or a {@link HostError}) when
+     * For a sync call: throws an `OrigineError` subclass instance (an {@link IoError} or a {@link HostError}) when
      * it left a non-zero code in `fs.errno` (and resets it), otherwise returns `value`, which a sync
      * operation returns as `undefined` only when it failed, so the result is typed without `undefined`.
      */
@@ -54,19 +57,22 @@ declare module "origine:@std/io" {
 
   /** The static side of {@link HostError}: the host error codes by name (like `ERRNO.host`) and helpers. */
   export interface HostErrorStatics extends HostErrnoTable {
+    new (code: HostErrnoCode, message?: string): HostError;
+    readonly prototype: HostError;
+    nameOf(code: number): IoErrnoName | HostErrnoName;
     /** The name of `code`, of either domain; `'Unexpected'` for an unknown one. */
     name(code: number): IoErrnoName | HostErrnoName;
     /** Whether `value` (a code, or anything with an `errno`) is `code`. Narrows an unknown caught value to that error. */
     is(value: number, code: number): boolean;
     is<C extends HostErrnoCode>(value: unknown, code: C): value is HostErrorByCode<C>;
-    /** A frozen `{ errno, name }` error value for `code`. */
-    of<C extends HostErrnoCode>(code: C): HostErrorByCode<C>;
+    /** An Error subclass instance for `code`. */
+    of<C extends HostErrnoCode>(code: C, message?: string): HostErrorByCode<C>;
   }
 
   /**
    * I/O error codes named like Rust's `std::io::ErrorKind` (`IoError.NotFound`, ...; the set of `ERRNO.io`)
    * plus `name`, `is`, `of` and `check`. As a type, `IoError` is what a failed fs or net operation throws
-   * (sync) or rejects with (async): a plain `{ errno, name }` object, not an `Error`.
+   * (sync) or rejects with (async): an `OrigineError` subclass with message and stack.
    */
   export const IoError: IoErrorStatics;
 
@@ -128,7 +134,7 @@ declare module "origine:@std/io" {
   }
 
   /**
-   * A directory descriptor (frozen `{ kind: 'dir', fs, id }`). Every method takes the grant `io`
+   * A directory descriptor (JS `DirRef` instances with read-only kind, fs, and id fields). Every method takes the grant `io`
    * first and returns the value (sync) or a promise of it (async). Paths are confined to the grant's
    * root lexically (no `..`, no absolute path: `PermissionDenied`; a NUL: `InvalidInput`).
    */
@@ -170,7 +176,7 @@ declare module "origine:@std/io" {
   }
 
   /**
-   * A file descriptor (frozen `{ kind: 'file', fs, id }`). Every method takes the grant `io` first.
+   * A file descriptor (JS `FileRef` instances with read-only kind, fs, and id fields). Every method takes the grant `io` first.
    * **Writes copy** the bytes at call time and never detach your `ArrayBuffer`; the `*Move`
    * variants (async grants only) transfer it instead. Close with `close(io)`.
    */

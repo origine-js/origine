@@ -7,8 +7,8 @@ import type { ModuleGraph } from "./graph.d.ts";
 import type { IsolateCap } from "./isolate.d.ts";
 
 /**
- * The host API handed to `main`: every permission a program has. Frozen. Narrow a capability
- * (`api.host.env.narrow`, `api.io.narrow`) to hand a slice to a context; nothing widens one.
+ * The host API handed to `main`: every permission a program has. Frozen. `api.io.narrow` restricts backend choices and shared runtime quotas;
+ * filesystem authority is selected explicitly through grants.
  * `api.io` and `api.net` exist where the embedder gave the program a runtime ceiling (the
  * `origine` shell does); see {@link BasicApi} for code that must also run without it.
  */

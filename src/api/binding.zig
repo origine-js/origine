@@ -41,8 +41,8 @@
 //! - **Results.** The return value (optionally an error union) is encoded (see
 //!   `encode`): integers, floats, bools, strings, `?T`, slices and tuples (arrays),
 //!   structs (objects), V8 handles, or any type with `pub fn encode(self, env) !v8.Value`.
-//! - **Fast calls.** A native whose parameters are all `u32`, `f64` or `bool` (after
-//!   the state) and whose result is void, bool, `u32`, `u64` or `f64` (or an
+//! - **Fast calls.** A native whose parameters are `u32`, `f64`, `bool`, `v8.Value` or
+//!   `v8.Object` (after the state) and whose result is void, bool, `u32`, `u64` or `f64` (or an
 //!   error union of one) also gets a V8 fast API entry (`fast`), so optimized JS calls it
 //!   without building a `FunctionCallbackInfo`. The slow callback stays as the fallback. On
 //!   the fast path a failure still writes the errno cell but the result is zero rather than
@@ -259,6 +259,7 @@ fn fastParam(comptime T: type) ?FastType {
         u32 => .Uint32,
         f64 => .Float64,
         bool => .Bool,
+        v8.Value, v8.Object => .V8Value,
         else => null,
     };
 }
@@ -268,7 +269,10 @@ fn fastResult(comptime T: type) ?FastType {
     return switch (T) {
         void => .Void,
         u64 => .Uint64,
-        else => fastParam(T),
+        u32 => .Uint32,
+        f64 => .Float64,
+        bool => .Bool,
+        else => null,
     };
 }
 
@@ -321,8 +325,17 @@ fn Fast(comptime State: type, comptime callee: anytype, comptime detached: Detac
         pub const overloads = [_]v8.CFunction{c_function};
 
         fn P(comptime index: usize) type {
-            return Fn.param_types[index + 1].?;
+            const T = Fn.param_types[index + 1].?;
+            // V8 passes Local<Value> bits directly, not our normalized Zig wrapper.
+            return if (T == v8.Value or T == v8.Object) usize else T;
         }
+
+        const needs_handle_scope = blk: {
+            for (Fn.param_types[1..]) |param| {
+                if (param.? == v8.Value or param.? == v8.Object) break :blk true;
+            }
+            break :blk false;
+        };
 
         /// Runs `callee` with the state recovered from `options.data`. Borrows `options` for
         /// the call; a failure is recorded in the errno cell and yields a zero result.
@@ -336,9 +349,31 @@ fn Fast(comptime State: type, comptime callee: anytype, comptime detached: Detac
                     return std.mem.zeroes(Result);
                 }
             }
+            // A handle-taking callee may create Local handles or invoke V8 APIs. Keep
+            // them scoped through the call; never retain an incoming Local afterwards.
+            var handle_scope: v8.HandleScope = undefined;
+            if (comptime needs_handle_scope) handle_scope.init(.{ .handle = @ptrCast(options.isolate.?) });
+            defer if (comptime needs_handle_scope) handle_scope.deinit();
             var args: std.meta.ArgsTuple(@TypeOf(callee)) = undefined;
             args[0] = if (comptime Fn.param_types[0].? == *State) state else state.core();
-            inline for (0..arity) |index| args[index + 1] = js_args[index];
+            inline for (0..arity) |index| {
+                const T = Fn.param_types[index + 1].?;
+                if (comptime T == v8.Value or T == v8.Object) {
+                    const value = v8.Value.from_opaque(v8.fromRawLocal(js_args[index])) orelse {
+                        call_mod.record(cell, error.InvalidArgument);
+                        return std.mem.zeroes(Result);
+                    };
+                    if (comptime T == v8.Object) {
+                        // kV8Value admits every JS value. Match decode(v8.Object)
+                        // instead of treating a primitive's bits as an Object handle.
+                        if (!value.isObject()) {
+                            call_mod.record(cell, error.InvalidArgument);
+                            return std.mem.zeroes(Result);
+                        }
+                        args[index + 1] = v8.Object.from_opaque(value.data.handle).?;
+                    } else args[index + 1] = value;
+                } else args[index + 1] = js_args[index];
+            }
             if (@typeInfo(Fn.return_type.?) == .error_union) {
                 return @call(.always_inline, callee, args) catch |err| {
                     call_mod.record(cell, err);

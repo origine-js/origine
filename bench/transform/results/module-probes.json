@@ -1,0 +1,42 @@
+[
+  {
+    "mode": "yuku-fast",
+    "probe": "import-equals",
+    "status": -2
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "export-equals",
+    "status": -2
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "import-equals",
+    "status": 0,
+    "code": "const Foo = require(\"pkg\");\nexport const answer = Foo.answer;\n",
+    "v8_syntax_valid": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "export-equals",
+    "status": 0,
+    "code": "const value = 42;\nmodule.exports = value;\n",
+    "v8_syntax_valid": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "import-equals",
+    "status": 0,
+    "code": "const Foo = import.sync(\"pkg\");\nexport const answer = Foo.answer;\n",
+    "v8_syntax_valid": false,
+    "error": "Unexpected identifier 'sync'"
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "export-equals",
+    "status": 0,
+    "code": "const value = 42;\nexport = value;\n",
+    "v8_syntax_valid": false,
+    "error": "Unexpected token 'export'"
+  }
+]

@@ -63,7 +63,7 @@ The table records the source-backed hypotheses investigated. The controlled meas
 
 V8's own warmup routine makes a cold snapshot, restores it, runs a warmup script in a disposable context, creates a clean context, and serializes with `kKeep`. This is a useful pattern for keeping compilation benefits without intentionally preserving the warmup script's mutated application context. It is not a guarantee that every optimization or machine-code tier survives. Evaluate the pinned implementation, not a historical API example. [V8 warmup implementation](https://github.com/v8/v8/blob/a98309795399032afd2f191adaa94ed6e9918437/src/snapshot/snapshot.cc), [V8 custom startup snapshots](https://v8.dev/blog/custom-startup-snapshots).
 
-A candidate must change both creators: clearing code when generating the per-init snapshot could undo benefits of keeping code in the embedded engine snapshot. Measure blob growth and deserialization: retaining unused functions could cost more to load than the compilation it saves. Do not warm real filesystem/network operations, capture credentials, or serialize runtime authority merely to exercise code. The existing JS-only API template is the appropriate boundary.
+A candidate must change both creators: clearing code when generating the per-init snapshot could undo benefits of keeping code in the embedded engine snapshot. Measure blob growth and deserialization: retaining unused functions could cost more to load than the compilation it saves. Do not warm real filesystem/network operations, capture credentials, or serialize runtime authority merely to exercise code. The host-independent, snapshot-safe API template is the appropriate boundary.
 
 ## Native initialization cannot all move into a JS snapshot
 

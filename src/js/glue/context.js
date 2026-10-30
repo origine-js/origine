@@ -1,21 +1,20 @@
-// `api.context`: realms whose imports run through an ImportHandler. Evaluated as an expression by
-// src/api/glue.zig: `(native, util) => makeContextCap`. It builds on the parts the graph glue
-// publishes in `util.shared.graph` (index.js binds `graph` before `context`).
-(native, util) => {
-  'use strict';
-  const { freeze, take, failure, own } = util;
+// `api.context`: realms whose imports run through an ImportHandler. An ES module factory used by
+// index.js. It builds on the parts the graph glue
+// publishes in shared module state (index.js prepares `graph` before `context`).
+import { recordOf, freeze, failure, own, shared, errors } from './util.js';
+export default (native, { take }) => {
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
 
   const makeContextCap = () => {
-    const shared = () => util.shared.graph;
+    const graphShared = () => shared.graph;
     return freeze({
       /// A realm. `import` (an ImportHandler) answers the `import()` of code that has no module around it
       /// (scripts, `ctx.import`) and is required: it decides what the realm can load. `graph` defaults to
       /// `api.graph`.
       async create(options) {
-        const { register, rootGraph, graphId, contexts, contextRefs, refsById, makeReference, host, invalid, named } = shared();
+        const { register, rootGraph, graphId, contexts, contextRefs, refsById, makeReference, host, invalid, named } = graphShared();
         const handler = own(options, 'import');
         const graph = own(options, 'graph') ?? rootGraph();
         const preload = own(options, 'preload') ?? [];
@@ -30,7 +29,7 @@
         const record = register(handler);
         const id = host(native.context.create, record.id, graphId(graph));
         const refs = new Set();
-        const context = {
+        const context = recordOf('Context', {
           graph,
           /// Imports `specifier` as a script's `import()` would, through this context's handler. Resolves a
           /// reference to the evaluated module.
@@ -38,7 +37,7 @@
             if (typeof specifier !== 'string') throw invalid('import: specifier must be a string');
             const attributes = own(o, 'attributes') ?? {};
             const phase = own(o, 'phase') ?? 'evaluation';
-            if (phase !== 'evaluation') throw named(util.errors.Unsupported, `${phase} imports are not implemented`);
+            if (phase !== 'evaluation') throw named(errors.Unsupported, `${phase} imports are not implemented`);
             const name = await native.context.importSpecifier(id, specifier, attributesJson(attributes));
             const code = take();
             if (code !== 0) throw failure(code);
@@ -51,7 +50,7 @@
               context: id,
               contextObject: context,
             });
-            shared().referenceState.get(imported).pin = host(native.context.pin, id, name);
+            graphShared().referenceState.get(imported).pin = host(native.context.pin, id, name);
             return imported;
           },
           /// The references bound to this context.
@@ -67,8 +66,7 @@
             native.context.close(id);
             take();
           },
-        };
-        freeze(context);
+        });
         contexts.set(context, id);
         contextRefs.set(context, refs);
         refsById.set(id, refs);

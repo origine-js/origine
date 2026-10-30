@@ -13,7 +13,7 @@ import { Dir, File, FileKind, IoError, Limit, ops } from 'origine:@std/io';
 As in Zig, every `Dir`/`File` method takes `io` first. Here `io` is the fs object from the
 host's `api`: `api.fs.requestSync({ root, access })` (blocks; throws an `IoError` value; failures
 go through the shared `errno` cell, `IoError.check`) or `await api.fs.requestAsync({ io, root, access })`
-(returns promises that reject with an `IoError`-shaped value; never touches the errno cell;
+(returns promises that reject with an `IoError` or `HostError` instance; never touches the errno cell;
 operations run on the `api.io` runtime `io`). Each method dispatches on `io.kind`
 (`'sync' | 'async'`). The async arm has the same operation names and result shapes.
 
@@ -56,7 +56,7 @@ file.close(io);
 ## `Dir`
 
 `Dir.cwd()` is the sentinel each fs resolves to its own root. `Dir.at(fs, id)` builds a
-descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs, id }`.
+descriptor, `Dir.is(value)` tests one. Descriptors are JS `DirRef` instances with read-only kind, fs, and id fields.
 
 | Method (after `io`) | Zig counterpart / behavior |
 | --- | --- |
@@ -75,7 +75,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs
 
 ## `File`
 
-`File.at(fs, id)`, `File.is(value)`; frozen `{ kind: 'file', fs, id }`.
+`File.at(fs, id)`, `File.is(value)`; JS `FileRef` instances with read-only kind, fs, and id fields.
 
 | Method (after `io`) | Behavior |
 | --- | --- |
@@ -85,7 +85,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs
 | `readPositional(buffer, offset)` | One positional read. |
 | `readPositionalAll(buffer, offset)` | Fills `buffer` until full or end; returns the count. |
 | `readAll(limit = Limit.unlimited)` | Rest of the file as `Uint8Array`. |
-| `readInto(view, offset?)` | Async only. BYOB: detaches `view`'s buffer (if eligible), resolves frozen `{ bytes, buffer }` with `buffer` a view like `view` over the filled memory. |
+| `readInto(view, offset?)` | Async only. BYOB: detaches `view`'s buffer (if eligible), resolves a native ReadResult with read-only bytes and buffer fields with `buffer` a view like `view` over the filled memory. |
 | `readAlloc(len, offset?)` | Async only. Resolves a `Uint8Array` of the bytes read (at most `len`; empty at end). |
 | `writeStreaming(bytes)` | One write; returns the count (may be partial). Copies. |
 | `writeStreamingAll(bytes)`, `writePositionalAll(bytes, offset)` | Write everything. Copy. |
@@ -94,13 +94,13 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `{ kind: 'dir', fs
 
 ## Values
 
-- **`IoError`** — frozen table of the I/O error codes, named like Rust's `std::io::ErrorKind`
+- **`IoError`** — an `OrigineError` subclass with static I/O error codes, named like Rust's `std::io::ErrorKind`
   (`IoError.NotFound`, …, the set of [`ERRNO.io`](errno.md)) plus helpers: `name(code)` (either
-  domain), `is(value, code)` (number or any `{ errno }`), `of(code)` → frozen `{ errno, name }`, and
+  domain), `is(value, code)` (number or any `{ errno }`), `of(code)` → an `OrigineError` subclass instance, and
   `check(fs, value)` which throws that value (an I/O or a host error) when the sync call left a non-zero
-  errno in `fs.errno`. Thrown/rejected errors are `{ errno, name }` data, not `Error`s. fs and net fail
+  errno in `fs.errno`. Thrown/rejected errors extend `OrigineError` and `Error`, with errno, name, message, and stack. fs and net fail
   with an `IoError`, or a `HostError` for a bad handle.
-- **`HostError`** — the same for origine's own runtime codes (`HostError.BadHandle`, `StaleHandle`,
+- **`HostError`** — an `OrigineError` subclass for origine's own runtime codes (`HostError.BadHandle`, `StaleHandle`,
   `Canceled`, `Unexpected`; [`ERRNO.host`](errno.md)), with `name`, `is`, `of`. `io.close()`, timers
   and scope handles fail with a `HostError` only.
 - **`Limit`** — byte limit with `std.Io.Limit` semantics: `Limit.unlimited` (`Infinity`),

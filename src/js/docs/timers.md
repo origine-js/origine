@@ -40,7 +40,7 @@ deadline and may run later when the isolate is busy. A zero-delay timer never
 settles synchronously. No relative ordering is promised for equal deadlines.
 
 `cancel()` returns `true` when it canceled a pending timer and rejects that timer's
-promise with the frozen `{ errno, name: 'Canceled' }` error used by other I/O APIs.
+promise with a `HostError` instance with errno `Canceled` error used by other I/O APIs.
 It removes the native task and cancels its backend timeout. Repeated cancellation,
 cancellation after settlement, and cancellation after runtime close return `false`.
 A retained old handle cannot cancel a newer timer. Attach a rejection handler

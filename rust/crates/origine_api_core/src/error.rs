@@ -11,8 +11,8 @@ use crate::errno;
 pub enum NativeError {
     /// A bad argument: a `TypeError` with the message `argument N: expected X`.
     Arg(ArgError),
-    /// An `Errno` failure: the frozen value `{ errno, name }` (the same shape `glue/util.js`
-    /// `failure(code)` builds).
+    /// An `Errno` failure: the shared OrigineError subclass instance that
+    /// `glue/util.js` `failure(code)` builds.
     Errno(u32),
     /// A plain `TypeError`.
     Type(String),

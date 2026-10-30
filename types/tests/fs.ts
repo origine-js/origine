@@ -127,7 +127,7 @@ export async function main(api: Api): Promise<void> {
   decodeUtf8("abc");
   // @ts-expect-error misspelled decoder option
   decodeUtf8(encoded, { fatel: true });
-  // @ts-expect-error an error value is not an Error
+  // Runtime error classes expose the standard Error message.
   const message: string = IoErrors.of(IoErrors.NotFound).message;
   // @ts-expect-error an unknown error code
   IoErrors.of(99);

@@ -1,38 +1,21 @@
 // `origine:@std/io`: Zig-style Io vocabulary for the init context.
 // Pure data: holding any of these values confers no authority. The errno table is
 // generated from `IoErrno` and `HostErrno` (`origine:@std/errno`), not written here.
-import { ERRNO } from 'origine:@std/errno';
+import { define, is as recordIs } from 'origine:@internal/records';
 import { quansync } from 'origine:@std/quansync';
 
 const freeze = Object.freeze;
+const makeDir = define('DirRef');
+const makeFile = define('FileRef');
+const methods = prototype =>
+  Object.fromEntries(
+    Object.getOwnPropertyNames(prototype)
+      .filter(key => key !== 'constructor')
+      .map(key => [key, prototype[key]]),
+  );
 
-const NAMES = new Map([...Object.entries(ERRNO.io), ...Object.entries(ERRNO.host)].map(([name, code]) => [code, name]));
-const nameOf = code => NAMES.get(code) ?? 'Unexpected';
-const is = (value, code) => (typeof value === 'number' ? value : value?.errno) === code;
-/// A frozen `{ errno, name }` error value for `code`.
-const of = code => freeze({ errno: code, name: nameOf(code) });
-
-/// The I/O error codes, named like Rust's `std::io::ErrorKind` (`IoError.NotFound`, ...): what fs and
-/// net raise. `is` accepts a number or any `{ errno }`. A call can also fail with a `HostError`.
-export const IoError = freeze({
-  ...ERRNO.io,
-  name: nameOf,
-  is,
-  of,
-  /// Throws a frozen `{ errno, name }` (an `IoError` or a `HostError` value) when a sync call left a
-  /// non-zero errno in `fs.errno`, and resets the state. Returns `value` otherwise.
-  check(fs, value) {
-    const code = fs.errno[0];
-    if (code === 0) return value;
-    fs.errno[0] = 0;
-    throw of(code);
-  },
-});
-
-/// The host error codes: origine's own runtime concepts that Rust's `ErrorKind` has no name for
-/// (`HostError.BadHandle`, `StaleHandle`, `Canceled`, `Unexpected`). Any native can raise them.
-/// Same helpers as `IoError`.
-export const HostError = freeze({ ...ERRNO.host, name: nameOf, is, of });
+export { IoError, HostError } from 'origine:@std/errors';
+import { IoError } from 'origine:@std/errors';
 
 /// Byte limit with `std.Io.Limit` semantics. `unlimited` is Infinity (maxInt(usize)).
 export const Limit = freeze({
@@ -187,7 +170,7 @@ class DirImpl {
     this.kind = 'dir';
     this.fs = fs;
     this.id = id;
-    freeze(this);
+    return makeDir({ ...this, ...methods(DirImpl.prototype) });
   }
   /// Zig `Dir.openFile`. options: `{ mode: 'read_only' | 'write_only' | 'read_write' }`.
   openFile(io, path, options) {
@@ -259,7 +242,7 @@ class FileImpl {
     this.kind = 'file';
     this.fs = fs;
     this.id = id;
-    freeze(this);
+    return makeFile({ ...this, ...methods(FileImpl.prototype) });
   }
   close(io) {
     return fileClose[io.kind](io, this);
@@ -284,7 +267,7 @@ class FileImpl {
   /// Async only (the sync arm throws Unsupported). BYOB read into `view` (an ArrayBuffer or any view)
   /// from the current position, or from `offset` when given. Zero-copy: the guest's buffer is
   /// detached (when eligible: not shared, not resizable) and the result is the only live handle on
-  /// that memory. Resolves a frozen `{ bytes, buffer }`, `buffer` being a view of the same kind,
+  /// that memory. Resolves a JS ReadResult with read-only bytes and buffer fields, `buffer` being a view of the same kind,
   /// byteOffset and length as `view` over the filled memory; read it from there and not from `view`.
   readInto(io, view, offset) {
     return offset === undefined ? fileReadInto[io.kind](io, this, view) : filePreadInto[io.kind](io, this, view, offset);
@@ -347,12 +330,12 @@ const CWD = new DirImpl(0, 0);
 export const Dir = freeze({
   cwd: () => CWD,
   at: (fs, id) => new DirImpl(fs, id),
-  is: value => value instanceof DirImpl,
+  is: value => recordIs(value, 'DirRef'),
 });
 
 export const File = freeze({
   at: (fs, id) => new FileImpl(fs, id),
-  is: value => value instanceof FileImpl,
+  is: value => recordIs(value, 'FileRef'),
 });
 
 /// The quansync operations behind the methods, for composing in other std modules:

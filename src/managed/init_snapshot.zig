@@ -9,7 +9,7 @@
 //! is already evaluated: importing it again hits the module map and runs nothing.
 //!
 //! The snapshot context holds no live host state or API native callbacks. It carries a
-//! private JS-only API template (descriptors, methods and classes) with no native authority;
+//! private host-independent API template (JS descriptors, methods and classes) with no resource authority;
 //! Host.install binds it after restore. The default context keeps the same pristine
 //! template and frozen intrinsics, so each restored scope gets independent state.
 const std = @import("std");
@@ -39,7 +39,9 @@ pub const Identity = struct {
 /// removing an entry invalidates existing blobs. Null-terminated.
 /// The references managed's own heap objects need; hosts with native callbacks of their own
 /// append to these (see `Host.externalReferences`) and null-terminate.
-pub const base_references = [_]?*const anyopaque{};
+pub const base_references = [_]?*const anyopaque{
+    @ptrCast(&@import("module_map.zig").synthetic),
+};
 const default_references = base_references ++ [_]?*const anyopaque{null};
 
 /// The table V8 expects in `CreateParams.external_references` when the host adds none.

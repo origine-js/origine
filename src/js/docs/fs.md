@@ -22,8 +22,8 @@ a script cannot read, copy or inherit, so a copy with every property (`{ ...gran
 authority: `api.graph.derive({ fs })` and `CodeCache.dir(fs)` reject it with `InvalidInput`.
 
 `fs(io, dir = Dir.cwd())` returns a frozen object; paths are relative to `dir`.
-Rust's `Result` maps to **throw** (sync) / **reject** (async) with a frozen `{ errno, name }`
-value ([`IoError`](io.md#values)). `contents` arguments accept a string (UTF-8 encoded via
+Rust's `Result` maps to **throw** (sync) / **reject** (async) with an `OrigineError` subclass
+instance ([`IoError`](io.md#values)). `contents` arguments accept a string (UTF-8 encoded via
 [text](text.md)) or a `Uint8Array`.
 
 Async calls run on the `io` runtime the grant was requested with; closing it (`await io.close()`)

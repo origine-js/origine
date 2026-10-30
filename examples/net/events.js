@@ -53,7 +53,7 @@ export async function main(api) {
       if (received !== total) fail(new Error('stream ended early'));
     });
     client.register('data', event => {
-      const chunk = event.buffer(); // A Uint8Array lease, valid until we release it.
+      using chunk = event.buffer(); // A Uint8Array lease, release at the end of the function
       try {
         for (let i = 0; i < chunk.length; i++) {
           if (chunk[i] !== ((received + i) & 255)) throw new Error('stream mismatch');
@@ -61,11 +61,7 @@ export async function main(api) {
         received += chunk.length;
         if (received > total) throw new Error('too many bytes');
         if (received === total) stop();
-      } finally {
-        // Detaches chunk.buffer and frees its memory. Copy with slice()
-        // first if you need to retain the data after releasing this lease.
-        chunk.unref();
-      }
+      } finally {}
     });
     await running; // Resolves once all flowing handles have closed.
     if (failure) throw failure;

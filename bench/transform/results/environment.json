@@ -1,0 +1,97 @@
+{
+  "date": "2026-10-28",
+  "platform": "macOS-27.2-arm64-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.13.16 (main, Oct 14 2026, 00:55:38) [Clang 23.1.3 ]",
+  "samples": 7,
+  "iterations": 20,
+  "revisions": {
+    "yuku": "35678b85a437d1fb4c722e8c2381f155c33d49fe",
+    "cordis": "26d900345697adb87c3d3764bb6e8fc88a153929",
+    "webui": "2a884b56e589d81c41e510922e6b9f12badef26a",
+    "vue-core": "ca034820b8288ab6da3a033626a7857401ee64a5",
+    "vite": "cce559ab158cc6b177d0911a0bea73436b48faff",
+    "swc-next": "71c3f7982004f9acc6da83c742183466bd5ba229"
+  },
+  "sizes": [
+    {
+      "mode": "yuku-fast",
+      "dylib_bytes": 822288,
+      "archive_bytes": 1027256,
+      "dylib_sha256": "c916e47ddcfe5eeced12d4928ff70a48fcc6eb7ea35167293f015033e66a96e6"
+    },
+    {
+      "mode": "yuku-safe",
+      "dylib_bytes": 1003248,
+      "archive_bytes": 1280088,
+      "dylib_sha256": "a8bad71fc418b1c66537af5651ae55c0dc75560cf08b138cd4c3edd58f1cd024"
+    },
+    {
+      "mode": "yuku-small",
+      "dylib_bytes": 677600,
+      "archive_bytes": 1030704,
+      "dylib_sha256": "085840e4cf8a9fb2674fbd0cb2c62f3e1352239449521153ed92b387625dfe90"
+    },
+    {
+      "mode": "oxc-O3",
+      "dylib_bytes": 2387664,
+      "archive_bytes": 9981672,
+      "dylib_sha256": "020473ab4ed741d4fde883bc967e96fa232c9fcb37270cfb8016089c78202893"
+    },
+    {
+      "mode": "oxc-O3-checked",
+      "dylib_bytes": 3017024,
+      "archive_bytes": 11862808,
+      "dylib_sha256": "4c55b4edaccb64b111707992ce45188dd3309c8ddfc5cedc00e493a9d34c7b97"
+    },
+    {
+      "mode": "oxc-Os",
+      "dylib_bytes": 1977376,
+      "archive_bytes": 10500968,
+      "dylib_sha256": "77487e207bdb7d9fcbe4c2341104474aa5f905bb9f35aff602518b7a0e528902"
+    },
+    {
+      "mode": "oxc-Oz",
+      "dylib_bytes": 1371600,
+      "archive_bytes": 11133112,
+      "dylib_sha256": "a224b2c6b6e7fc72eaa9dc073f40d915b5139c5211223a24be2fcf09a494ae4d"
+    },
+    {
+      "mode": "swc-next-O3",
+      "dylib_bytes": 1575632,
+      "archive_bytes": 8344936,
+      "dylib_sha256": "234982aff09b58b03159b7aee56435e7b4293b2df0b331ae5dfcba9e65c56d35"
+    },
+    {
+      "mode": "swc-next-O3-checked",
+      "dylib_bytes": 2154416,
+      "archive_bytes": 9533096,
+      "dylib_sha256": "fae253c61124599bb45d7096558188db376eeb3adc80832d672dfca45ba2848e"
+    },
+    {
+      "mode": "swc-next-Os",
+      "dylib_bytes": 1279072,
+      "archive_bytes": 8332944,
+      "dylib_sha256": "5a37d0bee08685afe49be530c9b5be35d153c19a4af718f92dae158e57bdcc31"
+    },
+    {
+      "mode": "swc-next-Oz",
+      "dylib_bytes": 985664,
+      "archive_bytes": 8713288,
+      "dylib_sha256": "9721844aa75bc90d823f2a1c6ffe5a4ea06d5ddde56b4cbff0e5787908fccc69"
+    }
+  ],
+  "zig": "0.17.0",
+  "rustc": "rustc 1.101.0-nightly (07e526db9 2026-10-19)",
+  "node": "v24.22.1",
+  "cpu": "Apple M4 Max",
+  "logical_cpus": 16,
+  "ram_bytes": 137438953472,
+  "hardware_source": "sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu",
+  "yuku_version": "0.24.1",
+  "oxc_version": "0.155.0",
+  "swc_next_version": "0.4.0",
+  "cooldown_seconds": 1.0,
+  "run_started_unix": 1793184139.923372,
+  "run_finished_unix": 1793184713.6876118
+}

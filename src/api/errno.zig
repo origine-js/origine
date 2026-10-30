@@ -19,7 +19,7 @@ const binding = @import("binding.zig");
 
 /// Names match Zig error names so errors map by name. The enum lives in errno_codes.zig, the
 /// single source of truth: the guest-side tables are generated from it (`module_source` for
-/// `origine:@std/errno`, `table` for `native.errors`) and so is the Rust table (docs/contracts.md).
+/// `origine:@std/errno`, the private glue's imported `ERRNO` module, and the Rust table (docs/contracts.md).
 const codes = @import("errno_codes.zig");
 pub const Errno = codes.Errno;
 pub const IoErrno = codes.IoErrno;
@@ -223,7 +223,7 @@ pub const module_source: []const u8 = blk: {
 };
 
 /// A new JS object `{ io: { NotFound: 10, ... }, host: { BadHandle: 2, ... } }` generated from the two
-/// domains, for the glue (`native.errors`). Needs an entered context and live handle scope.
+/// domains. Kept for native consumers that need a V8 object; the JS glue imports `module_source`.
 pub fn table(env: binding.Env) !v8.Object {
     const target = eu.v.object(env.isolate);
     inline for (.{ .{ "io", codes.IoErrno }, .{ "host", codes.HostErrno } }) |dom| {

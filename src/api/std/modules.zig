@@ -4,7 +4,7 @@ const Module = @import("../module.zig").Module;
 
 pub const all: [modules.len]Module = modules;
 
-const modules = std_io.modules() ++
+const modules = @import("errors.zig").modules() ++ std_io.modules() ++
     std_errno.modules() ++
     std_quansync.modules() ++
     std_fs.modules() ++

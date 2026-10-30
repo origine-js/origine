@@ -1,0 +1,26 @@
+{
+  "yuku": {
+    "url": "https://github.com/yuku-toolchain/yuku",
+    "revision": "35678b85a437d1fb4c722e8c2381f155c33d49fe"
+  },
+  "cordis": {
+    "url": "https://github.com/cordiverse/cordis",
+    "revision": "26d900345697adb87c3d3764bb6e8fc88a153929"
+  },
+  "webui": {
+    "url": "https://github.com/cordiverse/webui",
+    "revision": "2a884b56e589d81c41e510922e6b9f12badef26a"
+  },
+  "vue-core": {
+    "url": "https://github.com/vuejs/core",
+    "revision": "ca034820b8288ab6da3a033626a7857401ee64a5"
+  },
+  "vite": {
+    "url": "https://github.com/vitejs/vite",
+    "revision": "cce559ab158cc6b177d0911a0bea73436b48faff"
+  },
+  "swc-next": {
+    "url": "https://github.com/swc-project/swc-next",
+    "revision": "71c3f7982004f9acc6da83c742183466bd5ba229"
+  }
+}

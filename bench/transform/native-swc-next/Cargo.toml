@@ -1,0 +1,20 @@
+[package]
+name = "bench_swc_next"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[lib]
+crate-type = ["cdylib", "staticlib"]
+[dependencies]
+swc_next_allocator = { path = "../vendor/swc-next/crates/swc_allocator" }
+swc_next_ecma_ast = { path = "../vendor/swc-next/crates/swc_ecma_ast" }
+swc_next_ecma_parser = { path = "../vendor/swc-next/crates/swc_ecma_parser" }
+swc_next_ecma_semantic = { path = "../vendor/swc-next/crates/swc_ecma_semantic" }
+swc_next_ecma_transformer = { path = "../vendor/swc-next/crates/swc_ecma_transformer" }
+swc_next_ecma_codegen = { path = "../vendor/swc-next/crates/swc_ecma_codegen" }
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

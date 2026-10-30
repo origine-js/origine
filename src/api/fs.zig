@@ -1,7 +1,7 @@
 //! `api.fs`: grants over a host directory and the typed natives behind them.
 //!
-//! A `FsGrant` owns directory/file handles; guest code only holds descriptors
-//! (`{ fs, id }` pairs) that name entries in one grant, and native functions bound
+//! A `FsGrant` owns directory/file handles; guest code holds JS DirRef/FileRef
+//! instances with private state, and native functions bound
 //! to that grant. Argument types below (`DirRef`, `Path`, ...) validate at the
 //! binding boundary, so the ops only see checked values.
 const std = @import("std");
@@ -202,19 +202,13 @@ pub const FsGrant = struct {
     }
 
     fn storeFile(self: *FsGrant, value: sys.File) !u32 {
-        for (self.files.items, 0..) |slot, index| if (slot == null) {
-            self.files.items[index] = value;
-            return @intCast(index + 1);
-        };
+        // IDs are never reused: an old JS reference must not name a newly opened resource.
         try self.files.append(self.host.allocator, value);
         return @intCast(self.files.items.len);
     }
 
     fn storeDir(self: *FsGrant, value: sys.Dir) !u32 {
-        for (self.dirs.items, 0..) |slot, index| if (slot == null) {
-            self.dirs.items[index] = value;
-            return @intCast(index + 1);
-        };
+        // IDs are never reused: an old JS reference must not name a newly opened resource.
         try self.dirs.append(self.host.allocator, value);
         return @intCast(self.dirs.items.len);
     }
@@ -603,44 +597,23 @@ fn fileSync(g: *FsGrant, file_ref: FileRef) !void {
 
 // ---- the operations a sync grant carries ------------------------------------
 //
-// What the glue used to wrap in JS: handles are frozen `{ kind, fs, id }` objects, stats
-// `{ kind, size }`, a directory listing an array of `{ name, kind }`; a malformed argument is
-// `InvalidInput` before anything runs. They call the ops above, which keep the `(fs, id)` form that
-// the Rust twin shares.
-
-/// `{ kind, fs, id }` of a handle argument: the object must say it is a `kind` and carry two u32s.
-fn handleParts(call: *Call, index: usize, kind: []const u8) !struct { fs: u32, id: u32 } {
-    const arg = call.arg(index);
-    if (!arg.isObject()) return error.InvalidInput;
-    const object = arg.toObject(call.ctx) orelse return error.InvalidInput;
-    const said = object.get(call.ctx, binding.string(call.isolate, "kind")) orelse return error.InvalidInput;
-    if (!said.strictEquals(binding.string(call.isolate, kind))) return error.InvalidInput;
-    return .{ .fs = try handleNumber(call, object, "fs"), .id = try handleNumber(call, object, "id") };
-}
-
-fn handleNumber(call: *Call, object: v8.Object, name: []const u8) !u32 {
-    const value = object.get(call.ctx, binding.string(call.isolate, name)) orelse return error.InvalidInput;
-    if (!value.isNumber()) return error.InvalidInput;
-    const number = value.numberValue(call.ctx) orelse return error.InvalidInput;
-    if (!(number >= 0) or number > 4294967295.0 or number != @floor(number)) return error.InvalidInput;
-    return @intFromFloat(number);
-}
+// JS wrappers validate and unwrap private reference state once, then pass scalar
+// `(fs, id)` pairs to these grant-bound operations. Native code checks ownership,
+// liveness, paths, buffers, and access before using any resource.
 
 pub const DirHandle = struct {
     ref: DirRef,
-
+    pub const arity = 2;
     pub fn decode(call: *Call, index: usize) !DirHandle {
-        const parts = try handleParts(call, index, "dir");
-        return .{ .ref = .{ .fs = parts.fs, .id = parts.id } };
+        return .{ .ref = try DirRef.decode(call, index) };
     }
 };
 
 pub const FileHandle = struct {
     ref: FileRef,
-
+    pub const arity = 2;
     pub fn decode(call: *Call, index: usize) !FileHandle {
-        const parts = try handleParts(call, index, "file");
-        return .{ .ref = .{ .fs = parts.fs, .id = parts.id } };
+        return .{ .ref = try FileRef.decode(call, index) };
     }
 };
 
@@ -698,33 +671,21 @@ pub const ReadOptions = struct {
     }
 };
 
-fn handleValue(call: *Call, kind: []const u8, fs: u32, id: u32) !v8.Value {
-    const object = eu.v.object(call.isolate);
-    try call.set(object, "kind", kind);
-    try call.set(object, "fs", fs);
-    try call.set(object, "id", id);
-    _ = object.setIntegrityLevel(call.ctx, .Frozen) orelse return error.JavaScriptException;
-    return object.value;
-}
-
+// Internal result payloads are wrapped into JS result classes by glue/fs.js.
 fn statValue(call: *Call, info: Stat) !v8.Value {
-    const object = eu.v.object(call.isolate);
-    try call.set(object, "kind", info[0]);
-    try call.set(object, "size", info[1]);
-    _ = object.setIntegrityLevel(call.ctx, .Frozen) orelse return error.JavaScriptException;
-    return object.value;
+    return call.value(info);
 }
 
-fn grantDirOpenFile(g: *FsGrant, call: *Call, dir: DirHandle, path: EntryPath, mode: OpenMode) !v8.Value {
-    return handleValue(call, "file", g.id, try openFile(g, dir.ref, path, mode.bits));
+fn grantDirOpenFile(g: *FsGrant, dir: DirHandle, path: EntryPath, mode: OpenMode) !u32 {
+    return openFile(g, dir.ref, path, mode.bits);
 }
 
-fn grantDirOpenDir(g: *FsGrant, call: *Call, dir: DirHandle, path: Path) !v8.Value {
-    return handleValue(call, "dir", g.id, try openDir(g, dir.ref, path));
+fn grantDirOpenDir(g: *FsGrant, dir: DirHandle, path: Path) !u32 {
+    return openDir(g, dir.ref, path);
 }
 
-fn grantDirClose(g: *FsGrant, dir: DirHandle) !void {
-    return closeDir(g, dir.ref);
+fn grantDirClose(g: *FsGrant, fs: u32, id: u32) !void {
+    return closeDir(g, .{ .fs = fs, .id = id });
 }
 
 fn grantDirStat(g: *FsGrant, call: *Call, dir: DirHandle, path: Path) !v8.Value {
@@ -735,7 +696,7 @@ fn grantDirSymlinkStat(g: *FsGrant, call: *Call, dir: DirHandle, path: Path) !v8
     return statValue(call, try symlinkStat(g, dir.ref, path));
 }
 
-/// A frozen array of frozen `{ name, kind }`.
+/// Internal listing payload; the JS wrapper constructs the public DirEntry instances.
 fn grantDirRead(g: *FsGrant, call: *Call, dir: DirHandle) !v8.Value {
     try g.readable();
     var list = call.array();
@@ -775,8 +736,8 @@ fn grantDirRename(g: *FsGrant, dir: DirHandle, old_path: SubPath, new_dir: DirHa
     return rename(g, dir.ref, old_path, new_dir.ref, new_path);
 }
 
-fn grantFileClose(g: *FsGrant, file: FileHandle) !void {
-    return close(g, file.ref);
+fn grantFileClose(g: *FsGrant, fs: u32, id: u32) !void {
+    return close(g, .{ .fs = fs, .id = id });
 }
 
 fn grantFileStat(g: *FsGrant, call: *Call, file: FileHandle) !v8.Value {
@@ -824,6 +785,6 @@ fn grantFileSetLength(g: *FsGrant, file: FileHandle, length: u64) !void {
     return fileSetLength(g, file.ref, length);
 }
 
-fn grantFileSync(g: *FsGrant, file: FileHandle) !void {
-    return fileSync(g, file.ref);
+fn grantFileSync(g: *FsGrant, fs: u32, id: u32) !void {
+    return fileSync(g, .{ .fs = fs, .id = id });
 }

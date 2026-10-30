@@ -63,8 +63,8 @@ When you change the header (new op, field, flag):
 
 Source of truth: the `IoErrno` and `HostErrno` enums in `src/api/errno_codes.zig` (`Errno` is built from both) (std-only so a tool can import it).
 
-* JS (`origine:@std/errno`, `native.errors`): generated at compile time from the enum
-  (`errno.module_source`, `errno.table`); nothing to do.
+* JS (`origine:@std/errno`, private glue import): generated at compile time from the enum
+  (`errno.module_source`); nothing to do.
 * Names follow Rust's `std::io::ErrorKind` where it has a kind. The Zig std names of the same failures
   (`FileNotFound`, `SymLinkLoop`, ...) are the `aliases` list in `errno.zig`; `src/tests/managed/api.zig`
   provokes the same failures through the sync (Zig) and async (Rust) fs and compares the errno.

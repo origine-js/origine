@@ -6,29 +6,24 @@
 // first verdict that is not `next` wins. `maker` answers "given the supplied source, which recipe
 // options apply, and which handler governs its own imports?" and runs once. See docs/graph-api.md.
 //
-// Elements of the pipeline are host descriptors (frozen `{ host, kind, ... }` values from the
-// sibling modules, run natively) or functions (run in the creating realm during the load stage).
+// Elements of the pipeline are JS descriptor instances from the
+// sibling modules (run natively) or functions (run in the creating realm during the load stage).
 // `ImportHandler.make` classifies them: `handler.plan` lists them in order and `handler.native` is
 // true when no import of this handler needs the JS realm.
+import { define, is as recordIs } from 'origine:@internal/records';
 import { ERRNO } from 'origine:@std/errno';
+import { IoError, ImportError } from 'origine:@std/errors';
 import { ImportCache } from 'origine:@std/graph/cache';
 
 const freeze = Object.freeze;
-const invalid = message => freeze({ errno: ERRNO.io.InvalidInput, name: 'InvalidInput', message });
+const invalid = message => new IoError(ERRNO.io.InvalidInput, message);
 const own = (object, key) => {
   if (object === null || typeof object !== 'object') return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(object, key);
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 };
 
-const SOURCE = Symbol.for('origine:@std/graph/source');
-const RECIPE = Symbol.for('origine:@std/graph/recipe');
-const HANDLER = Symbol.for('origine:@std/graph/handler');
-const RESOLVER = Symbol.for('origine:@std/graph/resolver');
-
-const isDescriptor = value =>
-  value !== null && typeof value === 'object' && typeof value.host === 'string' && typeof value.kind === 'string';
-const isTransformer = value => typeof value === 'function' || (isDescriptor(value) && value.kind === 'transformer');
+const isTransformer = value => typeof value === 'function' || recordIs(value, 'Transformer');
 
 const CODES = freeze({
   NotFound: ERRNO.io.NotFound,
@@ -41,21 +36,17 @@ const NAMES = new Map([...Object.entries(CODES).map(([name, code]) => [code, nam
 
 /// Why an import fails. The members are the `io` codes a pipeline can raise (the same numbers as
 /// `IoError`); `other(message)` is the open case, for failures that have no better kind.
-export const ImportError = freeze({
-  ...CODES,
-  /// An error that fits no other kind. `message` stays in the creating realm; a child sees a `ModuleError`.
-  other(message) {
-    if (typeof message !== 'string') throw invalid('ImportError.other: message must be a string');
-    return freeze({ errno: ERRNO.host.Unexpected, name: 'Unexpected', message });
-  },
-  /// Whether `value` (a code or any `{ errno }`) is `code`.
-  is: (value, code) => (typeof value === 'number' ? value : value?.errno) === code,
-});
+export { ImportError };
 
-const NEXT = freeze({ kind: 'next' });
-const ACCEPT = freeze({ kind: 'accept' });
+const verdict = define('ImportVerdict');
+const transformRecord = define('Transformer');
+const makerRecord = define('Maker');
+const planRecord = define('PlanEntry');
+const handlerRecord = define('ImportHandler');
+const NEXT = verdict({ kind: 'next' });
+const ACCEPT = verdict({ kind: 'accept' });
 
-/// Verdicts a hook returns. All are frozen data.
+/// Verdicts a hook returns. All are immutable JS class instances.
 export const Import = freeze({
   /// Not mine: continue with the next hook.
   next: () => NEXT,
@@ -64,8 +55,8 @@ export const Import = freeze({
   /// Stop the chain with `target`: a `ModuleSource` (the `maker` turns it into a recipe) or a
   /// `ModuleRecipe` (final: the maker is skipped). The importing context gets its own module.
   provide(target) {
-    if (target?.[SOURCE] === true) return freeze({ kind: 'provide', source: target });
-    if (target?.[RECIPE] === true) return freeze({ kind: 'provide', recipe: target });
+    if (recordIs(target, 'ModuleSource')) return verdict({ kind: 'provide', source: target });
+    if (recordIs(target, 'ModuleRecipe')) return verdict({ kind: 'provide', recipe: target });
     throw invalid('Import.provide: expected a ModuleSource or a ModuleRecipe');
   },
   /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a
@@ -80,20 +71,20 @@ export const Import = freeze({
     if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
     const mode = own(options, 'mode');
     if (mode !== 'hardened' && mode !== 'shared') throw invalid("Import.link: mode must be 'hardened' or 'shared'");
-    return freeze({ kind: 'link', reference, mode });
+    return verdict({ kind: 'link', reference, mode });
   },
   /// Stop the chain with an error: a code of `ImportError` or the value of `ImportError.other(...)`.
   reject(error) {
     if (typeof error === 'number') {
       const name = NAMES.get(error);
       if (name === undefined || error === ERRNO.host.Unexpected) throw invalid('Import.reject: not an ImportError code');
-      return freeze({ kind: 'reject', error: freeze({ errno: error, name }) });
+      return verdict({ kind: 'reject', error: new ImportError(error) });
     }
     const code = own(error, 'errno');
     const message = own(error, 'message');
     if (code !== ERRNO.host.Unexpected || typeof message !== 'string')
       throw invalid('Import.reject: expected an ImportError code or ImportError.other(message)');
-    return freeze({ kind: 'reject', error: freeze({ errno: code, name: 'Unexpected', message }) });
+    return verdict({ kind: 'reject', error: new ImportError(code, message) });
   },
 });
 
@@ -123,14 +114,14 @@ export const Transform = freeze({
       if (typeof transformer === 'function' || transformer.native === false) native = false;
       entries.push(freeze([extension, transformer]));
     }
-    return freeze({ host: 'byExtension', kind: 'transformer', native, entries: freeze(entries) });
+    return transformRecord({ host: 'byExtension', kind: 'transformer', native, entries: freeze(entries) });
   },
 });
 
 const makerOptions = (what, options) => {
   const handler = own(options, 'import');
   const transformer = own(options, 'transformer');
-  if (handler !== undefined && handler?.[HANDLER] !== true) throw invalid(`${what}: import must be an ImportHandler`);
+  if (handler !== undefined && !recordIs(handler, 'ImportHandler')) throw invalid(`${what}: import must be an ImportHandler`);
   if (transformer !== undefined && !isTransformer(transformer)) throw invalid(`${what}: transformer must be a transformer`);
   return { handler, transformer };
 };
@@ -142,7 +133,7 @@ export const MakeRecipe = freeze({
   /// the source a hook supplied.
   inherit(options = {}) {
     const { handler, transformer } = makerOptions('MakeRecipe.inherit', options);
-    return freeze({
+    return makerRecord({
       host: 'maker',
       kind: 'maker',
       ...(handler === undefined ? {} : { import: handler }),
@@ -153,19 +144,19 @@ export const MakeRecipe = freeze({
   /// realm for every supplied source.
   fn(fn) {
     if (typeof fn !== 'function') throw invalid('MakeRecipe.fn: expected a function');
-    return freeze({ kind: 'maker', native: false, fn });
+    return makerRecord({ kind: 'maker', native: false, fn });
   },
 });
 
 /// One element of the plan: which stage it belongs to and whether it runs natively.
 const planEntry = (stage, element) => {
   if (typeof element !== 'function' && typeof element.host === 'string' && element.native !== false)
-    return freeze({ stage, kind: 'native', name: element.host });
-  return freeze({ stage, kind: 'js' });
+    return planRecord({ stage, kind: 'native', name: element.host });
+  return planRecord({ stage, kind: 'js' });
 };
 
 const asList = value => (Array.isArray(value) ? value : [value]);
-const isHook = value => typeof value === 'function' || (isDescriptor(value) && value.kind === 'provider');
+const isHook = value => typeof value === 'function' || recordIs(value, 'Provider');
 
 /// A recipe's import pipeline.
 export const ImportHandler = freeze({
@@ -175,16 +166,16 @@ export const ImportHandler = freeze({
   /// `({ id }) => data`, called when a module is made; the plain-data result becomes its `import.meta`).
   make(options) {
     const resolver = own(options, 'resolver');
-    if (resolver?.[RESOLVER] !== true || resolver.layers.length === 0)
+    if (!recordIs(resolver, 'ImportResolver') || resolver.layers.length === 0)
       throw invalid('ImportHandler.make: resolver must be an ImportResolver with at least one layer');
     const given = own(options, 'hooks');
     if (given === undefined) throw invalid('ImportHandler.make: hooks is required (an empty array resolves nothing)');
     const hooks = asList(given);
     for (const hook of hooks) if (!isHook(hook)) throw invalid('ImportHandler.make: a hook must be a function or a provider descriptor');
     const maker = own(options, 'maker') ?? MakeRecipe.inherit();
-    if (maker?.kind !== 'maker') throw invalid('ImportHandler.make: maker must come from MakeRecipe');
+    if (!recordIs(maker, 'Maker')) throw invalid('ImportHandler.make: maker must come from MakeRecipe');
     const cache = own(options, 'cache') ?? ImportCache.native({ retain: 'all' });
-    if (cache?.host !== 'importCache') throw invalid('ImportHandler.make: cache must be an ImportCache');
+    if (!recordIs(cache, 'Cache') || cache.host !== 'importCache') throw invalid('ImportHandler.make: cache must be an ImportCache');
     const meta = own(options, 'meta');
     if (meta !== undefined && typeof meta !== 'function') throw invalid('ImportHandler.make: meta must be a function');
 
@@ -194,9 +185,8 @@ export const ImportHandler = freeze({
     plan.push(planEntry('maker', maker));
     if (maker.transformer !== undefined) plan.push(planEntry('transformer', maker.transformer));
     plan.push(planEntry('cache', cache));
-    if (meta !== undefined) plan.push(freeze({ stage: 'meta', kind: 'js' }));
-    return freeze({
-      [HANDLER]: true,
+    if (meta !== undefined) plan.push(planRecord({ stage: 'meta', kind: 'js' }));
+    return handlerRecord({
       resolver,
       hooks: freeze([...hooks]),
       maker,
@@ -208,5 +198,5 @@ export const ImportHandler = freeze({
       native: plan.every(entry => entry.kind === 'native'),
     });
   },
-  is: value => value?.[HANDLER] === true,
+  is: value => recordIs(value, 'ImportHandler'),
 });

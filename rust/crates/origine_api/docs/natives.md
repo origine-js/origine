@@ -20,7 +20,7 @@ code as it is.
 
 * All use `side_effect = "any"`.
 * Argument errors are `TypeError("argument N: expected X")` thrown (sync) or an already-rejected
-  promise (promise natives). Failures of the operation are the frozen `{ errno, name }` value
+  promise (promise natives). Failures of the operation are an `OrigineError` subclass instance value
   (`origine_api_core::errno`); none touches the shared errno cell.
 * Handles: `{fs, id}` handles are flattened into **two** JS arguments (`DirRef`/`FileRef` have
   `ARITY = 2`). Directory id 0 is the grant root. The sync twins in `src/api/fs.zig` take the same
@@ -35,7 +35,7 @@ code as it is.
 
 | Native | Signature | Result |
 |---|---|---|
-| `create` | `(opts?: { backend?, entries? })` | frozen `{ kind: 'io', id, backend }` (sync). Throws `{errno}`: `Unsupported` (backend excluded or unavailable), `PermissionDenied` (runtime ceiling), `TypeError` for bad options. |
+| `create` | `(opts?: { backend?, entries? })` | JS `IoHandle` instance with read-only kind, id, and backend fields (sync). Throws an `OrigineError` subclass: `Unsupported` (backend excluded or unavailable), `PermissionDenied` (runtime ceiling), `TypeError` for bad options. |
 | `close` | `(id: u32)` | `Promise<void>`: cancels the runtime's ops (their promises reject `Canceled`), drains, releases its grants, destroys the loop. Rejects `BadHandle` for unknown/foreign/closing ids. |
 | `sleep` | `(runtime: u32, token: u32, ms: number)` | `Promise<void>` resolving after a monotonic timeout. Finite delays from 0 through 2147483647 ms only; fractions allowed. Tokens are unique per JS runtime handle. Unknown/foreign/closed runtimes reject `BadHandle`. |
 | `cancelTimer` | `(runtime: u32, token: u32)` | Boolean; cancels a pending timer task and backend timeout, rejects its promise with `Canceled`, and returns true. False for a settled/unknown token; throws `BadHandle` for an unknown/foreign/closed runtime. |

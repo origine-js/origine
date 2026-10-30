@@ -276,7 +276,7 @@ fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, args: 
 /// Linux objcopy patterns are both generated from this one list. Every `#[no_mangle]` item of the
 /// Rust crates must start with one of these (`just check-contracts` greps for violations); the
 /// first prefix is origine's own C ABI (`origine_oxc_*`, `origine_api_*`, `origine_api_native_*`).
-const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector__" };
+const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector__", "v8__ValueSerializer__Delegate__", "v8__ValueDeserializer__Delegate__" };
 
 /// Builds the Rust workspace in rust/ with cargo and returns the linkable result (see below),
 /// a cache file so consumers depend on its content. Borrows b through build
@@ -340,6 +340,9 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, t
 fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
+        // The external linker does not add Zig's compiler-rt; an object that needs a soft-float helper
+        // (`__multf3`, `roundf128`, ... from f128 math in std) carries its own copy.
+        object.bundle_compiler_rt = true;
         const link = b.addSystemCommand(&.{"/usr/bin/clang++"});
         // Keep the LLVM tool directory as a package-owned path.
         const linker = v8.namedLazyPath("clang_bin").path(b, "ld64.lld");

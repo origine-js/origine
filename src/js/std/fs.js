@@ -8,7 +8,7 @@
 //   const f = rs.File.open('a.txt'); f.read(buf); f.close();
 //   rs.OpenOptions.new().write(true).create(true).open('b.txt');
 //
-// Rust's `Result` maps to throw (sync) / reject (async) with `{ errno, name }`
+// Rust's `Result` maps to throw (sync) / reject (async) with OrigineError subclasses
 // error values (`IoError`). All of it is written once with quansync and shares the
 // Zig-style ops from `origine:@std/io`, so it costs one extra JS call per operation.
 //

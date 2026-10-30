@@ -10,6 +10,7 @@ const json_module = @import("json_module.zig");
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
+const records = @import("records.zig");
 
 /// Modules the init scope can import without touching the file system by default; a
 /// Host serves `Config.modules`, which defaults to this table.
@@ -18,8 +19,12 @@ pub const std_modules = origine_modules.all;
 /// Relative specifiers (`./`, `../`) resolve against the referrer's directory;
 /// everything else is used as written.
 pub fn resolve(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror![]const u8 {
-    _ = data;
     const spec = request.specifier;
+    if (records.requested(spec)) {
+        const host: *Host = @ptrCast(@alignCast(data.?));
+        if (!records.trusted(host, request.referrer)) return error.PermissionDenied;
+        return request.allocator.dupe(u8, records.id);
+    }
     if (!(std.mem.startsWith(u8, spec, "./") or std.mem.startsWith(u8, spec, "../"))) return request.allocator.dupe(u8, spec);
     const base = std.fs.path.dirnamePosix(request.referrer) orelse "";
     var parts: std.ArrayList([]const u8) = .empty;
@@ -44,6 +49,7 @@ pub fn resolve(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror
 
 pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {
     const host: *Host = @ptrCast(@alignCast(data.?));
+    if (records.requested(request.module_id)) return records.load(host, request);
     for (host.modules) |module| {
         if (std.mem.eql(u8, request.module_id, module.id)) return .{ .source = module.source };
     }

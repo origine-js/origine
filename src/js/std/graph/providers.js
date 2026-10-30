@@ -3,19 +3,22 @@
 // widens nothing by itself.
 //
 //   hooks: [policy, origineProvider({ std: { include: ['text'] } }), fsProvider({ read: 'copy' })]
+import { define } from 'origine:@internal/records';
 import { ERRNO } from 'origine:@std/errno';
+import { IoError } from 'origine:@std/errors';
 import { Import, ImportError } from 'origine:@std/graph/import';
 import { ModuleSource } from 'origine:@std/graph/module';
 
 const freeze = Object.freeze;
-const invalid = message => freeze({ errno: ERRNO.io.InvalidInput, name: 'InvalidInput', message });
+const invalid = message => new IoError(ERRNO.io.InvalidInput, message);
 const own = (object, key) => {
   if (object === null || typeof object !== 'object') return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(object, key);
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 };
 
-const provider = (host, rest) => freeze({ host, kind: 'provider', ...rest });
+const makeProvider = define('Provider');
+const provider = (host, rest) => makeProvider({ host, kind: 'provider', ...rest });
 
 /// Names of std modules, without the `origine:@std/` prefix (`'text'`, `'transformer/oxc'`).
 const names = (what, list) => {

@@ -42,7 +42,7 @@ declare class PullSocket extends Socket<'pull'> {
 }
 declare class EventSocket extends Socket<'event'> {
   register(event: 'data', fn: (e: DataEvent) => void): Registration; register(event: 'end' | 'drain' | 'close', fn: () => void): Registration;
-  register(event: 'error', fn: (e: { errno: number; name: string }) => void): Registration;
+  register(event: 'error', fn: (e: OrigineError) => void): Registration;
   pause(): void; resume(): void; readonly paused: boolean; toPull(): PullSocket;
 }
 declare class Server<M extends Mode, S extends Mode> extends Handle { readonly port: number }
@@ -69,7 +69,7 @@ Handles are instances of classes the guest cannot construct (`TypeError`), whose
 | `Socket extends Handle` | base of sockets, the write side: `remotePort`, `queued` and `direct` (the two write lanes, below), `end(side): Promise<void>` (see [Closing](#closing)) |
 | `PullSocket extends Socket` | `read(length): Promise<Uint8Array>` (1 to 2^28 bytes), `readInto(buffer): Promise<{ bytes, buffer }>` (zero-copy: your buffer is detached while the read runs and comes back as a new ArrayBuffer; `Unsupported` if it cannot be detached; best for large reads), `readCopy(buffer): Promise<number>` (copies into your buffer without detaching it, so one buffer serves every read; best for small reads; 0 = end of stream), `toEvent(): EventSocket`, and `for await (const chunk of socket)`: `read(65536)` until the end of the stream |
 | `EventSocket extends Socket` | `register`, `pause()`, `resume()`, `paused`, `toPull(): PullSocket` |
-| `api.net.listen(io, { mode, socketMode, host?, port?, sendQueueLimit? })` | `PullServer` or `EventServer` by `mode`; `socketMode` (`'event'` \| `'pull'`, required) is the mode of the sockets it accepts. Throws `TypeError` for a missing or unknown `mode`/`socketMode`, `{ errno, name }` (`AddressInUse`, `PermissionDenied`, `BadHandle`, ...) otherwise |
+| `api.net.listen(io, { mode, socketMode, host?, port?, sendQueueLimit? })` | `PullServer` or `EventServer` by `mode`; `socketMode` (`'event'` \| `'pull'`, required) is the mode of the sockets it accepts. Throws `TypeError` for a missing or unknown `mode`/`socketMode`, an `OrigineError` subclass (`AddressInUse`, `PermissionDenied`, `BadHandle`, ...) otherwise |
 | `api.net.connect(io, { mode, port, host?, sendQueueLimit? })` | `Promise<PullSocket \| EventSocket>` by `mode`; `port` is required (`TypeError` without it); rejects `ConnectionRefused`, ... |
 
 ### Hosts
@@ -104,7 +104,7 @@ await running;
 
 | Handle | Events |
 | --- | --- |
-| `EventSocket` | `data` (`ev.length`, `ev.buffer()`), `end` (peer finished), `error` (`{ errno, name }`), `drain` (the send queue became empty), `close` |
+| `EventSocket` | `data` (`ev.length`, `ev.buffer()`), `end` (peer finished), `error` (`OrigineError` subclass), `drain` (the send queue became empty), `close` |
 | `EventServer` | `connection` (a socket of the server's `socketMode`), `error`, `close` |
 
 - `handle.register(event, fn)` returns `{ unregister() }` (`true` if it was registered). Handlers of one event run in registration order. The first `data` (or `connection`) handler starts reading. When the last one is unregistered the handle pauses itself, so nothing is read just to be dropped; registering one again resumes it. After `close` the handlers are dropped; `register` on a closed handle throws `BadHandle`.

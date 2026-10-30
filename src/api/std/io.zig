@@ -1,4 +1,4 @@
-//! `origine:@std/io`: Zig-style Io vocabulary. Pure JS; no natives.
+//! Embedded std wrappers with private JS class factories; validation stays in JS.
 const Module = @import("../module.zig").Module;
 
 pub const id = "origine:@std/io";

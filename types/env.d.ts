@@ -1,17 +1,9 @@
-/** Options of {@link EnvCap.narrow}. */
-export interface EnvNarrow {
-  /** The only variable names the narrowed capability shows. Names this capability already hides stay hidden. */
-  readonly allow: readonly string[];
-}
-
-/** `api.host.env`: command-line arguments and environment variables. */
+/** `api.host.env`: command-line arguments and environment variables configured by the host. */
 export interface EnvCap {
-  /** The arguments the program was started with. */
+  /** The arguments the program was started with. Allocates a frozen array. */
   args(): readonly string[];
-  /** The value of the variable `name`, or `undefined` when it is unset or not visible. */
+  /** The value of the variable `name`, or `undefined` when it is unset. */
   get(name: string): string | undefined;
-  /** The names of the visible variables. */
+  /** The environment variable names. Allocates a frozen array. */
   list(): readonly string[];
-  /** A capability that shows only the names in `allow` (that this one shows too). Throws `TypeError` without an `allow` array. */
-  narrow(options: EnvNarrow): EnvCap;
 }

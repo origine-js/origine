@@ -14,12 +14,12 @@ the zero-copy buffer rules that were added later. `api.net` and the `io` timers 
 ## Guest API (JS)
 ```js
 const sync = api.fs.requestSync({ root, access });          // unchanged semantics (std.Io, errno cell); returns the sync cap
-const io = api.io.create({ backend: 'auto', entries: 256 }); // exists (spike): frozen { kind: 'io', id, backend }
+const io = api.io.create({ backend: 'auto', entries: 256 }); // JS IoHandle instance
 const async = await api.fs.requestAsync({ io, root, access }); // rejects BadHandle/PermissionDenied/Unsupported
 await io.close();                                           // Promise<void>: cancels in-flight ops, destroys the runtime
 ```
 `api.fs.request` is removed. `api.fs.narrow` was dropped for now (`Config.fs` is the ceiling, `access` is per request). `api.io.narrow({ backends, maxRuntimes })`
-only narrows what `create` may do (embedder ceiling = `Config.runtime`). Handles are frozen data, not transferable across scopes.
+only narrows what `create` may do (embedder ceiling = `Config.runtime`). Handles are immutable JS class instances, not transferable across scopes.
 
 ## Errno (two domains, numbering)
 The error codes are two enums, `IoErrno` (Rust `io::ErrorKind` names, plus `TooManyOpenFiles` and `Io`) and `HostErrno`
@@ -32,7 +32,7 @@ io::ErrorKind mapping in Rust (others stay `Unexpected`): `TimedOut`, `WouldBloc
 
 ## Natives (registered in the `native` table; JS glue calls them)
 Rust natives (`#[native]`, `rust/crates/origine_api`), all take plain JS values, none touch the shared errno cell; failures reject (promise natives)
-or throw `{errno,name}` (sync natives):
+or throw `OrigineError` subclasses (sync natives):
 - `native.io.create(opts) -> {kind,id,backend}` (sync; creates `io::Loop` + `rt::Runtime` inside HostState; enforces `Config.runtime` ceiling)
 - `native.io.close(ioId) -> Promise<void>`
 - `native.fsAsync.request(ioId, root: string, write: bool) -> Promise<{ id: u32 }>` (opens `root` relative to the embedder's fs root dir (ceiling) as a `fs::Dir`, registers a Grant bound to that runtime)
@@ -41,7 +41,7 @@ or throw `{errno,name}` (sync natives):
   deleteTree rename fileStat fileRead filePread fileWrite filePwriteAll fileSetLength fileSync`. Results identical to the sync results
   (file id / dir id / `[kind,size]` / flat `[name,kind,...]` / `Uint8Array` / count / undefined). Base buffer semantics: COPY (writes copy the
   guest bytes at call time; reads copy into the guest buffer at completion if it is still attached, else reject). Pin+detach/BYOB is described under "Zero-copy buffers" below.
-- Handle tables live in Rust per Grant: ids are per-fs-id like sync (`DirRef{fs,id}`, id 0 = grant root), not reused while an op is in flight (`in_flight`, `closing`; use after close rejects `StaleHandle`/`BadHandle`).
+- Handle tables live in Rust per Grant: ids are per-fs-id like sync (`DirRef{fs,id}`, id 0 = grant root), not reused during the table lifetime (`in_flight`, `closing`; use after close rejects `StaleHandle`/`BadHandle`).
 - Ceiling checks mirror Zig (`write` ceiling, `cleanPath` rules are `origine_io::fs::sanitize`).
 
 ## C ABI between Zig Host and Rust (symbols exported by the Rust staticlib)

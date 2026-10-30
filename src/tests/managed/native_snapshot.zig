@@ -33,6 +33,13 @@ const modules = m.Api.std_modules ++ [_]m.Api.module.Module{counter_module};
 
 const init_source =
     \\import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
+    \\import { ImportResolver } from 'origine:@std/graph/resolve';
+    \\import { relative, importMap } from 'origine:@std/graph/resolve/layers';
+    \\import { IoError, OrigineError } from 'origine:@std/errors';
+    \\const layer = relative();
+    \\const mapped = importMap({ imports: { x: './x.js' } });
+    \\globalThis.nativeAtInit = { layer, mapped, constructor: layer.constructor, error: new IoError(IoError.NotFound, 'missing') };
+    \\export const nativeRestored = () => layer.constructor === nativeAtInit.constructor && mapped.imports.x === './x.js' && nativeAtInit.error instanceof OrigineError && ImportResolver.layered().layer(layer).layers[0] === layer;
     \\import { bump, native } from 'origine:test/counter';
     \\globalThis.atInit = { text: decodeUtf8(encodeUtf8('é')) === 'é', counter: native, first: bump(), bytes: encodeUtf8('é').length };
     \\globalThis.runs = (globalThis.runs ?? 0) + 1;
@@ -97,6 +104,7 @@ test "native snapshot: module natives are built for the snapshot and rebind to t
     // The init ran once, inside the snapshot, with real natives.
     try check(scope, "globalThis.runs === 1 && atInit.text && atInit.counter && atInit.first === 101 && atInit.bytes === 2");
     try exposeModule(scope, "init", "init_ns");
+    try check(scope, "init_ns.nativeRestored() && Object.isFrozen(nativeAtInit.layer)");
     try check(scope, "globalThis.runs === 1");
     // Before the host attaches a record, a snapshot native cannot find its state.
     try check(scope, "(() => { try { init_ns.encode('x'); return false; } catch (e) { return /attached/.test(e.message); } })()");

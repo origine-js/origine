@@ -1,0 +1,582 @@
+[
+  {
+    "mode": "yuku-fast",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "const-enum",
+    "status": -2
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "enum",
+    "status": -2
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "namespace",
+    "status": -2
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "parameter-property",
+    "status": -2
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "yuku-fast",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "const-enum",
+    "status": -2
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "enum",
+    "status": -2
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "namespace",
+    "status": -2
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "parameter-property",
+    "status": -2
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "yuku-safe",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "const-enum",
+    "status": -2
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "enum",
+    "status": -2
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "namespace",
+    "status": -2
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "parameter-property",
+    "status": -2
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "yuku-small",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "namespace",
+    "status": 0,
+    "code": "let N;\n(function(_N) {\n\tconst n = _N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n\tn;\n\tconstructor(n) {\n\t\tthis.n = n;\n\t}\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = React.createElement(\"span\", null, n);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = React.createElement(\"span\", null, 42);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "namespace",
+    "status": 0,
+    "code": "let N;\n(function(_N) {\n\tconst n = _N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n\tn;\n\tconstructor(n) {\n\t\tthis.n = n;\n\t}\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = React.createElement(\"span\", null, n);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-O3-checked",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = React.createElement(\"span\", null, 42);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "namespace",
+    "status": 0,
+    "code": "let N;\n(function(_N) {\n\tconst n = _N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n\tn;\n\tconstructor(n) {\n\t\tthis.n = n;\n\t}\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = React.createElement(\"span\", null, n);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Os",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = React.createElement(\"span\", null, 42);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E = function(E) {\n\tE[E[\"A\"] = 41] = \"A\";\n\tE[E[\"B\"] = 42] = \"B\";\n\treturn E;\n}(E || {});\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "namespace",
+    "status": 0,
+    "code": "let N;\n(function(_N) {\n\tconst n = _N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n\tn;\n\tconstructor(n) {\n\t\tthis.n = n;\n\t}\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = React.createElement(\"span\", null, n);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "oxc-Oz",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = React.createElement(\"span\", null, 42);\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "namespace",
+    "status": 0,
+    "code": "var N;\n(function(N) {\n  N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n  n;\n  constructor(n) {\n    this.n = n;\n  }\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-O3",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "namespace",
+    "status": 0,
+    "code": "var N;\n(function(N) {\n  N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n  n;\n  constructor(n) {\n    this.n = n;\n  }\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-O3-checked",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "namespace",
+    "status": 0,
+    "code": "var N;\n(function(N) {\n  N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n  n;\n  constructor(n) {\n    this.n = n;\n  }\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-Os",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "erasable-ts",
+    "status": 0,
+    "code": "export const answer = 42;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "const-enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "enum",
+    "status": 0,
+    "code": "var E;\n(function(E) {\n  E[E[\"A\"] = 41] = \"A\";\n  E[E[\"B\"] = 42] = \"B\";\n})(E || (E = {}));\n;\nexport const answer = E.B;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "namespace",
+    "status": 0,
+    "code": "var N;\n(function(N) {\n  N.n = 42;\n})(N || (N = {}));\n;\nexport const answer = N.n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "parameter-property",
+    "status": 0,
+    "code": "class Box {\n  n;\n  constructor(n) {\n    this.n = n;\n  }\n}\n;\nexport const answer = new Box(42).n;\n",
+    "answer": 42,
+    "runtime_pass": true
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "tsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nconst n = 42;\nexport const answer = <span>{n}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  },
+  {
+    "mode": "swc-next-Oz",
+    "probe": "jsx",
+    "status": 0,
+    "code": "const React = { createElement: (_tag, _props, n) => n };\nexport const answer = <span>{42}</span>;\n",
+    "runtime_pass": false,
+    "error": "Unexpected token '<'"
+  }
+]

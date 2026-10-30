@@ -8,25 +8,26 @@
 // `origine:@std/graph/resolve/layers`, run natively) or a function
 // `({ specifier, referrer, attributes, phase }) => { id, attributes? } | undefined | Promise<...>`
 // that runs in the creating realm during the load stage.
+import { define, is as recordIs } from 'origine:@internal/records';
 import { ERRNO } from 'origine:@std/errno';
+import { IoError } from 'origine:@std/errors';
 
 const freeze = Object.freeze;
-const invalid = message => freeze({ errno: ERRNO.io.InvalidInput, name: 'InvalidInput', message });
+const invalid = message => new IoError(ERRNO.io.InvalidInput, message);
 
-const RESOLVER = Symbol.for('origine:@std/graph/resolver');
+const makeResolver = define('ImportResolver');
 
-const isLayer = value =>
-  typeof value === 'function' || (value !== null && typeof value === 'object' && typeof value.host === 'string' && value.kind === 'layer');
+const isLayer = value => typeof value === 'function' || recordIs(value, 'ResolveLayer');
 
 class Resolver {
   constructor(layers) {
-    this[RESOLVER] = true;
     this.layers = freeze(layers);
-    freeze(this);
+    return makeResolver({ layers: this.layers, layer: Resolver.prototype.layer });
   }
 
   /// A new resolver with `layer` consulted after the ones already added. The receiver is unchanged.
   layer(layer) {
+    if (!recordIs(this, 'ImportResolver')) throw invalid('layer: expected an ImportResolver receiver');
     if (!isLayer(layer)) throw invalid('ImportResolver.layer: expected a function or a layer descriptor');
     return new Resolver([...this.layers, layer]);
   }
@@ -35,5 +36,5 @@ class Resolver {
 export const ImportResolver = freeze({
   /// A resolver with no layers yet; add them with `.layer(...)`.
   layered: () => new Resolver([]),
-  is: value => value?.[RESOLVER] === true,
+  is: value => recordIs(value, 'ImportResolver'),
 });

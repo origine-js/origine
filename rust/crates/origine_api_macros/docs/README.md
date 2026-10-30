@@ -96,7 +96,7 @@ spawns `future` on runtime `runtime`, whose output must be `Result<T, E>` (`T: I
 settles it. An error returned from the native itself, an unknown or closed runtime, or a bad
 argument yields an already-rejected promise. A panic in the future rejects with `Unexpected`.
 Errors become values via `native::error_value`: `NativeError::Arg`/`Type` -> `TypeError`,
-`Range` -> `RangeError`, `Error` -> `Error`, `Errno(code)` -> frozen `{ errno, name }`.
+`Range` -> `RangeError`, `Error` -> `Error`, `Errno(code)` -> an `OrigineError` subclass instance.
 
 ## `#[derive(FromJs)]` / `#[derive(IntoJs)]`
 

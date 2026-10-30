@@ -4,7 +4,7 @@ Facts about the machine and process the program runs on. Types: `types/host.d.ts
 
 ## `host.env`
 
-`args()`, `get(name)`, `list()` and `narrow({ allow })`; see `docs/api-design.md` (4.2).
+`args()`, `get(name)` and `list()`; see `docs/api-design.md` (4.2).
 
 ## `host.Snapshot`
 

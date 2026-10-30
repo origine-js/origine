@@ -1,5 +1,6 @@
-// `api.fs`: the fs capability factory. Evaluated as an expression by src/api/glue.zig:
-// `(native, util) => makeFsCap`. `makeFsCap(spec)` returns a frozen `{ requestSync, requestAsync }`;
+// `api.fs`: the fs capability factory. An ES module factory used by index.js:
+// Its default export reads the per-realm native and shared helpers through imports;
+// `makeFsCap(spec)` returns a frozen `{ requestSync, requestAsync }`;
 // a sync request returns the grant the host built (Zig natives + errno cell); an async one wraps the
 // Rust natives of its grant on an io runtime in promise-returning operations. `spec` is the embedder's
 // ceiling (`Config.fs`): `{ root, write, sync, async }`.
@@ -8,107 +9,134 @@
 // ceiling is denied (PermissionDenied), never silently downgraded. Native handles are readable
 // whenever they are writable, so a write-only grant ('w') is enforced by the grant itself: it denies
 // everything that observes what exists (reads, stat, directory listings, opening read-only).
-(
-  native,
-  {
-    freeze,
-    errno,
-    take,
-    failure,
-    own,
-    joinPath,
-    ioHandles,
-    closedIo,
-    completed,
-    shared,
-    errors: { InvalidInput, BadHandle, PermissionDenied, Unsupported },
-  },
-) => {
-  // Python-style open modes -> native bits (write 1, create 2, truncate 4,
-  // exclusive 8). Handles always allow reading when writable, so `x` and `x+`
-  // (and `w`/`w+`, `r+`/`rw`) are equivalent natively. `c` and `t` extend Python's
-  // set for Rust-style options: create keeping contents, truncate without creating.
-  const OPEN_MODES = freeze(
-    Object.assign(Object.create(null), {
-      r: 0,
-      rw: 1,
-      'r+': 1,
-      w: 7,
-      'w+': 7,
-      x: 11,
-      'x+': 11,
-      c: 3,
-      'c+': 3,
-      t: 5,
-      't+': 5,
-    }),
-  );
-  // `undefined` means `r`; anything unknown is -1 (rejected as InvalidInput).
-  const openBits = mode => (mode === undefined ? 0 : typeof mode === 'string' ? (OPEN_MODES[mode] ?? -1) : -1);
+import { records, recordOf, failure, own, joinPath, ioHandles, closedIo, shared, freeze, errors, settled, settling } from './util.js';
+const { InvalidInput, BadHandle, PermissionDenied } = errors;
+// Static open-mode mapping shared by every fs capability built in this realm.
+const OPEN_MODES = Object.freeze(
+  Object.assign(Object.create(null), {
+    r: 0,
+    rw: 1,
+    'r+': 1,
+    w: 7,
+    'w+': 7,
+    x: 11,
+    'x+': 11,
+    c: 3,
+    'c+': 3,
+    t: 5,
+    't+': 5,
+  }),
+);
+// `undefined` means `r`; anything unknown is -1 (rejected as InvalidInput).
+const openBits = mode => (mode === undefined ? 0 : typeof mode === 'string' ? (OPEN_MODES[mode] ?? -1) : -1);
+const isString = value => typeof value === 'string';
+const isBytes = value => value instanceof Uint8Array;
+const isOffset = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
-  const isString = value => typeof value === 'string';
-  const isBytes = value => value instanceof Uint8Array;
-
-  // Guest buffers for the zero-copy async reads: an ArrayBuffer or any view over one. The shape of
-  // a view is captured BEFORE the native call (the native may detach its buffer), then rebuilt over
-  // the ArrayBuffer the promise resolves with. Views are rebuilt with the intrinsic constructor
-  // named by their toStringTag (not `value.constructor`, which a guest can spoof), so a subclass
-  // of Uint8Array comes back as a plain Uint8Array.
-  const TypedArray = Object.getPrototypeOf(Uint8Array);
-  const typedTag = Object.getOwnPropertyDescriptor(TypedArray.prototype, Symbol.toStringTag).get;
-  const viewKinds = freeze(
-    Object.assign(Object.create(null), {
-      Int8Array,
-      Uint8Array,
-      Uint8ClampedArray,
-      Int16Array,
-      Uint16Array,
-      Int32Array,
-      Uint32Array,
-      Float32Array,
-      Float64Array,
-      BigInt64Array,
-      BigUint64Array,
-      DataView,
-    }),
-  );
-  // `{ make(arrayBuffer) }` for a view or a bare ArrayBuffer; null for anything else.
-  const shapeOf = value => {
-    if (value instanceof ArrayBuffer) return freeze({ make: buffer => buffer });
-    if (!ArrayBuffer.isView(value)) return null;
-    const Kind = viewKinds[value instanceof DataView ? 'DataView' : typedTag.call(value)];
-    if (Kind === undefined) return null;
-    const { byteOffset, byteLength } = value;
-    const length = Kind === DataView ? byteLength : byteLength / Kind.BYTES_PER_ELEMENT;
-    return freeze({
-      make(buffer) {
-        // An empty view (or one whose buffer another call detached first) completes without I/O
-        // and may come back over a detached buffer, which no view can wrap: give it an empty one.
-        if (length === 0) {
-          try {
-            return new Kind(buffer, byteOffset, 0);
-          } catch {
-            return new Kind(new ArrayBuffer(0));
-          }
+// Guest buffers for zero-copy async reads. Capture a view's shape before the native call (it may
+// detach the buffer), then rebuild it over the returned ArrayBuffer using the intrinsic kind.
+const TypedArray = Object.getPrototypeOf(Uint8Array);
+const typedTag = Object.getOwnPropertyDescriptor(TypedArray.prototype, Symbol.toStringTag).get;
+const viewKinds = Object.freeze(
+  Object.assign(Object.create(null), {
+    Int8Array,
+    Uint8Array,
+    Uint8ClampedArray,
+    Int16Array,
+    Uint16Array,
+    Int32Array,
+    Uint32Array,
+    Float32Array,
+    Float64Array,
+    BigInt64Array,
+    BigUint64Array,
+    DataView,
+  }),
+);
+const shapeOf = value => {
+  if (value instanceof ArrayBuffer) return Object.freeze({ make: buffer => buffer });
+  if (!ArrayBuffer.isView(value)) return null;
+  const Kind = viewKinds[value instanceof DataView ? 'DataView' : typedTag.call(value)];
+  if (Kind === undefined) return null;
+  const { byteOffset, byteLength } = value;
+  const length = Kind === DataView ? byteLength : byteLength / Kind.BYTES_PER_ELEMENT;
+  return Object.freeze({
+    make(buffer) {
+      if (length === 0) {
+        try {
+          return new Kind(buffer, byteOffset, 0);
+        } catch {
+          return new Kind(new ArrayBuffer(0));
         }
-        return new Kind(buffer, byteOffset, length);
-      },
-    });
-  };
-  const isOffset = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+      }
+      return new Kind(buffer, byteOffset, length);
+    },
+  });
+};
 
-  // A handle is `{ kind, fs, id }`; anything else fails validation as null.
-  const handleOfKind = kind => handle =>
-    handle !== null && typeof handle === 'object' && handle.kind === kind && typeof handle.id === 'number' && typeof handle.fs === 'number'
-      ? handle
-      : null;
+export default (native, { errno, take }) => {
+  // Read private JS reference state without crossing into native code.
+  const handleOfKind = kind => handle => records.unwrap(handle, kind === 'dir' ? 'DirRef' : 'FileRef') ?? null;
   const asDir = handleOfKind('dir');
   const asFile = handleOfKind('file');
 
+  const makeGrant = records.define('FsGrant');
+  const fileOf = (fs, id) => recordOf('FileRef', { kind: 'file', fs, id });
+  const dirOf = (fs, id) => recordOf('DirRef', { kind: 'dir', fs, id });
+  const statOf = out => recordOf('Stat', { kind: out[0], size: out[1] });
+  const syncEntriesOf = entries => freeze(entries.map(entry => recordOf('DirEntry', entry)));
+
+  // Public sync operations unwrap JS-private state and call one grant-bound native.
+  // Native checks remain responsible for ownership, access, liveness, and arguments.
+  function makeSyncOps(raw) {
+    const bad = () => {
+      errno[0] = InvalidInput;
+      return undefined;
+    };
+    const refOp = (name, unwrap, wrap) => (handle, a, b, c) => {
+      const ref = unwrap(handle);
+      if (ref === null) return bad();
+      const result = raw[name](ref.fs, ref.id, a, b, c);
+      if (errno[0] !== 0) return undefined;
+      return wrap === undefined ? result : wrap(result);
+    };
+    const ops = {};
+    for (const name of ['dirClose', 'dirCreateDir', 'dirCreateDirPath', 'dirDeleteFile', 'dirDeleteDir', 'dirDeleteTree'])
+      ops[name] = refOp(name, asDir);
+    for (const name of [
+      'fileClose',
+      'fileReadAll',
+      'fileRead',
+      'filePread',
+      'fileWriteAll',
+      'fileWrite',
+      'filePwriteAll',
+      'fileWriteMoveAll',
+      'fileWriteMove',
+      'filePwriteMoveAll',
+      'fileSetLength',
+      'fileSync',
+    ])
+      ops[name] = refOp(name, asFile);
+    ops.dirOpenFile = refOp('dirOpenFile', asDir, id => fileOf(raw.id, id));
+    ops.dirOpenDir = refOp('dirOpenDir', asDir, id => dirOf(raw.id, id));
+    ops.dirStat = refOp('dirStat', asDir, statOf);
+    ops.dirSymlinkStat = refOp('dirSymlinkStat', asDir, statOf);
+    ops.fileStat = refOp('fileStat', asFile, statOf);
+    ops.dirRead = refOp('dirRead', asDir, syncEntriesOf);
+    ops.dirRename = (dir, oldPath, newDir, newPath) => {
+      const from = asDir(dir),
+        to = asDir(newDir);
+      if (from === null || to === null) return bad();
+      return raw.dirRename(from.fs, from.id, oldPath, to.fs, to.id, newPath);
+    };
+    return ops;
+  }
+
   // The async grant's operations over `native.fsAsync` (Rust, on an io runtime): same operation
   // names and argument validation, but it never touches the shared errno cell. Every operation
-  // returns a promise; validation and completion failures reject with a frozen `{ errno, name }`
-  // (the natives reject with that shape already). `fsId` is the async grant's id.
+  // returns a promise; validation and completion failures reject with OrigineError subclasses.
+  // `fsId` is the async grant's id.
   //
   // Buffer semantics: `fileWrite`/`filePwriteAll`/`fileWriteAll` ALWAYS copy the bytes at call time
   // and never touch the guest's buffer. `fileWriteMove`/`filePwriteMoveAll`/`fileWriteMoveAll` are
@@ -117,89 +145,93 @@
   // silent copy) when it cannot be detached (shared, resizable, WebAssembly memory). `fileRead`/
   // `filePread` copy too (count result; the bytes are copied into `buffer` at completion).
   // `fileReadInto`/`filePreadInto` (BYOB) and `fileReadAlloc`/`filePreadAlloc` are the zero-copy reads.
-  function makeAsyncOps(ops, fsId) {
+  function makeAsyncOps(natives, fsId) {
+    const ops = settling(natives);
     const bad = () => Promise.reject(failure(InvalidInput));
-    // The `Dir.cwd()` sentinel `{0, 0}` names this grant's root.
-    const root = handle => (handle !== null && handle.fs === 0 && handle.id === 0 ? { kind: 'dir', fs: fsId, id: 0 } : handle);
-    const statOf = out => freeze({ kind: out[0], size: out[1] });
-    const fileOf = id => freeze({ kind: 'file', fs: fsId, id });
-    const dirOf = id => freeze({ kind: 'dir', fs: fsId, id });
+    // Unwrap before observing any fields: forged references never invoke guest getters.
+    const root = handle => {
+      const ref = asDir(handle);
+      return ref !== null && ref.fs === 0 && ref.id === 0 ? { fs: fsId, id: 0 } : ref;
+    };
+    const statOf = out => recordOf('Stat', { kind: out[0], size: out[1] });
+    const fileOf = id => recordOf('FileRef', { kind: 'file', fs: fsId, id });
+    const dirOf = id => recordOf('DirRef', { kind: 'dir', fs: fsId, id });
     const entriesOf = flat => {
       // The native returns `[name, kind, name, kind, ...]`.
       const entries = [];
-      for (let i = 0; i < flat.length; i += 2) entries.push(freeze({ name: flat[i], kind: flat[i + 1] }));
+      for (let i = 0; i < flat.length; i += 2) entries.push(recordOf('DirEntry', { name: flat[i], kind: flat[i + 1] }));
       return freeze(entries);
     };
 
     const dirOps = {
       dirOpenFile(dir, path, flags) {
-        const d = asDir(root(dir)),
+        const d = root(dir),
           bits = openBits(flags);
         if (d === null || !isString(path) || bits < 0) return bad();
         return ops.openFile(d.fs, d.id, path, bits).then(fileOf);
       },
       dirOpenDir(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.openDir(d.fs, d.id, path).then(dirOf);
       },
       dirClose(dir) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null) return bad();
         return ops.closeDir(d.fs, d.id);
       },
       dirStat(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.stat(d.fs, d.id, path).then(statOf);
       },
       dirSymlinkStat(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.symlinkStat(d.fs, d.id, path).then(statOf);
       },
       dirRead(dir) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null) return bad();
         return ops.readDir(d.fs, d.id).then(entriesOf);
       },
       dirCreateDir(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.createDir(d.fs, d.id, path);
       },
       dirCreateDirPath(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.createDirPath(d.fs, d.id, path);
       },
       dirDeleteFile(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.deleteFile(d.fs, d.id, path);
       },
       dirDeleteDir(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.deleteDir(d.fs, d.id, path);
       },
       dirDeleteTree(dir, path) {
-        const d = asDir(root(dir));
+        const d = root(dir);
         if (d === null || !isString(path)) return bad();
         return ops.deleteTree(d.fs, d.id, path);
       },
       dirRename(dir, oldPath, newDir, newPath) {
-        const d = asDir(root(dir)),
-          n = asDir(root(newDir));
+        const d = root(dir),
+          n = root(newDir);
         if (d === null || n === null || !isString(oldPath) || !isString(newPath)) return bad();
         return ops.rename(d.fs, d.id, oldPath, n.fs, n.id, newPath);
       },
     };
 
-    // Resolves `{ bytes, buffer }` (frozen) where `buffer` is a view of the same kind, byteOffset and
+    // Resolves a JS ReadResult with read-only bytes and buffer fields where `buffer` is a view of the same kind, byteOffset and
     // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached
     // when the buffer was pinned; it is untouched when the host copied instead).
-    const filled = (shape, pending) => pending.then(done => freeze({ bytes: done.bytes, buffer: shape.make(done.buffer) }));
+    const filled = (shape, pending) => pending.then(done => recordOf('ReadResult', { bytes: done.bytes, buffer: shape.make(done.buffer) }));
 
     const fileOps = {
       fileClose(file) {
@@ -319,19 +351,19 @@
 
   function makeFsCap(spec) {
     // The graph glue reads source files through the async grants' natives.
-    shared.fsAsync = native.fsAsync;
+    Object.defineProperty(shared, 'fsAsync', { get: () => native.fsAsync });
     return freeze({
       // Blocking variant on the isolate thread (std.Io, errno cell). Throws a frozen
-      // `{ errno, name }` when denied.
+      // OrigineError subclasses when denied.
       requestSync(hint) {
         const grant = grantOf(spec, hint);
         if (typeof grant === 'number') throw failure(grant);
         if (!spec.sync) throw failure(PermissionDenied);
-        // The host builds the grant: its operations, `kind`, `id` and the secret that makes it one. The glue adds
-        // the scope's `errno` array (one object for every grant) and freezes it.
+        // The host stamps a private raw grant. The JS class exposes wrapped operations and the
+        // shared errno cell; the raw grant stays in private state for authority consumers.
         const granted = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
-        return completed(granted, { errno });
+        return makeGrant({ kind: granted.kind, id: granted.id, errno, ...makeSyncOps(granted) }, granted);
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),
@@ -346,9 +378,10 @@
         // `io.close()` tells the host, which then refuses the grants opened on that io as an authority.
         shared.asyncFsClosed ??= handle => native.fsAsyncClosed(handle.id);
         // The host opens the grant on the Rust runtime and builds the grant object from its answer.
-        return native
-          .fsRequestAsync(native.fsAsync.request, io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access)
-          .then(granted => completed(granted, makeAsyncOps(native.fsAsync, granted.id)));
+        return settled(
+          native.fsRequestAsync(native.fsAsync.request, io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access),
+        )
+          .then(granted => makeGrant({ kind: granted.kind, id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) }, granted));
       },
     });
   }

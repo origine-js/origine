@@ -135,7 +135,7 @@ How a native fails: sync natives throw it, async natives reject with it.
 | Variant | JS value |
 |---|---|
 | `Arg(ArgError)` | `TypeError("argument N: expected X")` |
-| `Errno(u32)` | frozen `{ errno, name }` (same shape as `failure(code)` in `src/js/glue/util.js`) |
+| `Errno(u32)` | an `OrigineError` subclass instance (same constructors as `failure(code)` in `src/js/glue/util.js`) |
 | `Type(String)` / `Range(String)` / `Error(String)` | `TypeError` / `RangeError` / `Error` |
 
 Constructors `type_error`, `range_error`, `error`; `From<ArgError>`; `From<io::Error>` goes through
@@ -170,7 +170,7 @@ Mirrors `decode` in `src/api/binding.zig`.
 Per-grant tables of file/dir handles, single-threaded (`Rc`, `Cell`) because async operations of
 one runtime and the natives that start them all run on the isolate thread.
 
-* `Table<T>`: ids are 1-based slot indexes; `insert` reuses only **closed** slots; `get` fails
+* `Table<T>`: ids are 1-based slot indexes; `insert` issues fresh IDs without reusing closed slots; `get` fails
   `Bad` for unknown/closed ids; `live()` counts non-closed entries.
 * `Entry<T>` state: `Open` -> `Closing` (`begin_close`) -> `Closed` (`finish_close`).
   `begin()` returns a `Guard<T>` (derefs to the value, counts `in_flight`) only while `Open`;

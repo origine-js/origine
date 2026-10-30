@@ -17,7 +17,7 @@ pub struct IoCreateOpts {
     entries: Option<u32>,
 }
 
-/// The frozen handle `{ kind: 'io', id, backend }`.
+/// Runtime creation result; glue constructs the guest-visible native IoHandle instance.
 #[derive(crate::IntoJs)]
 pub struct IoHandle {
     kind: &'static str,
@@ -26,7 +26,7 @@ pub struct IoHandle {
 }
 
 /// `native.io.create(opts)`: creates a runtime (an `io::Loop` plus its task runtime) owned by the
-/// calling scope. Throws `{errno,name}`: `PermissionDenied` at the runtime ceiling, `Unsupported` for
+/// calling scope. Throws an OrigineError subclass: `PermissionDenied` at the runtime ceiling, `Unsupported` for
 /// a backend the embedder excluded or the platform lacks; `TypeError` for a bad option.
 #[native(side_effect = "any", path = "io.create", needs = "runtime")]
 fn io_create(host: &mut HostState, key: ScopeKey, opts: Option<IoCreateOpts>) -> Result<IoHandle, NativeError> {

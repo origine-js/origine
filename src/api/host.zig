@@ -2,7 +2,7 @@
 //! scopes, loaders) and driver of the init -> `main(api)` lifecycle.
 //!
 //! The Zig host owns all authority. Guest code only holds native functions whose V8
-//! External data points at a grant or per-scope state record, plus plain descriptors
+//! External data points at a grant or per-scope state record, plus JS reference instances
 //! that name things inside one grant. `src/js/glue/` shapes the surface; every native
 //! validates its own inputs through typed bindings (binding.zig).
 //!
@@ -151,6 +151,7 @@ pub const ScopeState = struct {
     host: *Host,
     scope: *Scope,
     errno_local: u32 = 0,
+    private_exports: std.ArrayList(v8.Global.Of(v8.Value)) = .empty,
     shared: ScopeCore = undefined,
     /// True once `Host.release` took the scope's resources back. `scope` dangles from then on:
     /// only `core` may be used.
@@ -239,10 +240,10 @@ pub const Host = struct {
     next_fs_id: u32 = 1,
     isolates: ?IsolateConfig = null,
     link: ?ParentLink = null,
-    /// Snapshots the guest made or loaded, by id (index + 1); `null` once closed. Released by `destroy`.
-    snapshots: std.ArrayList(?*snapshot_api.Record) = .empty,
     /// `init_cache.engineKey` of this host, computed on first use (it hashes every embedded module).
     engine_key: ?[32]u8 = null,
+    /// Snapshots the guest made or loaded, by id (index + 1); `null` once closed. Released by `destroy`.
+    snapshots: std.ArrayList(?*snapshot_api.Record) = .empty,
     /// Isolates this Host created, in id order (id = index + 1); terminated and joined by `destroy`.
     children: std.ArrayList(*ThreadIsolate) = .empty,
     /// The isolate the Rust API is attached to on first Rust capability access; detached by `destroy`.
@@ -250,7 +251,7 @@ pub const Host = struct {
     /// Set by an owner on another thread to end `settle` with `error.Terminated`.
     stop: ?*const std.atomic.Value(bool) = null,
     /// Only scripts actually loaded are retained; flush after execution to include lazy code.
-    glue_unbound: [glue_script.module_count]?v8.Global.Of(v8.UnboundScript) = @splat(null),
+    glue_unbound: [glue_script.module_count]?v8.Global.Of(v8.UnboundModuleScript) = @splat(null),
 
     /// Borrows config contents until `destroy`. Returns a heap Host at a stable
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
@@ -321,8 +322,8 @@ pub const Host = struct {
         alloc.destroy(self);
     }
 
-    /// Stores code caches of loaded glue scripts that compiled without an accepted cache.
-    /// Call after the glue and its users run; best effort, releasing retained scripts even
+    /// Stores code caches of loaded glue modules that compiled without an accepted cache.
+    /// Call after the glue and its users run; best effort, releasing retained modules even
     /// without a hook. Borrows scope on its isolate thread; retains no new handles or bytes.
     pub fn flushGlueCache(self: *Host, scope: *Scope) void {
         var session: Scope.Session = undefined;
@@ -546,6 +547,8 @@ pub const Host = struct {
             owned.bindings.destroy(state, owned.ptr);
         }
         state.module_states.deinit(alloc);
+        for (state.private_exports.items) |value| value.deinit();
+        state.private_exports.deinit(alloc);
         if (state.driver) |driver| driver.step.deinit();
         if (state.errno_buffer) |buffer| buffer.deinit();
         alloc.destroy(state);
@@ -597,7 +600,7 @@ pub const Host = struct {
         self.detach(scope);
     }
 
-    /// Binds per-scope native state to its prebuilt API template (cached-script fallback
+    /// Binds per-scope native state to its prebuilt API template (ES module initialization
     /// when absent). Returns a caller-owned handle; release before Runtime.destroy.
     /// Borrows scope through return; its realm retains natives until teardown.
     /// Error details follow ErrorInfo ownership. No guest export validation is needed.
@@ -612,12 +615,12 @@ pub const Host = struct {
         const ctx = session.ctx;
         const env: binding.Env = .{ .isolate = isolate, .ctx = ctx };
         startup_trace.mark(&timing, "api_attach");
-        const bundle = glue_script.restored(ctx) orelse try glue_script.initialize(isolate, ctx, try self.compileGlue(scope, .common));
+        const bundle = glue_script.restored(ctx) orelse try glue_script.initialize(isolate, ctx, try glue_script.factory(isolate, ctx, .{ .data = state, .compile = compileGlueModule }));
         startup_trace.mark(&timing, "api_restore_template");
         const native_value = bundle.object.getIndex(ctx, glue_script.native_index) orelse return error.BootstrapFailed;
         const native = native_value.toObject(ctx) orelse return error.BootstrapFailed;
-        const load = binding.rawDynamic(env, state, binding.native(ScopeState, loadCapability), .any);
-        try binding.set(env, native, "load", load.object.value);
+        const bind = binding.rawDynamic(env, state, binding.native(ScopeState, bindCapability), .any);
+        try binding.set(env, native, "bind", bind.object.value);
         const errno_value = bundle.object.getIndex(ctx, glue_script.errno_index) orelse return error.BootstrapFailed;
         try bindErrno(state, errno_value);
         const api = bundle.object.getIndex(ctx, if (self.runtime != null) glue_script.full_index else glue_script.basic_index) orelse return error.BootstrapFailed;
@@ -625,13 +628,16 @@ pub const Host = struct {
         return .new(isolate, api);
     }
 
-    /// Compiles/evaluates one glue expression in scope's entered realm. Returns a local
-    /// factory handle; retains an unbound script until flush/destroy only on a cache miss.
+    /// Compiles one private glue ES module in scope's entered realm. Returns a local
+    /// module handle; retains an unbound module until flush/destroy only on a cache miss.
     /// Borrows scope and cache bytes through compilation; errors transfer no caller ownership.
-    fn compileGlue(self: *Host, scope: *Scope, module: glue_script.Module) !v8.Function {
+    fn compileGlueModule(data: *anyopaque, module: glue_script.Module) anyerror!v8.Module {
+        const state: *ScopeState = @ptrCast(@alignCast(data));
+        return state.host.compileGlue(state.scope, module);
+    }
+    fn compileGlue(self: *Host, scope: *Scope, module: glue_script.Module) !v8.Module {
         var timing = if (module == .common) startup_trace.begin() else null;
         const isolate = scope.runtime.isolate;
-        const ctx = scope.context.deref();
         const text = glue_script.script(module);
         const hook = scope.options.code_cache;
         var cache_arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -640,33 +646,33 @@ pub const Host = struct {
         startup_trace.mark(&timing, "api_glue_cache_read");
         // The Source owns the CachedData object it is given (not the bytes).
         const cache_object = if (cached_bytes) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
-        const origin = scope.scriptOrigin(text.origin, false);
+        const origin = scope.scriptOrigin(text.origin, true);
         var source: v8.ScriptCompiler.Source = undefined;
         source.init(eu.v.str_utf8(isolate, text.source), &origin, cache_object);
         defer source.deinit();
-        const script = v8.ScriptCompiler.compile(ctx, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
+        const script = v8.ScriptCompiler.compileModule(isolate, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
         const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
+        if (cache_object != null and !accepted) if (hook) |h| if (h.rejected) |discard| discard(h.data, .{ .allocator = cache_arena.allocator(), .module_id = text.cache_id, .source = text.source });
         const slot = &self.glue_unbound[@backingInt(module)];
         if (hook != null and !accepted and slot.* == null) {
-            if (script.getUnboundScript()) |unbound| slot.* = .new(isolate, unbound);
+            if (script.getUnboundModuleScript()) |unbound| slot.* = .new(isolate, unbound);
         }
         startup_trace.mark(&timing, "api_glue_compile");
-        const factory = v8.Function.from_opaque((script.run(ctx) orelse return error.JavaScriptException).data.handle) orelse return error.BootstrapFailed;
+
         startup_trace.mark(&timing, "api_glue_evaluate");
-        return factory;
+        return script;
     }
 
-        if (cache_object != null and !accepted) if (hook) |h| if (h.rejected) |discard| discard(h.data, .{ .allocator = cache_arena.allocator(), .module_id = text.cache_id, .source = text.source });
     /// First-access callback: binds only this capability's natives to the private template.
     /// Borrows local arguments; installed callbacks retain scope-owned state until teardown.
-    /// Returns a local JS factory only for the no-snapshot fallback, otherwise undefined.
+    /// Returns undefined; static ES imports supply all JavaScript factories.
     /// Failures leave the getter retryable; never validates/freezes the prebuilt public graph.
-    fn loadCapability(state: *ScopeState, call: *binding.Call, name: []const u8, native: v8.Object, needs_factory: bool) !v8.Value {
+    fn bindCapability(state: *ScopeState, call: *binding.Call, name: []const u8, native: v8.Object) !v8.Value {
         const module = std.meta.stringToEnum(glue_script.Module, name) orelse return error.InvalidInput;
         const host = state.host;
         const env = call.env();
         const part = switch (module) {
-            .common => return error.InvalidInput,
+            .common, .util, .errors, .records, .errno => return error.InvalidInput,
             .host => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),
@@ -778,7 +784,7 @@ pub const Host = struct {
             try host.ensureRust(env);
             try host.installRustNatives(env, native, state, namespace);
         }
-        return if (needs_factory) (try host.compileGlue(state.scope, module)).object.value else eu.v.undefined_value(env.isolate).value;
+        return eu.v.undefined_value(env.isolate).value;
     }
 
     /// The value the glue keeps for `main`'s second argument; needs the entered context and a live HandleScope.

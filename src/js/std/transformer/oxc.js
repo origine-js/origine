@@ -1,5 +1,6 @@
+import { define } from 'origine:@internal/records';
 // `origine:@std/transformer/oxc`: host transformers for the module graph (`ModuleSource#withTransformer`,
-// `Transform.byExtension`, the maker of an `ImportHandler`). `ts(options)` returns a frozen descriptor
+// `Transform.byExtension`, the maker of an `ImportHandler`). `ts(options)` returns an immutable JS descriptor instance
 // `{ host: 'oxc', kind: 'transformer', transform, options }` that the host runs natively on module
 // source when a context loads it, so a handler built from these never enters JavaScript. Pure data:
 // it holds no authority and can be built in the init snapshot.
@@ -44,7 +45,8 @@ const checked = options => {
   return freeze(out);
 };
 
-const make = (transform, options) => freeze({ host: 'oxc', kind: 'transformer', transform, options: checked(options) });
+const makeTransformer = define('Transformer');
+const make = (transform, options) => makeTransformer({ host: 'oxc', kind: 'transformer', transform, options: checked(options) });
 
 export const ts = options => make('ts', options);
 export const tsx = options => make('tsx', options);

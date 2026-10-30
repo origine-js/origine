@@ -2,9 +2,8 @@
 //!
 //! A handle is a 1-based id into a [`Table`]. An entry is [`State::Open`] until `close` is called,
 //! then [`State::Closing`] while operations that started earlier are still running (new ones fail
-//! with [`HandleError::Stale`]), and [`State::Closed`] once the close completed. Only closed slots
-//! are reused for new handles, so an id never changes meaning while an operation on it is in
-//! flight. Everything is single-threaded (`Rc`, `Cell`): async operations of one runtime and the
+//! with [`HandleError::Stale`]), and [`State::Closed`] once the close completed. IDs are never reused within a table, so an old reference cannot acquire the
+//! authority of a later resource after close. Everything is single-threaded (`Rc`, `Cell`): async operations of one runtime and the
 //! natives that start them all run on the isolate thread.
 
 use std::cell::{Cell, RefCell};
@@ -79,7 +78,7 @@ impl<T> Entry<T> {
         self.in_flight.get()
     }
 
-    /// Starts an operation: the returned guard keeps the entry from being reused or closed until
+    /// Starts an operation: the returned guard keeps the entry from being closed until
     /// it is dropped.
     pub fn begin(self: &Rc<Self>) -> Result<Guard<T>, HandleError> {
         match self.state.get() {
@@ -109,7 +108,7 @@ impl<T> Entry<T> {
         Drained { entry: Rc::clone(self) }
     }
 
-    /// Marks the entry closed; its slot may be reused.
+    /// Marks the entry closed; its id remains permanently invalid.
     pub fn finish_close(&self) {
         self.state.set(State::Closed);
     }
@@ -185,15 +184,12 @@ impl<T> Table<T> {
         Table::default()
     }
 
-    /// Stores `value` in the first reusable slot (never used, or closed) and returns its id.
+    /// Stores `value` under a fresh id. IDs are not reused for the lifetime of the table.
     pub fn insert(&mut self, value: T) -> u32 {
         let entry = Entry::new(value);
-        if let Some(index) = self.slots.iter().position(|slot| slot.as_ref().is_none_or(|entry| entry.state() == State::Closed)) {
-            self.slots[index] = Some(entry);
-            return index as u32 + 1;
-        }
+        let id = u32::try_from(self.slots.len()).ok().and_then(|n| n.checked_add(1)).expect("resource id space exhausted");
         self.slots.push(Some(entry));
-        self.slots.len() as u32
+        id
     }
 
     /// The entry for `id`; `Bad` when the id was never issued or the entry is closed.
@@ -252,7 +248,8 @@ mod tests {
         drop(guard);
         entry.finish_close();
         assert_eq!(table.get(id).err(), Some(HandleError::Bad));
-        assert_eq!(table.insert(3), id, "a closed slot is reused");
+        assert_eq!(table.insert(3), 3, "closed ids remain invalid");
+        assert_eq!(table.get(id).err(), Some(HandleError::Bad));
         assert_eq!(table.live(), 2);
     }
 

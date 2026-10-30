@@ -2,7 +2,7 @@
 
 Source: generated at compile time from `IoErrno` and `HostErrno` ([errno_codes.zig](../../api/errno_codes.zig),
 via [errno.zig](../../api/errno.zig) `module_source`). Never edit a table by hand; add a member to an
-enum and the module, `IoError`/`HostError` and `native.errors` all follow.
+enum and its generated module, `IoError`/`HostError` and glue helpers all follow.
 
 ```js
 import { ERRNO } from 'origine:@std/errno';
@@ -13,7 +13,7 @@ ERRNO.host.BadHandle // 2
 `ERRNO` is a frozen `{ io, host }`: two tables, one per error domain, each a frozen `{ Name: code }`
 for every member (without `ok`, which is 0). Use them through
 [`IoError` and `HostError`](io.md#values). Both enums live in
-[errno_codes.zig](../../api/errno_codes.zig); `ERRNO`, `native.errors`, the Rust table and the
+[errno_codes.zig](../../api/errno_codes.zig); `ERRNO`, the Rust table and the
 TypeScript types are generated from them.
 
 - **`io`**: everything Rust's [`std::io::ErrorKind`](https://doc.rust-lang.org/std/io/enum.ErrorKind.html)

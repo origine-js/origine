@@ -5,6 +5,7 @@
 /// <reference path="./globals.d.ts" />
 /// <reference path="./std/errno.d.ts" />
 /// <reference path="./std/io.d.ts" />
+/// <reference path="./std/errors.d.ts" />
 /// <reference path="./std/fs.d.ts" />
 /// <reference path="./std/text.d.ts" />
 /// <reference path="./std/debug.d.ts" />
@@ -28,7 +29,7 @@ export type {
   IoErrnoName,
   IoErrnoTable,
 } from "./errors.d.ts";
-export type { EnvCap, EnvNarrow } from "./env.d.ts";
+export type { EnvCap } from "./env.d.ts";
 export type { CreateConfig, CreateOptions, Isolate, IsolateCap, IsolateExit } from "./isolate.d.ts";
 export type { DataBlobOptions, Snapshot, SnapshotConstructor, SnapshotCreateOptions, SnapshotLoadOptions } from "./host.d.ts";
 export type { ChannelConstructor, ChannelOptions, EventPort, HostCap, MessageEvent, Port, PortBase, PortEvents, PortMode, PullPort, SendOptions, ThreadingCap } from "./host.d.ts";

@@ -1,0 +1,7 @@
+/vendor/
+/target/
+/.zig-cache/
+/zig-out/
+/native-oxc/target/
+/native-swc-next/target/
+/__pycache__/

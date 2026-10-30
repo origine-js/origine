@@ -40,8 +40,7 @@ export const main: Main = async (api: Api) => {
   new api.host.Snapshot();
   // @ts-expect-error init is required
   api.isolate.create({});
-  const narrowed = api.host.env.narrow({ allow: ["HOME"] });
-  const names: readonly string[] = narrowed.list();
+  const names: readonly string[] = api.host.env.list();
   void names;
 
   const io = api.io.create({ backend: "auto", entries: 256 });
@@ -95,7 +94,7 @@ export const main: Main = async (api: Api) => {
   await api.context.create({ import: handler, grph: api.graph });
   // @ts-expect-error `context` has no `narrow`
   api.context.narrow({});
-  // @ts-expect-error `narrow` needs `allow`
+  // @ts-expect-error environment views have no narrowing API
   api.host.env.narrow({});
   // @ts-expect-error `narrow` takes the same `backends`, no `max`
   api.io.narrow({ max: 1 });

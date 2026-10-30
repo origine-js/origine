@@ -18,7 +18,7 @@ const api_glue = @import("../api/glue.zig");
 /// Alignment V8 expects for snapshot data.
 pub const alignment: std.mem.Alignment = .@"16";
 
-/// Builds a startup snapshot with finalized intrinsics and a JS-only API template. V8 must already
+/// Builds a startup snapshot with finalized intrinsics and a host-independent API template. V8 must already
 /// be initialized. Runs a throwaway isolate on the calling thread. Returns bytes
 /// owned by `allocator` (free with `allocator.free`); pass them to
 /// `Runtime.Options.snapshot`, where they must outlive the Runtime.
@@ -27,6 +27,7 @@ pub fn create(allocator: std.mem.Allocator) ![]align(16) u8 {
     defer aba.deinit();
     var params = v8.Isolate.CreateParams.init();
     params.array_buffer_allocator = aba;
+    params.external_references = @import("init_snapshot.zig").externalReferences();
     const blob = make: {
         var creator: v8.SnapshotCreator = undefined;
         creator.init(&params);

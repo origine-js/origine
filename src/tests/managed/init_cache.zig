@@ -291,7 +291,7 @@ test "init cache: code caches are named by their source text and only served for
     var changed = request;
     changed.source = "export const a = 2;";
     try t.expect(hook.load(hook.data, changed) == null);
-    // The name covers the runtime fingerprint, and whether it is a host glue script.
+    // The name covers the runtime fingerprint, and whether it is a host glue ES module.
     var other_fp = state.fp;
     other_fp[0] ^= 1;
     try t.expect(!std.mem.eql(u8, &name, &cache.codeFileName(other_fp, null, false, request.source)));

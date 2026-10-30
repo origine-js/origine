@@ -1,9 +1,9 @@
-// `api.isolate`: the isolate capability factory. Evaluated as an expression by src/api/glue.zig:
-// `(native, util) => makeIsolateCap`. Starts isolates on other threads. What the new isolate gets is
+// `api.isolate`: the isolate capability factory. An ES module factory used by index.js:
+// Its default export imports the per-realm native and shared helpers. Starts isolates on other threads. What the new isolate gets is
 // `data`, the second argument of its `main`; ports (`api.host.threading.Channel`) in `data` are how it
 // talks to its creator.
-(native, util) => {
-  const { freeze, freezeMethods, own, shared, take, failure } = util;
+import { recordOf, freeze, freezeMethods, own, shared, failure } from './util.js';
+export default (native, { take }) => {
   const { ready } = shared.channels;
   const configs = new WeakSet();
   const statuses = ['running', 'completed', 'failed', 'terminated'];
@@ -34,7 +34,7 @@
     if (snapshot !== undefined) shared.snapshotId(snapshot);
     const transfer = own(options, 'transfer');
     if (transfer !== undefined && !Array.isArray(transfer)) throw new TypeError('transfer must be an array of ArrayBuffers and ports');
-    const config = freeze({
+    const config = recordOf('IsolateConfig', {
       init,
       args,
       env: freeze(env),
@@ -57,7 +57,14 @@
       if (config.data !== undefined) data = native.channel.stash(config.data, config.transfer);
       const env = [];
       for (const name of Object.keys(config.env)) env.push(name, config.env[name]);
-      id = native.isolate.spawn(config.init, JSON.stringify(config.args), JSON.stringify(env), done.tx, data, config.snapshot === undefined ? 0 : shared.snapshotId(config.snapshot));
+      id = native.isolate.spawn(
+        config.init,
+        JSON.stringify(config.args),
+        JSON.stringify(env),
+        done.tx,
+        data,
+        config.snapshot === undefined ? 0 : shared.snapshotId(config.snapshot),
+      );
       checked(take());
     } catch (error) {
       for (const handle of [done.tx, done.rx]) {
@@ -93,16 +100,18 @@
       checked(take());
       const reason = native.isolate.failure(id);
       checked(take());
-      return freeze(reason === undefined ? { status } : { status, error: reason });
+      return recordOf('IsolateOutcome', reason === undefined ? { status } : { status, error: reason });
     };
-    return freezeMethods({
-      id,
-      terminate() {
-        native.isolate.terminate(id);
-        checked(take());
-      },
-      join: () => (joined ??= join()),
-    });
+    return freezeMethods(
+      recordOf('IsolateHandle', {
+        id,
+        terminate() {
+          native.isolate.terminate(id);
+          checked(take());
+        },
+        join: () => (joined ??= join()),
+      }),
+    );
   }
 
   // The second argument of `main` in an isolate made by `create`; see `Host.run`.

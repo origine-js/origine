@@ -19,7 +19,7 @@ declare module "origine:@std/transformer/oxc" {
     readonly inlineSourceMap?: boolean;
   }
 
-  /** A frozen descriptor the host runs natively on module source: no JS is entered to transform. */
+  /** An immutable JS class descriptor the host runs natively on module source: no JS is entered to transform. */
   export interface OxcTransformer {
     readonly host: "oxc";
     readonly kind: "transformer";

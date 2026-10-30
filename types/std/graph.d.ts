@@ -3,7 +3,12 @@
 // docs/graph-api.md and not implemented, so there is no way to load or evaluate a recipe today.
 
 declare module "origine:@std/graph/module" {
-  /** An error value thrown by the builders for a malformed argument: `{ errno, name: 'InvalidInput', message }`. */
+  type NativeIdentity = import("origine:@std/graph/module").Descriptor;
+  const descriptorBrand: unique symbol;
+  /** Opaque identity supplied by the runtime's factories. */
+  export interface Descriptor { readonly [descriptorBrand]: true; }
+
+  /** An IoError thrown by builders for a malformed argument, with errno InvalidInput and a message. */
   type BuildError = { readonly errno: number; readonly name: "InvalidInput"; readonly message: string };
 
   /** Which phase an import asks for. Only `Evaluation` is implemented by the engine. */
@@ -15,10 +20,9 @@ declare module "origine:@std/graph/module" {
   export type ModuleImportPhase = (typeof ModuleImportPhase)[keyof typeof ModuleImportPhase];
 
   /** Where the source map of a module comes from. */
-  export type SourceMap =
-    | { readonly kind: "none" }
+  export type SourceMap = (| { readonly kind: "none" }
     | { readonly kind: "url"; readonly value: string }
-    | { readonly kind: "text"; readonly value: string };
+    | { readonly kind: "text"; readonly value: string }) & import("origine:@std/graph/module").Descriptor;
   export const SourceMap: {
     /** No map. The default. */
     readonly None: SourceMap;
@@ -37,7 +41,7 @@ declare module "origine:@std/graph/module" {
     | { readonly host: string; readonly kind: "transformer"; readonly native?: boolean };
 
   /** Source text: a file the graph reads with its fs grant, or text given directly. Immutable. */
-  export interface ModuleSource {
+  export interface ModuleSource extends NativeIdentity {
     readonly kind: "file" | "text";
     /** `kind: 'file'`: the path, relative to the graph's fs root. */
     readonly path?: string;
@@ -71,7 +75,7 @@ declare module "origine:@std/graph/module" {
   }
 
   /** An immutable description of a module. Describing is free; a graph loads and compiles it. */
-  export interface ModuleRecipe {
+  export interface ModuleRecipe extends NativeIdentity {
     readonly source: ModuleSource;
     readonly import: import("origine:@std/graph/import").ImportHandler;
     readonly name: string;
@@ -93,6 +97,7 @@ declare module "origine:@std/graph/module" {
 }
 
 declare module "origine:@std/graph/resolve" {
+  type NativeIdentity = import("origine:@std/graph/module").Descriptor;
   /** What a resolver layer receives. */
   export interface ResolveRequest {
     readonly specifier: string;
@@ -108,11 +113,11 @@ declare module "origine:@std/graph/resolve" {
   }
   /** A host layer descriptor (see `origine:@std/graph/resolve/layers`) or a function run in the creating realm. `undefined` passes to the next layer. */
   export type ResolverLayer =
-    | { readonly host: string; readonly kind: "layer" }
+    | (import("origine:@std/graph/module").Descriptor & { readonly host: string; readonly kind: "layer" })
     | ((request: ResolveRequest) => Resolved | undefined | Promise<Resolved | undefined>);
 
   /** An ordered list of layers; the first answer wins and none means `NotFound`. Immutable. */
-  export interface ImportResolver {
+  export interface ImportResolver extends NativeIdentity {
     readonly layers: readonly ResolverLayer[];
     /** A new resolver with `layer` appended; the receiver is unchanged. Throws `InvalidInput` for a non-layer. */
     layer(layer: ResolverLayer): ImportResolver;
@@ -125,7 +130,8 @@ declare module "origine:@std/graph/resolve" {
 }
 
 declare module "origine:@std/graph/resolve/layers" {
-  type Layer = { readonly host: string; readonly kind: "layer" };
+  type NativeIdentity = import("origine:@std/graph/module").Descriptor;
+  type Layer = (import("origine:@std/graph/module").Descriptor & { readonly host: string; readonly kind: "layer" });
   /** `./x` and `../x` against the importer's id. */
   export function relative(): Layer;
   /** Recognises `origine:` ids; serving them is `origineProvider`'s job. */
@@ -142,6 +148,7 @@ declare module "origine:@std/graph/resolve/layers" {
 }
 
 declare module "origine:@std/graph/import" {
+  type NativeIdentity = import("origine:@std/graph/module").Descriptor;
   type ModuleSource = import("origine:@std/graph/module").ModuleSource;
   type ModuleRecipe = import("origine:@std/graph/module").ModuleRecipe;
   type Transformer = import("origine:@std/graph/module").Transformer;
@@ -150,13 +157,18 @@ declare module "origine:@std/graph/import" {
 
   /** The kinds of failure an import can have: the `io` codes of `IoError` that apply, by name. */
   export const ImportError: {
+    new (code: number, message?: string): import("origine:@std/errors").OrigineError;
+    readonly prototype: import("origine:@std/errors").OrigineError;
+    name(code: number): string;
+    nameOf(code: number): string;
+    of(code: number, message?: string): import("origine:@std/errors").OrigineError;
     readonly NotFound: 10;
     readonly PermissionDenied: 20;
     readonly Unsupported: 23;
     readonly InvalidInput: 30;
     readonly InvalidData: 31;
     /** The open case. `message` stays in the creating realm; a child sees a `ModuleError`. */
-    other(message: string): { readonly errno: number; readonly name: "Unexpected"; readonly message: string };
+    other(message: string): import("origine:@std/errors").OrigineError & { readonly name: "Unexpected" };
     /** Whether `value` (a code or any `{ errno }`) is `code`. */
     is(value: number | { readonly errno?: number } | null | undefined, code: number): boolean;
   };
@@ -171,14 +183,13 @@ declare module "origine:@std/graph/import" {
     readonly phase: import("origine:@std/graph/module").ModuleImportPhase;
   }
 
-  /** A hook's answer. All verdicts are frozen data. */
-  export type Verdict =
-    | { readonly kind: "next" }
+  /** A hook's answer. All verdicts are immutable JS class instances. */
+  export type Verdict = (| { readonly kind: "next" }
     | { readonly kind: "accept" }
     | { readonly kind: "provide"; readonly source: ModuleSource; readonly recipe?: never }
     | { readonly kind: "provide"; readonly recipe: ModuleRecipe; readonly source?: never }
     | { readonly kind: "link"; readonly reference: object; readonly mode: "hardened" | "shared" }
-    | { readonly kind: "reject"; readonly error: { readonly errno: number; readonly name: string; readonly message?: string } };
+    | { readonly kind: "reject"; readonly error: { readonly errno: number; readonly name: string; readonly message?: string } }) & import("origine:@std/graph/module").Descriptor;
 
   export const Import: {
     /** Not mine: continue with the next hook. */
@@ -203,7 +214,7 @@ declare module "origine:@std/graph/import" {
   };
 
   /** A provider descriptor from `origine:@std/graph/providers`, or a function run in the creating realm. */
-  export type Hook = { readonly host: string; readonly kind: "provider" } | ((resolved: ResolvedImport) => Verdict | Promise<Verdict>);
+  export type Hook = (import("origine:@std/graph/module").Descriptor & { readonly host: string; readonly kind: "provider" }) | ((resolved: ResolvedImport) => Verdict | Promise<Verdict>);
 
   /** What a maker returns (or `MakeRecipe.inherit` is given): recipe options, never a recipe. */
   export interface MakerOptions {
@@ -211,9 +222,8 @@ declare module "origine:@std/graph/import" {
     readonly import?: ImportHandler;
     readonly transformer?: Transformer;
   }
-  export type Maker =
-    | ({ readonly host: "maker"; readonly kind: "maker" } & MakerOptions)
-    | { readonly kind: "maker"; readonly native: false; readonly fn: (supplied: { readonly id: string; readonly source: ModuleSource }) => MakerOptions | Promise<MakerOptions> };
+  export type Maker = (| ({ readonly host: "maker"; readonly kind: "maker" } & MakerOptions)
+    | { readonly kind: "maker"; readonly native: false; readonly fn: (supplied: { readonly id: string; readonly source: ModuleSource }) => MakerOptions | Promise<MakerOptions> }) & import("origine:@std/graph/module").Descriptor;
   export const MakeRecipe: {
     /** Native: inherit this handler (or `options.import`) and apply `options.transformer` to every supplied source. */
     inherit(options?: MakerOptions): Maker;
@@ -263,7 +273,7 @@ declare module "origine:@std/graph/import" {
   }
 
   /** A module's import pipeline: resolver -> hooks -> maker, plus a cache. Immutable. */
-  export interface ImportHandler {
+  export interface ImportHandler extends NativeIdentity {
     readonly resolver: ImportResolver;
     readonly hooks: readonly Hook[];
     readonly maker: Maker;
@@ -282,9 +292,10 @@ declare module "origine:@std/graph/import" {
 }
 
 declare module "origine:@std/graph/providers" {
+  type NativeIdentity = import("origine:@std/graph/module").Descriptor;
   type Verdict = import("origine:@std/graph/import").Verdict;
   type ResolvedImport = import("origine:@std/graph/import").ResolvedImport;
-  type Provider = { readonly host: string; readonly kind: "provider" };
+  type Provider = (import("origine:@std/graph/module").Descriptor & { readonly host: string; readonly kind: "provider" });
 
   /**
    * Serves `origine:@std/*` modules from the host, with their natives bound to the importing context.
@@ -307,12 +318,13 @@ declare module "origine:@std/graph/providers" {
 }
 
 declare module "origine:@std/graph/cache" {
+  type NativeIdentity = import("origine:@std/graph/module").Descriptor;
   /**
    * A table of modules: (id, attributes) -> module. The object is the table's name: handlers made with the
    * same object keep their modules in the same table, handlers made with two objects keep two modules for
    * one id, also inside one context. Keep one object per table you want to inspect.
    */
-  export type ImportCache = {
+  export type ImportCache = ({
     readonly host: "importCache";
     readonly kind: "cache";
     /** How many modules the table holds, in the contexts this realm created. Needs `api.graph` or `api.context`. */
@@ -328,27 +340,26 @@ declare module "origine:@std/graph/cache" {
     readonly retain: "all" | "used";
     /** Cap on the table, in entries. */
     readonly entries?: number;
-  };
+  }) & import("origine:@std/graph/module").Descriptor;
   export const ImportCache: {
     /** `retain` is required because it changes what re-importing does. Throws `InvalidInput`. */
     native(options: { readonly retain: "all" | "used"; readonly entries?: number }): ImportCache;
   };
 
   /** The native memo of resolver results. */
-  export type ResolveCache = { readonly host: "resolveCache"; readonly kind: "cache"; readonly entries?: number };
+  export type ResolveCache = ({ readonly host: "resolveCache"; readonly kind: "cache"; readonly entries?: number }) & import("origine:@std/graph/module").Descriptor;
   export const ResolveCache: {
     native(options?: { readonly entries?: number }): ResolveCache;
   };
 
   /** (id, source hash) -> V8 code-cache bytes. */
-  export type CodeCache =
-    | { readonly host: "codeCacheNone" | "codeCacheMemory" | "codeCacheDir"; readonly kind: "codeCache"; readonly bytes?: number; readonly fs?: object }
+  export type CodeCache = (| { readonly host: "codeCacheNone" | "codeCacheMemory" | "codeCacheDir"; readonly kind: "codeCache"; readonly bytes?: number; readonly fs?: object }
     | {
         readonly kind: "codeCache";
         readonly native: false;
         readonly load: (key: CodeCacheKey, source: string) => Uint8Array | undefined | Promise<Uint8Array | undefined>;
         readonly store: (key: CodeCacheKey, blob: Uint8Array) => void | Promise<void>;
-      };
+      }) & import("origine:@std/graph/module").Descriptor;
   export interface CodeCacheKey {
     /** The module id (the `name` of a root module). */
     readonly id: string;

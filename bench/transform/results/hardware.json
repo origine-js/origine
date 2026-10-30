@@ -1,0 +1,6 @@
+{
+  "cpu": "Apple M4 Max",
+  "logical_cpus": 16,
+  "ram_bytes": 137438953472,
+  "hardware_source": "sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu"
+}

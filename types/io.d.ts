@@ -24,7 +24,7 @@ export interface IoNarrow {
 
 /** A cancellable timer: {@link Io.timer}. */
 export interface Timer {
-  /** Resolves when the delay has passed; rejects with `{ errno: 14, name: 'Canceled' }` when cancelled. */
+  /** Resolves when the delay has passed; rejects with a HostError whose errno is Canceled when cancelled. */
   readonly promise: Promise<void>;
   /**
    * Cancels the timer and its backend timeout. Returns `true` when it cancelled a pending timer,

@@ -1,4 +1,4 @@
-// `origine:@std/graph/cache`: the three caches of the graph, as descriptors the host builds natively.
+// `origine:@std/graph/cache`: JS class descriptors for caches the host manages natively.
 //
 //   ImportCache    (id, attributes) -> module. One native table per context, made from the descriptor
 //                  (a V8 module belongs to a single context). `retain` says how long an entry lives.
@@ -7,10 +7,12 @@
 //
 // ImportCache and ResolveCache are consulted on every import and behind V8's synchronous link, so
 // they cannot call back into JS. CodeCache is off that path and may be backed by JS (`custom`).
+import { define, internal } from 'origine:@internal/records';
 import { ERRNO } from 'origine:@std/errno';
+import { IoError } from 'origine:@std/errors';
 
 const freeze = Object.freeze;
-const invalid = message => freeze({ errno: ERRNO.io.InvalidInput, name: 'InvalidInput', message });
+const invalid = message => new IoError(ERRNO.io.InvalidInput, message);
 const own = (object, key) => {
   if (object === null || typeof object !== 'object') return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(object, key);
@@ -22,14 +24,14 @@ const capacity = (what, name, value) => {
   if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0)) throw invalid(`${what}: ${name} must be a non-negative integer`);
   return value;
 };
-const withCapacity = (host, kind, name, value, rest) => freeze({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
+const makeCache = define('Cache');
+const withCapacity = (host, kind, name, value, rest) =>
+  makeCache({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
 
-const OPS = Symbol.for('origine:@std/graph/cache-ops');
-/// What reaches the host: `api.graph` (or `api.context`) installs it in the realm.
+/// What reaches the host: `api.graph` (or `api.context`) publishes it in the realm's records module.
 const ops = () => {
-  const found = globalThis[OPS];
-  if (found === undefined)
-    throw freeze({ errno: ERRNO.io.Unsupported, name: 'Unsupported', message: 'ImportCache needs api.graph or api.context' });
+  const found = internal('graph/cache-ops');
+  if (found === undefined) throw new IoError(ERRNO.io.Unsupported, 'ImportCache needs api.graph or api.context');
   return found;
 };
 
@@ -48,7 +50,7 @@ export const ImportCache = freeze({
     const descriptor = withCapacity('importCache', 'cache', 'entries', capacity('ImportCache.native', 'entries', own(options, 'entries')), {
       retain,
     });
-    const cache = {
+    const cache = makeCache({
       ...descriptor,
       get size() {
         return ops().size(cache);
@@ -60,8 +62,8 @@ export const ImportCache = freeze({
       clear() {
         return ops().clear(cache);
       },
-    };
-    return freeze(cache);
+    });
+    return cache;
   },
 });
 
@@ -72,7 +74,7 @@ export const ResolveCache = freeze({
   },
 });
 
-const none = freeze({ host: 'codeCacheNone', kind: 'codeCache' });
+const none = makeCache({ host: 'codeCacheNone', kind: 'codeCache' });
 
 export const CodeCache = freeze({
   /// No code cache: every compile parses.
@@ -106,6 +108,6 @@ export const CodeCache = freeze({
     const load = own(options, 'load');
     const store = own(options, 'store');
     if (typeof load !== 'function' || typeof store !== 'function') throw invalid('CodeCache.custom: load and store must be functions');
-    return freeze({ kind: 'codeCache', native: false, load, store });
+    return makeCache({ kind: 'codeCache', native: false, load, store });
   },
 });

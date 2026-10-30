@@ -1,0 +1,2403 @@
+[
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/context.ts",
+    "kind": "ts",
+    "bytes": 2708,
+    "sha256": "de2a085933307a31fb01bdfee8f666726ff2db22304833b0c90ebb434c935b26"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/events.ts",
+    "kind": "ts",
+    "bytes": 8320,
+    "sha256": "ede616ab5abea791ec05a2c5b52ef975aeabce7bd9062d485d1f974fc955c223"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/fiber.ts",
+    "kind": "ts",
+    "bytes": 16569,
+    "sha256": "57effdc3d07c0ea646c257cec2cd44881d42db967fdc97523b77af993f105a6c"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/index.ts",
+    "kind": "ts",
+    "bytes": 198,
+    "sha256": "49df2031dd6590d606813f4d25220ce3ce177163c5fcdbe1084b81a90f605ebf"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/logger.ts",
+    "kind": "ts",
+    "bytes": 7137,
+    "sha256": "5b99be04738208b5aa8114ba087b37844dab7d88998d428aa53f8e59e45b71a9"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/reflect.ts",
+    "kind": "ts",
+    "bytes": 11478,
+    "sha256": "04399f610df5e93a0ecd97a6a0c220e43145fe1248e6ade4f5cb4c1c73a660d5"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/registry.ts",
+    "kind": "ts",
+    "bytes": 7516,
+    "sha256": "66c9f48a043e7707cf1efa119ea6e175a3c58358f2dee27ed4e96f46d5c67b12"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/service.ts",
+    "kind": "ts",
+    "bytes": 2784,
+    "sha256": "be7868f4a85a75c95a010470ffa2e39043f90eb7fb9533cddd5986687699279c"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/core/src/utils.ts",
+    "kind": "ts",
+    "bytes": 9993,
+    "sha256": "d3d6a62efc6255e0b03e82b1d6108cc58337062b34ee52f5b0cb6675dfc50411"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/create/src/bin.ts",
+    "kind": "ts",
+    "bytes": 184,
+    "sha256": "b0f962298bebabd0087b3b7a13ff2afce0457a96909e41ce18b117cddd093bcc"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/create/src/index.ts",
+    "kind": "ts",
+    "bytes": 13278,
+    "sha256": "614f601b416615128297e1e4fb10c4c8487780c5f307be8cb384c3b2b4824090"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/fs-node/src/index.ts",
+    "kind": "ts",
+    "bytes": 2692,
+    "sha256": "bb1b6ec669490cfd15fdea80d06bb438da38bca1b20a821591e0685f5bad86f4"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/group/src/index.ts",
+    "kind": "ts",
+    "bytes": 70,
+    "sha256": "fbbf8e8fe04056873360442127086dd9893da96ef9a608c2a531974ae2ce367e"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/hmr/src/error.ts",
+    "kind": "ts",
+    "bytes": 958,
+    "sha256": "1c99f0394be9f69a730c8039970d426322ba252ed01158090bb72367e82f42e0"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/hmr/src/index.ts",
+    "kind": "ts",
+    "bytes": 20147,
+    "sha256": "8152364c880ec2816c670ff59b6aaa9b9bf6b526362e6f22cf0e28b65ba00a91"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/include/src/index.ts",
+    "kind": "ts",
+    "bytes": 24696,
+    "sha256": "84fb64a426d3faec84182eccd520fee50e8248989238de6367bd7dc584729922"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/include/src/journal.ts",
+    "kind": "ts",
+    "bytes": 8044,
+    "sha256": "78ecc1112ddc17e51caa39d5ce55bbc5f1de5a7c7824609a95c8185d195420d4"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/include/src/patch.ts",
+    "kind": "ts",
+    "bytes": 9008,
+    "sha256": "9298dc8d9f152abf3330c15d8817443c77ee428c1f5488cc95df48af05c6bf37"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/config/entry.ts",
+    "kind": "ts",
+    "bytes": 11733,
+    "sha256": "82632070c3e69f798a842efa6b38955cc084a12927ec5049ac983096439280ae"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/config/group.ts",
+    "kind": "ts",
+    "bytes": 4076,
+    "sha256": "7b11b235fba659376637b53938d7ac7e75d13326f0597a4450bfb639899471c1"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/config/isolate.ts",
+    "kind": "ts",
+    "bytes": 4793,
+    "sha256": "40a95cb77cd390c7aba29de1bb2f673a38284148e884a55a2ce7b222673f3abd"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/config/tree.ts",
+    "kind": "ts",
+    "bytes": 7951,
+    "sha256": "b480bec81a6c17dba964c89bb1d4b1f3f7957f13873ed2b63e5d0392c6e2f0f1"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/config/utils.ts",
+    "kind": "ts",
+    "bytes": 7798,
+    "sha256": "29f3afe4e97dd013566d60ae3644f2b11846719ba3578bad3faff4134439bb2d"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/index.ts",
+    "kind": "ts",
+    "bytes": 7037,
+    "sha256": "2755bed306623810a7613e9a2a195a4d0f8c479a7cda93a4e87de42ce3dd25c4"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader/src/resolve.ts",
+    "kind": "ts",
+    "bytes": 3454,
+    "sha256": "bf691886f94c38a1f36f3947ee12392f776ca3783af32cda8c5a3d16ff75a30a"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader-utils/src/index.ts",
+    "kind": "ts",
+    "bytes": 443,
+    "sha256": "236d8e47c7a39b90b568bd270c36be434bc0e22d5ffebe62f81ae10edfd963cd"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/loader-utils/src/internal.ts",
+    "kind": "ts",
+    "bytes": 5217,
+    "sha256": "2d4ddc8c13068fe98749f7522e88024fcba94f51f3da51c59fe0e43af99b20b7"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/logger-console/src/browser.ts",
+    "kind": "ts",
+    "bytes": 485,
+    "sha256": "0b406ea7e559b001293ae2e8e1481a28d3fa0d6bd961da1bec00921b4da0a5e9"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/logger-console/src/index.ts",
+    "kind": "ts",
+    "bytes": 710,
+    "sha256": "a03ac71279bf514ed1ebebcee4c7caf42f256f88788f61d4498af701357d28c9"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/logger-console/src/shared.ts",
+    "kind": "ts",
+    "bytes": 2828,
+    "sha256": "469dd48f3ce8832cd941a225e8505de428a5fcc2971e5dc1f866fea83cc88a73"
+  },
+  {
+    "repo": "cordis",
+    "path": "packages/timer/src/index.ts",
+    "kind": "ts",
+    "bytes": 5080,
+    "sha256": "85b7a2b85ff733c2d9125e7ad8b8ed94f965abcd0c2a6c5bd5492fd82b444674"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/home/index.ts",
+    "kind": "ts",
+    "bytes": 265,
+    "sha256": "17809a25cea084b46cc4e6d127df09796f1a06b88fc427cf6f314295004f47e7"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/index.ts",
+    "kind": "ts",
+    "bytes": 634,
+    "sha256": "4b13eacf4c3e680f9b92bc86760b96c255b0676b8eeb92ccbe5f5f607c395817"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/layout/index.ts",
+    "kind": "ts",
+    "bytes": 297,
+    "sha256": "a3797a27354145a7e7b56f2f27a788f321dd212a052fd22e150fb35df5bada43"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/settings/index.ts",
+    "kind": "ts",
+    "bytes": 646,
+    "sha256": "5bbe6985b85bae674906f57f0b418cccc54b10532dc515e35c1792b6a0a8150d"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/status/index.ts",
+    "kind": "ts",
+    "bytes": 333,
+    "sha256": "35aee4bce8f7d6cc6834a2d7ffb21d8c3f4027ea87eb5ee57bf8ed35d323fe61"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/styles/index.ts",
+    "kind": "ts",
+    "bytes": 447,
+    "sha256": "44defd91a3c51458f07039b47966529322ba1eb86e96b26724f9ce1cd6f0f4bb"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/theme/activity/utils.ts",
+    "kind": "ts",
+    "bytes": 333,
+    "sha256": "81dcff05971e574db03f511ef1769688f6703c6fa51a095ef63dd59f8c355d42"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/app/theme/index.ts",
+    "kind": "ts",
+    "bytes": 659,
+    "sha256": "f9d41b5a1c382a7ed23af37a9b3d794e2d15f74a6fd005714c19965f9ddd77a9"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/components/common/index.ts",
+    "kind": "ts",
+    "bytes": 262,
+    "sha256": "680af833e6665367165bf1879913c586a7eb77386691df1a6111337a5df284d1"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/components/icons/index.ts",
+    "kind": "ts",
+    "bytes": 4175,
+    "sha256": "b535988338a0159818321daeb0b4b1d4f5a80b06ba7632e8fde7fbf0985755e4"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/components/index.ts",
+    "kind": "ts",
+    "bytes": 838,
+    "sha256": "c4e391a0e53fe995412ef78d1cbc781fb7bf154f9139ce8da38dbefd9cb4781b"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/components/layout/index.ts",
+    "kind": "ts",
+    "bytes": 424,
+    "sha256": "5e888ad0a36d92d9412e553c2601b98266604402b2935daeae23c3993ce2f4cf"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/components/link.ts",
+    "kind": "ts",
+    "bytes": 1200,
+    "sha256": "9c05cc887f1a702fb3809d6ecb9c05c7d0712ef8f397e8c7f8573ac6eae53a6b"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/components/slot.ts",
+    "kind": "ts",
+    "bytes": 1835,
+    "sha256": "5377601ffe4dd32663e9000641b7542cad0ba37665a8aa9cac511614f4018616"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/context.ts",
+    "kind": "ts",
+    "bytes": 1179,
+    "sha256": "fce65d9f41834384e862cf31c01f1906719c3cd792f157549e993dc6e5ea9e08"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/data.ts",
+    "kind": "ts",
+    "bytes": 1543,
+    "sha256": "539179a251c16b1813a39cbde4d1fca1a6a5ceb1a60700a87f1a9ae00a0af8fa"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/index.ts",
+    "kind": "ts",
+    "bytes": 4850,
+    "sha256": "db7a8d366c8a51130f9831b926f4105d8b0065ead93cf7f9ece5aaef04da2523"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/plugins/action.ts",
+    "kind": "ts",
+    "bytes": 4654,
+    "sha256": "262320f148b060e126081d95cc731effb3d5e924aa61d930fe6ec8718fa79e65"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/plugins/loader.ts",
+    "kind": "ts",
+    "bytes": 8507,
+    "sha256": "1ef212ca28dec489d9ed8478e5f1aa40ce537b778de73e405786839abcd859b6"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/plugins/router.ts",
+    "kind": "ts",
+    "bytes": 10592,
+    "sha256": "4122344e93e86c62d98097c2e6ba5e407377cffd58b810397fddaa56e25dcee5"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/plugins/rpc.ts",
+    "kind": "ts",
+    "bytes": 1528,
+    "sha256": "761c9520cba25c62180fd90f6b28f7e87677e2381f968ddae06788e03e1edf1d"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/plugins/setting.ts",
+    "kind": "ts",
+    "bytes": 3941,
+    "sha256": "e2df7794f19a7457fb8156ea555db9bed05669abed3b1cb79fe98be520178685"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/plugins/theme.ts",
+    "kind": "ts",
+    "bytes": 3136,
+    "sha256": "4c1e1ce0b7388a94f2ef8722dea4d844a087813d4be9a7a11fac41748e27743d"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/client/utils.ts",
+    "kind": "ts",
+    "bytes": 308,
+    "sha256": "392c8131d17e453013756be92dc0bae5c5c7f2b380b2bf4341f5240f04b01583"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/scripts/client.ts",
+    "kind": "ts",
+    "bytes": 6177,
+    "sha256": "e53396be771adf2fd8d5933ec084c2d6b8776dc5c45d1b9362eed7c0c66387bf"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/src/bin.ts",
+    "kind": "ts",
+    "bytes": 416,
+    "sha256": "91793ba2113373f6811a1a9cbfd5d65864960cf024094db19c4613859b3d8bc0"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/src/index.ts",
+    "kind": "ts",
+    "bytes": 3913,
+    "sha256": "781acedc24872351326606d82442d3fa339c4a0089c8c4ca10d4f91bb14414b5"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/client/src/yakumo.ts",
+    "kind": "ts",
+    "bytes": 1277,
+    "sha256": "25c810ae11d2f6439cd085dc965cfb08f3458dc94480dec4816c67f6273b2ecd"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/components/client/form/index.ts",
+    "kind": "ts",
+    "bytes": 181,
+    "sha256": "8bc21a973755e4dcbef36e0c46b41a887373106edf58de5bc7d68c2da3dda929"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/components/client/index.ts",
+    "kind": "ts",
+    "bytes": 333,
+    "sha256": "21266531ba7640e2df3089807a52f0d6f811f433cefc43cccd25708652cb627f"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/components/client/virtual/index.ts",
+    "kind": "ts",
+    "bytes": 172,
+    "sha256": "b442ed2832cd0e3b52efba3c048469f34de00fa7c6de35b7d89a9b403c54a66f"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/components/client/virtual/item.ts",
+    "kind": "ts",
+    "bytes": 1633,
+    "sha256": "43bf3b23551e838e5b8d7f17cc064ecb9b9aa910da2fcccf467206a9972b2092"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/components/client/virtual/virtual.ts",
+    "kind": "ts",
+    "bytes": 7007,
+    "sha256": "637e390899e45ad8cb47d4f164e4d41903051de63b11e374dfa88876526d1b01"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/components/src/index.ts",
+    "kind": "ts",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/market/client/icons/index.ts",
+    "kind": "ts",
+    "bytes": 1431,
+    "sha256": "7b1fbe8e67e33f54da05583e1580ab96a8a6956c9bbfa126d9a33c24760f815b"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/market/client/index.ts",
+    "kind": "ts",
+    "bytes": 338,
+    "sha256": "555946c71f71a0c44857735b9521c3897c4886e4f80f3819ccc8683aba6cf6bf"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/market/client/utils.ts",
+    "kind": "ts",
+    "bytes": 7493,
+    "sha256": "42d30495ac95373fb35751df02308bab91a14f674e3b901f24ce0047ba94752c"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/market/src/index.ts",
+    "kind": "ts",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/bootstrap-main.ts",
+    "kind": "ts",
+    "bytes": 3352,
+    "sha256": "efef2e33b5a600142b12d05d32d7f3c065947d5b9e2a101bc6ddd977a5c194a3"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/instances/index.ts",
+    "kind": "ts",
+    "bytes": 986,
+    "sha256": "9f24ec9793c567ef00c01bfa75f76f9018137791cb89b4e46b148d10eaa6c067"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/instances/utils.ts",
+    "kind": "ts",
+    "bytes": 6255,
+    "sha256": "ac99440c013aac70179583da0ec3668b9828d6047cc5ed60e1781a0535038e2f"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/main.ts",
+    "kind": "ts",
+    "bytes": 815,
+    "sha256": "e8d50feddd6271547f9d7f7d14d2f2f3839cb78540f1982eecaceaedec0485f5"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/polyfills.ts",
+    "kind": "ts",
+    "bytes": 951,
+    "sha256": "c532e8f30f773d3c0d20c9841245ce37111efdbfad3f7290d9e0861023c142b3"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/service-worker.ts",
+    "kind": "ts",
+    "bytes": 1562,
+    "sha256": "9f8d762d04554128628a6651393c564679e1821422ca32d3dfacb81aad4d81a4"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/shims/node-module.ts",
+    "kind": "ts",
+    "bytes": 537,
+    "sha256": "f6965631591f35f303d0e976e87f2543787db7fe51a0723219b11bf8d6ba3542"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/socket.ts",
+    "kind": "ts",
+    "bytes": 7269,
+    "sha256": "c69f4c689310376e7daf780389bec99125841e9c5553518a9c8b8b08e328f102"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/sw-runtime.ts",
+    "kind": "ts",
+    "bytes": 7661,
+    "sha256": "6223f83b6181939cf8a808b9f9afbfd1683926ef8cbbc38e9fe1c42a78a7f4f1"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/worker/entry.ts",
+    "kind": "ts",
+    "bytes": 2794,
+    "sha256": "2f25416b68e5291842a955ffb1261edcece79158c7b8b8fcb04dfb1b2b17de52"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/worker/loader.ts",
+    "kind": "ts",
+    "bytes": 1776,
+    "sha256": "06084c84e4f3208175a2f3e00c0fec14c2b02ab4437fd97eefebeecd2b62bd1d"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/client/worker/online-webui.ts",
+    "kind": "ts",
+    "bytes": 1756,
+    "sha256": "8e8a3fe9c422d59ea5a37b04e74906322337b1e4cabe6726e7d14570718e0d18"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/bin.ts",
+    "kind": "ts",
+    "bytes": 3431,
+    "sha256": "aa577c45d2c63bfe2216ed5b54eddcaf3efae6e927c8d6b2f363ae32eeff2640"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/cdn.ts",
+    "kind": "ts",
+    "bytes": 2216,
+    "sha256": "16b4fbaf2810adf90c34aa1b49e63dbe212fed8df03e7aa8eb152a2a106d768d"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/constants.ts",
+    "kind": "ts",
+    "bytes": 1984,
+    "sha256": "a6fc86275cdc2ccf9345a80573875d4f6274ee79f41ef5602cb9cffd58cbf470"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/index.ts",
+    "kind": "ts",
+    "bytes": 116,
+    "sha256": "a49f3eb7f9ef58e5fbfa8cff7caf01762749f058f2bd843e9d66a475f17c9ce7"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/resolve.ts",
+    "kind": "ts",
+    "bytes": 5452,
+    "sha256": "ab33826fd9b46e95671ec941dbcc8e3b2dbff1a910759d0a281f0c0763a39d39"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/serve.ts",
+    "kind": "ts",
+    "bytes": 2295,
+    "sha256": "bc4d98d65e39b9b8f25277261028f7c5a64c28d4a1e7c981454c3669b3d72255"
+  },
+  {
+    "repo": "webui",
+    "path": "packages/online/src/transform.ts",
+    "kind": "ts",
+    "bytes": 5086,
+    "sha256": "8d682d5f49b48a617540fba22a090cbf9252c0022762e5db040ba25e5ffc4f91"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/ast.ts",
+    "kind": "ts",
+    "bytes": 22069,
+    "sha256": "9b90571a354234d02753cd6484e4ab5c9fa1f281db08a204cdcb89802b49371a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/babelUtils.ts",
+    "kind": "ts",
+    "bytes": 14500,
+    "sha256": "2caca549e738805d9a90f597efdd52c975e506a3dafb3e656ca48d2f7715b600"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/codegen.ts",
+    "kind": "ts",
+    "bytes": 29023,
+    "sha256": "ca2958b252428bd39946cfbf58776b6d1e25862c34cdacc17942aa872a158e3a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/compat/compatConfig.ts",
+    "kind": "ts",
+    "bytes": 5347,
+    "sha256": "62dab2d0fcecd15d15e87a26b50f9c105401708cbd9a023deb9ba885d6624ce7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/compat/transformFilter.ts",
+    "kind": "ts",
+    "bytes": 4908,
+    "sha256": "b04603ad75d4cfb3b74e3d17350ab0f3cf416de8d70c4bd63933495c45af1cd6"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/compile.ts",
+    "kind": "ts",
+    "bytes": 3917,
+    "sha256": "3d2659ca9ba18dd6c47d893e79b0d2ccbe0251194c79f67acb80f12f7141d153"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/errors.ts",
+    "kind": "ts",
+    "bytes": 8670,
+    "sha256": "cd2e3919c1c594fde6f402ce5acc2988f22ef93031d220d717fe0d9562c63142"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/index.ts",
+    "kind": "ts",
+    "bytes": 2098,
+    "sha256": "30e0f98fbe2e4f31049d86d5818bd7d2c0dd2cceab84463af6620a03a81fb12c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/options.ts",
+    "kind": "ts",
+    "bytes": 10583,
+    "sha256": "ef5a59f4b35baaf124396a2077e561c07b57c05a540fdd6c5aa978ea78e3d250"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/parser.ts",
+    "kind": "ts",
+    "bytes": 30072,
+    "sha256": "d1e4340a2b0f7f222e798c473826786bc09b5dc33de8d3f29b0c0bb589a51fd8"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/runtimeHelpers.ts",
+    "kind": "ts",
+    "bytes": 5210,
+    "sha256": "0655002b76c97277db2fd236ebdcda772c61375d7cad4405142682b8de4759b2"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/tokenizer.ts",
+    "kind": "ts",
+    "bytes": 36538,
+    "sha256": "c7cf4a85af2c9259562823595f547fbc62e12a2a3d085953481392bbc9bb5c07"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transform.ts",
+    "kind": "ts",
+    "bytes": 14142,
+    "sha256": "9807f8d05f28e48cb9306ddc682f887e8b6f700e5cbd2cd8eeab5c150718d8d2"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/cacheStatic.ts",
+    "kind": "ts",
+    "bytes": 15142,
+    "sha256": "1e8a66b081a7c9c586133d4ad2cd5c5309fb4c3ee46ddf7d6b2641d34bff460f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/noopDirectiveTransform.ts",
+    "kind": "ts",
+    "bytes": 136,
+    "sha256": "fa76ce4c6a2e9dc9e94575381f196ef82f21361ce902ce98c989385f497148f1"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/transformElement.ts",
+    "kind": "ts",
+    "bytes": 29439,
+    "sha256": "36d99bba28cc7bca7af9cf0509543d37baee0cfc931cd1ddb38037a67c7009e8"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/transformExpression.ts",
+    "kind": "ts",
+    "bytes": 13993,
+    "sha256": "1fea48581b88b5d10e271579f04fecf9a74086f7358544d87a5fec3ff115d935"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/transformSlotOutlet.ts",
+    "kind": "ts",
+    "bytes": 3232,
+    "sha256": "cf02af4c41ddfc393c0796874ad0b1394bd2916843d1a1361da72f6b99a1853a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/transformText.ts",
+    "kind": "ts",
+    "bytes": 4320,
+    "sha256": "47558e63b7d07fad908b6a83fd7c3b27fcec28e284af1409165827f6175c20ff"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/transformVBindShorthand.ts",
+    "kind": "ts",
+    "bytes": 1680,
+    "sha256": "a947f35dc0fa20cd59d9a68bad1897cf9111264fdd3430d1eb87eb48f25d209d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vBind.ts",
+    "kind": "ts",
+    "bytes": 2479,
+    "sha256": "a0eaa74d341a54da5b601b7a4560d3378835e3d73845bad41958a72d841ac364"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vFor.ts",
+    "kind": "ts",
+    "bytes": 11981,
+    "sha256": "b65ae69103417e684d3180a24351f8ee05fa92aee0b0130e56604d700be0eb21"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vIf.ts",
+    "kind": "ts",
+    "bytes": 10339,
+    "sha256": "d58351924047274c48d6ed87bb9a470eb36b304df2882364c1cadf58c66c5f8f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vMemo.ts",
+    "kind": "ts",
+    "bytes": 1280,
+    "sha256": "3481d52bbdf7689fd265dbb574f33b8832cf1c80af91878a277187e848cc8e28"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vModel.ts",
+    "kind": "ts",
+    "bytes": 4958,
+    "sha256": "9d65e0dcb2c3b8a9e7e4f8bfbe88809e02df83c71f47ab4b75711a350b8e7770"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vOn.ts",
+    "kind": "ts",
+    "bytes": 6423,
+    "sha256": "dbe51b191a3a420002534413122581542202a34cf4122ec06305a1d38a4a7e3e"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vOnce.ts",
+    "kind": "ts",
+    "bytes": 860,
+    "sha256": "2937921347ee277edac95c2d79cba357e8a532b52155da11112e77659f281ce3"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/transforms/vSlot.ts",
+    "kind": "ts",
+    "bytes": 12832,
+    "sha256": "a56626a9e409506048508a2c50f369f33b4378b98fe9de99e7c836d6a49bee1c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/utils.ts",
+    "kind": "ts",
+    "bytes": 17953,
+    "sha256": "e457685b7f950b22f7c62291f5524cd9a86e734c106c9a332edf20b43c22bc9f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-core/src/validateExpression.ts",
+    "kind": "ts",
+    "bytes": 1834,
+    "sha256": "57fc1d9b873473e71d54dd696a9c4bde9f1216dbefa39958c48a501c845351e5"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/decodeHtmlBrowser.ts",
+    "kind": "ts",
+    "bytes": 426,
+    "sha256": "6d026bdda45ca9abbf5cf8333a51b4f896a28012f76fc5e6e829e50e5fb231e5"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/errors.ts",
+    "kind": "ts",
+    "bytes": 2517,
+    "sha256": "8bdf8f38495801dfb3d3e5d5c6c74036655ff1275ec10b6237465245a9e3930d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/htmlNesting.ts",
+    "kind": "ts",
+    "bytes": 4438,
+    "sha256": "bb543a600b5a04f20f5b7f94795484fad17bfd6c99aa1fbcf56b8fc00f2d3343"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/index.ts",
+    "kind": "ts",
+    "bytes": 2405,
+    "sha256": "5934a5795c9fe29dcdd8b49af83d55b3fd3305561bc25b2784d23a41825b7cf0"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/parserOptions.ts",
+    "kind": "ts",
+    "bytes": 2106,
+    "sha256": "76541e662171de055faae2352f2f81328353d6a9aea6d518be0ffacfee04fced"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/runtimeHelpers.ts",
+    "kind": "ts",
+    "bytes": 1293,
+    "sha256": "430e2fd87cc8e49601794d2d89782dc1524d2fa60a463d8f6277b795d2eb06e9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/Transition.ts",
+    "kind": "ts",
+    "bytes": 2143,
+    "sha256": "c2b8b7d5da83b72be3929eb1246f7240401f0ee0181f43e3b80c8d230e98dae3"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/ignoreSideEffectTags.ts",
+    "kind": "ts",
+    "bytes": 560,
+    "sha256": "7df5d45f4af98fcebf5618f0058ceb2befeded6eeb724749dded980cb9b1f2ef"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/stringifyStatic.ts",
+    "kind": "ts",
+    "bytes": 13211,
+    "sha256": "dd94b672743c76a78cfe5eafebadd4341c6f1f9f8f3b5adf6326c98e1b5d34d2"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/transformStyle.ts",
+    "kind": "ts",
+    "bytes": 1348,
+    "sha256": "8bc01f6fdee0bc1e00aa9e868b19c35a1035f9bede9c7ccca80456fa51fedbbb"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/vHtml.ts",
+    "kind": "ts",
+    "bytes": 744,
+    "sha256": "6f1de64d47ed4188b74c73b1864c536f574a05dd7514bfa2b758264ba9b6d835"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/vModel.ts",
+    "kind": "ts",
+    "bytes": 3439,
+    "sha256": "f26b8355cd50e179a5184819b0e5336a728974dff212f963abe1e117bc641c44"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/vOn.ts",
+    "kind": "ts",
+    "bytes": 4481,
+    "sha256": "1a5d5214a0e126fdbddc7797279e6246b6b1cb4a0d37cc263f133fda230febad"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/vShow.ts",
+    "kind": "ts",
+    "bytes": 465,
+    "sha256": "cf9d3e1d4fafc277cd49bcf200e1f9a474448a33b1b5cc81272f75aa4e191b62"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/vText.ts",
+    "kind": "ts",
+    "bytes": 1031,
+    "sha256": "f81df86e57e0c90eb5d2b39ae2ffde6b148c14f5551c598247a7e838d119a720"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-dom/src/transforms/validateHtmlNesting.ts",
+    "kind": "ts",
+    "bytes": 843,
+    "sha256": "f89f03163b965bd4726d5b4468b92f343b313c04afb5cc992885d94fb1738926"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/cache.ts",
+    "kind": "ts",
+    "bytes": 269,
+    "sha256": "c2f7299b82ee1ff981cf8fb0792937b8ca9c1f59bf57ea6f2b77b908701e227e"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/compileScript.ts",
+    "kind": "ts",
+    "bytes": 44868,
+    "sha256": "ccda100d52ea548612eb0869abea9dc20f0605d7a26dfc5d9b4daccde0e054ee"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/compileStyle.ts",
+    "kind": "ts",
+    "bytes": 6339,
+    "sha256": "d80cf6186548527d1ae4f819c3035097036e553c69d8f3255f81ed9d623ca05f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/compileTemplate.ts",
+    "kind": "ts",
+    "bytes": 9316,
+    "sha256": "17cc9ebffb7bd142378e0c36614fed450ea610f17e30e763a8e830bdf45e9ef7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/index.ts",
+    "kind": "ts",
+    "bytes": 2592,
+    "sha256": "2afdfe08f15cb5dac2938467f733274eb9343a17649e47cea1db1b19eb1bcb7f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/parse.ts",
+    "kind": "ts",
+    "bytes": 13213,
+    "sha256": "e6a3191f0a89ecb75fd2d5d5e2635b04d096aa814f86e3298184bd886418f87f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/rewriteDefault.ts",
+    "kind": "ts",
+    "bytes": 3881,
+    "sha256": "5d583f56da38eb788b140002263c4f522ac1597716f9e254ef5b921391c25c0d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/analyzeScriptBindings.ts",
+    "kind": "ts",
+    "bytes": 3710,
+    "sha256": "e81e51fdadd5f3b48bb2af4e8b97bdf2aa3b00fe3180f72342550cf978355d78"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/context.ts",
+    "kind": "ts",
+    "bytes": 5887,
+    "sha256": "1262898b599fa581c52e5a77e1721d51e89b112d0f13d0eeb048fbf9b615d884"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/defineEmits.ts",
+    "kind": "ts",
+    "bytes": 3155,
+    "sha256": "7acb46369c8ceb0dbe71f4420994261549e7f92052fc660b04e5398bd0694044"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/defineExpose.ts",
+    "kind": "ts",
+    "bytes": 480,
+    "sha256": "717c6b69f0ae7d66e4d1ac624bce71a2e2a00a13afea34dbe19e8eb54b5d2f10"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/defineModel.ts",
+    "kind": "ts",
+    "bytes": 5625,
+    "sha256": "c556c79c93e8cb9dbf360536def515de8e72df878731cc9e79bfce1cfbf860fb"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/defineOptions.ts",
+    "kind": "ts",
+    "bytes": 2288,
+    "sha256": "bd10b31a284202bdce54f6b1a11edabbce3076144d2ca934e5ee0c412a814c44"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/defineProps.ts",
+    "kind": "ts",
+    "bytes": 11214,
+    "sha256": "cca021d383bdb2a6fd22f93d642f3f517f307e5d9788eafaca146e2f86df99ed"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/definePropsDestructure.ts",
+    "kind": "ts",
+    "bytes": 11512,
+    "sha256": "aa1e517a7d948268a4ca14ab1e45916b815159e561b5124ed13c1a8a4a3cef2b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/defineSlots.ts",
+    "kind": "ts",
+    "bytes": 754,
+    "sha256": "36ff568060077d65c1b155e173bb4a914cc22400ec73cb998cc6bf49f7cf1332"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/importUsageCheck.ts",
+    "kind": "ts",
+    "bytes": 5142,
+    "sha256": "884e695ac97fd459c4ca227a3ac34c1078a7579f8c3a4c627cc839cbcb46bd15"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/normalScript.ts",
+    "kind": "ts",
+    "bytes": 1571,
+    "sha256": "b0bf709953db925696d7337ee5a44d6aae914e61e74eb3ccb4ed434630acb7bc"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/resolveType.ts",
+    "kind": "ts",
+    "bytes": 66335,
+    "sha256": "b479c934c9fb789d4864f53cc26e2f604d9d5cf200cf8af288a5d284052c7da8"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/topLevelAwait.ts",
+    "kind": "ts",
+    "bytes": 1762,
+    "sha256": "f576a87ad2509a7acfe34bfb3f8105ce064b301f781d37714cd6033d8fef8e8c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/script/utils.ts",
+    "kind": "ts",
+    "bytes": 4102,
+    "sha256": "e1d6954b539b9f8309ed6e91103ce122f52facc6eed120b18934065d81a5a8f7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/style/cssVars.ts",
+    "kind": "ts",
+    "bytes": 9786,
+    "sha256": "e4d136cbf9e01e379f86ed164ef0fca772203cf0a840a894a5dbddde67168ef1"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/style/pluginScoped.ts",
+    "kind": "ts",
+    "bytes": 11957,
+    "sha256": "9fa0a4d29063e7d938c0f4b472defd4b0602cf346ae93dfdadc83bb6a884df8f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/style/pluginTrim.ts",
+    "kind": "ts",
+    "bytes": 439,
+    "sha256": "9cd50fbcff6421491f5ec335d5f1526fb7bf77917d1892c435547b1c71c6ed93"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/style/preprocessors.ts",
+    "kind": "ts",
+    "bytes": 4018,
+    "sha256": "44dba2fb459a1be702e9ff3cadf0757492efb61189f38df93ef84bcf9e824307"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/template/resolveTemplateAST.ts",
+    "kind": "ts",
+    "bytes": 1079,
+    "sha256": "84677121af44764c6f176049ef91a80282b0ea4a14c12c01e761da840a006341"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/template/templateUtils.ts",
+    "kind": "ts",
+    "bytes": 1408,
+    "sha256": "45b63db94cd3966d21caef6f1e063bf89a325b70630e435434b3938b7cedc4ed"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/template/transformAssetUrl.ts",
+    "kind": "ts",
+    "bytes": 7513,
+    "sha256": "f36108198ecb982bfa6dde6de3f1d9a61508ca82ac1a25c2cb2b8e26f2cfb47b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/template/transformSrcset.ts",
+    "kind": "ts",
+    "bytes": 6142,
+    "sha256": "91d121b944eb7c92f61de2b4d7537c92bd9176b9ad43bed21190b73f7b96cad5"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-sfc/src/warn.ts",
+    "kind": "ts",
+    "bytes": 427,
+    "sha256": "4efb801dfbe416e0a0dab77ba10b74daf0f25c8d85f24a7b7ff285b84a41a1a3"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/errors.ts",
+    "kind": "ts",
+    "bytes": 1307,
+    "sha256": "1f0ca84b325a633a7e945ec3e5634472337a746ca516a0a9adcca8dd5d977bed"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/index.ts",
+    "kind": "ts",
+    "bytes": 2810,
+    "sha256": "fe8f9850ebc4ba08864808c5f35c60ed14274b0322771802d657abc77f53befe"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/runtimeHelpers.ts",
+    "kind": "ts",
+    "bytes": 2586,
+    "sha256": "fafcd6f4fd71df2935e41562b4ebe6537b91793a06556e6b310cc007f2879556"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/ssrCodegenTransform.ts",
+    "kind": "ts",
+    "bytes": 7507,
+    "sha256": "4b78a6e9ff25e628167d48f1b0d477a6136c6947da6ea9f259c34d66e18ae184"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrInjectCssVars.ts",
+    "kind": "ts",
+    "bytes": 1620,
+    "sha256": "5163f9e319e0ccc0de045457488de69df72ed1302f111b9966b63dadc3197166"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrInjectFallthroughAttrs.ts",
+    "kind": "ts",
+    "bytes": 2483,
+    "sha256": "8990228078291767d6fc8f18b5dbdded79de2454b010c9cf603085f6e2d9e9bf"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformComponent.ts",
+    "kind": "ts",
+    "bytes": 12061,
+    "sha256": "9a4b5fd56e60755708a4ae40ba181032b821ac43059bf572e740d382e9b2c2b4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformElement.ts",
+    "kind": "ts",
+    "bytes": 16435,
+    "sha256": "8a5ad4edec79421c0864584b31e6db982e63036f16e02e9eebdcfe897b8f000f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformSlotOutlet.ts",
+    "kind": "ts",
+    "bytes": 2839,
+    "sha256": "0f83ffa083232862f769d7195446d2ab11c2060698dc4149708dec029785cae0"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformSuspense.ts",
+    "kind": "ts",
+    "bytes": 1961,
+    "sha256": "a457127fb930f894b3cd6370a62a551695dbc04b1adde17a0da79bc09d390441"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformTeleport.ts",
+    "kind": "ts",
+    "bytes": 1785,
+    "sha256": "b88d7846498b64e067ac76942cc86c271c5286194032519baf134a22c3568555"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformTransition.ts",
+    "kind": "ts",
+    "bytes": 947,
+    "sha256": "c93db716a1b2ee8cf577935f57226364e9618e3b2c8f1552e282c1650b7abe3a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrTransformTransitionGroup.ts",
+    "kind": "ts",
+    "bytes": 3311,
+    "sha256": "748af1509a9bed8905004808c2ca909da32ddb95e1455776b8354edc1a1a1fe1"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrVFor.ts",
+    "kind": "ts",
+    "bytes": 1453,
+    "sha256": "4297b6f8d3612a8bf3a26ebba165db2b6cdb79cdae46f469edee667da3dc6a22"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrVIf.ts",
+    "kind": "ts",
+    "bytes": 2173,
+    "sha256": "d268f109eaf306431efb0e84e0ad27eb50990ed6f0d92ce7d3a65cc694bfcea9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrVModel.ts",
+    "kind": "ts",
+    "bytes": 6245,
+    "sha256": "74f6d75f9228ec9eaff87006ea1fda879024e4e355266ec3713b10d02652a015"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/compiler-ssr/src/transforms/ssrVShow.ts",
+    "kind": "ts",
+    "bytes": 826,
+    "sha256": "3a8764938330fe6ca4e080f8971e2be6fcefbd710b7a51287d832027b6a5e6fd"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/arrayInstrumentations.ts",
+    "kind": "ts",
+    "bytes": 11484,
+    "sha256": "019c868fae79b1b577f658a20f96c6c45f65d63331e76737b42ea5f19d667fa9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/baseHandlers.ts",
+    "kind": "ts",
+    "bytes": 7538,
+    "sha256": "644f60af44b6ee521fc617f685ee9fa287296aa2de157911fa344acad9f06ed3"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/collectionHandlers.ts",
+    "kind": "ts",
+    "bytes": 10596,
+    "sha256": "5cb351dec25d5e2314b6a0b69d06e50695b29b44e329f8e2678ad28e6f79a116"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/computed.ts",
+    "kind": "ts",
+    "bytes": 5080,
+    "sha256": "8ffa806b12007d991a51baf19cdb02a050fb6319e52a93d4ca89ffa77a033b1b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/constants.ts",
+    "kind": "ts",
+    "bytes": 474,
+    "sha256": "07fe5b83223ef3525bfb2806b186f9b6f4f59cc58af08d4749caf93c49ef527f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/dep.ts",
+    "kind": "ts",
+    "bytes": 10306,
+    "sha256": "398dca9aca80d24f73033cf11ee944681b9ade8d10bc466f3ebf4ccfcf0eb47a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/effect.ts",
+    "kind": "ts",
+    "bytes": 13856,
+    "sha256": "acfc5c813be8323a8dd52d5348e91186ca5a88426c6c4e5dc04448fa3c12983a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/effectScope.ts",
+    "kind": "ts",
+    "bytes": 6519,
+    "sha256": "ec3c7e4dbb5ed7784d701a092b71f14dbf7fb915e007be9bcaeb25815f176879"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/index.ts",
+    "kind": "ts",
+    "bytes": 1772,
+    "sha256": "544c9c181c973e0341e08c326dd9aef97e4b26f69ca2872ca7a7bba015897019"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/reactive.ts",
+    "kind": "ts",
+    "bytes": 12849,
+    "sha256": "47280cc495afb2392a8cb59ffd0b940cf9afd54977d961d08917fb57c624eec6"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/ref.ts",
+    "kind": "ts",
+    "bytes": 15350,
+    "sha256": "ad09f393c2fa11906d59f4daee1ee634c2ced643d8551ef1318a56b9f76d82ef"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/warning.ts",
+    "kind": "ts",
+    "bytes": 105,
+    "sha256": "cbde58f39e9fced570ec0ad1dc7853f43c8a2a16db0ffb05e936478428f3f122"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/reactivity/src/watch.ts",
+    "kind": "ts",
+    "bytes": 9713,
+    "sha256": "bcaf75b5efc4477cb212939f3897debabad3b5b598ff6d270b494ca25d8e0916"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiAsyncComponent.ts",
+    "kind": "ts",
+    "bytes": 8357,
+    "sha256": "651c54025f132238b01c8685c8173777b6a6d97a1d6b038e5d248ba633c5be4e"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiComputed.ts",
+    "kind": "ts",
+    "bytes": 554,
+    "sha256": "2b44d360fe1cbfa3a29fb901a43a13ad3f11de0b5a749abb7832810b6a65d8e7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiCreateApp.ts",
+    "kind": "ts",
+    "bytes": 14266,
+    "sha256": "633116bffff02f59edb00c1f58fbb6826cec3abf49114678ce839ca00e62b8b4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiDefineComponent.ts",
+    "kind": "ts",
+    "bytes": 8127,
+    "sha256": "5bec57100c703178dabfebf35e3d5ad58bb493ded03b56e81dc12aac96bbf03c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiInject.ts",
+    "kind": "ts",
+    "bytes": 3497,
+    "sha256": "33ff7827925312658eaef9965a4ca254da7333dfa8a9b0576cf55e53c5848c43"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiLifecycle.ts",
+    "kind": "ts",
+    "bytes": 4050,
+    "sha256": "73513351e7e32694d76d357a12afa05283702af04d19abddaff9b519fafd1cba"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiSetupHelpers.ts",
+    "kind": "ts",
+    "bytes": 15661,
+    "sha256": "5fcdf24a2518dc1fd92777dcf36c331b37144613b008ef1619294aa5539b185b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/apiWatch.ts",
+    "kind": "ts",
+    "bytes": 7889,
+    "sha256": "c688147266ed71cfd3d097d79ebca998eb6d2e2c278d28a9134c97d05d384a72"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/attrsFallthrough.ts",
+    "kind": "ts",
+    "bytes": 701,
+    "sha256": "d31e1c7849b98503c066897ba0e04d351df5900a5506ad249e1df0de9597fb73"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/compatConfig.ts",
+    "kind": "ts",
+    "bytes": 22521,
+    "sha256": "2a2fc81c6d44e0049c5a1d07a29ab6471a757439a2345b6e31b3b3266b98f325"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/component.ts",
+    "kind": "ts",
+    "bytes": 1485,
+    "sha256": "3f4dec90ee3bd24c08181bfe8a82ed04849876a32d66db1e52d3c11082f82ad7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/componentAsync.ts",
+    "kind": "ts",
+    "bytes": 1796,
+    "sha256": "6d0410c31013d885043c56bbcd153583a9fe1e4a93dd652d0eedbe3a95c650a6"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/componentFunctional.ts",
+    "kind": "ts",
+    "bytes": 1793,
+    "sha256": "ffc821f3d90876e2c3da19552eab36a553ad894c1453bd5559f3b70dc7504429"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/componentVModel.ts",
+    "kind": "ts",
+    "bytes": 2783,
+    "sha256": "c2ba6ba8627ad34eb0f8f3ecd182c2affa584675c2052706845729311ac19fed"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/customDirective.ts",
+    "kind": "ts",
+    "bytes": 1596,
+    "sha256": "bbf4081d93b88b165e434fd007ece1c330cc9243333caed06dd987dd4b824a66"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/data.ts",
+    "kind": "ts",
+    "bytes": 502,
+    "sha256": "f080f476dee2d3c5826be5caa23aafcf5ed97198205dfbf27977ca3d85b01809"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/global.ts",
+    "kind": "ts",
+    "bytes": 18194,
+    "sha256": "0c31eec7c662cfbd2518800a505af732c33b576d8b9dbe146a6fc6d7649e8557"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/globalConfig.ts",
+    "kind": "ts",
+    "bytes": 2431,
+    "sha256": "b234a0b57984d2488d07bd62772225692412b1458d039727d1e945ec3eebe4cf"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/instance.ts",
+    "kind": "ts",
+    "bytes": 5554,
+    "sha256": "8c038aa8b16cc781d974139f8d4158aae0d9dd55179d5ce0f8bd725040ef6dd9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/instanceChildren.ts",
+    "kind": "ts",
+    "bytes": 934,
+    "sha256": "2d35547f57643fbd43de3d13b1a82aaf4340646d2fde27e5eb64889ace87411b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/instanceEventEmitter.ts",
+    "kind": "ts",
+    "bytes": 2736,
+    "sha256": "f9e9af34cec181e2d4ff52056fcb82247be189d28cd8fa12a68c77a580ca302f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/instanceListeners.ts",
+    "kind": "ts",
+    "bytes": 656,
+    "sha256": "6cd9713e226da430bab84e293b97615877d37e0c29805384af3fa4090d016ce8"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/props.ts",
+    "kind": "ts",
+    "bytes": 1150,
+    "sha256": "c9e58c7ddde694593de582118d6dd5180b92504d26bd5338ce31f24e092c59ee"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/renderFn.ts",
+    "kind": "ts",
+    "bytes": 9346,
+    "sha256": "c080b8b7ab25bfafe75152cee0b630caf62ea1a72d06dd27fa3a5338232f12b3"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/compat/renderHelpers.ts",
+    "kind": "ts",
+    "bytes": 4628,
+    "sha256": "3906b2da0e7f1b2244378bcf7a9ad408337dc8ca099247cbfeb79cb5614f1524"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/component.ts",
+    "kind": "ts",
+    "bytes": 35143,
+    "sha256": "8a16d5eb3a1838583d4371ca88f81712e9495f253bb6695fc146bab1fe1c7a85"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentEmits.ts",
+    "kind": "ts",
+    "bytes": 8814,
+    "sha256": "3e576bad015a9cc8ddf5c34212c31770d930f3dc0fca979d5b22260c79c3ce50"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentOptions.ts",
+    "kind": "ts",
+    "bytes": 32887,
+    "sha256": "83837043d83cffd2f0904760f97e6a31ae74e6559d95e14e844dd8a529cbd889"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentProps.ts",
+    "kind": "ts",
+    "bytes": 23796,
+    "sha256": "c9b93c63deceaf061b3c0f50952993670f2cd45b5aeefd43ad1e8c4d602a4e07"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentPublicInstance.ts",
+    "kind": "ts",
+    "bytes": 21647,
+    "sha256": "92106dd47df4ca655e3a821faa5854ddd6e4814fde1324884c14f0aa63d99f06"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentRenderContext.ts",
+    "kind": "ts",
+    "bytes": 3925,
+    "sha256": "954a49827c08dc8cfe72aed4bc04c816cf43c82d49e79180c34f10f10285fd17"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentRenderUtils.ts",
+    "kind": "ts",
+    "bytes": 14439,
+    "sha256": "3c25d298172f778c9180889b4bbe2ed7af56a6d337d40eba4faba1af10fe5066"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/componentSlots.ts",
+    "kind": "ts",
+    "bytes": 7294,
+    "sha256": "077bd2d08418117353063becffc7cccc1715c85ae7fc5e2ac0da5e52b49702a2"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/components/BaseTransition.ts",
+    "kind": "ts",
+    "bytes": 18032,
+    "sha256": "19184e87a735fde8eff219f6e5a35b4346a22266d2cd21ff5fa77c20dd8dbe5d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/components/KeepAlive.ts",
+    "kind": "ts",
+    "bytes": 14516,
+    "sha256": "25cd8abc948aae127b07f82f16ff78954be4b46dcc201c5c2bbe2f07d302b8e4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/components/Suspense.ts",
+    "kind": "ts",
+    "bytes": 29438,
+    "sha256": "412d2932e7fcdf677c40b93dfab2b476f25efa2e331e317af990c0a72923688e"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/components/Teleport.ts",
+    "kind": "ts",
+    "bytes": 18728,
+    "sha256": "60e91239b825c128eb13f4f3aaae166023fa97495468ca143ae77d023095817e"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/customFormatter.ts",
+    "kind": "ts",
+    "bytes": 5510,
+    "sha256": "d7490aa73cd8ff7ed789305b7b5dd2c0d8598769b07d0fff49b9c38e7071e5de"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/devtools.ts",
+    "kind": "ts",
+    "bytes": 4957,
+    "sha256": "04c8cc36a82b60ebf49a1c2d63eb0757963c2f124ad97d31449278cf75ef3546"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/directives.ts",
+    "kind": "ts",
+    "bytes": 5398,
+    "sha256": "fa8f7b3a17f2129e07dfc2f5b1e22b1afaf4768f2544144d94d3b8e85d79d0f6"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/enums.ts",
+    "kind": "ts",
+    "bytes": 345,
+    "sha256": "3f017832bd4c635d7765fe808399eb4699b2570f4f294a73eab5f4f17b8c3448"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/errorHandling.ts",
+    "kind": "ts",
+    "bytes": 5860,
+    "sha256": "ad8638a17d9ba873557646764633914a9a59b6da5a093a269d40a18090716260"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/featureFlags.ts",
+    "kind": "ts",
+    "bytes": 1380,
+    "sha256": "10911a6af026d7ab57cff84f291e330453b4eb33c8c80fc7be782edb139334d7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/h.ts",
+    "kind": "ts",
+    "bytes": 6338,
+    "sha256": "69d2ec5729a223d5fb0dec7c4295b00eaee9c46dcb5df1e58a1740961aa8db9a"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/createSlots.ts",
+    "kind": "ts",
+    "bytes": 1253,
+    "sha256": "826eafcf16d5df5f7cda0cf21ebb7908b7f8036c36d2577ab133b597648c87b1"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/renderList.ts",
+    "kind": "ts",
+    "bytes": 2991,
+    "sha256": "daa0fcc922b8383c80f618ea1fec78d2353065085f35551b54791dca4f6352c9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/renderSlot.ts",
+    "kind": "ts",
+    "bytes": 4544,
+    "sha256": "3254da752ac791e428b8d8eb8f3b3b1a5b8d9d4f76946f6f8ed6c31380cdaca2"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/resolveAssets.ts",
+    "kind": "ts",
+    "bytes": 3704,
+    "sha256": "40d4f1aace3ead18869380cc1b5f83e43511938c05351d18a464fd10290a0498"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/toHandlers.ts",
+    "kind": "ts",
+    "bytes": 596,
+    "sha256": "09d644f37a8c271f9db616535ffc7b7e9598aff64e9b06556e3e602abc58970c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/useId.ts",
+    "kind": "ts",
+    "bytes": 735,
+    "sha256": "e60090d2717d654f18ae4525d0ce1ddfd035748fbcec9b6d8ba9bf3606393f88"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/useModel.ts",
+    "kind": "ts",
+    "bytes": 4365,
+    "sha256": "505033ccd605e99c5be03a0d326e5dcd203dfc170884260e6ce7551ef994d23c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/useSsrContext.ts",
+    "kind": "ts",
+    "bytes": 594,
+    "sha256": "a5e9331bf5cbe20b851866322714ce23e3072fc72909199ae1497ac607f02c69"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/useTemplateRef.ts",
+    "kind": "ts",
+    "bytes": 1333,
+    "sha256": "378f44eeac140144e961251c29932ed4ea5f4b08ff01ef379b099ff750c9553f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/helpers/withMemo.ts",
+    "kind": "ts",
+    "bytes": 922,
+    "sha256": "97d47bf351196a69a75d825511b70717458d15336b96f7040f504224eb146886"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/hmr.ts",
+    "kind": "ts",
+    "bytes": 6672,
+    "sha256": "058f8b3f490c67c832d83f074a12a5629c7c7d34731216c0dc417277a2fa24f4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/hydration.ts",
+    "kind": "ts",
+    "bytes": 33944,
+    "sha256": "5d1774eac22c2287e59369946d390ce526c104a47904fe6a54f51f22cbd49415"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/hydrationStrategies.ts",
+    "kind": "ts",
+    "bytes": 4455,
+    "sha256": "443efab822066b3b66e29787bd3637e1f2461be63adaafe2c708e08ace88ee6c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/index.ts",
+    "kind": "ts",
+    "bytes": 12255,
+    "sha256": "067f105768c3094437cead9f39958c7843b848f6c6e93d324f85361f944adbf7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/internalObject.ts",
+    "kind": "ts",
+    "bytes": 523,
+    "sha256": "981f69657322c58571096a3803b7adec03b901c8ad716dc1f19fd3d33552bb13"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/profiling.ts",
+    "kind": "ts",
+    "bytes": 1465,
+    "sha256": "d480ea562ac9a4975cdcd330a0725bab88c88ed46a5e88d560c5b6ca1412f261"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/renderer.ts",
+    "kind": "ts",
+    "bytes": 76666,
+    "sha256": "7d166627a562bcd65d463d2e02d45eaf1c4dce571c3e55c04d69c0b3b6eb9161"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/rendererTemplateRef.ts",
+    "kind": "ts",
+    "bytes": 6462,
+    "sha256": "4727818daf08dd0d61f5499cf57397f401757475f94f0ecd50e49566ae5da57d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/scheduler.ts",
+    "kind": "ts",
+    "bytes": 11165,
+    "sha256": "1185932ae1d95b7e3709d445fb156dc622532b6de20d4891f264338a96c6eb35"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/vnode.ts",
+    "kind": "ts",
+    "bytes": 27044,
+    "sha256": "eed61152144d0e932ca116c8a028272acf40bdbbfc6252e3f063d95fe816cdde"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-core/src/warning.ts",
+    "kind": "ts",
+    "bytes": 4932,
+    "sha256": "a7408ca137164fb59184b84f33882daeed2395030bbb928fc28ee21c9ef4962d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/apiCustomElement.ts",
+    "kind": "ts",
+    "bytes": 22978,
+    "sha256": "26f1464fed41d9b7d734402d22bd7d399e6ad6702dee3e4509e7784ecd6de64f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/components/Transition.ts",
+    "kind": "ts",
+    "bytes": 13732,
+    "sha256": "a7cbf5319864a5ab3111cf8784d72d991d830880159a6cfc9cde34285bc2be7d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/components/TransitionGroup.ts",
+    "kind": "ts",
+    "bytes": 10479,
+    "sha256": "6fa8ee1fa06096cac04da477d0d5612be62d56b2210717fbb7c0e457d2e8c785"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/directives/vModel.ts",
+    "kind": "ts",
+    "bytes": 13586,
+    "sha256": "e9c7c9775b7baa59fb63d9e7a1d7a8a1a35e329a7d1594361cce64d0c59d6192"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/directives/vOn.ts",
+    "kind": "ts",
+    "bytes": 4442,
+    "sha256": "a84267e27454fbada77964cd962efc4ebe965515d37dfe2a37727e0d33e9ad8b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/directives/vShow.ts",
+    "kind": "ts",
+    "bytes": 1684,
+    "sha256": "4fbd5a708a7c7765343456c821eb9ad7231514c36ab34154c8d329f8df33daf7"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/helpers/useCssModule.ts",
+    "kind": "ts",
+    "bytes": 919,
+    "sha256": "396b18dd39bf068fed28488c532ec4bce5e68b6cbcb7bfdcd639988999f18b89"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/helpers/useCssVars.ts",
+    "kind": "ts",
+    "bytes": 3018,
+    "sha256": "7b95fb800b3bf61693529619934c9122d4272c26dfa7d41df7c28c2e8543421d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/index.ts",
+    "kind": "ts",
+    "bytes": 8797,
+    "sha256": "8f00c12e2ee314a50b496ceae581cf3f070b9181c827ee7086f3e9482dca5bea"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/jsx.ts",
+    "kind": "ts",
+    "bytes": 47691,
+    "sha256": "70355e79583f822871ae0eb192ec57d7ade5652f700142c2128abdde313ad887"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/modules/attrs.ts",
+    "kind": "ts",
+    "bytes": 2347,
+    "sha256": "8216b89daea235b32a35f6f8a6556182a40dd11712fc38ad9022c52f22a3d3d9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/modules/class.ts",
+    "kind": "ts",
+    "bytes": 830,
+    "sha256": "d24c104e04a92d4103aa632d45ecc4132120d20617ee15edd80dc282d49a7dd4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/modules/events.ts",
+    "kind": "ts",
+    "bytes": 4945,
+    "sha256": "ff9b9b5a9b4d19adbf4b2259d3ff825fba81dc938969b8a4b6234c9f10287c85"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/modules/props.ts",
+    "kind": "ts",
+    "bytes": 3256,
+    "sha256": "60e62417294970f9d970da66c066d44c4157d407ab55f67fd668c2f369bb8689"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/modules/style.ts",
+    "kind": "ts",
+    "bytes": 4396,
+    "sha256": "18f693624749f3dfb328565f0d258c23f4fe5ffc733e89229110b5cdc38ea559"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/nodeOps.ts",
+    "kind": "ts",
+    "bytes": 4166,
+    "sha256": "373131af6ce85cc869b04d49d60d2c8475840331a5022a27c28524d2aa9b5415"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-dom/src/patchProp.ts",
+    "kind": "ts",
+    "bytes": 5199,
+    "sha256": "d4a53880dc6df6f90f9d3355400da1ddd2f4f20ef0619abf346b36e274e81da5"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-test/src/index.ts",
+    "kind": "ts",
+    "bytes": 869,
+    "sha256": "2fe123d56f1cc1ed48dd258b1ec778b3475980fe4d2ef7358ac604aeac1d4200"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-test/src/nodeOps.ts",
+    "kind": "ts",
+    "bytes": 5497,
+    "sha256": "1882284dec205a92eed47845173fc4b0e3bf7967d0197cc178459c8a5f46235c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-test/src/patchProp.ts",
+    "kind": "ts",
+    "bytes": 560,
+    "sha256": "5ac01019021f905fdb38d8a7147d5aeb594329ae2436607c28677430ff967008"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-test/src/serialize.ts",
+    "kind": "ts",
+    "bytes": 1579,
+    "sha256": "ce370e5cd133d12713c5aa740ad49714ae1ce7830bb9eddc3b7d48a0e617f4f8"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/runtime-test/src/triggerEvent.ts",
+    "kind": "ts",
+    "bytes": 493,
+    "sha256": "e46db30c39224a8f6d9220b6c01fa1be08bce95d3aa3c98001734e0f7ea92a6c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrCompile.ts",
+    "kind": "ts",
+    "bytes": 2695,
+    "sha256": "0d247ecc2fd24c54247242ef13aee59ab21ecb4e7723e92497f05da12b1d87ad"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrGetDirectiveProps.ts",
+    "kind": "ts",
+    "bytes": 628,
+    "sha256": "9b9fba9ec07a944d7cc7c5b6181f4dedadae4410059791a33e9aa52badf1c67e"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrInterpolate.ts",
+    "kind": "ts",
+    "bytes": 162,
+    "sha256": "ecd1d230ca093fe7b629d01239b887e119e71c5a764015fb19aaa372b0352cda"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrRenderAttrs.ts",
+    "kind": "ts",
+    "bytes": 3316,
+    "sha256": "d6de400db488745c82423260282543b81c39c14259b2f3c409af9915e63d235b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrRenderComponent.ts",
+    "kind": "ts",
+    "bytes": 606,
+    "sha256": "e5919fecb0b131b5e9e1ba1258784f414afa9d95390863903d6497354775e3bb"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrRenderList.ts",
+    "kind": "ts",
+    "bytes": 1065,
+    "sha256": "7e233414fe2f4928e2909210f91efd7aad0923d0dabafd2ce0af026338fb1e87"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrRenderSlot.ts",
+    "kind": "ts",
+    "bytes": 3850,
+    "sha256": "8074f12676145376839d424ef7dad5387c6839fd4dc19dafa1a30594f6c2e99d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrRenderSuspense.ts",
+    "kind": "ts",
+    "bytes": 450,
+    "sha256": "854070c3ec248aa8adc9dff43e1c050fe3623a6528d7dbf1f3a282d78e85a5a6"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrRenderTeleport.ts",
+    "kind": "ts",
+    "bytes": 1511,
+    "sha256": "bc56bd586ed208672a669779d174f920237c362472dfda6116d510c13957f244"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/helpers/ssrVModelHelpers.ts",
+    "kind": "ts",
+    "bytes": 1294,
+    "sha256": "c6f2b6605c46c814013943c9f07bc9353a7a8583c3bf094c327e42028ba0c876"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/index.ts",
+    "kind": "ts",
+    "bytes": 441,
+    "sha256": "8bb192b7bb500a8939c498105169d2ff013dd64fd13292493bd712a02996ac44"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/internal.ts",
+    "kind": "ts",
+    "bytes": 904,
+    "sha256": "6b2d9e62e605f5936eef73b45a0c488603a647f256041dc58ad342de3d66dbd2"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/render.ts",
+    "kind": "ts",
+    "bytes": 12013,
+    "sha256": "2f0318149a4ef6f697a31009b06f1c369d2b15b964f5919ba25b0fdda21955bc"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/renderToStream.ts",
+    "kind": "ts",
+    "bytes": 5215,
+    "sha256": "8dd8eaba6be5a4743d5e17b0dcebc51e3f937b0182b21e873912f3a4fb93528c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/server-renderer/src/renderToString.ts",
+    "kind": "ts",
+    "bytes": 3949,
+    "sha256": "4b34498920d737457cddd69ec60217b32901f837042df1ebab02a89335fef38f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/codeframe.ts",
+    "kind": "ts",
+    "bytes": 2081,
+    "sha256": "bd00f1cee2dec77d186e4f678635141c03ae924b24d9ed0da03b762887e8be9b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/cssVars.ts",
+    "kind": "ts",
+    "bytes": 605,
+    "sha256": "74279ab19843e51a5d7adb2dce0f00e1c7de0be438b69a4252eeb293e7d78288"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/domAttrConfig.ts",
+    "kind": "ts",
+    "bytes": 8117,
+    "sha256": "d343fb9e0b5ca6109f83f5986ad802ce60b5b1d33786ff96189967548e34fab4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/domTagConfig.ts",
+    "kind": "ts",
+    "bytes": 2984,
+    "sha256": "571a383b541c6122764c6f6451fc44e999f836edff787a3b6f8a1366b658784d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/escapeHtml.ts",
+    "kind": "ts",
+    "bytes": 1497,
+    "sha256": "77968fa96dda60e9068079f5035f7199df112de99d43c4ab53c0bc0354402368"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/general.ts",
+    "kind": "ts",
+    "bytes": 6060,
+    "sha256": "00f2ecb8608db0398c0fdeeb4ffcd120bf6f827769ec6f00f1d0b5baffcbf3bc"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/globalsAllowList.ts",
+    "kind": "ts",
+    "bytes": 527,
+    "sha256": "a41fc4a16eb3671e9ffdf38185b0786002f06fe47f7fcbab025ed1e2839a47cd"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/index.ts",
+    "kind": "ts",
+    "bytes": 452,
+    "sha256": "423ca1bc4838302de0a978e1194cd984244bd38f1a39339365da415ef4151286"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/looseEqual.ts",
+    "kind": "ts",
+    "bytes": 3197,
+    "sha256": "81bcee3acc33df958cf329f0218e80d96a38a42d139b634f91b1515a7eb4080b"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/makeMap.ts",
+    "kind": "ts",
+    "bytes": 428,
+    "sha256": "1edafc6bdb5b18819fec2201fb4583be291ea91b09878f7b33d3ee2a02ed0dc4"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/normalizeProp.ts",
+    "kind": "ts",
+    "bytes": 2594,
+    "sha256": "4aa0c6cebcdd530da17fbd44314891c5c9e9cfc2de8147650d376e0917298c9c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/patchFlags.ts",
+    "kind": "ts",
+    "bytes": 4714,
+    "sha256": "26bad23d884f3cf825b959adc4456d6b857adee9ef46eb8a6a8fd2e61e52e28d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/shapeFlags.ts",
+    "kind": "ts",
+    "bytes": 380,
+    "sha256": "48307dab673ac5abbcb2b0167bca81ce81086702cb35c009455bbc6f192d3816"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/slotFlags.ts",
+    "kind": "ts",
+    "bytes": 1003,
+    "sha256": "32adcf4113b794bb52a7f421967cc50687f81958e23de119fc63a4b41c1f4aa1"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/toDisplayString.ts",
+    "kind": "ts",
+    "bytes": 1835,
+    "sha256": "87ce938d3928d079257651eb4c9634f812a8bdf70082ff54cf2bf7023db0dd33"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/shared/src/typeUtils.ts",
+    "kind": "ts",
+    "bytes": 1603,
+    "sha256": "3b13dae506e96fcd6e11b9466fd7bd067036d01555fa58566ca958d3ef961d7f"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue/src/dev.ts",
+    "kind": "ts",
+    "bytes": 358,
+    "sha256": "e3a328636aacebaf8d5d2279466806a1262056934a497b9a818a63408904617d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue/src/index.ts",
+    "kind": "ts",
+    "bytes": 2955,
+    "sha256": "4679fb066abd99e24c9ef0b7fd1ef3d045c84598b1f561e5e91aabf7b5c1e28c"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue/src/runtime.ts",
+    "kind": "ts",
+    "bytes": 715,
+    "sha256": "06ab259ad064e1c411d53b53eecae01a4467ea7fdcb124e5fe0cb13c117bb9fd"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue-compat/src/createCompatVue.ts",
+    "kind": "ts",
+    "bytes": 1375,
+    "sha256": "46978a80bee13348e994c67a18e50bf752c67b4dbf0f2991f12c6c2599dbb01d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue-compat/src/dev.ts",
+    "kind": "ts",
+    "bytes": 358,
+    "sha256": "e3a328636aacebaf8d5d2279466806a1262056934a497b9a818a63408904617d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue-compat/src/esm-index.ts",
+    "kind": "ts",
+    "bytes": 179,
+    "sha256": "2632409fc512ccfca83cb32e0954135e74a5f256f5ceadcd634db0577b24118d"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue-compat/src/esm-runtime.ts",
+    "kind": "ts",
+    "bytes": 181,
+    "sha256": "15382e60b4405ce7a8529ad7504fd786206604361dec03510b912c0fcde839b9"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue-compat/src/index.ts",
+    "kind": "ts",
+    "bytes": 3118,
+    "sha256": "1206d405f20391bdd140196ec09cd7be0986eded15aa1e5fb922fe0ec4766c11"
+  },
+  {
+    "repo": "vue-core",
+    "path": "packages/vue-compat/src/runtime.ts",
+    "kind": "ts",
+    "bytes": 752,
+    "sha256": "7b789085a0bbbc93c39b5188bbc59731f6c77854c83d7bb17e247821a676630d"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-preact/src/app.jsx",
+    "kind": "jsx",
+    "bytes": 3304,
+    "sha256": "1eee1fe2d824ae2d5747d157350dcea4342e08b5e247f5e08bd848bb582c0551"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-preact/src/main.jsx",
+    "kind": "jsx",
+    "bytes": 134,
+    "sha256": "92a3e7a92897ab21facb9faf506042aea2d616dd1b6cc23acef271cc973625e6"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-preact-ts/src/app.tsx",
+    "kind": "tsx",
+    "bytes": 3304,
+    "sha256": "7a1433d8620bc1413bbefec3af5565eb1df74f6a72303776c2f13ec84aa3e729"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-preact-ts/src/main.tsx",
+    "kind": "tsx",
+    "bytes": 135,
+    "sha256": "88b4a2aa67663fce1e6840d7bfb7ed17093768fe7fa2ab922ecd1fe9486daf1c"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-qwik/src/app.jsx",
+    "kind": "jsx",
+    "bytes": 3263,
+    "sha256": "81e71c89058baaf055de24ec6bff61446cf5095404eba06521c14747ab0adbd1"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-qwik/src/main.jsx",
+    "kind": "jsx",
+    "bytes": 185,
+    "sha256": "99fa334c48597c526f6020cf30d31ac70948bb64242f61440a950debe35f21b9"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-qwik-ts/src/app.tsx",
+    "kind": "tsx",
+    "bytes": 3263,
+    "sha256": "6d836a13cb6cab003f9488b3f127444fe1f6f8e7a1c3469a7e9d29b6167f115d"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-qwik-ts/src/main.tsx",
+    "kind": "tsx",
+    "bytes": 200,
+    "sha256": "a406ddc19e92e68afbd0a6bca7e1dfa1be241c86df8b55d0eb689f89322a976c"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-react/src/App.jsx",
+    "kind": "jsx",
+    "bytes": 3646,
+    "sha256": "3226560e76fae0a061d973aee04d87fc5e3f4c4b41d94777ab622c4b19aa4067"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-react/src/main.jsx",
+    "kind": "jsx",
+    "bytes": 229,
+    "sha256": "4b4b864dbe45253425d0c925337180ec07e204295179f80f59551216f466f618"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-react-ts/src/App.tsx",
+    "kind": "tsx",
+    "bytes": 3646,
+    "sha256": "c7184fc9b1c36d7492093e1b5f5844c440bd3396deeace21b6699d3838f6ecb2"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-react-ts/src/main.tsx",
+    "kind": "tsx",
+    "bytes": 230,
+    "sha256": "6e9e5807fcbd48b75a96db5cbef36c996262196be42e6d4760dc86babbe61ad2"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-solid/src/App.jsx",
+    "kind": "jsx",
+    "bytes": 3317,
+    "sha256": "09027ee6125708e9d4455bac4ef2586dae58ade7f05b7dae6d3ea75d555e4796"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-solid/src/index.jsx",
+    "kind": "jsx",
+    "bytes": 184,
+    "sha256": "6d66a95375486ca0b11cf151b1125f7b4ccca2c990c0b589b095efaed65d8876"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-solid-ts/src/App.tsx",
+    "kind": "tsx",
+    "bytes": 3317,
+    "sha256": "d385947e6d1ca59ff3556e92c614d1a3e4cd2024839cabf0dc59c102002c9b70"
+  },
+  {
+    "repo": "vite",
+    "path": "packages/create-vite/template-solid-ts/src/index.tsx",
+    "kind": "tsx",
+    "bytes": 185,
+    "sha256": "70f8ec36ed6a9fd65fc854700782882fdb68cfe1213da7eda5fd14fd5887e2d6"
+  },
+  {
+    "repo": "vite",
+    "path": "playground/environment-react-ssr/src/entry-client.tsx",
+    "kind": "tsx",
+    "bytes": 261,
+    "sha256": "071c1da9f476e2982be137208da0077ffc4110ca7ec4c4847ef414ca824c6dd5"
+  },
+  {
+    "repo": "vite",
+    "path": "playground/environment-react-ssr/src/entry-server.tsx",
+    "kind": "tsx",
+    "bytes": 749,
+    "sha256": "7480347ac0c4d7958921361709568631abfac6ede3de7a32358a87d78ac6f582"
+  },
+  {
+    "repo": "vite",
+    "path": "playground/environment-react-ssr/src/root.tsx",
+    "kind": "tsx",
+    "bytes": 467,
+    "sha256": "243592f747b2ac3b2c0683259de2e056e193f59529269ded53d0716a3e29c14f"
+  },
+  {
+    "repo": "vite",
+    "path": "playground/resolve/ts-extension/hellojsx.tsx",
+    "kind": "tsx",
+    "bytes": 76,
+    "sha256": "65651e9afb8c8b43f8c9c14c6681a22d4dfa893f7afee92345196c0992e5f123"
+  },
+  {
+    "repo": "vite",
+    "path": "playground/resolve/ts-extension/hellotsx.tsx",
+    "kind": "tsx",
+    "bytes": 75,
+    "sha256": "a668e54c7b9855ff9fb829706121deffd0e29d15c87800853b09016b680aca6b"
+  },
+  {
+    "repo": "vite",
+    "path": "playground/ssr-webworker/src/entry-worker.jsx",
+    "kind": "jsx",
+    "bytes": 1021,
+    "sha256": "29c62e590a5edc2b2e3f878be3fc7e05d820bd5bdd1a03993c71f954587d27b9"
+  }
+]

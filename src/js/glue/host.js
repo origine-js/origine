@@ -1,25 +1,18 @@
-// `api.host`: facts about the machine and process the program runs on. Evaluated as an expression
-// by src/api/glue.zig: `(native, util) => makeHostCap`. `makeHostCap()` builds the namespace.
-// `api.host.env` takes a Set of visible names, or null for all (`makeEnvCap(allow)`).
-(native, util) => {
-  const { freeze, freezeMethods, own, shared, take, failure } = util;
-  function makeEnvCap(allow) {
-    const visible = name => allow === null || allow.has(name);
+// `api.host`: facts about the machine and process the program runs on. An ES module factory imported
+// by index.js. Its default export uses the per-realm native and helpers through imports.
+// `api.host.env` exposes the environment configured by the host.
+import { recordOf, freeze, freezeMethods, own, shared, failure, errors } from './util.js';
+export default (native, { take }) => {
+  function makeEnvCap() {
     return freezeMethods({
       args: () => freeze(native.env.args()),
-      get: name => (typeof name === 'string' && visible(name) ? native.env.get(name) : undefined),
-      list: () => freeze(native.env.list().filter(visible)),
-      narrow(next) {
-        const list = own(next, 'allow');
-        if (!Array.isArray(list)) throw new TypeError('allow must be an array of names');
-        const names = new Set(list.filter(name => typeof name === 'string' && visible(name)));
-        return makeEnvCap(names);
-      },
+      get: name => (typeof name === 'string' ? native.env.get(name) : undefined),
+      list: () => freeze(native.env.list()),
     });
   }
 
   // ---- channels -------------------------------------------------------------------------
-  // A channel is a pair of ports. A port is a frozen object over two one-way native channels (`tx` to
+  // A channel is a pair of ports. A port is an immutable JS class instance over two one-way native channels (`tx` to
   // send, `rx` to receive) and one read mode, `'pull'` (`recv`, `for await`) or `'event'`
   // (`register('message', fn)`), like the handles of `api.net`. Ports are branded natively, which is
   // what lets them travel in a transfer list.
@@ -39,8 +32,8 @@
   };
   const errorNamed = (error, name) => error !== null && typeof error === 'object' && error.name === name;
   const failWith = name => {
-    const code = util.errors[name];
-    throw util.failure(code);
+    const code = errors[name];
+    throw failure(code);
   };
   const live = state => {
     if (state.consumed) failWith('BadHandle');
@@ -126,6 +119,8 @@
   const EVENTS = ['message', 'close', 'error'];
   const fire = (state, name, event) => {
     const failures = [];
+    // Snapshot the handlers: unregistering during dispatch affects the next event.
+    // oxlint-disable-next-line unicorn/no-useless-spread
     for (const fn of [...state.handlers[name]]) {
       try {
         fn(event);
@@ -184,7 +179,7 @@
         ready();
         state.handlers[name].push(fn);
         if (name === 'message') pump(state);
-        return freeze({
+        return recordOf('Registration', {
           unregister() {
             const at = state.handlers[name].indexOf(fn);
             if (at < 0) return false;
@@ -221,7 +216,7 @@
   function makePort(tx, rx, mode) {
     ready();
     const state = { tx, rx, consumed: false, pending: 0, running: false };
-    const port = mode === EVENT ? eventPort(state) : pullPort(state);
+    const port = recordOf(mode === EVENT ? 'EventPort' : 'PullPort', mode === EVENT ? eventPort(state) : pullPort(state));
     native.channel.brand(port, tx, rx, mode);
     freezeMethods(port);
     states.set(port, state);
@@ -276,7 +271,7 @@
     }
     /**
      * Evaluates the module graph of `init` (not its `main`) in a throwaway isolate **on this thread**,
-     * which is blocked until it is done, and snapshots the heap. Throws `{ errno }` `InvalidData` for an
+     * which is blocked until it is done, and snapshots the heap. Throws an `IoError` with errno `InvalidData` for an
      * init that throws or needs I/O to finish.
      */
     static create(options) {
@@ -328,7 +323,7 @@
   };
 
   return () => ({
-    env: makeEnvCap(null),
+    env: makeEnvCap(),
     Snapshot,
     threading: freezeMethods({
       get parallelism() {

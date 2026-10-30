@@ -49,7 +49,7 @@ pub struct RawNative {
 }
 
 /// The JS value for `error`: a `TypeError`/`RangeError`/`Error`, or for [`NativeError::Errno`] the
-/// frozen `{ errno, name }` that `glue/util.js` `failure(code)` builds.
+/// shared Error subclass instance that `glue/util.js` `failure(code)` builds.
 pub fn error_value<'s>(scope: &mut v8::PinScope<'s, '_>, error: NativeError) -> v8::Local<'s, v8::Value> {
     let message = |scope: &mut v8::PinScope<'s, '_>, text: &str| v8::String::new(scope, text).unwrap_or_else(|| v8::String::empty(scope));
     match error {
@@ -77,10 +77,27 @@ pub fn error_value<'s>(scope: &mut v8::PinScope<'s, '_>, error: NativeError) -> 
 }
 
 fn errno_value<'s>(scope: &mut v8::PinScope<'s, '_>, code: u32) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-    let object = crate::encode::new_object(scope);
+    // Zig's private glue bundle is raw embedder slot 3. rusty_v8 reserves
+    // two slots internally, so its public slot 1 addresses the same location.
+    let context = scope.get_current_context();
+    let bundle = context.get_embedder_data(scope, 1).and_then(|value| v8::Local::<v8::Array>::try_from(value).ok());
+    if let Some(bundle) = bundle {
+        let classes = bundle.get_index(scope, 6).and_then(|value| v8::Local::<v8::Object>::try_from(value).ok());
+        if let Some(classes) = classes {
+            let key = v8::String::new(scope, "of").ok_or_else(|| NativeError::error("error factory key"))?;
+            let factory = classes.get(scope, key.into()).and_then(|value| v8::Local::<v8::Function>::try_from(value).ok());
+            if let Some(factory) = factory {
+                let argument = v8::Integer::new_from_unsigned(scope, code);
+                return factory.call(scope, classes.into(), &[argument.into()]).ok_or_else(|| NativeError::error("error factory failed"));
+            }
+        }
+    }
+    let text = v8::String::new(scope, errno::name_of(code)).unwrap_or_else(|| v8::String::empty(scope));
+    let error = v8::Exception::error(scope, text);
+    let object = v8::Local::<v8::Object>::try_from(error).map_err(|_| NativeError::error("error object"))?;
     crate::encode::set(scope, object, "errno", code)?;
     crate::encode::set(scope, object, "name", errno::name_of(code))?;
-    crate::encode::freeze(scope, object)
+    Ok(error)
 }
 
 /// The Host state of the isolate, mutably. Natives that take `&mut HostState` get it from here;

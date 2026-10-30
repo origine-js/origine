@@ -1,10 +1,12 @@
-// `api.io`: the async runtime capability factory. Evaluated as an expression by src/api/glue.zig:
-// `(native, util) => makeIoCap`. `makeIoCap(state)` returns a frozen `{ create, narrow }`.
+// `api.io`: the async runtime capability factory. An ES module factory used by index.js:
+// Its default export imports the per-realm native and shared helpers. `makeIoCap(state)` returns a frozen `{ create, narrow }`.
 // A runtime is created by the Rust native `native.io.create` (the ceiling is the embedder's
 // `Config.runtime`); the glue only adds the narrowing the init asked for. A handle is frozen
 // data `{ kind: 'io', id, backend }` plus `close()`; it is not transferable across scopes
 // and `api.fs.requestAsync` takes it as `io`.
-(native, { freeze, own, failure, ioHandles, closedIo, shared, errors: { Unsupported, BadHandle } }) => {
+import { recordOf, freeze, own, failure, ioHandles, closedIo, shared, errors } from './util.js';
+const { Unsupported, BadHandle } = errors;
+export default native => {
   const BACKENDS = freeze(['auto', 'uring', 'kqueue', 'threaded']);
 
   // `state` = { parent, backends: string[] | undefined, max, live }: one record per narrowing.
@@ -56,7 +58,7 @@
         const token = nextTimer++;
         const promise = native.io.sleep(made.id, token, ms);
         const cancel = () => (closedIo.has(handle) ? false : native.io.cancelTimer(made.id, token));
-        return freeze({ promise, cancel });
+        return recordOf('Timer', { promise, cancel });
       };
       const timerAt = deadline => {
         if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline < 0)
@@ -65,14 +67,25 @@
       };
       const sleep = ms => timer(ms).promise;
       const sleepUntil = deadline => timerAt(deadline).promise;
-      handle = freeze({ kind: 'io', id: made.id, backend: made.backend, close, run, now, timer, timerAt, sleep, sleepUntil });
+      handle = recordOf('IoHandle', {
+        kind: 'io',
+        id: made.id,
+        backend: made.backend,
+        close,
+        run,
+        now,
+        timer,
+        timerAt,
+        sleep,
+        sleepUntil,
+      });
       ioHandles.add(handle);
       for (const s of chain) s.live++;
       return handle;
     }
 
     return freeze({
-      // Synchronous; throws a frozen `{ errno, name }` (InvalidInput for bad options, Unsupported
+      // Synchronous; throws an `OrigineError` subclass instance (InvalidInput for bad options, Unsupported
       // when the backend or the runtime count is not allowed or available).
       create(opts) {
         if (opts !== undefined && (opts === null || typeof opts !== 'object')) throw new TypeError('options must be an object');

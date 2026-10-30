@@ -52,7 +52,7 @@ Version*) so the editor and `tsc` agree. Hover docs come from the JSDoc on every
 | `io.d.ts` | `api.io`: `IoCap`, `Io` (runtime handle: `run`, `sleep`, `timer`, ...) |
 | `net.d.ts` | `api.net`: `Socket<'event'>`/`Socket<'pull'>`, `Server<M, S>`, `listen`/`connect` with required `mode`, `end(side)`, `queued`/`direct`, `toEvent()`/`toPull()` |
 | `isolate.d.ts`, `host.d.ts`, `env.d.ts`, `graph.d.ts`, `context.d.ts` | `api.isolate`, `api.host` (`HostCap`), `api.host.env`, `api.graph` (`ModuleGraph`, `ModuleReference`), `api.context` (`Context`) |
-| `errors.d.ts` | `IoError` and `HostError`, the `{ errno, name }` values thrown or rejected (plain objects, not an `Error`), one per error domain |
+| `errors.d.ts` | `IoError` and `HostError`, the `OrigineError` subclasses thrown or rejected, one per error domain |
 | `generated/errno.d.ts` | **Generated** from `src/api/errno_codes.zig`: `IoErrnoTable`/`HostErrnoTable` (and their `*Name`, `*Code`), `ErrnoTable` |
 | `std/*.d.ts` | `declare module` for `origine:@std/errno`, `io`, `fs`, `text`, `debug`, `quansync`, `transformer/oxc`, `graph/*` |
 | `globals.d.ts`, `repl.d.ts` | the hardened context's globals; the REPL's global `api` (opt in) |
@@ -96,3 +96,5 @@ value; `Temporal` and `console` exist in the context but are not declared (TypeS
   `just check-types` runs all of it.
 * Changing the API (a name, an option, a default): change the glue, the docs in `src/js/docs/`, and these
   declarations in the same change.
+
+Runtime failures are `Error` subclasses from `origine:@std/errors`: `OrigineError`, `IoError`, `HostError`, and `ImportError`. They retain errno codes and expose message and stack. Graph descriptors and filesystem references are JS class instances; construct them with the documented factories, rather than object literals.

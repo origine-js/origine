@@ -1,3 +1,4 @@
+declare const handleBrand: unique symbol;
 import type { HostError, IoError } from "./errors.d.ts";
 import type { Io } from "./io.d.ts";
 
@@ -12,6 +13,7 @@ export type FileKindValue = 1 | 2 | 3 | 4;
 
 /** What a `stat` reports. */
 export interface Stat {
+  readonly [handleBrand]: true;
   readonly kind: FileKindValue;
   /** Size in bytes. */
   readonly size: number;
@@ -19,6 +21,7 @@ export interface Stat {
 
 /** One entry of a directory listing. */
 export interface DirEntryData {
+  readonly [handleBrand]: true;
   readonly name: string;
   readonly kind: FileKindValue;
 }
@@ -31,16 +34,18 @@ export interface DirEntryData {
  */
 export type OpenFlags = "r" | "rw" | "r+" | "w" | "w+" | "x" | "x+" | "c" | "c+" | "t" | "t+";
 
-/** A directory descriptor of one grant: frozen `{ kind: 'dir', fs, id }`. It confers no authority by itself. */
+/** A JS class directory reference of one grant with read-only kind, fs, and id fields. It confers no authority by itself. */
 export interface DirHandle {
+  readonly [handleBrand]: true;
   readonly kind: "dir";
   /** Id of the grant it belongs to (`0` for the `Dir.cwd()` sentinel). */
   readonly fs: number;
   readonly id: number;
 }
 
-/** A file descriptor of one grant: frozen `{ kind: 'file', fs, id }`. It confers no authority by itself. */
+/** A JS class file reference of one grant with read-only kind, fs, and id fields. It confers no authority by itself. */
 export interface FileHandle {
+  readonly [handleBrand]: true;
   readonly kind: "file";
   readonly fs: number;
   readonly id: number;

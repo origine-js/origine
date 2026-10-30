@@ -517,8 +517,8 @@ pub const ModuleMap = struct {
     }
 
     /// Registers every active module with `creator` as data of the current context and
-    /// describes the graph. The map must be idle and hold only settled source modules:
-    /// failures, pending loads, synthetic modules and unfinished imports fail with
+    /// describes the graph. The map must be idle and hold only settled source modules
+    /// or the evaluated private records module. Failures, pending loads, other synthetic modules and unfinished imports fail with
     /// error.NotSnapshottable. Requires the entered context and a live HandleScope. Result
     /// slices and strings are copied into `alloc`, which the caller owns; source hashes are
     /// left for the host to fill in.
@@ -529,8 +529,8 @@ pub const ModuleMap = struct {
         for (self.all_entries.items) |entry| {
             if (!entry.cached) continue;
             const module = entry.module orelse return error.NotSnapshottable;
-            if (entry.failure != null or entry.pending != null or entry.preparing or entry.exports.len != 0 or entry.shared) return error.NotSnapshottable;
-            if (!module.deref().isSourceTextModule()) return error.NotSnapshottable;
+            if (entry.failure != null or entry.pending != null or entry.preparing or entry.shared) return error.NotSnapshottable;
+            if (!snapshotSafeModule(entry.id, module.deref())) return error.NotSnapshottable;
             try active.append(alloc, entry);
         }
         const modules = try alloc.alloc(init_snapshot.Module, active.items.len);
@@ -572,7 +572,7 @@ pub const ModuleMap = struct {
             self.entries.putAssumeCapacity(entry.*.cache_key, entry.*);
             const data = self.ctx().getDataFromSnapshotOnce(module.data_index) orelse return error.InvalidSnapshot;
             const restored = v8.Module.from_opaque(data.handle) orelse return error.InvalidSnapshot;
-            if (!restored.isSourceTextModule()) return error.InvalidSnapshot;
+            if (!snapshotSafeModule(module.id, restored)) return error.InvalidSnapshot;
             entry.*.module = .new(self.isolate(), restored);
             try self.indexModule(entry.*);
             entry.*.preparing = false;
@@ -1167,7 +1167,7 @@ fn resolveStatic(ctx: v8.Context, specifier: v8.String, attributes: v8.FixedArra
 /// Borrows callback locals through return; copies export names and installs
 /// map-retained values into the V8 module. Returns a local promise or null in
 /// the enclosing HandleScope; requires entered context and retains no host inputs.
-fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle {
+pub fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle {
     const scope = fromContext(ctx) orelse return null;
     const entry = scope.module_map.find(module) orelse return null;
     for (entry.exports) |exp| {
@@ -1176,6 +1176,15 @@ fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle {
     const resolver = eu.v.promise_resolver(ctx) orelse return null;
     _ = resolver.resolve(ctx, eu.v.undefined_value(scope.runtime.isolate).value);
     return resolver.getPromise().object.value.data.handle;
+}
+
+// The private records module aliases JS functions already retained by the glue
+// heap. Once evaluated, its export cells are entirely V8-managed; the callback
+// never runs after restore and needs no Zig export metadata or live authority.
+// Other synthetic modules keep the existing snapshot restriction.
+fn snapshotSafeModule(id: []const u8, module: v8.Module) bool {
+    return module.isSourceTextModule() or
+        (std.mem.eql(u8, id, "origine:@internal/records") and module.isSyntheticModule() and module.getStatus() == 4);
 }
 /// Borrows callback locals through synchronous import setup; scratch storage
 /// is released before return. Returns a local promise in the enclosing HandleScope;

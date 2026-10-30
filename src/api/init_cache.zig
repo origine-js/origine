@@ -432,7 +432,7 @@ pub fn blobDigest(blob: []const u8) Hash {
 
 /// `<32 hex digits>.v8-code-cache` for a source text: the hash covers the fingerprint, the startup blob
 /// the runtime booted from (null: the engine's own), whether it is
-/// a host glue script (V8 hashes the origin options into its own check, so the same text compiled the
+/// a host glue ES module (V8 hashes the origin options into its own check, so the same text compiled the
 /// other way is a different cache) and the exact text.
 pub fn codeFileName(fp: Hash, boot: ?Hash, glue_script: bool, source: []const u8) [32 + cache_dir.code_extension.len]u8 {
     var hasher = Blake3.init(.{});
@@ -524,7 +524,7 @@ pub fn decodeCode(alloc: std.mem.Allocator, file: []align(8) u8, source: []const
     return null;
 }
 
-/// File-backed modules and each host glue script get code caches; the embedded `origine:`
+/// File-backed modules and each host glue ES module get code caches; the embedded `origine:`
 /// ES modules are covered by the init snapshot. Borrows the ID through return; retains nothing.
 fn cacheable(module_id: []const u8) bool {
     if (!std.mem.startsWith(u8, module_id, managed.module_types.origine_prefix)) return true;

@@ -1,5 +1,5 @@
-// `api.net`: loopback TCP on an io runtime. Evaluated as an expression by src/api/glue.zig:
-// `(native, util) => makeNetCap`. `makeNetCap()` returns the frozen `{ listen, connect, ... }`.
+// `api.net`: loopback TCP on an io runtime. An ES module factory used by index.js:
+// Its default export imports the per-realm native and shared helpers. `makeNetCap()` returns the frozen `{ listen, connect, ... }`.
 // Handles are instances of the classes below: the native id lives in a `Core` that only this file
 // can reach (a private field of the handle holds it), only this file can construct handles
 // (`token`), and methods brand-check their receiver. Every native call still re-validates owner
@@ -10,7 +10,9 @@
 // (`register`, `pause`, `resume`). The write side (`direct`, `queued`, `end`, `close`) is shared
 // by both. `toEvent()`/`toPull()` move the native handle into a new instance of the other class
 // and consume the old one.
-(native, { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors: { BadHandle, Canceled, Unsupported, WouldBlock } }) => {
+import { recordOf, freeze, freezeMethods, own, failure, ioHandles, closedIo, errors } from './util.js';
+const { BadHandle, Canceled, Unsupported, WouldBlock } = errors;
+export default native => {
   const token = {};
   let coreOf;
   let revoke;
@@ -232,7 +234,7 @@
         native.net.start(this.id);
       }
       if (flows) this.sync();
-      return freeze({
+      return recordOf('Registration', {
         unregister: () => {
           const removed = entries.delete(entry);
           // Without a flow handler the handle pauses itself: nothing is read to be dropped.
@@ -445,7 +447,10 @@
      * `BadHandle` afterwards). Throws `WouldBlock` while an `accept()` is pending.
      */
     toEvent() {
-      return new EventServer(token, revoke(this, core => core.toEvent()));
+      return new EventServer(
+        token,
+        revoke(this, core => core.toEvent()),
+      );
     }
   }
 
@@ -453,7 +458,7 @@
   class EventServer extends Server {
     /**
      * Subscribes `handler` to `connection` (a socket of the server's `socketMode`), `error`
-     * (`{ errno, name }`) or `close` and returns `{ unregister() }`. The first `connection` handler
+     * (an OrigineError subclass) or `close` and returns `{ unregister() }`. The first `connection` handler
      * starts accepting. Handlers run in registration order. Registrations never keep the program
      * alive: `await io.run()` does, until every flowing handle has closed. After `close`,
      * handlers are dropped. A connection nobody handles is closed.
@@ -478,7 +483,10 @@
      * `Unsupported` once a `connection` handler started accepting.
      */
     toPull() {
-      return new PullServer(token, revoke(this, core => core.toPull()));
+      return new PullServer(
+        token,
+        revoke(this, core => core.toPull()),
+      );
     }
   }
 
@@ -710,7 +718,9 @@
         if (buffer.byteLength === 0) throw new TypeError('buffer must not be empty');
         const core = live(this);
         return core.track(
-          core.readEnded ? Promise.resolve({ bytes: 0, buffer: buffer instanceof ArrayBuffer ? buffer : buffer.buffer }) : native.net.readInto(core.id, buffer),
+          core.readEnded
+            ? Promise.resolve({ bytes: 0, buffer: buffer instanceof ArrayBuffer ? buffer : buffer.buffer })
+            : native.net.readInto(core.id, buffer),
           r => r.bytes === 0,
         );
       } catch (e) {
@@ -748,7 +758,10 @@
      * read is pending.
      */
     toEvent() {
-      return new EventSocket(token, revoke(this, core => core.toEvent()));
+      return new EventSocket(
+        token,
+        revoke(this, core => core.toEvent()),
+      );
     }
   }
 
@@ -756,7 +769,7 @@
   class EventSocket extends Socket {
     /**
      * Subscribes `handler` to `event` and returns `{ unregister() }`. Sockets emit `data` (an event
-     * with `length` and `buffer()`), `end` (the peer finished), `error` (`{ errno, name }`), `drain`
+     * with `length` and `buffer()`), `end` (the peer finished), `error` (an OrigineError subclass), `drain`
      * (the send queue emptied) and `close`. The first `data` handler starts the flow. Handlers run
      * in registration order. Registrations never keep the program alive: `await io.run()` does,
      * until every flowing handle has closed. After `close`, handlers are dropped.
@@ -786,7 +799,10 @@
      * runtime already read belong to the events.
      */
     toPull() {
-      return new PullSocket(token, revoke(this, core => core.toPull()));
+      return new PullSocket(
+        token,
+        revoke(this, core => core.toPull()),
+      );
     }
   }
 
@@ -832,7 +848,7 @@
       PullSocket,
       EventSocket,
       /**
-       * Binds and listens (loopback only). Synchronous; throws `{ errno, name }`. `mode` ('event' or
+       * Binds and listens (loopback only). Synchronous; throws an OrigineError subclass. `mode` ('event' or
        * 'pull', required) picks the server class, `socketMode` (required) the class of the sockets it
        * accepts. `host`: an IP literal as given, `localhost` binds 127.0.0.1 (pass '::1' for IPv6).
        */

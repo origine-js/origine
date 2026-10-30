@@ -16,6 +16,8 @@ test {
     _ = @import("tests/managed/async_resolve.zig");
     _ = @import("tests/managed/cache.zig");
     _ = @import("tests/managed/api.zig");
+    _ = @import("tests/managed/fast_values.zig");
+    _ = @import("tests/managed/js_handles.zig");
     _ = @import("tests/managed/thread_isolate.zig");
     _ = @import("tests/managed/channel.zig");
     _ = @import("tests/managed/isolate.zig");

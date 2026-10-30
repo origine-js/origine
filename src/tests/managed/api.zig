@@ -101,6 +101,8 @@ const GlueCacheProbe = struct {
     loads: std.StringHashMapUnmanaged(usize) = .empty,
     hits: usize = 0,
     stores: usize = 0,
+    corrupt: bool = false,
+    rejects: usize = 0,
 
     /// Borrows the request through the delegated load; returned bytes use its allocator.
     fn load(data: ?*anyopaque, request: m.CodeCacheRequest) ?[]const u8 {
@@ -113,6 +115,12 @@ const GlueCacheProbe = struct {
         entry.value_ptr.* += 1;
         const bytes = self.inner.load(self.inner.data, request) orelse return null;
         self.hits += 1;
+        if (self.corrupt) {
+            const changed = request.allocator.alignedAlloc(u8, .@"8", bytes.len) catch unreachable;
+            @memcpy(changed, bytes);
+            changed[0] ^= 0xff;
+            return changed;
+        }
         return bytes;
     }
 
@@ -121,6 +129,12 @@ const GlueCacheProbe = struct {
         const self: *GlueCacheProbe = @ptrCast(@alignCast(data.?));
         self.stores += 1;
         self.inner.store(self.inner.data, request, bytes);
+    }
+
+    fn rejected(data: ?*anyopaque, request: m.CodeCacheRequest) void {
+        const self: *GlueCacheProbe = @ptrCast(@alignCast(data.?));
+        self.rejects += 1;
+        if (self.inner.rejected) |discard| discard(self.inner.data, request);
     }
 
     /// Releases all probe-owned IDs; inner cache ownership stays with the fixture.
@@ -141,21 +155,21 @@ fn exposeApi(scope: *m.Scope, api: v8.Global.Of(v8.Value)) !void {
     try t.expect(session.ctx.getGlobal().set(session.ctx, v8.String.initUtf8(session.isolate(), "api").name.primitive.value, api.deref()) orelse false);
 }
 
-test "api: getters load and harden capabilities once and retain separate disk code caches" {
+test "api: ES module glue imports once and retains separate module code caches" {
     ensureV8();
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     // The second runtime must consume the first runtime's actual V8 code caches.
-    for (0..2) |run| {
+    for (0..4) |run| {
         const rt = try m.Runtime.create(t.allocator, .{});
         defer rt.destroy();
         const host = try m.Api.Host.create(t.allocator, .{ .runtime = .{}, .fs = .{ .root = .{ .handle = tmp.dir.handle }, .async = false } });
         defer host.destroy();
         var cache = m.Api.init_cache.CodeCacheState.init(host, .{ .handle = tmp.dir.handle });
-        var probe: GlueCacheProbe = .{ .inner = cache.hook() };
+        var probe: GlueCacheProbe = .{ .inner = cache.hook(), .corrupt = run == 2 };
         defer probe.deinit();
         var options = host.initOptions();
-        options.code_cache = .{ .data = &probe, .load = GlueCacheProbe.load, .store = GlueCacheProbe.store };
+        options.code_cache = .{ .data = &probe, .load = GlueCacheProbe.load, .store = GlueCacheProbe.store, .rejected = GlueCacheProbe.rejected };
         const scope = try rt.createScope(options);
         const api = try host.install(scope, null);
         defer api.deinit();
@@ -165,11 +179,11 @@ test "api: getters load and harden capabilities once and retain separate disk co
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );
-        try t.expectEqual(@as(usize, 1), probe.loads.count());
-        try t.expect(probe.loads.contains("origine:glue"));
+        try t.expectEqual(@as(usize, 12), probe.loads.count());
+        try t.expect(probe.loads.contains("origine:glue.esm.index"));
         try t.expect(host.rust_isolate == null);
         try check(scope, "api.host.env === api.host.env && Object.isFrozen(api.host.env.args) && api.host.env.args().length === 0");
-        try t.expect(!probe.loads.contains("origine:glue.fs"));
+        try t.expect(probe.loads.contains("origine:glue.esm.fs"));
         try check(scope, "api.fs === api.fs && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.fs)");
         try check(scope,
             \\(() => {
@@ -183,14 +197,15 @@ test "api: getters load and harden capabilities once and retain separate disk co
         try check(scope, "api.io === api.io && Object.isFrozen(api.io.create)");
         try t.expect(host.rust_isolate != null);
         try check(scope, "api.net === api.net && Object.isFrozen(api.net.Socket.prototype) && Object.isFrozen(api.net.PullSocket.prototype)");
-        try t.expectEqual(@as(usize, 7), probe.loads.count());
+        try t.expectEqual(@as(usize, 12), probe.loads.count());
         var counts = probe.loads.valueIterator();
         while (counts.next()) |count| try t.expectEqual(@as(usize, 1), count.*);
+        try t.expectEqual(@as(usize, if (run == 2) 12 else 0), probe.rejects);
         host.flushGlueCache(scope);
-        try t.expectEqual(@as(usize, if (run == 0) 7 else 0), probe.stores);
-        try t.expectEqual(@as(usize, if (run == 0) 0 else 7), probe.hits);
+        try t.expectEqual(@as(usize, if (run == 0 or run == 2) 12 else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0) 0 else 12), probe.hits);
         host.flushGlueCache(scope);
-        try t.expectEqual(@as(usize, if (run == 0) 7 else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0 or run == 2) 12 else 0), probe.stores);
     }
 }
 
@@ -407,7 +422,7 @@ test "api: host.threading.parallelism is a positive integer" {
     try check(fx.scope, "Number.isInteger(report.n) && report.n >= 1 && report.frozen");
 }
 
-test "api: io and env narrowing are monotonic" {
+test "api: io narrowing enforces quotas and env exposes only reads" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { Dir, IoError, HostError } from 'origine:@std/io';
@@ -432,10 +447,8 @@ test "api: io and env narrowing are monotonic" {
         \\  out.closeAfter = solo.close() === c1;
         \\  await slot.create({ backend: 'threaded' }).close();
         \\  await io.close();
-        \\  const one = api.host.env.narrow({ allow: ['HOME'] });
-        \\  out.home = one.get('HOME'); out.path = one.get('PATH');
-        \\  const none = one.narrow({ allow: ['PATH'] });
-        \\  out.widened = none.get('PATH') !== undefined || none.get('HOME') !== undefined;
+        \\  out.home = api.host.env.get('HOME'); out.path = api.host.env.get('PATH');
+        \\  out.envReads = Object.keys(api.host.env).join(',') === 'args,get,list' && Object.isFrozen(api.host.env);
         \\  out.noContextNarrow = api.context.narrow === undefined && api.graph.derive !== undefined;
         \\  out.frozen = Object.isFrozen(api) && Object.isFrozen(api.fs) && api.fs.narrow === undefined;
         \\}
@@ -443,7 +456,7 @@ test "api: io and env narrowing are monotonic" {
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.narrowedBackend === 'threaded' && report.countCapped && report.backendCapped");
-    try check(fx.scope, "report.home === '/home/test' && report.path === undefined && report.widened === false");
+    try check(fx.scope, "report.home === '/home/test' && report.path === '/bin' && report.envReads");
     try check(fx.scope, "report.noContextNarrow === true && report.frozen === true && report.closeShared && report.closeHeld && report.closeAfter");
 }
 
@@ -754,7 +767,7 @@ test "quansync: leaves, composites, yields, errors, finally and fast paths" {
     try check(fx.scope, "report.fast === 'fast:gen' && report.badYield === true && report.run === '3:3' && report.byMode === '4:4' && report.frozen");
 }
 
-test "graph: recipes, sources, resolvers, import handlers, providers and caches are frozen data" {
+test "graph: recipes, sources, resolvers, import handlers, providers and caches are immutable JS class instances" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource, SourceMap, ModuleImportPhase } from 'origine:@std/graph/module';
@@ -2364,12 +2377,13 @@ test "api: import.meta natives reach only the embedded std modules" {
         \\  out.noGlobal = !('__engineText' in globalThis);
         \\  out.reserved = await import('origine:@std/unknown').then(() => false, () => true);
         \\  out.reservedPrivate = await import('origine:private/bindings').then(() => false, () => true);
+        \\  out.recordsPrivate = await import('origine:@internal/records').then(() => false, () => true);
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.exports === 'decodeUtf8,encodeUtf8,tryDecodeUtf8'");
-    try check(fx.scope, "report.bareMeta && report.noGlobal && report.reserved && report.reservedPrivate");
+    try check(fx.scope, "report.bareMeta && report.noGlobal && report.reserved && report.reservedPrivate && report.recordsPrivate");
 }
 
 /// State a test module keeps for one scope; `torn_down` records `deinit` runs.
@@ -2954,7 +2968,7 @@ const zero_copy_source =
     \\  const syncFile = cwd.openFile(sync, 'r.txt');
     \\  const unsupported = f => { try { f(); return false; } catch (e) { return IoError.is(e, IoError.Unsupported); } };
     \\  out.syncUnsupported = unsupported(() => syncFile.readInto(sync, new Uint8Array(1))) && unsupported(() => syncFile.readAlloc(sync, 1));
-    \\  syncMoveFile.close(sync);
+    \\  syncFile.close(sync);
     \\
     \\  // Raw glue validation: rejects InvalidInput without touching the buffer.
     \\  const raw = await fs.dirOpenFile(cwd, 'r.txt', 'r');
@@ -4297,4 +4311,79 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\    (n.locked === 'PermissionDenied' || n.locked === 'ok');
         \\})()
     );
+}
+
+test "api: graph records have private JS identity and errors share Error subclasses" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { relative, importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { OrigineError, IoError, HostError, ImportError } from 'origine:@std/errors';
+        \\import { Dir, IoError as FromIo } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const layer = relative();
+        \\  let forged = false, constructed = false;
+        \\  try { ImportResolver.layered().layer({ host: 'relative', kind: 'layer' }); } catch (e) { forged = e instanceof IoError; }
+        \\  try { new layer.constructor({ host: 'relative', kind: 'layer' }); } catch (e) { constructed = e instanceof TypeError; }
+        \\  const data = { imports: { x: './x.js' } };
+        \\  const map = importMap(data);
+        \\  data.imports.x = './changed.js';
+        \\  let runtime;
+        \\  try { api.fs.requestSync({ access: 'invalid' }); } catch (e) { runtime = e; }
+        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  let badRef = false;
+        \\  try { sync.dirStat({ kind: 'dir', fs: 0, id: 0 }, '.'); FromIo.check(sync); } catch (e) { badRef = e instanceof IoError; }
+        \\  const stat = sync.dirStat(Dir.cwd(), '.');
+        \\  const io = api.io.create({ backend: 'threaded' });
+        \\  const asyncFs = await api.fs.requestAsync({ io, access: 'r' });
+        \\  let missing = false;
+        \\  try { await asyncFs.dirOpenFile(Dir.cwd(), 'missing-file', 'r'); } catch (e) { missing = e instanceof IoError && e instanceof OrigineError && typeof e.stack === 'string'; }
+        \\  await io.close();
+        \\  globalThis.nativeRecords = badRef && missing && Object.getPrototypeOf(stat) !== Object.prototype && forged && constructed && Object.isFrozen(layer) &&
+        \\    Object.getPrototypeOf(layer) !== Object.prototype && map.imports.x === './x.js' &&
+        \\    FromIo === IoError && new IoError(IoError.NotFound) instanceof OrigineError &&
+        \\    new HostError(HostError.BadHandle) instanceof Error &&
+        \\    ImportError.other('broken') instanceof OrigineError && runtime instanceof OrigineError &&
+        \\    typeof runtime.stack === 'string';
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "nativeRecords");
+}
+
+test "api: std factories import private JS records without native metadata" {
+    for (m.Api.std_modules) |module| {
+        if (std.mem.startsWith(u8, module.id, "origine:@std/graph/") or
+            std.mem.eql(u8, module.id, "origine:@std/io") or
+            std.mem.eql(u8, module.id, "origine:@std/fs") or
+            std.mem.eql(u8, module.id, "origine:@std/transformer/oxc"))
+            try t.expect(module.bindings == null);
+    }
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative, origine, importMap } from 'origine:@std/graph/resolve/layers';
+        \\import { origineProvider, fromLoader } from 'origine:@std/graph/providers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e?.stack || '')); } }
+        \\async function body(api) {
+        \\  globalThis.privateDenied = await import('origine:@internal/records').then(() => false, () => true);
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(relative()).layer(origine()).layer(importMap({ imports: { main: 'app:/main.js' } })),
+        \\    hooks: [origineProvider({ std: { include: ['graph/resolve', 'graph/resolve/layers', 'errors', 'errno'] } }), fromLoader(() => `
+        \\      import { relative } from 'origine:@std/graph/resolve/layers';
+        \\      import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\      globalThis.sharedBrand = ImportResolver.layered().layer(relative()).layers.length === 1;
+        \\      globalThis.privateDenied = await import('origine:@internal/records').then(() => false, () => true);
+        \\    `)],
+        \\  });
+        \\  const ctx = await api.context.create({ import: handler });
+        \\  await ctx.import('main');
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "privateDenied");
+    try check(fx.rt.scopes.items[1], "sharedBrand && privateDenied");
 }

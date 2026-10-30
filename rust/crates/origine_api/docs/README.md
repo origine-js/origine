@@ -97,7 +97,7 @@ number }`). It calls `HostState::create_runtime(key, backend, entries)`:
 2. `entries = entries.unwrap_or(default_entries).min(1 << 16)`.
 3. `origine_io::Loop::new(Options { backend, entries })`; failure maps to `Unsupported`.
 4. `Runtime::new(Rc<Loop>)`, store a `RuntimeEntry`, return the id.
-5. Returns the frozen `{ kind: 'io', id, backend }` (`IoHandle`, `derive(IntoJs)`).
+5. Returns the native `IoHandle` instance with read-only kind, id, and backend fields (`IoHandle`, `derive(IntoJs)`).
 
 `native.io.close(id)` returns a `Promise<void>`: it takes the runtime out of use (`begin_close`):
 drops the `Runtime` (cancels every task and op), rejects that runtime's pending promises with
@@ -191,7 +191,7 @@ Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions 
   JS could re-enter another native); the macro lets a native take either the host state or a scope
   as parameters, and natives that need both fetch the state via `host_mut(scope)` between V8 calls.
 * **No errno cell.** None of these natives touches the shared per-scope errno cell: failures
-  reject promises (async) or throw `{ errno, name }` (sync, e.g. `io.create`).
+  reject promises (async) or throw an `OrigineError` subclass instance (sync, e.g. `io.create`).
 * Lints: `unsafe` blocks need `// SAFETY:` ([workspace](../../../docs/README.md)).
 
 ## Building

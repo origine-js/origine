@@ -1,6 +1,6 @@
-// `api.graph` and the machinery `api.context` (glue/context.js) shares with it. Evaluated as an
-// expression by src/api/glue.zig: `(native, util) => makeGraphCap`. The factory also publishes the
-// shared parts in `util.shared.graph` (handler registry, JS driver, references) for the context glue.
+// `api.graph` and the machinery `api.context` (glue/context.js) shares with it. An ES module factory used by
+// index.js. The factory also publishes the shared parts in imported `shared.graph` (handler registry,
+// JS driver, references) for the context glue; both modules import the shared state directly.
 //
 // A graph holds the authority modules are produced with (an fs grant, a code cache); a recipe is
 // turned into a `ModuleReference` with `recipe.create(graph)`; a reference is loaded
@@ -11,18 +11,14 @@
 // (`steps`: one layer, hook, maker, transformer or `meta` at a time), in the creating realm. The
 // host runs the chain and calls the driver only when it reaches a function, so a handler with no
 // function in it never reaches the driver. See docs/graph-api.md.
-(native, util) => {
-  'use strict';
-  const { freeze, take, failure, own, errors } = util;
-  const { InvalidInput, NotFound, PermissionDenied, Unsupported, InvalidData } = errors;
+import { recordOf, recordIs, records, freeze, failure, own, errors, shared } from './util.js';
+export default (native, { take }) => {
+  const { InvalidInput, NotFound, Unsupported, InvalidData } = errors;
 
-  const HANDLER = Symbol.for('origine:@std/graph/handler');
-  const RECIPE = Symbol.for('origine:@std/graph/recipe');
-  const SOURCE = Symbol.for('origine:@std/graph/source');
   const CREATE = Symbol.for('origine:@std/graph/create');
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
-  const named = (code, message) => freeze({ errno: code, name: util.failure(code).name, message });
+  const named = (code, message) => failure(code, message);
   const invalid = message => named(InvalidInput, message);
   /// Calls a host native and throws what it left in the errno cell.
   const host = (fn, ...args) => {
@@ -142,7 +138,7 @@
   };
 
   const register = handler => {
-    if (handler === null || typeof handler !== 'object' || handler[HANDLER] !== true) throw invalid('expected an ImportHandler');
+    if (!recordIs(handler, 'ImportHandler')) throw invalid('expected an ImportHandler');
     prune();
     const known = handlers.get(handler);
     if (known !== undefined && byId.get(known.id) === known) return known;
@@ -196,7 +192,7 @@
     const grant = graphFs.get(graphId);
     if (grant === undefined || grant.kind !== 'async') return host(native.graph.readSource, graphId, path);
     const limit = grant.limit;
-    const ops = util.shared.fsAsync;
+    const ops = shared.fsAsync;
     const file = await ops.openFile(grant.id, 0, path, 0);
     try {
       // One byte more than the limit tells a file that is too large from one that just fits.
@@ -234,7 +230,7 @@
     const cache = graphCache.get(graphId);
     if (cache === undefined) return;
     try {
-      const blob = await cache.load(freeze({ id, hash }), text);
+      const blob = await cache.load(recordOf('CodeCacheKey', { id, hash }), text);
       if (blob instanceof Uint8Array) {
         native.context.cachePut(graphId, id, hash, blob);
         take();
@@ -275,7 +271,7 @@
   };
 
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
-  const NEXT = freeze({ kind: 'next' });
+  const NEXT = recordOf('PipelineResult', { kind: 'next' });
 
   /// Reads the state behind a reference (`link` verdicts name another context's module).
   const referenceState = new WeakMap();
@@ -283,7 +279,7 @@
   const metaOf = async (record, id) => {
     const metaFn = record.handler.meta;
     if (metaFn === null) return undefined;
-    const data = await metaFn(freeze({ id }));
+    const data = await metaFn(recordOf('MetaRequest', { id }));
     if (data === null || typeof data !== 'object') throw named(InvalidData, 'meta must return an object');
     return JSON.stringify(data);
   };
@@ -292,7 +288,7 @@
     /// A resolver layer that is a function: the id it answers, or undefined to pass.
     layer: async (hid, ctxId, index, specifier, referrer, attributes) => {
       await settled();
-      const request = freeze({ specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
+      const request = recordOf('ResolveRequest', { specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
       const answer = await byId.get(hid).layerFns[index](request);
       if (answer === undefined) return undefined;
       const id = typeof answer === 'string' ? answer : own(answer, 'id');
@@ -302,21 +298,26 @@
     /// A hook that is a function: its verdict as data `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link' }`.
     hook: async (hid, ctxId, graphId, index, id, attributes, specifier, referrer) => {
       await settled();
-      const resolved = freeze({ id, attributes: freeze({ ...attributes }), specifier, referrer, phase: 'evaluation' });
+      const resolved = recordOf('ResolvedImport', {
+        id,
+        attributes: freeze({ ...attributes }),
+        specifier,
+        referrer,
+        phase: 'evaluation',
+      });
       const verdict = await byId.get(hid).hookFns[index](resolved);
-      if (verdict === null || typeof verdict !== 'object' || typeof verdict.kind !== 'string')
-        throw named(InvalidData, 'a hook must return an Import verdict');
+      if (!recordIs(verdict, 'ImportVerdict')) throw named(InvalidData, 'a hook must return an Import verdict');
       switch (verdict.kind) {
         case 'next':
           return NEXT;
         case 'accept':
-          return freeze({ kind: 'accept' });
+          return recordOf('PipelineResult', { kind: 'accept' });
         case 'provide':
           if (verdict.recipe !== undefined) {
             const source = await sourceText(verdict.recipe.source, graphId, id);
-            return freeze({ kind: 'final', source, handler: register(verdict.recipe.import).id });
+            return recordOf('PipelineResult', { kind: 'final', source, handler: register(verdict.recipe.import).id });
           }
-          return freeze({ kind: 'provide', source: await sourceText(verdict.source, graphId, id) });
+          return recordOf('PipelineResult', { kind: 'provide', source: await sourceText(verdict.source, graphId, id) });
         case 'link': {
           const state = referenceState.get(verdict.reference);
           if (state === undefined || state.context === null || state.status !== 'evaluated')
@@ -330,7 +331,7 @@
             for (const key of Object.keys(namespace)) exports[key] = copyData(namespace[key], seen);
             reply.exports = exports;
           }
-          return freeze(reply);
+          return recordOf('PipelineResult', reply);
         }
         case 'reject':
           throw verdict.error;
@@ -342,11 +343,17 @@
     maker: async (hid, ctxId, id, text) => {
       await settled();
       const record = byId.get(hid);
-      const source = freeze({ kind: 'text', text, map: freeze({ kind: 'none' }), transformers: freeze([]), native: true });
-      const options = (await record.handler.maker.fn(freeze({ id, source }))) ?? {};
+      const source = recordOf('ProvidedSource', {
+        kind: 'text',
+        text,
+        map: recordOf('SourceMap', { kind: 'none' }),
+        transformers: freeze([]),
+        native: true,
+      });
+      const options = (await record.handler.maker.fn(recordOf('MakerRequest', { id, source }))) ?? {};
       const made = await applyTransformer(options.transformer, id, text);
       const child = options.import !== undefined ? register(options.import) : record;
-      return freeze({ text: made, handler: child.id });
+      return recordOf('TransformResult', { text: made, handler: child.id });
     },
     /// A transformer function the host's maker reached (the `index`th of the handler's).
     transform: async (hid, index, id, text) => {
@@ -382,7 +389,9 @@
 
   /// The `source` reply of `reference.load()`: `handler` is the handler object that governs the module's own imports.
   const finished = (child, source, id) =>
-    pinned(child, async () => freeze({ kind: 'source', source, handler: child.handler, meta: await metaOf(child, id) }));
+    pinned(child, async () =>
+      recordOf('PipelineResult', { kind: 'source', source, handler: child.handler, meta: await metaOf(child, id) }),
+    );
 
   /// Answers `{ kind: 'source', source, handler, meta }` or the `link` reply of a hook.
   const loadInJs = async (hid, graphId, id, attributes, specifier, referrer) => {
@@ -400,11 +409,11 @@
         if (!serves) reply = NEXT;
         else {
           const text = await readText(graphId, id);
-          reply = freeze({ kind: 'provide', source: isJson ? host(native.graph.jsonModule, text) : text });
+          reply = recordOf('PipelineResult', { kind: 'provide', source: isJson ? host(native.graph.jsonModule, text) : text });
         }
       } else {
         const text = host(native.graph.hook, hid, index, graphId, 0, id, json);
-        reply = text === undefined ? NEXT : freeze({ kind: 'provide', source: text });
+        reply = text === undefined ? NEXT : recordOf('PipelineResult', { kind: 'provide', source: text });
       }
       if (reply.kind === 'accept') supplied = await readText(graphId, id);
       else if (reply.kind === 'provide') supplied = reply.source;
@@ -427,7 +436,7 @@
   };
 
   let bound = false;
-  /// Hands the driver to the host the first time a handler is registered (a snapshot has no natives).
+  /// Hands the driver to the host the first time a handler is registered (live graph authority is bound after snapshot restoration).
   const bindDriver = () => {
     if (bound) return;
     host(native.graph.bind, (kind, ...args) => stepByKind[kind](...args));
@@ -512,7 +521,7 @@
           const handler = answer.answer !== undefined ? answer.answer.handler : answer.handler;
           reference = makeReference(state.graph, null, { name: answer.id, text: source, handler, status: 'declared' });
         }
-        out.push(freeze({ specifier, attributes: freeze({ ...attributes }), phase, reference }));
+        out.push(recordOf('ModuleRequest', { specifier, attributes: freeze({ ...attributes }), phase, reference }));
       }
       state.requests = freeze(out);
       state.status = 'loaded';
@@ -598,7 +607,7 @@
   const refsById = new Map();
 
   // `ImportCache#size`, `delete` and `clear` (origine:@std/graph/cache) reach the host through this one object:
-  // a std module is pure data and holds no natives. They act on the contexts this realm created. A reference
+  // std cache descriptors hold private JS identity but no graph authority. They act on the contexts this realm created. A reference
   // to a module the cache forgot leaves `context.references`; it stays a usable handle of the old module.
   const forgetRefs = (cache, moduleId) => {
     const id = cacheIds.get(cache);
@@ -625,11 +634,7 @@
       return count;
     },
   });
-  try {
-    Object.defineProperty(globalThis, Symbol.for('origine:@std/graph/cache-ops'), { value: cacheOps });
-  } catch {
-    // Already defined: the realm keeps the first one.
-  }
+  records.publish('graph/cache-ops', cacheOps);
 
   /// The text of a reference made from a recipe (read, transformed) once.
   const ensureText = async state => {
@@ -666,7 +671,7 @@
   const cacheKinds = freeze({ codeCacheNone: 0, codeCacheMemory: 1, codeCacheDir: 2 });
 
   const makeGraph = (id, config) => {
-    const graph = {
+    const graph = recordOf('Graph', {
       /// A graph with the same authority except what `options` replaces: `fs` (a grant of `api.fs.requestSync`)
       /// and `codeCache` (`origine:@std/graph/cache`). It cannot hold more than the realm already does.
       derive(options) {
@@ -682,7 +687,7 @@
         const cache = config.codeCache;
         if (cache !== undefined && cache.native === false) {
           for (let index = 1; index < out.length; index++)
-            await cache.store(freeze({ id: out[index][0], hash: out[index][1] }), out[index][2]);
+            await cache.store(recordOf('CodeCacheKey', { id: out[index][0], hash: out[index][1] }), out[index][2]);
         }
         return out[0];
       },
@@ -700,12 +705,12 @@
         graphCache.delete(id);
       },
       [CREATE](recipe) {
-        if (recipe === null || typeof recipe !== 'object' || recipe[RECIPE] !== true) throw invalid('expected a ModuleRecipe');
+        if (!recordIs(recipe, 'ModuleRecipe')) throw invalid('expected a ModuleRecipe');
         return makeReference(graph, recipe, null);
       },
-    };
+    });
     graphs.set(graph, { id, config });
-    return freeze(graph);
+    return graph;
   };
 
   /// The largest source file a graph reads unless `derive({ sourceBytes })` says otherwise.
@@ -713,32 +718,35 @@
 
   const build = (fs, codeCache, sourceBytes = DEFAULT_SOURCE_BYTES) => {
     if (!Number.isSafeInteger(sourceBytes) || sourceBytes < 1) throw invalid('sourceBytes must be a positive integer');
-    // The host decides what is a grant (it stamped the object itself); `kind` and `id` are read only
-    // after it accepted the object, and a grant is frozen.
-    if (fs !== undefined && (fs === null || typeof fs !== 'object')) throw invalid('graph fs must be a fs grant made by api.fs');
+    // JS private-field identity protects the wrapper. Only its closure-private state
+    // reaches the native graph operation, which checks grant ownership and liveness.
+    const rawFs = fs === undefined ? undefined : records.unwrap(fs, 'FsGrant');
+    if (fs !== undefined && rawFs === undefined) throw invalid('graph fs must be a fs grant made by api.fs');
     let kind = 0;
     let bytes = 0;
     let cacheFs;
+    let rawCacheFs;
     if (codeCache !== undefined) {
-      if (codeCache.kind !== 'codeCache') throw invalid('codeCache must be a CodeCache');
+      if (!recordIs(codeCache, 'Cache') || codeCache.kind !== 'codeCache') throw invalid('codeCache must be a CodeCache');
       if (codeCache.native === false) kind = 3;
       else {
         kind = cacheKinds[codeCache.host] ?? -1;
         if (kind < 0) throw invalid('unknown CodeCache');
         if (kind === 2) {
           cacheFs = codeCache.fs;
-          if (cacheFs === null || typeof cacheFs !== 'object') throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
+          rawCacheFs = records.unwrap(cacheFs, 'FsGrant');
+          if (rawCacheFs === undefined) throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
         }
       }
       bytes = codeCache.bytes ?? 0;
     }
-    if (fs !== undefined && fs.kind === 'async' && util.shared.fsAsync === undefined) throw invalid('async fs is not available');
-    const id = host(native.graph.create, fs, kind, bytes, cacheFs, sourceBytes);
+    if (fs !== undefined && fs.kind === 'async' && shared.fsAsync === undefined) throw invalid('async fs is not available');
+    const id = host(native.graph.create, rawFs, kind, bytes, rawCacheFs, sourceBytes);
     if (kind === 3) graphCache.set(id, codeCache);
     if (fs !== undefined) {
       if (fs.kind === 'async')
-        host(native.graph.asyncFs, id, fs, util.shared.fsAsync.openFile, util.shared.fsAsync.readAll, util.shared.fsAsync.close);
-      graphFs.set(id, freeze({ kind: fs.kind, id: fs.id, limit: sourceBytes }));
+        host(native.graph.asyncFs, id, rawFs, shared.fsAsync.openFile, shared.fsAsync.readAll, shared.fsAsync.close);
+      graphFs.set(id, recordOf('GraphFs', { kind: fs.kind, id: fs.id, limit: sourceBytes }));
     }
     return makeGraph(id, freeze({ fs, codeCache, sourceBytes }));
   };
@@ -753,7 +761,7 @@
 
   const rootGraph = () => (root ??= build(undefined, undefined));
 
-  util.shared.graph = freeze({
+  shared.graph = freeze({
     register,
     byId,
     graphId,

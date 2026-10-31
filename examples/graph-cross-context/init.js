@@ -3,7 +3,7 @@
 //   Import.link(ref): B uses A's module itself, with live bindings and A's own objects. Nothing is copied or
 //     frozen, so B can read and write A's `config`, and a function B calls runs in A. This crosses the realm
 //     boundary on purpose; hand data over with a copy (origine:@std snapshot / Import.exports) instead.
-//   Import.provide(recipe): B gets its own module of counter.js, with its own state, separate from A's.
+//   Import.recipe(recipe): B gets its own module of counter.js, with its own state, separate from A's.
 // Prints (stderr):
 //   counter.js evaluated                      (A, loaded by lib.js)
 //   A: lib.js evaluated
@@ -42,7 +42,7 @@ export async function main(api) {
     hooks: [
       resolved => {
         if (resolved.id === 'lib.js') return Import.link(lib);
-        if (resolved.id === 'counter.js') return Import.provide(counter); // a recipe is final: B's own module
+        if (resolved.id === 'counter.js') return Import.recipe(counter); // a recipe is final: B's own module
         return Import.next();
       },
       fsProvider({ read: 'copy' }),

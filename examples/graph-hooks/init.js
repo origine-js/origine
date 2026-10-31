@@ -32,7 +32,7 @@ export async function main(api) {
       // 2. origine:@std/* modules. `std` is required; only the names listed are served.
       origineProvider({ std: { include: ['text'] } }),
       // 3. A module made from text the hook holds: nothing is read from disk.
-      resolved => (resolved.id === 'virtual:answer' ? Import.provide(ModuleSource.text('export const answer = 42;')) : Import.next()),
+      resolved => (resolved.id === 'virtual:answer' ? Import.source(ModuleSource.text('export const answer = 42;')) : Import.next()),
       // 4. Files under the grant's root. `read` is required: 'copy' or 'mmap'.
       fsProvider({ read: 'copy' }),
     ],

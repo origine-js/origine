@@ -88,8 +88,8 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   // @ts-expect-error declare takes a recipe
   graph.declare({});
 }
-const provided: Verdict = Import.provide(recipe);
-const sourced: Verdict = Import.provide(ModuleSource.text("export default 1"));
+const provided: Verdict = Import.recipe(recipe);
+const sourced: Verdict = Import.source(ModuleSource.text("export default 1"));
 const linked: Verdict = Import.link({});
 const synthetic: Verdict = Import.exports({ answer: 42, default: () => 1 });
 void [pure, provided, sourced, linked, synthetic, Import.accept(), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
@@ -122,7 +122,9 @@ Import.link({}, { mode: "shared" });
 // @ts-expect-error `import` is required: it decides what the module can load
 ModuleRecipe({ source: ModuleSource.file("./a.js") });
 // @ts-expect-error a source is not a recipe
-Import.provide({ kind: "file" });
+Import.source({ kind: "file" });
+// @ts-expect-error a source is not a recipe
+Import.recipe(ModuleSource.text(""));
 // @ts-expect-error `maker` returns options (import, transformer), not a source or a recipe
 MakeRecipe.fn(() => ({ source: ModuleSource.file("./a.js") }));
 // @ts-expect-error only the codes of ImportError can be rejected

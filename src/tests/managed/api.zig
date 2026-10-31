@@ -827,7 +827,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  out.getter = invalid(() => ModuleRecipe({ source: file, get import() { return native; } }));
         \\  // verdicts
         \\  out.verdicts = Import.next() === Import.next() && Import.accept().kind === 'accept' && Object.isFrozen(Import.next())
-        \\    && Import.provide(file).source === file && Import.provide(recipe).recipe === recipe && invalid(() => Import.provide({}));
+        \\    && Import.source(file).source === file && Import.source(file).kind === 'source' && Import.recipe(recipe).recipe === recipe && Import.recipe(recipe).kind === 'recipe' && invalid(() => Import.source({})) && invalid(() => Import.source(recipe)) && invalid(() => Import.recipe(file)) && Import.provide === undefined;
         \\  const rejected = Import.reject(ImportError.NotFound);
         \\  const other = Import.reject(ImportError.other('Not allowed'));
         \\  out.reject = rejected.error.name === 'NotFound' && ImportError.is(rejected.error, ImportError.NotFound) && other.error.message === 'Not allowed' && other.error.name === 'Unexpected'
@@ -848,7 +848,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  const a = await hook({ id: 'a', attributes: {} });
         \\  const b = await hook({ id: 'b', attributes: { type: 'json' } });
         \\  const c = await hook({ id: 'c', attributes: {} });
-        \\  out.fromLoader = a.kind === 'provide' && a.source.text === 'export default 1' && b.source.text === 'export default json' && c.kind === 'reject' && ImportError.is(c.error, ImportError.InvalidData) && invalid(() => fromLoader(1));
+        \\  out.fromLoader = a.kind === 'source' && a.source.text === 'export default 1' && b.source.text === 'export default json' && c.kind === 'reject' && ImportError.is(c.error, ImportError.InvalidData) && invalid(() => fromLoader(1));
         \\  // caches
         \\  out.caches = ImportCache.native({ retain: 'all' }).retain === 'all' && !('entries' in ImportCache.native({ retain: 'all' }))
         \\    && invalid(() => ImportCache.native({})) && invalid(() => ImportCache.native({ retain: 'some' })) && invalid(() => ImportCache.native({ retain: 'all', entries: 10 })) && invalid(() => ImportCache.native({ retain: 'used', entries: 0 }))
@@ -993,9 +993,9 @@ test "graph: JS layers, hooks, makers and transformers run in the creating realm
         \\      async resolved => {
         \\        if (resolved.id === 'mem:secret') return Import.reject(ImportError.PermissionDenied);
         \\        if (resolved.id === 'mem:gone') return Import.reject(ImportError.other('gone for good'));
-        \\        if (resolved.id === 'app:/value.js') return Import.provide(ModuleSource.text('export const value = 40;'));
-        \\        if (resolved.id === 'mem:ts') return Import.provide(ModuleSource.text('export const t = 1;').withTransformer(async s => s + ' export const u = 2;'));
-        \\        if (resolved.id === 'mem:recipe') return Import.provide(ModuleRecipe({ source: ModuleSource.text('export const r = "recipe"; export const where = import.meta.url;'), import: leaf, name: 'mem:recipe' }));
+        \\        if (resolved.id === 'app:/value.js') return Import.source(ModuleSource.text('export const value = 40;'));
+        \\        if (resolved.id === 'mem:ts') return Import.source(ModuleSource.text('export const t = 1;').withTransformer(async s => s + ' export const u = 2;'));
+        \\        if (resolved.id === 'mem:recipe') return Import.recipe(ModuleRecipe({ source: ModuleSource.text('export const r = "recipe"; export const where = import.meta.url;'), import: leaf, name: 'mem:recipe' }));
         \\        if (resolved.id === 'mem:accept') return Import.accept();
         \\        return Import.next();
         \\      },
@@ -1042,7 +1042,7 @@ test "graph: JS layers and hooks never run on the stack of a child's import()" {
         \\  const seen = [];
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => { seen.push('layer:' + marked); return { id: specifier }; }),
-        \\    hooks: [async r => { seen.push('hook:' + marked); return Import.provide(ModuleSource.text('export const v = 1;')); }],
+        \\    hooks: [async r => { seen.push('hook:' + marked); return Import.source(ModuleSource.text('export const v = 1;')); }],
         \\  });
         \\  const ctx = await api.context.create({ graph: api.graph,
         \\    import: handler,
@@ -1053,7 +1053,7 @@ test "graph: JS layers and hooks never run on the stack of a child's import()" {
         \\  // A hook may create a context: it runs from the microtask checkpoint.
         \\  const maker = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => { const inner = await api.context.create({ graph: api.graph, import: handler }); inner.close(); return Import.provide(ModuleSource.text('export const w = 2;')); }],
+        \\    hooks: [async r => { const inner = await api.context.create({ graph: api.graph, import: handler }); inner.close(); return Import.source(ModuleSource.text('export const w = 2;')); }],
         \\  });
         \\  const outer = await api.context.create({ graph: api.graph, import: maker });
         \\  out.nested = await outer.import('x').then(r => r.status, e => e.name + ':' + e.message);
@@ -1077,7 +1077,7 @@ test "graph: a settled driver call is freed and a second evaluate waits for the 
         \\  const out = globalThis.report = {};
         \\  const js = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.provide(ModuleSource.text(`export const id = '${r.id}';`))],
+        \\    hooks: [async r => Import.source(ModuleSource.text(`export const id = '${r.id}';`))],
         \\  });
         \\  const kept = await api.context.create({ graph: api.graph, import: js });
         \\  for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) await kept.import(id);
@@ -1123,7 +1123,7 @@ test "graph: a handler with functions in it runs its host elements natively and 
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(relative()).layer(({ specifier }) => { calls.push('layer:' + specifier); return specifier === 'virtual' ? { id: 'virtual' } : undefined; }),
         \\    hooks: [
-        \\      async r => { calls.push('hook:' + r.id); return r.id === 'virtual' ? Import.provide(ModuleSource.text('export const v = 5;')) : Import.next(); },
+        \\      async r => { calls.push('hook:' + r.id); return r.id === 'virtual' ? Import.source(ModuleSource.text('export const v = 5;')) : Import.next(); },
         \\      fsProvider({ read: 'copy' }),
         \\    ],
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.txt': async text => { calls.push('transform'); return text + ' export const t = 1;'; } }) }),
@@ -1161,7 +1161,7 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
         \\  const out = globalThis.report = {};
         \\  const make = hooks => ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()), hooks });
         \\  const text = origineProvider({ std: { include: ['text'] } });
-        \\  const forging = make([async resolved => (resolved.id === 'origine:evil' || resolved.id === 'origine:@std/text' ? Import.provide(ModuleSource.text('export const encodeUtf8 = () => ({ length: 99 }); export const x = 1;')) : Import.next())]);
+        \\  const forging = make([async resolved => (resolved.id === 'origine:evil' || resolved.id === 'origine:@std/text' ? Import.source(ModuleSource.text('export const encodeUtf8 = () => ({ length: 99 }); export const x = 1;')) : Import.next())]);
         \\  const handler = make([text]);
         \\  out.native = handler.native;
         \\  const run = async (h, name, source) => {
@@ -1939,7 +1939,7 @@ test "graph: CodeCache.dir keeps the files of virtual and escaping module ids in
         \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw', root: 'cache' });
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.provide(ModuleSource.text(`export const id = ${JSON.stringify(r.id)}; export function f() { return 1; }`))],
+        \\    hooks: [async r => Import.source(ModuleSource.text(`export const id = ${JSON.stringify(r.id)}; export function f() { return 1; }`))],
         \\  });
         \\  const ids = ['app:/x.js', '../../escape.js', 'https://example.com/a/b.js', 'mem:y'];
         \\  const run = async () => {
@@ -1990,7 +1990,7 @@ test "graph: ImportCache objects name separate tables, also inside one context" 
         \\  const out = globalThis.report = {};
         \\  const handlerFor = cache => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.provide(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const n = globalThis.count;`))],
+        \\    hooks: [async r => Import.source(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const n = globalThis.count;`))],
         \\    cache,
         \\  });
         \\  const entry = (handler, name) => api.graph.declare(ModuleRecipe({ source: ModuleSource.text("import { n } from 'dep'; globalThis['seen' + n] = true;"), import: handler, name }));
@@ -2040,7 +2040,7 @@ test "graph: contexts that use one ImportCache object share its modules; two obj
         \\  const text = "globalThis.count = (globalThis.count ?? 0) + 1; export let n = 0; export function inc() { return ++n; } export const o = { v: 1 };";
         \\  const handlerFor = options => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.provide(ModuleSource.text(text))],
+        \\    hooks: [async r => Import.source(ModuleSource.text(text))],
         \\    ...options,
         \\  });
         \\  // Two contexts made from the SAME handler object share the default cache it made, so one module.
@@ -2097,7 +2097,7 @@ test "graph: delete in one context is seen by all, a closed home hands the modul
         \\  const text = "globalThis.count = (globalThis.count ?? 0) + 1; export let n = globalThis.count;";
         \\  const handlerFor = cache => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.provide(ModuleSource.text(text))],
+        \\    hooks: [async r => Import.source(ModuleSource.text(text))],
         \\    cache,
         \\  });
         \\  // delete(id) forgets the module in every context that holds it; the next import makes a new one.
@@ -2156,7 +2156,7 @@ test "graph: retain used frees unused modules, delete resets identity, release u
         \\  const out = globalThis.report = {};
         \\  const handlerFor = cache => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.provide(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const id = '${r.id}';`))],
+        \\    hooks: [async r => Import.source(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const id = '${r.id}';`))],
         \\    cache,
         \\  });
         \\  // retain 'used': a module lives while a reference holds it.

@@ -181,8 +181,8 @@ declare module "origine:@std/graph/import" {
   /** A hook's answer. All verdicts are immutable JS class instances. */
   export type Verdict = (| { readonly kind: "next" }
     | { readonly kind: "accept" }
-    | { readonly kind: "provide"; readonly source: ModuleSource; readonly recipe?: never }
-    | { readonly kind: "provide"; readonly recipe: ModuleRecipe; readonly source?: never }
+    | { readonly kind: "source"; readonly source: ModuleSource }
+    | { readonly kind: "recipe"; readonly recipe: ModuleRecipe }
     | { readonly kind: "link"; readonly reference: object }
     | { readonly kind: "exports"; readonly values: Readonly<Record<string, unknown>> }
     | { readonly kind: "reject"; readonly error: { readonly errno: number; readonly name: string; readonly message?: string } }) & import("origine:@std/graph/module").Descriptor;
@@ -192,8 +192,10 @@ declare module "origine:@std/graph/import" {
     next(): Verdict;
     /** Stop the chain and use the default `maker`. */
     accept(): Verdict;
-    /** Stop the chain with a source (the `maker` makes it a recipe) or a recipe (final; the maker is skipped). The importer gets its own module. */
-    provide(target: ModuleSource | ModuleRecipe): Verdict;
+    /** Stop the chain with a source: the `maker` turns it into a module (its transformers, its handler, its name). The importer gets its own module. */
+    source(source: ModuleSource): Verdict;
+    /** Stop the chain with a recipe: final, the maker is skipped and the recipe's own handler answers its module's imports. The importer gets its own fresh module, with its own state. */
+    recipe(recipe: ModuleRecipe): Verdict;
     /**
      * Stop the chain and use a module already evaluated in some context: the importer links the module
      * itself, with live bindings and the other realm's objects (an alias when it is the importer's own

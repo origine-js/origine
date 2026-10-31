@@ -50,12 +50,17 @@ export const Import = freeze({
   next: () => NEXT,
   /// Stop the chain and use the default `maker` on whatever the pipeline supplies itself.
   accept: () => ACCEPT,
-  /// Stop the chain with `target`: a `ModuleSource` (the `maker` turns it into a recipe) or a
-  /// `ModuleRecipe` (final: the maker is skipped). The importing context gets its own module.
-  provide(target) {
-    if (target instanceof h.ModuleSource) return new h.ImportVerdict({ kind: 'provide', source: target });
-    if (target instanceof h.ModuleRecipe) return new h.ImportVerdict({ kind: 'provide', recipe: target });
-    throw invalid('Import.provide: expected a ModuleSource or a ModuleRecipe');
+  /// Stop the chain with a source: text the `maker` turns into a module (its transformers, its handler, its name).
+  /// The importing context gets its own module.
+  source(source) {
+    if (!(source instanceof h.ModuleSource)) throw invalid('Import.source: expected a ModuleSource');
+    return new h.ImportVerdict({ kind: 'source', source });
+  },
+  /// Stop the chain with a recipe: final, the maker is skipped and the recipe's own handler answers the imports of
+  /// its module. The importing context gets its own fresh module of it, with its own state.
+  recipe(recipe) {
+    if (!(recipe instanceof h.ModuleRecipe)) throw invalid('Import.recipe: expected a ModuleRecipe');
+    return new h.ImportVerdict({ kind: 'recipe', recipe });
   },
   /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a fresh
   /// copy: the importer links the module itself, with live bindings and the other realm's objects. This

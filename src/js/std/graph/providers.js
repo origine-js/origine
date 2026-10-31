@@ -69,6 +69,6 @@ export const fromLoader = loader => {
     const content = await loader(resolved.id, resolved.attributes);
     const text = typeof content === 'string' ? content : own(content, 'source');
     if (typeof text !== 'string') return Import.reject(ImportError.InvalidData);
-    return Import.provide(ModuleSource.text(text));
+    return Import.source(ModuleSource.text(text));
   };
 };

@@ -28,7 +28,7 @@ export default g => {
       if (typeof id !== 'string' || id === '') throw named(InvalidData, 'a resolver layer must answer an id');
       return id;
     },
-    /// A hook that is a function: its verdict as data `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link' }`.
+    /// A hook that is a function: its verdict as data `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link' | 'exports' }`.
     hook: async (hid, ctxId, graphId, index, id, attributes, specifier, referrer) => {
       await settled();
       const resolved = new ResolvedImport({
@@ -45,11 +45,11 @@ export default g => {
           return NEXT;
         case 'accept':
           return new PipelineResult({ kind: 'accept' });
-        case 'provide':
-          if (verdict.recipe !== undefined) {
-            const source = await sourceText(verdict.recipe.source, graphId, id);
-            return new PipelineResult({ kind: 'final', source, handler: register(verdict.recipe.import).id });
-          }
+        case 'recipe': {
+          const source = await sourceText(verdict.recipe.source, graphId, id);
+          return new PipelineResult({ kind: 'final', source, handler: register(verdict.recipe.import).id });
+        }
+        case 'source':
           return new PipelineResult({ kind: 'provide', source: await sourceText(verdict.source, graphId, id) });
         case 'link': {
           const state = referenceState.get(verdict.reference);

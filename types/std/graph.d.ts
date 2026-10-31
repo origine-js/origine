@@ -1,6 +1,6 @@
 // `origine:@std/graph/*`: the data side of the module graph. Frozen descriptions of modules, import
-// pipelines and caches. Nothing consumes them yet: `api.graph` and `api.context` are designed in
-// docs/graph-api.md and not implemented, so there is no way to load or evaluate a recipe today.
+// pipelines and caches. `api.graph` and `api.context` (types/graph.d.ts, types/context.d.ts) consume them;
+// the design is in docs/graph-api.md.
 
 declare module "origine:@std/graph/module" {
   type NativeIdentity = import("origine:@std/graph/module").Descriptor;

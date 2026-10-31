@@ -58,7 +58,7 @@ The builders block nothing, allocate nothing natively, detach nothing and retain
 ### `resolve` and `resolve/layers`
 
 - `ImportResolver.layered()` is a resolver with no layers; `.layer(l)` returns a new one. The first layer that returns `{ id, attributes? }` wins, `undefined` passes, no answer is `NotFound`. A layer is a function `({ specifier, referrer, attributes, phase })` run in the creating realm (it may be async) or a descriptor.
-- `relative()` (`./x`, `../x`), `origine()` (recognises `origine:` ids, serves nothing), `importMap({ imports, scopes })` (web import-map data, copied and frozen). Descriptors are JS `ResolveLayer` instances the host will compile to native steps.
+- `relative()` (`./x`, `../x`), `origine()` (recognises `origine:` ids, serves nothing), `importMap({ imports, scopes })` (web import-map data, copied and frozen; its values and scope keys are virtual URLs resolved against `app:/map.json`, so `./x.js` becomes the id `app:/x.js`, and a bare file name that is not a URL is `InvalidInput` at `context.create`. Ids are what the hooks see: a hook that reads plain paths, `fsProvider` among them, does not serve `app:/x.js`). Descriptors are JS `ResolveLayer` instances the host will compile to native steps.
 
 ### `import`
 

@@ -16,6 +16,7 @@ const std = @import("std");
 const v8 = @import("@v8");
 const Runtime = @import("runtime.zig").Runtime;
 const Scope = @import("scope.zig").Scope;
+const context_slots = @import("context_slots.zig");
 const ImportAttribute = @import("module_types.zig").ImportAttribute;
 const api_glue = @import("../api/glue.zig");
 
@@ -394,6 +395,6 @@ fn evaluate(rt: *Runtime, creator: *v8.SnapshotCreator, alloc: std.mem.Allocator
     const hardener_index = creator.addDataToContext(ctx, scope.hardener.deref().object.value.data);
     const unsupported_index = creator.addDataToContext(ctx, scope.unsupported_prototype.deref().object.value.data);
     // The scope pointer is process memory; the restored scope installs its own.
-    ctx.setAlignedPointerInEmbedderData(1, null);
+    ctx.setAlignedPointerInEmbedderData(context_slots.scope, null);
     return .{ .context_index = context_index, .hardener_index = hardener_index, .unsupported_index = unsupported_index, .modules = modules };
 }

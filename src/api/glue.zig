@@ -4,7 +4,8 @@ const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("binding.zig");
 const Scope = @import("../managed/scope.zig").Scope;
-pub const context_slot = 3;
+const slots = @import("../managed/context_slots.zig");
+pub const context_slot = slots.glue;
 pub const full_index = 0;
 pub const basic_index = 1;
 pub const native_index = 2;
@@ -15,7 +16,7 @@ pub const errors_index = 5;
 pub const handles_id = "origine:@internal/handles";
 /// Embedder slot of a context whose glue was made for a snapshot: the snapshot data index of the
 /// handles module, which the restored scope adopts (a module handle cannot ride in the bundle).
-const handles_data_slot = 4;
+const handles_data_slot = slots.glue_handles;
 pub const Module = enum { common, fs, host, graph, context, isolate, io, net, util, errors, handle, handles, errno, @"net/event", @"net/send", @"net/core", @"net/server", @"net/socket", @"graph/data", @"graph/source", @"graph/handlers", @"graph/driver", @"graph/reference" };
 pub const module_count = std.meta.fieldNames(Module).len;
 pub const Script = struct { source: []const u8, origin: []const u8, cache_id: []const u8 };
@@ -112,17 +113,23 @@ pub const Options = struct {
 /// The glue bundle of `ctx`, made on first use. Idempotent.
 pub fn ensure(isolate: v8.Isolate, ctx: v8.Context, options: Options) !v8.Array {
     if (restored(ctx)) |bundle| {
-        if (options.scope) |scope| try adoptRestored(ctx, scope);
+        if (options.scope) |scope| {
+            try adoptRestored(ctx, scope);
+            // The index in the slot belongs to the snapshot `ctx` came from and is spent; a snapshot of `ctx` needs its own.
+            if (options.creator) |creator| retainHandles(isolate, ctx, creator, scope.module_map.adopted.get(handles_id).?.deref());
+        }
         return bundle;
     }
     const built = try factory(isolate, ctx, options.compiler);
     const bundle = try initialize(isolate, ctx, built.create);
-    if (options.creator) |creator| {
-        const index: u32 = @intCast(creator.addDataToContext(ctx, built.handles.data));
-        ctx.setEmbedderData(handles_data_slot, v8.Integer.initFromUnsigned(isolate, index).number.numeric.primitive.value.data);
-    }
+    if (options.creator) |creator| retainHandles(isolate, ctx, creator, built.handles);
     if (options.scope) |scope| try scope.module_map.adopt(handles_id, built.handles);
     return bundle;
+}
+/// Adds the handles module to the snapshot `creator` makes of `ctx` and records its data index in the context.
+fn retainHandles(isolate: v8.Isolate, ctx: v8.Context, creator: *v8.SnapshotCreator, handles: v8.Module) void {
+    const index: u32 = @intCast(creator.addDataToContext(ctx, handles.data));
+    ctx.setEmbedderData(handles_data_slot, v8.Integer.initFromUnsigned(isolate, index).number.numeric.primitive.value.data);
 }
 /// A context restored from a snapshot has glue but no module handle: take it from the snapshot data.
 fn adoptRestored(ctx: v8.Context, scope: *Scope) !void {

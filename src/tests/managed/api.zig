@@ -338,6 +338,38 @@ test "api: init snapshot retains prepared network classes and their runtime bind
     try t.expectEqual(@as(usize, 0), probe.stores);
 }
 
+test "api: an init snapshot made on the engine snapshot hands the restored scope the handles module" {
+    // The path of main.zig: the init snapshot is taken from a context restored out of the engine
+    // snapshot, so the handles module's snapshot data must be added to the new blob again.
+    ensureV8();
+    const engine = try m.snapshot.create(t.allocator);
+    defer t.allocator.free(engine);
+    const Init = struct {
+        fn load(_: ?*anyopaque, _: m.LoadRequest) !m.LoadResult {
+            return .{ .source = "export function main(api) { globalThis.report = Object.isFrozen(api) && typeof api.fs.requestSync === 'function'; }" };
+        }
+    };
+    var image = try m.init_snapshot.create(t.allocator, .{
+        .key = @splat(7),
+        .specifier = "init",
+        .scope = .{ .resolver = .{ .resolve = @import("support.zig").Memory.resolve }, .loader = .{ .load = Init.load } },
+        .base_snapshot = engine,
+    });
+    defer image.deinit();
+    const rt = try m.Runtime.create(t.allocator, .{ .snapshot = image.blob });
+    defer rt.destroy();
+    const host = try m.Api.Host.create(t.allocator, .{ .runtime = .{} });
+    defer host.destroy();
+    var options = host.initOptions();
+    options.init_snapshot = &image.table;
+    const scope = try rt.createScope(options);
+    var error_info: m.ErrorInfo = .{};
+    defer error_info.deinit();
+    try host.run(scope, support.engine.platform, "init", &error_info);
+    try check(scope, "report === true");
+    try t.expect(scope.module_map.adopted.contains(m.Api.glue.handles_id));
+}
+
 test "api: main receives env and an fs with sync and async variants" {
     var fx: Fixture = undefined;
     try fx.setup(

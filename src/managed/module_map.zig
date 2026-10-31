@@ -3,6 +3,7 @@ const std = @import("std");
 const v8 = @import("@v8");
 const eu = @import("@util");
 const Scope = @import("scope.zig").Scope;
+const context_slots = @import("context_slots.zig");
 const ErrorInfo = @import("errors.zig").ErrorInfo;
 
 const ModuleId = @import("module_types.zig").ModuleId;
@@ -1136,7 +1137,7 @@ pub const ModuleMap = struct {
 /// Scope pointer, valid until Runtime.destroy begins. Requires a context created
 /// by Runtime.createScope, entered isolate and a live HandleScope.
 pub fn fromContext(ctx: v8.Context) ?*Scope {
-    return @ptrCast(@alignCast(ctx.getAlignedPointerFromEmbedderData(1)));
+    return @ptrCast(@alignCast(ctx.getAlignedPointerFromEmbedderData(context_slots.scope)));
 }
 /// A promise rejected with an Error saying the context's scope is gone. Needs no scope, so it
 /// works once the scope has been freed and only a stray reference into the context is left.

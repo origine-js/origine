@@ -3,8 +3,7 @@ const v8 = @import("@v8");
 const eu = @import("@util");
 const startup_trace = @import("@diagnostics").scope;
 
-/// Context slots 1/2 hold host pointers, and slot 3 holds the private API template.
-const context_slot = 4;
+const context_slot = @import("context_slots.zig").bootstrap;
 
 /// Returns this entered context's helpers as a local handle if already prepared.
 /// Borrows context only through return; no persistent handle or host pointer is retained.

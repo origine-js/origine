@@ -113,8 +113,8 @@ pub fn rebindMarkers() [max_rebind]*const anyopaque {
     return out;
 }
 
-/// Embedder-data slot of a context that holds its `Rebinder` (slot 1 is the managed Scope).
-pub const rebinder_slot = 2;
+/// Embedder-data slot of a context that holds its `Rebinder`.
+pub const rebinder_slot = @import("../managed/context_slots.zig").rebinder;
 
 /// How a native built for a snapshot finds its state after the snapshot is restored: the
 /// context it runs in points at the owner that knows, by module index. The owner must set the

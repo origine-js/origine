@@ -3,6 +3,7 @@ const v8 = @import("@v8");
 const eu = @import("@util");
 const Runtime = @import("runtime.zig").Runtime;
 const modules = @import("module_map.zig");
+const context_slots = @import("context_slots.zig");
 const module_types = @import("module_types.zig");
 const import_map = @import("import_map.zig");
 const ErrorInfo = @import("errors.zig").ErrorInfo;
@@ -62,7 +63,7 @@ pub const Scope = struct {
         // Retain only our independent copy, not the caller's map pointer.
         scope.options.import_map = null;
         ctx.setSecurityToken(eu.v.symbol(isolate, null).name.primitive.value);
-        ctx.setAlignedPointerInEmbedderData(1, scope);
+        ctx.setAlignedPointerInEmbedderData(context_slots.scope, scope);
         ctx.enter();
         defer ctx.exit();
         ctx.setStackTraceLimit(options.stack_trace_limit);
@@ -295,7 +296,7 @@ pub const Scope = struct {
         if (notify) if (self.options.on_dispose) |hook| hook.call(hook.data, self);
         self.module_map.deinit();
         // A stray reference into the context (a function another realm kept) must find no scope.
-        ctx.setAlignedPointerInEmbedderData(1, null);
+        ctx.setAlignedPointerInEmbedderData(context_slots.scope, null);
         ctx.exit();
         self.hardener.deinit();
         self.unsupported_prototype.deinit();

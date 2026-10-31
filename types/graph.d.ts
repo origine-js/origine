@@ -90,7 +90,7 @@ export interface ModuleGraph {
    * (otherwise `InvalidInput`); `StaleHandle` once the context is closed. Nothing is copied or frozen: every
    * export type works, bindings follow the module, and what you read is the context's own objects, so this
    * crosses the realm boundary (a function you call runs in that realm and can reach its globals). Hand data
-   * over with `snapshot` and `seal` instead.
+   * over with `snapshot` and `deepFreeze` instead.
    */
   exports(reference: ModuleReference): Readonly<Record<string, unknown>>;
   /** Lets the host free what the reference pins; with `retain: 'used'` the module goes once nothing else holds it. */

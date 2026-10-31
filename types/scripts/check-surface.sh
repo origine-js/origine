@@ -24,7 +24,7 @@ missing() {
 
 exports_of() { rg -o '^export (const|function|class|async function) (\w+)' -r '$2' "$1"; }
 
-for pair in errors:errors io:io fs:fs text:text quansync:quansync errno:errno; do
+for pair in errors:errors io:io fs:fs text:text data:data quansync:quansync errno:errno; do
     mod=${pair%%:*} decl=${pair##*:}
     src=$js/std/$mod.js
     [ -f "$src" ] || continue

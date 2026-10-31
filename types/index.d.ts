@@ -8,6 +8,7 @@
 /// <reference path="./std/errors.d.ts" />
 /// <reference path="./std/fs.d.ts" />
 /// <reference path="./std/text.d.ts" />
+/// <reference path="./std/data.d.ts" />
 /// <reference path="./std/debug.d.ts" />
 /// <reference path="./std/quansync.d.ts" />
 /// <reference path="./std/transformer-oxc.d.ts" />

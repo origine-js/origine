@@ -206,7 +206,7 @@ declare module "origine:@std/graph/import" {
      * Stop the chain with a module whose namespace is `values`: its own enumerable string-keyed data
      * properties, `default` included (an accessor is `InvalidInput`). The importer gets one synthetic module
      * with those bindings. Nothing is copied or frozen: each value is the caller's own object or function, shared as it
-     * is, so the importer reaches whatever the values reach. Build them with `snapshot` and `seal` to hand data over.
+     * is, so the importer reaches whatever the values reach. Build them with `snapshot` and `deepFreeze` to hand data over.
      * An `origine:` id is never served this way (`PermissionDenied`).
      */
     exports(values: Readonly<Record<string, unknown>>): Verdict;

@@ -1667,6 +1667,72 @@ test "graph: Import.exports gives the importer a synthetic module of the values,
     try check(fx.rt.scopes.items[1], "got.join(',') === '42,dflt,1,7,answer|bump|default|odd name|shared,false,false,false' && sharedInside.tag === 'z' && seen === 'z1'");
 }
 
+test "data: snapshot copies plain data, deepFreeze freezes in place, and they compose with the live namespace" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { snapshot, deepFreeze } from 'origine:@std/data';
+        \\import { IoError } from 'origine:@std/errors';
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const code = f => { try { f(); return 'ok'; } catch (e) { return e instanceof IoError ? e.name : 'other:' + e.name; } };
+        \\  const text = f => { try { f(); return ''; } catch (e) { return e.message; } };
+        \\  // snapshot: a copy in this realm; the source is not touched; cycles and shared references are kept.
+        \\  const shared = { n: 1 };
+        \\  const src = { a: [1, { b: shared }], c: shared, d: 'x', e: 10n, f: null, g: undefined, [Symbol('s')]: 1, nul: Object.assign(Object.create(null), { z: 1 }) };
+        \\  src.self = src;
+        \\  const copy = snapshot(src);
+        \\  out.copy = copy !== src && copy.a !== src.a && copy.self === copy && copy.a[1].b === copy.c && copy.c !== shared && copy.e === 10n && copy.g === undefined && 'g' in copy && Object.getPrototypeOf(copy.nul) === null && Object.getOwnPropertySymbols(copy).length === 0;
+        \\  out.defaultNotFrozen = !Object.isFrozen(copy) && !Object.isFrozen(copy.a) && !Object.isFrozen(snapshot(src, {})) && !Object.isFrozen(snapshot(src, { freeze: false }));
+        \\  const frozen = snapshot(src, { freeze: true });
+        \\  out.frozen = Object.isFrozen(frozen) && Object.isFrozen(frozen.a) && Object.isFrozen(frozen.a[1].b) && !Object.isFrozen(src) && !Object.isFrozen(shared);
+        \\  out.primitive = snapshot(5) === 5 && snapshot('s') === 's' && snapshot(null) === null;
+        \\  // What cannot be copied is Unsupported and says where; nothing is shared silently.
+        \\  class Point { constructor() { this.x = 1; } }
+        \\  const bad = {
+        \\    fn: { f: () => 1 }, cls: { k: Point }, map: { m: new Map() }, set: { s: new Set() }, typed: { t: new Uint8Array(1) },
+        \\    promise: { p: Promise.resolve() }, inst: { i: new Point() }, accessor: { get g() { return 1; } }, proxy: { p: new Proxy({}, {}) }, topFn: () => 1,
+        \\  };
+        \\  out.bad = Object.entries(bad).map(([k, v]) => k + ':' + code(() => snapshot(v))).join(',');
+        \\  out.path = text(() => snapshot({ a: [{ b: new Map() }] })).includes('$.a.0.b');
+        \\  out.options = [code(() => snapshot({}, null)), code(() => snapshot({}, { freeze: 'yes' }))].join(',');
+        \\  // deepFreeze: in place, returns its argument, reaches data, functions, classes and the prototype chain.
+        \\  class Box { static kind = 'box'; get() { return 1; } }
+        \\  const target = { list: [1, { deep: true }], fn() { return 2; }, Box, inst: new Box() };
+        \\  out.same = deepFreeze(target) === target && deepFreeze(5) === 5 && deepFreeze(null) === null;
+        \\  out.reached = Object.isFrozen(target) && Object.isFrozen(target.list) && Object.isFrozen(target.list[1]) && Object.isFrozen(target.fn) && Object.isFrozen(Box) && Object.isFrozen(Box.prototype);
+        \\  out.refused = [code(() => deepFreeze({ m: new Map() })), code(() => deepFreeze({ t: new Uint8Array(1) })), code(() => deepFreeze({ get g() { return 1; } })), code(() => deepFreeze({ p: new Proxy({}, {}) })), code(() => deepFreeze({ p: Promise.resolve() }))].join(',');
+        \\  // Frozen in place means the owner's own writes fail too.
+        \\  const owned = { n: 1 };
+        \\  deepFreeze(owned);
+        \\  out.ownerFails = code(() => { owned.n = 2; });
+        \\  // Composed with the live namespace of another context: data is copied, a function is refused.
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
+        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
+        \\  const ref = api.graph.declare(ModuleRecipe({ source: ModuleSource.text('export const data = { n: 1, list: [1, 2] }; export const bump = () => 1;'), import: handler, name: 'a.js' }));
+        \\  await api.graph.evaluate(ref, ctx);
+        \\  const ns = api.graph.exports(ref);
+        \\  const data = snapshot(ns.data, { freeze: true });
+        \\  out.composed = data.n === 1 && data.list.length === 2 && data.constructor === Object && Object.isFrozen(data) && ns.data.constructor !== Object && !Object.isFrozen(ns.data);
+        \\  out.nsFn = code(() => snapshot(ns)) + ':' + text(() => snapshot(ns)).includes('$.bump');
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.copy === true && report.defaultNotFrozen === true && report.frozen === true && report.primitive === true && report.path === true");
+    try check(fx.scope, "report.bad === 'fn:Unsupported,cls:Unsupported,map:Unsupported,set:Unsupported,typed:Unsupported,promise:Unsupported,inst:Unsupported,accessor:Unsupported,proxy:Unsupported,topFn:Unsupported' && report.options === 'InvalidInput,InvalidInput'");
+    try check(fx.scope, "report.same === true && report.reached === true");
+    try check(fx.scope, "report.refused.split(',')[0] === 'Unsupported' && report.refused.split(',')[1] === 'Unsupported'");
+    try check(fx.scope, "report.refused.split(',')[2] === 'ok'");
+    try check(fx.scope, "report.refused.split(',')[3] === 'Unsupported' && report.refused.split(',')[4] === 'Unsupported'");
+    try check(fx.scope, "report.ownerFails === 'other:TypeError'");
+    try check(fx.scope, "report.composed === true && report.nsFn === 'Unsupported:true'");
+}
+
 test "graph: link refuses a module that is still evaluating and a failed import does not break later ones" {
     var fx: Fixture = undefined;
     try fx.setup(

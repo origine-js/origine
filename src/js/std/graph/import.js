@@ -60,7 +60,7 @@ export const Import = freeze({
   /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a fresh
   /// copy: the importer links the module itself, with live bindings and the other realm's objects. This
   /// crosses the realm boundary on purpose: a function or object exported that way runs in, and reaches,
-  /// the exporting realm. Nothing is copied or frozen; use `snapshot` and `seal` with `Import.exports` to hand
+  /// the exporting realm. Nothing is copied or frozen; use `snapshot` and `deepFreeze` with `Import.exports` to hand
   /// over data instead. A reference of the importer's own context is an alias.
   link(reference) {
     if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
@@ -69,7 +69,7 @@ export const Import = freeze({
   /// Stop the chain with a module whose namespace is `values`: its own enumerable string-keyed data properties,
   /// `default` included (an accessor is `InvalidInput`). The importer gets one synthetic module with those
   /// bindings. Nothing is copied or frozen: a value is the caller's own object or function, shared as it is, so
-  /// this hands the importer whatever the values reach. Build the values from `snapshot` and `seal` to give data.
+  /// this hands the importer whatever the values reach. Build the values from `snapshot` and `deepFreeze` to give data.
   /// An `origine:` id can never be served this way; it is `PermissionDenied`.
   exports(values) {
     if (values === null || typeof values !== 'object') throw invalid('Import.exports: values must be an object');

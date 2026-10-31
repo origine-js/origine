@@ -53,7 +53,6 @@ comptime {
     errno.requireBinding(pin);
     errno.requireBinding(unpin);
     errno.requireBinding(namespaceOf);
-    errno.requireBinding(hardenExports);
 }
 
 /// What a resolved id was resolved for; the load stage needs it.
@@ -1225,17 +1224,6 @@ fn namespaceImpl(state: *ScopeState, id: u32, name: []const u8) !v8.Value {
     // V8 aborts on the namespace of a module that is not instantiated; only an evaluated one is shared.
     if (module.getStatus() != 4) return error.InvalidInput;
     return module.getModuleNamespace() orelse error.InvalidData;
-}
-
-/// `hardenExports(value)`: deep-freezes what `reference.exports()` copied, with the realm's own hardener
-/// (the one preload values and hardened links use): plain data and functions are frozen in place; anything
-/// else (a `Map`, a typed array, a promise, a proxy) is `Unsupported`.
-pub fn hardenExports(state: *ScopeState, value: v8.Value) Error!void {
-    // The hardener throws a TypeError for what it refuses; the guest gets the closed error instead.
-    var catcher: v8.TryCatch = undefined;
-    catcher.init(state.scope.runtime.isolate);
-    defer catcher.deinit();
-    state.scope.hardenLocal(value) catch return error.Unsupported;
 }
 
 fn metaHook(data: ?*anyopaque, request: module_types.MetaRequest) void {

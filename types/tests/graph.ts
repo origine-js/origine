@@ -8,6 +8,7 @@ import { relative, origine, importMap } from "origine:@std/graph/resolve/layers"
 import { origineProvider, fsProvider, json, fromLoader } from "origine:@std/graph/providers";
 import { ImportCache, ResolveCache, CodeCache } from "origine:@std/graph/cache";
 import { ts } from "origine:@std/transformer/oxc";
+import { snapshot, deepFreeze } from "origine:@std/data";
 
 const resolver = ImportResolver.layered()
   .layer(relative())
@@ -130,3 +131,11 @@ Import.reject(123);
 ModuleSource.file("./a.js").transformers = [];
 // @ts-expect-error a layer is not a hook
 ImportHandler.make({ resolver, hooks: [relative()] });
+
+const copied: { a: number[] } = snapshot({ a: [1] }, { freeze: true });
+const frozenInPlace: { a: number } = deepFreeze({ a: 1 });
+void [copied, frozenInPlace];
+// @ts-expect-error `freeze` is a boolean
+snapshot({}, { freeze: "yes" });
+// @ts-expect-error the option is `freeze`; there is no `seal`
+snapshot({}, { seal: true });

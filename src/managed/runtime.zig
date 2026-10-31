@@ -100,6 +100,8 @@ pub const Runtime = struct {
     startup: v8.StartupData = .{ .data = null, .raw_size = 0 },
     /// False for the isolate of a `v8.SnapshotCreator`, which disposes it itself.
     owns_isolate: bool = true,
+    /// On the isolate of a `v8.SnapshotCreator`: what compiles here can be kept in the snapshot.
+    in_creator: bool = false,
 
     /// Borrows alloc (and its state) until `destroy` returns; options are copied.
     /// Returns a heap-allocated, owning Runtime at a stable address; release it with
@@ -163,6 +165,7 @@ pub const Runtime = struct {
             .allocator = alloc,
             .queue = undefined,
             .owns_isolate = false,
+            .in_creator = true,
         };
         isolate.enter();
         defer isolate.exit();

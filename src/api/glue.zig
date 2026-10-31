@@ -73,7 +73,8 @@ pub fn compile(isolate: v8.Isolate, module: Module) !v8.Module {
     var source: v8.ScriptCompiler.Source = undefined;
     source.init(eu.v.str_utf8(isolate, text.source), &origin, null);
     defer source.deinit();
-    return v8.ScriptCompiler.compileModule(isolate, &source, 0, 0) orelse error.JavaScriptException;
+    // Eager: the engine snapshot keeps this bytecode, so the first use of an API in `main` compiles nothing.
+    return v8.ScriptCompiler.compileModule(isolate, &source, @import("../managed/module_map.zig").eager_compile, 0) orelse error.JavaScriptException;
 }
 pub const Built = struct { create: v8.Function, handles: v8.Module };
 pub fn factory(isolate: v8.Isolate, ctx: v8.Context, compiler: ?Compiler) !Built {

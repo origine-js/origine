@@ -331,8 +331,9 @@ pub fn create(alloc: std.mem.Allocator, options: CreateOptions) !Image {
             // Every persistent handle must be gone before the heap is serialized.
             rt.destroy();
         }
-        // CreateBlob must run outside all handle scopes.
-        break :make creator.createBlob(.Clear);
+        // CreateBlob must run outside all handle scopes. Keep: clearing would drop the eager engine and
+        // `origine:` bytecode, and `main` would compile each of those functions on first use.
+        break :make creator.createBlob(.Keep);
     };
     defer blob.deinit();
     if (blob.slice().len == 0) return error.SnapshotFailed;

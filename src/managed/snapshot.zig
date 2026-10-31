@@ -47,8 +47,8 @@ pub fn create(allocator: std.mem.Allocator) ![]align(16) u8 {
             _ = try api_glue.ensure(isolate, context, .{ .creator = &creator });
             creator.setDefaultContext(context);
         }
-        // CreateBlob must run outside all handle scopes.
-        break :make creator.createBlob(.Clear);
+        // CreateBlob must run outside all handle scopes. Keep: the glue was compiled eagerly for this.
+        break :make creator.createBlob(.Keep);
     };
     defer blob.deinit();
     const bytes = blob.slice();

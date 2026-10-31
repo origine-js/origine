@@ -24,6 +24,9 @@ const CodeCacheRequest = @import("module_types.zig").CodeCacheRequest;
 const origine_prefix = @import("module_types.zig").origine_prefix;
 const init_snapshot = @import("init_snapshot.zig");
 
+/// `ScriptCompiler::kEagerCompile`: also compiles the inner functions. For engine code going into a snapshot only.
+pub const eager_compile: u32 = 2;
+
 const Dependency = struct { specifier: []const u8, attributes: []const ImportAttribute, entry: *Entry };
 /// A module request whose asynchronous resolution has not settled. Strings are arena-owned.
 const Unresolved = struct { specifier: []const u8, attributes: []const ImportAttribute, token: LoadToken };
@@ -408,7 +411,13 @@ pub const ModuleMap = struct {
                 const cache_object = if (cached) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
                 source.init(eu.v.str_utf8(iso, text), &origin, cache_object);
                 defer source.deinit();
-                const module = v8.ScriptCompiler.compileModule(iso, &source, if (cache_object != null) 1 else 0, 0) orelse return error.JavaScriptException;
+                // In a snapshot creator `origine:` modules compile eagerly: they are few and fixed, the snapshot
+                // keeps the bytecode, and their first use in `main` then compiles nothing. Everything else stays
+                // lazy: most of a large user graph never runs, and an eager compile outside a creator (a child
+                // context's `origine:` import) has nowhere to keep its work.
+                const eager = self.scope.runtime.in_creator and std.mem.startsWith(u8, entry.id, "origine:");
+                const options: u32 = if (cache_object != null) 1 else if (eager) eager_compile else 0;
+                const module = v8.ScriptCompiler.compileModule(iso, &source, options, 0) orelse return error.JavaScriptException;
                 const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
                 if (cache_object != null and !accepted) if (self.scope.options.code_cache) |hook| if (hook.rejected) |discard| discard(hook.data, cache_request);
                 if (!accepted and self.keepsCache(entry.id)) entry.cache_source = try self.scope.runtime.allocator.dupe(u8, text);

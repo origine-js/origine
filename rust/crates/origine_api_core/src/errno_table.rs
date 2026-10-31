@@ -130,3 +130,10 @@ pub fn name_of(code: u32) -> &'static str {
         _ => "Unexpected",
     }
 }
+
+/// The fields of an `ErrorDetail` object in key order (`detail_fields` in src/api/errno_codes.zig).
+#[rustfmt::skip]
+pub const DETAIL_FIELDS: &[&str] = &[
+    "subject",
+    "os",
+];

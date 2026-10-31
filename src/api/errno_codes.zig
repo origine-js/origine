@@ -129,3 +129,9 @@ pub const Errno = blk: {
 pub fn domain(code: Errno) Domain {
     return if (std.enums.fromInt(HostErrno, @backingInt(code)) != null) .host else .io;
 }
+
+/// The fields of an `ErrorDetail` object, in key order. Every one is always present on the object
+/// (`undefined` when unset), so Zig and Rust build the same map and V8 never sees a field appear.
+/// `subject` is a name the caller supplied or an id the guest already holds (never an absolute host
+/// path); `os` is the raw OS error code, set only where the backend has one.
+pub const detail_fields = [_][]const u8{ "subject", "os" };

@@ -137,7 +137,13 @@ fn errnoTable(w: *std.Io.Writer) !void {
         \\    }
         \\}
         \\
+        \\/// The fields of an `ErrorDetail` object in key order (`detail_fields` in src/api/errno_codes.zig).
+        \\#[rustfmt::skip]
+        \\pub const DETAIL_FIELDS: &[&str] = &[
+        \\
     );
+    for (codes.detail_fields) |field| try w.print("    \"{s}\",\n", .{field});
+    try w.writeAll("];\n");
 }
 
 fn constant(w: *std.Io.Writer, name: []const u8, value: u32) !void {

@@ -174,173 +174,88 @@ export default (native, { errno, take }) => {
       return freeze(entries);
     };
 
-    const dirOps = {
-      dirOpenFile(dir, path, flags) {
-        const d = root(dir),
-          bits = openBits(flags);
-        if (d === null || !isString(path) || bits < 0) return bad();
-        return ops.openFile(d.fs, d.id, path, bits).then(fileOf);
-      },
-      dirOpenDir(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.openDir(d.fs, d.id, path).then(dirOf);
-      },
-      dirClose(dir) {
-        const d = root(dir);
-        if (d === null) return bad();
-        return ops.closeDir(d.fs, d.id);
-      },
-      dirStat(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.stat(d.fs, d.id, path).then(statOf);
-      },
-      dirSymlinkStat(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.symlinkStat(d.fs, d.id, path).then(statOf);
-      },
-      dirRead(dir) {
-        const d = root(dir);
-        if (d === null) return bad();
-        return ops.readDir(d.fs, d.id).then(entriesOf);
-      },
-      dirCreateDir(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.createDir(d.fs, d.id, path);
-      },
-      dirCreateDirPath(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.createDirPath(d.fs, d.id, path);
-      },
-      dirDeleteFile(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.deleteFile(d.fs, d.id, path);
-      },
-      dirDeleteDir(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.deleteDir(d.fs, d.id, path);
-      },
-      dirDeleteTree(dir, path) {
-        const d = root(dir);
-        if (d === null || !isString(path)) return bad();
-        return ops.deleteTree(d.fs, d.id, path);
-      },
-      dirRename(dir, oldPath, newDir, newPath) {
-        const d = root(dir),
-          n = root(newDir);
-        if (d === null || n === null || !isString(oldPath) || !isString(newPath)) return bad();
-        return ops.rename(d.fs, d.id, oldPath, n.fs, n.id, newPath);
-      },
-    };
+    // One operation: unwrap the handle, check the arguments (`checks`, one predicate each; the rest are
+    // dropped), call the Rust native `name` with `(fs, id, ...args)` and wrap its answer.
+    const any = () => true;
+    const through =
+      (unwrap, name, checks, wrap) =>
+      (handle, ...args) => {
+        const ref = unwrap(handle);
+        if (ref === null || !checks.every((check, index) => check(args[index]))) return bad();
+        const done = ops[name](ref.fs, ref.id, ...args.slice(0, checks.length));
+        return wrap === undefined ? done : done.then(wrap);
+      };
+    const dir = (name, checks = [], wrap) => through(root, name, checks, wrap);
+    const file = (name, checks = [], wrap) => through(asFile, name, checks, wrap);
+    const path = [isString];
+    const data = [isBytes];
 
     // Resolves a JS ReadResult with read-only bytes and buffer fields where `buffer` is a view of the same kind, byteOffset and
     // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached
     // when the buffer was pinned; it is untouched when the host copied instead).
     const filled = (shape, pending) => pending.then(done => new ReadResult({ bytes: done.bytes, buffer: shape.make(done.buffer) }));
 
-    const fileOps = {
-      fileClose(file) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        return ops.close(f.fs, f.id);
+    return {
+      dirOpenFile(handle, name, flags) {
+        const d = root(handle),
+          bits = openBits(flags);
+        if (d === null || !isString(name) || bits < 0) return bad();
+        return ops.openFile(d.fs, d.id, name, bits).then(fileOf);
       },
-      fileStat(file) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        return ops.fileStat(f.fs, f.id).then(statOf);
+      dirOpenDir: dir('openDir', path, dirOf),
+      dirClose: dir('closeDir'),
+      dirStat: dir('stat', path, statOf),
+      dirSymlinkStat: dir('symlinkStat', path, statOf),
+      dirRead: dir('readDir', [], entriesOf),
+      dirCreateDir: dir('createDir', path),
+      dirCreateDirPath: dir('createDirPath', path),
+      dirDeleteFile: dir('deleteFile', path),
+      dirDeleteDir: dir('deleteDir', path),
+      dirDeleteTree: dir('deleteTree', path),
+      dirRename(handle, oldPath, newHandle, newPath) {
+        const d = root(handle),
+          n = root(newHandle);
+        if (d === null || n === null || !isString(oldPath) || !isString(newPath)) return bad();
+        return ops.rename(d.fs, d.id, oldPath, n.fs, n.id, newPath);
       },
-      fileReadAll(file, options) {
-        const f = asFile(file);
+      fileClose: file('close'),
+      fileStat: file('fileStat', [], statOf),
+      fileReadAll(handle, options) {
+        const f = asFile(handle);
         if (f === null) return bad();
         const limit = (options === undefined ? undefined : options.limit) ?? Infinity;
         if (typeof limit !== 'number' || !(limit >= 0)) return bad();
         return ops.readAll(f.fs, f.id, limit);
       },
-      fileRead(file, buffer) {
-        const f = asFile(file);
-        if (f === null || !isBytes(buffer)) return bad();
-        return ops.fileRead(f.fs, f.id, buffer);
-      },
-      filePread(file, buffer, offset) {
-        const f = asFile(file);
-        if (f === null || !isBytes(buffer)) return bad();
-        return ops.filePread(f.fs, f.id, buffer, offset);
-      },
+      fileRead: file('fileRead', data),
+      filePread: file('filePread', [isBytes, any]),
       // Zero-copy BYOB reads: `view` is an ArrayBuffer or a view; when eligible its buffer is
       // detached (the guest's `view` becomes empty) and the promise resolves a frozen
       // `{ bytes, buffer }`, `buffer` being a view of the same kind over the returned memory.
-      fileReadInto(file, view) {
-        const f = asFile(file),
+      fileReadInto(handle, view) {
+        const f = asFile(handle),
           shape = shapeOf(view);
         if (f === null || shape === null) return bad();
         return filled(shape, ops.fileReadInto(f.fs, f.id, view));
       },
-      filePreadInto(file, view, offset) {
-        const f = asFile(file),
+      filePreadInto(handle, view, offset) {
+        const f = asFile(handle),
           shape = shapeOf(view);
         if (f === null || shape === null || !isOffset(offset)) return bad();
         return filled(shape, ops.filePreadInto(f.fs, f.id, view, offset));
       },
       // Host-allocated reads: resolve a Uint8Array of exactly the bytes read (at most `length`).
-      fileReadAlloc(file, length) {
-        const f = asFile(file);
-        if (f === null || !isOffset(length)) return bad();
-        return ops.fileReadAlloc(f.fs, f.id, length);
-      },
-      filePreadAlloc(file, length, offset) {
-        const f = asFile(file);
-        if (f === null || !isOffset(length) || !isOffset(offset)) return bad();
-        return ops.filePreadAlloc(f.fs, f.id, length, offset);
-      },
-      fileWriteAll(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.writeAll(f.fs, f.id, bytes);
-      },
-      fileWrite(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.fileWrite(f.fs, f.id, bytes);
-      },
-      filePwriteAll(file, bytes, offset) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.filePwriteAll(f.fs, f.id, bytes, offset);
-      },
-      fileWriteMoveAll(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.writeMoveAll(f.fs, f.id, bytes);
-      },
-      fileWriteMove(file, bytes) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.fileWriteMove(f.fs, f.id, bytes);
-      },
-      filePwriteMoveAll(file, bytes, offset) {
-        const f = asFile(file);
-        if (f === null || !isBytes(bytes)) return bad();
-        return ops.filePwriteMoveAll(f.fs, f.id, bytes, offset);
-      },
-      fileSetLength(file, length) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        return ops.fileSetLength(f.fs, f.id, length);
-      },
-      fileSync(file) {
-        const f = asFile(file);
-        if (f === null) return bad();
-        return ops.fileSync(f.fs, f.id);
-      },
+      fileReadAlloc: file('fileReadAlloc', [isOffset]),
+      filePreadAlloc: file('filePreadAlloc', [isOffset, isOffset]),
+      fileWriteAll: file('writeAll', data),
+      fileWrite: file('fileWrite', data),
+      filePwriteAll: file('filePwriteAll', [isBytes, any]),
+      fileWriteMoveAll: file('writeMoveAll', data),
+      fileWriteMove: file('fileWriteMove', data),
+      filePwriteMoveAll: file('filePwriteMoveAll', [isBytes, any]),
+      fileSetLength: file('fileSetLength', [any]),
+      fileSync: file('fileSync'),
     };
-
-    return { ...dirOps, ...fileOps };
   }
 
   // Access bits of the natives: 1 read, 2 write.
@@ -396,15 +311,19 @@ export default (native, { errno, take }) => {
         shared.asyncFsClosed ??= handle => native.fsAsyncClosed(handle.id);
         // The host opens the grant on the Rust runtime and builds the grant object from its answer.
         return settled(
-          native.fsRequestAsync(native.fsAsync.request, io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access),
-        )
-          .then(granted => {
-            const issuer = freeze({});
-            return new FsGrant(
-              { kind: granted.kind, id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id, refsOf(grant.hardened, issuer), issuer) },
-              granted,
-            );
-          });
+          native.fsRequestAsync(
+            native.fsAsync.request,
+            io.id,
+            grant.root === undefined || grant.root === '' ? '.' : grant.root,
+            grant.access,
+          ),
+        ).then(granted => {
+          const issuer = freeze({});
+          return new FsGrant(
+            { kind: granted.kind, id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id, refsOf(grant.hardened, issuer), issuer) },
+            granted,
+          );
+        });
       },
     });
   }

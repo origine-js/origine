@@ -107,8 +107,13 @@ detail object itself is not part of the API.
 
 A failed import, evaluated source or preload is a `ModuleError` (`origine:@std/errors`): its `errno` is the kind of the cause
 (`Import.reject(ImportError.PermissionDenied)` is `PermissionDenied`, a missing file is `NotFound`, a module that threw is
-`Unexpected`), `subject` the module it was for, and `cause` an error rebuilt in the importing realm. Nothing of the failing
+`Unexpected`), `subject` the module that failed (the id the resolver gave; what the call named when none was reached),
+`referrer` the module that imported it (when it failed as a static import of another module), and `cause` an error rebuilt in the importing realm. Nothing of the failing
 realm's objects crosses.
 
 Natives name their subject in the `func` options of the binding table (`.subject = <JS argument index>`, `src/api/binding.zig`),
 or by calling `Call.failAt`. The fast call path reports only the kind.
+
+`OrigineError.transient(error)` (an error or an errno) is `true` for the kinds whose condition may pass by itself
+(`WouldBlock`, `TimedOut`, `ResourceBusy`, `ConnectionRefused`, `ConnectionReset`, `TooManyOpenFiles`). It is a hint, not a promise
+that repeating the request is safe: that depends on the operation.

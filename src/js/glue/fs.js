@@ -11,6 +11,7 @@
 // everything that observes what exists (reads, stat, directory listings, opening read-only).
 import { Data, FileHandle, DirHandle, FsGrant, issuerOf } from './handles.js';
 import { failure, own, joinPath, ioHandles, closedIo, shared, freeze, errors, settled, settling, seal } from './util.js';
+import { bindDetail } from './errors.js';
 const { InvalidInput, BadHandle, PermissionDenied } = errors;
 class Stat extends Data {}
 class DirEntry extends Data {}
@@ -293,9 +294,12 @@ export default (native, { errno, detail, takeError }) => {
         const failed = takeError();
         if (failed !== undefined) throw failed;
         const issuer = freeze({});
-        return new FsGrant(
-          { kind: granted.kind, id: granted.id, errno, detail, ...makeSyncOps(granted, refsOf(grant.hardened, issuer), issuer) },
-          granted,
+        return bindDetail(
+          new FsGrant(
+            { kind: granted.kind, id: granted.id, errno, ...makeSyncOps(granted, refsOf(grant.hardened, issuer), issuer) },
+            granted,
+          ),
+          detail,
         );
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant

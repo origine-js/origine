@@ -1420,13 +1420,25 @@ pub const ImportState = struct {
 /// the child's error crosses, only its text.
 fn failureValue(env: binding.Env, child_ctx: v8.Context, reason: v8.Value, subject: []const u8) !v8.Value {
     const message = if (reason.toDetailString(child_ctx)) |text| text.name.primitive.value else binding.string(env.isolate, "module evaluation failed");
+    // The module that failed, and the one that imported it, when the module map knows them; else what the call was for.
+    const undef = eu.v.undefined_value(env.isolate).value;
+    const asked = if (subject.len == 0) undef else binding.string(env.isolate, subject);
     return binding.encode(env, {}, .{
         .errno = causeErrno(env.isolate, child_ctx, reason),
         .name = "ModuleError",
         .message = message,
-        .subject = @as(?[]const u8, if (subject.len == 0) null else subject),
+        .subject = stampOf(env.isolate, child_ctx, reason, module_map.failed_module_key) orelse asked,
         .os = @as(?u32, null),
+        .referrer = stampOf(env.isolate, child_ctx, reason, module_map.failed_referrer_key) orelse undef,
     });
+}
+
+/// The string the module map stamped on a failure under `name`, if any.
+fn stampOf(isolate: v8.Isolate, child_ctx: v8.Context, reason: v8.Value, comptime name: []const u8) ?v8.Value {
+    if (!reason.isObject() or reason.isProxy()) return null;
+    const object = reason.toObject(child_ctx) orelse return null;
+    const value = object.getPrivate(child_ctx, v8.Private.forApi(isolate, v8.String.initUtf8(isolate, name))) orelse return null;
+    return if (value.isString()) value else null;
 }
 
 /// The `errno` an error of the child realm stands for, else `Unexpected`: the own data property `errno` (a

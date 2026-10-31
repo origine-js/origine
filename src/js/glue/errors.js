@@ -3,6 +3,10 @@ import { ERRNO } from './errno.js';
 
 const names = new Map([...Object.entries(ERRNO.io), ...Object.entries(ERRNO.host)].map(([name, code]) => [code, name]));
 
+const transientCodes = new Set(
+  ['WouldBlock', 'TimedOut', 'ResourceBusy', 'ConnectionRefused', 'ConnectionReset', 'TooManyOpenFiles'].map(name => ERRNO.io[name]),
+);
+
 export class OrigineError extends Error {
   constructor(errno, message = '', name = names.get(errno)) {
     if (!names.has(errno)) throw new TypeError('errno must be an origine error code');
@@ -19,18 +23,31 @@ export class OrigineError extends Error {
   static is(value, code) {
     return (typeof value === 'number' ? value : value?.errno) === code;
   }
+  // Whether the condition behind `value` (an error or an errno) may pass by itself: the same request can succeed
+  // later. A hint, not a promise that repeating the request is safe: that depends on the operation.
+  static transient(value) {
+    return transientCodes.has(typeof value === 'number' ? value : value?.errno);
+  }
   static of(code, message = '') {
     return new this(code, message);
   }
 }
+
+// The `ErrorDetail` of the scope a sync grant belongs to. Kept here, not on the grant: the grant is guest-visible.
+const grantDetails = new WeakMap();
+export const bindDetail = (grant, detail) => {
+  grantDetails.set(grant, detail);
+  return grant;
+};
 
 export class IoError extends OrigineError {
   static check(fs, value) {
     const code = fs.errno[0];
     if (code !== 0) {
       fs.errno[0] = 0;
-      const error = fromDetail(code, fs.detail);
-      resetDetail(fs.detail);
+      const detail = grantDetails.get(fs);
+      const error = fromDetail(code, detail);
+      resetDetail(detail);
       throw error;
     }
     return value;
@@ -40,11 +57,12 @@ export class IoError extends OrigineError {
 export class HostError extends OrigineError {}
 // An import, an evaluated source or a preload that failed. `errno` is the kind of the cause (a hook's
 // `Import.reject(ImportError.PermissionDenied)`, else `Unexpected`), `subject` the module it was for and
-// `cause` an error rebuilt in this realm from what the child reported: nothing of the child's objects crosses.
+// `referrer` the module that imported it (when it was a static import), and `cause` an error rebuilt in this realm from what the child reported: nothing of the child's objects crosses.
 export class ModuleError extends OrigineError {
-  constructor(errno, message = '', subject = undefined, cause = undefined) {
+  constructor(errno, message = '', subject = undefined, cause = undefined, referrer = undefined) {
     super(errno, message, 'ModuleError');
     if (subject !== undefined) Object.defineProperty(this, 'subject', { value: subject, enumerable: true });
+    if (referrer !== undefined) Object.defineProperty(this, 'referrer', { value: referrer, enumerable: true });
     if (cause !== undefined) Object.defineProperty(this, 'cause', { value: cause, configurable: true, writable: true });
   }
 }
@@ -100,7 +118,8 @@ export const moduleFailure = e => {
   const cause = known ? of(e.errno) : new Error(text);
   const reason = known ? names.get(e.errno) : text;
   const message = subject === undefined ? reason : `${subject}: ${reason}`;
-  return new ModuleError(e.errno, message, subject, cause);
+  const referrer = typeof e.referrer === 'string' ? e.referrer : undefined;
+  return new ModuleError(e.errno, message, subject, cause, referrer);
 };
 
 for (const C of [OrigineError, IoError, HostError, ImportError, ModuleError]) {

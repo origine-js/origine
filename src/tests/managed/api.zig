@@ -1046,22 +1046,24 @@ test "errors: a failed import is a ModuleError with the kind of its cause, the m
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const handler = ImportHandler.make({
-        \\    resolver: ImportResolver.layered().layer(importMap({ imports: { secret: 'app:/secret.js', boom: 'app:/boom.js' } })),
+        \\    resolver: ImportResolver.layered().layer(importMap({ imports: { secret: 'app:/secret.js', boom: 'app:/boom.js', top: 'app:/top.js' } })),
         \\    hooks: [async resolved => {
         \\      if (resolved.id === 'app:/secret.js') return Import.reject(ImportError.PermissionDenied);
         \\      if (resolved.id === 'app:/boom.js') return Import.source(ModuleSource.text('throw new Error("boom")'));
+        \\      if (resolved.id === 'app:/top.js') return Import.source(ModuleSource.text("import 'secret'"));
         \\      return Import.next();
         \\    }],
         \\  });
         \\  const ctx = await api.context.create({ import: handler, graph: api.graph });
         \\  const seen = {};
-        \\  for (const specifier of ['secret', 'boom', 'nowhere']) {
+        \\  for (const specifier of ['secret', 'boom', 'nowhere', 'top']) {
         \\    seen[specifier] = await ctx.import(specifier).then(() => 'no', e => ({
         \\      isModuleError: e instanceof ModuleError, isOrigine: e instanceof OrigineError, name: e.name, errno: e.errno,
-        \\      subject: e.subject, message: e.message, cause: e.cause === undefined ? null : e.cause.name,
+        \\      subject: e.subject, referrer: e.referrer ?? null, message: e.message, cause: e.cause === undefined ? null : e.cause.name,
         \\    }));
         \\  }
         \\  out.seen = JSON.stringify(seen);
+        \\  out.transient = [OrigineError.transient(51), OrigineError.transient(10), OrigineError.transient({ errno: 50 }), OrigineError.transient(undefined)].join();
         \\  ctx.close();
         \\}
     , true, &.{});
@@ -1070,12 +1072,15 @@ test "errors: a failed import is a ModuleError with the kind of its cause, the m
     try check(fx.scope,
         \\(() => {
         \\  const s = JSON.parse(report.seen);
-        \\  return s.secret.isModuleError && s.secret.isOrigine && s.secret.name === 'ModuleError' && s.secret.subject === 'secret' &&
-        \\    s.secret.message === 'secret: PermissionDenied' && s.secret.cause === 'PermissionDenied' &&
-        \\    s.nowhere.errno === 10 && s.nowhere.cause === 'NotFound' &&
+        \\  return s.secret.isModuleError && s.secret.isOrigine && s.secret.name === 'ModuleError' && s.secret.subject === 'app:/secret.js' &&
+        \\    s.secret.message === 'app:/secret.js: PermissionDenied' && s.secret.cause === 'PermissionDenied' && s.secret.referrer === null &&
+        \\    s.nowhere.errno === 10 && s.nowhere.cause === 'NotFound' && s.nowhere.subject === 'nowhere' &&
+        \\    s.top.errno === 20 && s.top.subject === 'app:/secret.js' && s.top.referrer === 'app:/top.js' &&
         \\    s.boom.errno === 1 && s.boom.cause === 'Error' && s.boom.message.includes('boom');
         \\})()
     );
+    // WouldBlock (51) and TimedOut (50) may pass; NotFound (10) will not.
+    try check(fx.scope, "report.transient === 'true,false,true,false'");
 }
 
 test "graph: JS layers, hooks, makers and transformers run in the creating realm" {

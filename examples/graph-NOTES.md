@@ -39,8 +39,8 @@ From the repository root (an example's own directory is not the working director
 - **`NotFound` of a missing file in an uncaught import still ends the process with `reached unreachable code`, exit 134,
   after printing the error.** The message and kind are printed now (`ModuleError: ./zzz.js: NotFound`); the
   trailing `unreachable` is the shell's `MainFailed` path. Deferred.
-- **`ModuleError` has `subject` (the specifier) and the cause's kind, but not `referrer` or the importer chain.** That needs the
-  module map's failure records. A follow-up.
+- **`ModuleError` names the failing module and its immediate importer, not the whole chain.** Entries are shared between
+  importers, so a path from the root is not one thing; the root is what the caller asked for.
 
 ## Open, undecided
 

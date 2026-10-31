@@ -34,7 +34,17 @@ pub const std_options_debug_io: std.Io = std.Io.failing;
 /// ArrayBuffer backing stores; frees host storage on success/error without allocator teardown.
 /// Owns one V8 background worker until platform teardown; foreground jobs are
 /// pumped on the calling thread. No callback state escapes runtime teardown.
-pub fn main(init: std.process.Init.Minimal) !void {
+/// Runs the program and turns a failure into exit status 1 with `error: <name>` on stderr. Returning the error from
+/// `main` would make std's start code print it through `std_options_debug_io`, which is `Io.failing` (see above): a panic.
+pub fn main(init: std.process.Init.Minimal) u8 {
+    run(init) catch |err| {
+        m.stderr.print("error: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    return 0;
+}
+
+fn run(init: std.process.Init.Minimal) !void {
     var trace: StartupTrace = .init();
     const alloc = eu.alloc;
     const args = try init.args.toSlice(alloc);
@@ -195,7 +205,6 @@ fn runInit(
     var error_info: m.ErrorInfo = .{};
     defer error_info.deinit();
     host.run(scope, engine.platform, args[1], &error_info) catch |err| {
-        repl.display.print("{s}\n", .{@errorName(err)});
         if (error_info.exception) |value| repl.display.show(scope, value);
         return err;
     };

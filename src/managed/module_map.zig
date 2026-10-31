@@ -27,6 +27,11 @@ const init_snapshot = @import("init_snapshot.zig");
 const Dependency = struct { specifier: []const u8, attributes: []const ImportAttribute, entry: *Entry };
 /// A module request whose asynchronous resolution has not settled. Strings are arena-owned.
 const Unresolved = struct { specifier: []const u8, attributes: []const ImportAttribute, token: LoadToken };
+/// The private property names (`v8::Private::ForApi`) a failure carries: the id of the module it came from and of the module
+/// that imported it. `api/context.zig` reads them into the `ModuleError`.
+pub const failed_module_key = "origine:failed-module";
+pub const failed_referrer_key = "origine:failed-referrer";
+
 const Entry = struct {
     cache_key: []const u8,
     cached: bool = true,
@@ -252,8 +257,20 @@ pub const ModuleMap = struct {
     /// exception on first failure, released at map deinit. Requires entered isolate
     /// and a live HandleScope; does not consume the local exception.
     fn fail(self: *ModuleMap, entry: *Entry, exception: v8.Value) void {
-        if (entry.failure == null) entry.failure = .new(self.isolate(), exception);
+        if (entry.failure == null) {
+            entry.failure = .new(self.isolate(), exception);
+            self.stampOnce(exception, failed_module_key, entry.id);
+        }
         entry.preparing = false;
+    }
+    /// Remembers on a failure (as a private property no script can see) which module it came from, once: the first, deepest
+    /// one wins. A value that is not an ordinary object is left alone.
+    fn stampOnce(self: *ModuleMap, value: v8.Value, comptime name: []const u8, text: []const u8) void {
+        if (!value.isObject() or value.isProxy()) return;
+        const object = value.toObject(self.ctx()) orelse return;
+        const key = v8.Private.forApi(self.isolate(), v8.String.initUtf8(self.isolate(), name));
+        if (object.getPrivate(self.ctx(), key)) |existing| if (!existing.isUndefined()) return;
+        _ = object.setPrivate(self.ctx(), key, eu.v.str_utf8(self.isolate(), text).name.primitive.value);
     }
     /// Accepts a copied error and borrows self through return. Returns a local
     /// exception in the current HandleScope; requires the isolate entered.
@@ -948,7 +965,11 @@ pub const ModuleMap = struct {
         if (entry.visited) return null;
         entry.visited = true;
         if (entry.failure) |failure| return failure.deref();
-        for (entry.dependencies.items) |dep| if (self.graphFailure(dep.entry)) |failure| return failure;
+        for (entry.dependencies.items) |dep| if (self.graphFailure(dep.entry)) |failure| {
+            // `entry` imported the module that failed: remember it as the referrer.
+            if (dep.entry.failure != null) self.stampOnce(failure, failed_referrer_key, entry.id);
+            return failure;
+        };
         return null;
     }
     /// Borrows self through return; mutates entry flags and retains no resources.

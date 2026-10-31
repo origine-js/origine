@@ -39,6 +39,8 @@ export function create(native) {
   const basic = {};
   // `context` is built on the parts `graph` publishes, so binding it binds `graph` first.
   const needs = { context: 'graph', isolate: 'host' };
+  const rustNamespaces = ['fsAsync', 'io', 'net', 'channel'];
+  const wrapped = new WeakSet();
   const access = name => {
     if (needs[name] !== undefined) access(needs[name]);
     if (!bound[name]) {
@@ -48,6 +50,13 @@ export function create(native) {
         native.bind(name, native);
         const failed = cell.takeError();
         if (failed !== undefined) throw failed;
+        // The Rust namespaces reject and throw plain errors; their callers get the error classes.
+        for (const namespace of rustNamespaces) {
+          if (native[namespace] !== undefined && !wrapped.has(native[namespace])) {
+            native[namespace] = util.settling(native[namespace]);
+            wrapped.add(native[namespace]);
+          }
+        }
         bound[name] = true;
       } finally {
         cell.errno[0] = previous;

@@ -1,5 +1,5 @@
 import { ERRNO } from './errno.js';
-import { of, fromDetail, resetDetail, moduleFailure } from './errors.js';
+import { of, fromDetail, resetDetail, moduleFailure, OrigineError } from './errors.js';
 
 // Shared helpers for the glue modules. Nothing here touches the host: the realm's `native` object
 // reaches a capability factory as an argument (index.js), so no module holds it ambiently.
@@ -61,9 +61,10 @@ export function freezeMethods(object) {
 
 // The Rust natives reject with an `Error` carrying `errno`, `name` and the `ErrorDetail` fields
 // (`subject`, `os`): callers get the shared error class instance, with those fields, instead.
+const hostError = e => (typeof e?.errno === 'number' && !(e instanceof OrigineError) ? fromDetail(e.errno, e) : e);
 export const settled = promise =>
   promise.then(undefined, e => {
-    throw typeof e?.errno === 'number' ? fromDetail(e.errno, e) : e;
+    throw hostError(e);
   });
 
 // A promise of a module import, evaluation or preload: its rejection becomes a `ModuleError`.
@@ -72,13 +73,19 @@ export const moduleSettled = promise =>
     throw moduleFailure(e);
   });
 
-// `ops` with every promise one of its operations returns passed through `settled`.
+// `ops` with every promise one of its operations returns passed through `settled`, and every error one throws
+// converted the same way.
 export const settling = ops =>
   Object.fromEntries(
     Object.entries(ops).map(([name, op]) => [
       name,
       typeof op !== 'function' ? op : (...args) => {
-        const result = op(...args);
+        let result;
+        try {
+          result = op(...args);
+        } catch (e) {
+          throw hostError(e);
+        }
         return result instanceof Promise ? settled(result) : result;
       },
     ]),

@@ -9,6 +9,12 @@ declare module "origine:@std/errors" {
     readonly os?: number;
     static nameOf(code: number): string;
     static is(value: unknown, code: number): boolean;
+    /**
+     * Whether the condition behind an error (or an errno) may pass by itself, so the same request can succeed later:
+     * `WouldBlock`, `TimedOut`, `ResourceBusy`, `ConnectionRefused`, `ConnectionReset`, `TooManyOpenFiles`. A hint, not a
+     * promise that repeating the request is safe; that depends on the operation.
+     */
+    static transient(value: unknown): boolean;
     static of(code: number, message?: string): OrigineError;
   }
   export { IoError, HostError } from "origine:@std/io";
@@ -16,12 +22,14 @@ declare module "origine:@std/errors" {
   /**
    * An import, an evaluated source or a preload that failed. `errno` is the kind of the cause (a hook's
    * `Import.reject(ImportError.PermissionDenied)`, a missing file `NotFound`; `Unexpected` when the module itself threw),
-   * `subject` the module it was for, and `cause` an error rebuilt in the importing realm (nothing of the failing
+   * `subject` the module that failed (the id the resolver gave; what the call named when none was reached), `referrer` the module that imported it, and `cause` an error rebuilt in the importing realm (nothing of the failing
    * realm's objects crosses).
    */
   export class ModuleError extends OrigineError {
-    constructor(errno: number, message?: string, subject?: string, cause?: unknown);
+    constructor(errno: number, message?: string, subject?: string, cause?: unknown, referrer?: string);
     readonly name: "ModuleError";
+    /** The module that imported the one that failed, when it failed as a static import of another module. */
+    readonly referrer?: string;
     cause?: unknown;
   }
 }

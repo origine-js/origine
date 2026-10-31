@@ -57,21 +57,35 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   }
   // @ts-expect-error api.graph lives as long as the realm
   api.graph.close();
-  const reference = recipe.create(graph);
-  await reference.load();
-  const requests: number = reference.requests?.length ?? 0;
+  const reference = graph.declare(recipe);
+  await graph.load(reference);
+  const requests: number = graph.requests(reference)?.length ?? 0;
   await using ctx = { context: await api.context.create({ import: handler, graph }), async [Symbol.asyncDispose]() { this.context.close(); } };
-  await reference.evaluate(ctx.context);
-  const exported: Readonly<Record<string, unknown>> = reference.exports();
+  await graph.evaluate(reference, ctx.context);
+  const exported: Readonly<Record<string, unknown>> = graph.exports(reference);
   void exported;
-  // @ts-expect-error exports() takes no argument
-  reference.exports(ctx.context);
+  // @ts-expect-error exports() takes the reference only
+  graph.exports(reference, ctx.context);
   const stored: number = await graph.flush();
   const view = ImportCache.native({ retain: "used" });
   void [requests, stored, view.size, view.delete("a"), view.clear()];
   // @ts-expect-error a table is not looked up through a context
   view.in(ctx.context);
+  graph.release(reference);
+  // @ts-expect-error a reference is an inert handle: the graph loads, evaluates, reads and frees it
+  reference.load();
+  // @ts-expect-error
+  reference.evaluate(ctx.context);
+  // @ts-expect-error
+  reference.exports();
+  // @ts-expect-error
   reference.release();
+  // @ts-expect-error
+  reference.requests;
+  // @ts-expect-error a recipe is declared in a graph; it has no `create`
+  recipe.create(graph);
+  // @ts-expect-error declare takes a recipe
+  graph.declare({});
 }
 const provided: Verdict = Import.provide(recipe);
 const sourced: Verdict = Import.provide(ModuleSource.text("export default 1"));
@@ -90,8 +104,6 @@ ImportHandler.make({ hooks: [] });
 ImportCache.native({});
 // @ts-expect-error `retain` is 'all' or 'used'
 ImportCache.native({ retain: "some" });
-// @ts-expect-error a graph is not a recipe
-recipe.create({});
 // @ts-expect-error `read` is required (it has a cost)
 fsProvider({});
 // With no options, or `std: true`, it serves everything the creating context may import.

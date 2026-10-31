@@ -49,5 +49,5 @@ export async function main(api) {
     graph,
     preload: [{ source: '(values) => { globalThis.print = values.print; }', values: { print: (...a) => eprintln(...a) } }],
   });
-  await recipe.create(graph).evaluate(ctx);
+  await graph.evaluate(graph.declare(recipe), ctx);
 }

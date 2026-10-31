@@ -32,8 +32,8 @@ export async function main(api) {
 
   // A: the exporter. lib.js is evaluated here and the reference is kept for B's hook to link.
   using ctxA = await api.context.create({ import: handlerA, graph, preload: printPreload });
-  const lib = ModuleRecipe({ source: ModuleSource.file('lib.js'), import: handlerA }).create(graph);
-  await lib.evaluate(ctxA);
+  const lib = graph.declare(ModuleRecipe({ source: ModuleSource.file('lib.js'), import: handlerA }));
+  await graph.evaluate(lib, ctxA);
   const counter = ModuleRecipe({ source: ModuleSource.file('counter.js'), import: handlerA });
 
   // B: the importer. Its hooks decide where each import comes from; a link needs an evaluated reference.
@@ -52,7 +52,9 @@ export async function main(api) {
   await ctxB.import('./user.js');
 
   // The creating realm (this one) can read A's exports too: a frozen copy of the data, shared functions.
-  const seen = lib.exports();
+  const seen = graph.exports(lib);
   const bumped = seen.bump();
-  eprintln(`host: A exports config ${JSON.stringify(seen.config)} frozen: ${Object.isFrozen(seen.config)} | bump() -> ${bumped} | next read count: ${lib.exports().config.count}`);
+  eprintln(
+    `host: A exports config ${JSON.stringify(seen.config)} frozen: ${Object.isFrozen(seen.config)} | bump() -> ${bumped} | next read count: ${graph.exports(lib).config.count}`,
+  );
 }

@@ -2,9 +2,10 @@
 // index.js. The factory also publishes the shared parts in imported `shared.graph` (handler registry,
 // JS driver, references) for the context glue; both modules import the shared state directly.
 //
-// A graph holds the authority modules are produced with (an fs grant, a code cache); a recipe is
-// turned into a `ModuleReference` with `recipe.create(graph)`; a reference is loaded
-// (`reference.load()`) and evaluated in one context (`reference.evaluate(ctx)`).
+// A graph holds the authority modules are produced with (an fs grant, a code cache) and the table of the
+// modules made with it. It is the entry point: a recipe is declared in it (`graph.declare(recipe)`), which
+// gives an inert `ModuleReference`, and the graph loads it (`graph.load(reference)`), evaluates it in one
+// context (`graph.evaluate(reference, ctx)`), reads its exports and frees it.
 //
 // Import handlers (origine:@std/graph/import) are registered with the host once, flattened to JSON:
 // every host descriptor is run by the host, every function is run here, by the *driver*
@@ -21,7 +22,6 @@ import reference from './graph/reference.js';
 export default (native, { take }) => {
   const { InvalidInput } = errors;
 
-  const CREATE = Symbol.for('origine:@std/graph/create');
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
   const named = (code, message) => failure(code, message);
@@ -56,6 +56,7 @@ export default (native, { take }) => {
   Object.assign(g, driver(g));
   Object.assign(g, reference(g));
   const { byId, contextRefs, contexts, graphCache, graphFs, makeReference, referenceState, refsById, register } = g;
+  const { loadRef, requestsOf, exportsOf, evaluateRef, releaseRef, isReference } = g;
 
   // ---- graphs ------------------------------------------------------------------------------------
 
@@ -64,6 +65,26 @@ export default (native, { take }) => {
   /// The native grant behind an `api.fs` grant, or undefined for anything else.
   const rawOf = fs => (fs instanceof FsGrant ? issuerOf(fs) : undefined);
   const cacheKinds = freeze({ codeCacheNone: 0, codeCacheMemory: 1, codeCacheDir: 2 });
+
+  /// Ids of the graphs that were closed: their references are stale.
+  const closedGraphs = new Set();
+
+  /// The reference `reference` names in the graph numbered `id`: `InvalidInput` for anything that is not a
+  /// reference this graph declared (a reference belongs to one graph, a derived graph cannot use its
+  /// parent's), `StaleHandle` once the graph is closed.
+  const own_ = (id, reference) => {
+    if (!isReference(reference)) throw invalid('expected a ModuleReference');
+    if (graphId(referenceState.get(reference).graph) !== id) throw invalid('this reference belongs to another graph');
+    if (closedGraphs.has(id)) throw named(errors.StaleHandle, 'the graph is closed');
+    return reference;
+  };
+  const settle = (id, reference, run) => {
+    try {
+      return run(own_(id, reference));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
 
   const makeGraph = (id, config) => {
     const graph = new Graph({
@@ -86,27 +107,54 @@ export default (native, { take }) => {
         }
         return out[0];
       },
-      /// Ends the graph: no more contexts or references can be made with it, and the host frees what it
-      /// kept (code caches not yet flushed are dropped) once the contexts using it are gone.
+      /// Ends the graph: no more contexts or references can be made with it, its references are stale, and
+      /// the host frees what it kept (code caches not yet flushed are dropped) once the contexts using it are gone.
       close() {
         host(native.graph.close, id);
+        closedGraphs.add(id);
         graphFs.delete(id);
         graphCache.delete(id);
       },
       [dispose]() {
         native.graph.close(id);
         take();
+        closedGraphs.add(id);
         graphFs.delete(id);
         graphCache.delete(id);
       },
-      [CREATE](recipe) {
-        if (!(recipe instanceof ModuleRecipe)) throw invalid('expected a ModuleRecipe');
-        return makeReference(graph, recipe, null);
-      },
+      ...tableOps(id, () => graph),
     });
     graphs.set(graph, { id, config });
     return graph;
   };
+
+  /// The operations of a graph on its table of modules; `self` is the graph object they belong to.
+  const tableOps = (id, self) => ({
+    /// A `declared` reference to the module `recipe` describes; nothing is read or compiled yet.
+    declare(recipe) {
+      if (!(recipe instanceof ModuleRecipe)) throw invalid('declare: expected a ModuleRecipe');
+      if (closedGraphs.has(id)) throw named(errors.StaleHandle, 'the graph is closed');
+      return makeReference(self(), recipe, null);
+    },
+    load: reference => settle(id, reference, loadRef),
+    requests: reference => requestsOf(own_(id, reference)),
+    evaluate(reference, ctx) {
+      return settle(id, reference, ref => {
+        const ctxGraph = ctx?.graph;
+        let ctxId;
+        try {
+          ctxId = ctxGraph === undefined ? undefined : graphId(ctxGraph);
+        } catch {
+          ctxId = undefined;
+        }
+        if (contexts.get(ctx) === undefined) throw invalid('evaluate: expected a context');
+        if (ctxId !== id) throw invalid('evaluate: the context belongs to another graph');
+        return evaluateRef(ref, ctx);
+      });
+    },
+    exports: reference => exportsOf(own_(id, reference)),
+    release: reference => releaseRef(own_(id, reference)),
+  });
 
   /// The largest source file a graph reads unless `derive({ sourceBytes })` says otherwise.
   const DEFAULT_SOURCE_BYTES = 64 * 1024 * 1024;
@@ -139,8 +187,7 @@ export default (native, { take }) => {
     const id = host(native.graph.create, rawFs, kind, bytes, rawCacheFs, sourceBytes);
     if (kind === 3) graphCache.set(id, codeCache);
     if (fs !== undefined) {
-      if (fs.kind === 'async')
-        host(native.graph.asyncFs, id, rawFs, shared.fsAsync.openFile, shared.fsAsync.readAll, shared.fsAsync.close);
+      if (fs.kind === 'async') host(native.graph.asyncFs, id, rawFs, shared.fsAsync.openFile, shared.fsAsync.readAll, shared.fsAsync.close);
       graphFs.set(id, new GraphFs({ kind: fs.kind, id: fs.id, limit: sourceBytes }));
     }
     return makeGraph(id, freeze({ fs, codeCache, sourceBytes }));
@@ -177,7 +224,12 @@ export default (native, { take }) => {
       derive: options => rootGraph().derive(options),
       flush: () => rootGraph().flush(),
       sourceBytes: DEFAULT_SOURCE_BYTES,
-      [CREATE]: recipe => rootGraph()[CREATE](recipe),
+      declare: recipe => rootGraph().declare(recipe),
+      load: reference => rootGraph().load(reference),
+      requests: reference => rootGraph().requests(reference),
+      evaluate: (reference, ctx) => rootGraph().evaluate(reference, ctx),
+      exports: reference => rootGraph().exports(reference),
+      release: reference => rootGraph().release(reference),
     };
     graphs.set(cap, {
       get id() {

@@ -22,7 +22,6 @@ const own = (object, key) => {
 
 // Descriptor identity comes from the record kinds of `origine:@internal/records`. Their private-field
 // checks reject copied fields, forged prototypes, and calls through a borrowed constructor.
-const CREATE = Symbol.for('origine:@std/graph/create');
 
 /// A transformer is a function `(source, id) => string | { source, map } | Promise`, or a host
 /// descriptor of kind `transformer` (run natively, see `Transform`).
@@ -116,13 +115,6 @@ const make = options => {
     /// True when neither the source's transformers nor the import handler need the JS realm, which
     /// lets the host run its pipeline without calling back into this realm.
     native: source.native && handler.native,
-    /// A reference to this module in `graph` (`api.graph` or a derived one). Nothing is read or
-    /// compiled until `reference.load()` or `reference.evaluate(ctx)`.
-    create(graph) {
-      const make = graph?.[CREATE];
-      if (typeof make !== 'function') throw invalid('ModuleRecipe#create: expected an api.graph');
-      return make(recipe);
-    },
   });
   return recipe;
 };

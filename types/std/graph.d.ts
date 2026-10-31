@@ -83,11 +83,6 @@ declare module "origine:@std/graph/module" {
     readonly codeCache: import("origine:@std/graph/cache").CodeCache | null;
     /** True when neither the source's transformers nor the import handler need the JS realm: the recipe is then plain data. */
     readonly native: boolean;
-    /**
-     * A reference to this module in `graph` (`api.graph` or a derived one). Nothing is read or compiled
-     * until `reference.load()` or `reference.evaluate(ctx)`.
-     */
-    create(graph: import("../graph.d.ts").ModuleGraph): import("../graph.d.ts").ModuleReference;
   }
   export const ModuleRecipe: {
     /** Throws `InvalidInput` for a missing or mistyped option. Options are read as own data properties (a getter counts as missing). */

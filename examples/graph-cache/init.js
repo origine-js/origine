@@ -42,14 +42,19 @@ export async function main(api) {
   const second = await ctxAll.import('./side.js');
   eprintln('retain all: same reference:', first === second, ', table size:', all.size);
   // delete(id) is an identity reset: the next import makes a new reference and evaluates it again.
-  eprintln('delete(side.js) dropped', all.delete('side.js'), '; after delete, same reference:', (await ctxAll.import('./side.js')) === first);
+  eprintln(
+    'delete(side.js) dropped',
+    all.delete('side.js'),
+    '; after delete, same reference:',
+    (await ctxAll.import('./side.js')) === first,
+  );
   eprintln('clear() dropped', all.clear(), '; table size now', all.size);
 
   // 2. retain 'used': an entry is dropped once nothing holds it, so releasing the reference re-evaluates.
   const used = ImportCache.native({ retain: 'used' });
   using ctxUsed = await context(api, makeHandler(used), graph);
   const held = await ctxUsed.import('./side.js');
-  held.release();
+  graph.release(held);
   const again = await ctxUsed.import('./side.js');
   eprintln('retain used: evaluated again after release:', again !== held, ', table size:', used.size);
 
@@ -62,7 +67,7 @@ export async function main(api) {
   using guest = await context(api, sharedHandler, graph);
   const inHome = await home.import('./side.js');
   const inGuest = await guest.import('./side.js');
-  eprintln('one cache, two contexts: same module:', inHome.exports().id === inGuest.exports().id, ', table size:', together.size);
+  eprintln('one cache, two contexts: same module:', graph.exports(inHome).id === graph.exports(inGuest).id, ', table size:', together.size);
 
   // 3. Code caches. `memory` keeps bytes in this graph; `dir` writes one file per distinct source under __codecache__.
   //    Both are written at graph.flush(): it resolves how many modules' caches were stored this time.

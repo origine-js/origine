@@ -3,7 +3,8 @@
 //   ImportCache    (id, attributes) -> module. One native table per context, made from the descriptor
 //                  (a V8 module belongs to a single context). `retain` says how long an entry lives.
 //   ResolveCache   (referrer, specifier, attributes, phase) -> resolved id. Native memo.
-//   CodeCache      (id, source hash) -> V8 code-cache bytes. Persistent or in memory.
+//   CodeCache      (id, source hash) -> V8 code-cache bytes. Persistent or in memory. A handler (or a
+//                  recipe) names it; it has `flush()`.
 //
 // ImportCache and ResolveCache are consulted on every import and behind V8's synchronous link, so
 // they cannot call back into JS. CodeCache is off that path and may be backed by JS (`custom`).
@@ -75,31 +76,60 @@ export const ResolveCache = freeze({
   },
 });
 
-const none = new h.Cache({ host: 'codeCacheNone', kind: 'codeCache' });
+/// A code cache: the descriptor, plus the operations on the cache the host keeps for it.
+const codeCache = fields => {
+  const cache = new h.Cache({
+    kind: 'codeCache',
+    ...fields,
+    /// Persists the code of the modules (made with this cache) that compiled without a usable cache and resolves
+    /// how many were stored. A `memory` cache keeps them in memory, a `dir` cache writes its files, a
+    /// `custom` cache calls its `store`.
+    flush() {
+      return ops().flush(cache);
+    },
+    /// Ends the cache: it stores and serves nothing from now on, and what it held is freed.
+    close() {
+      return ops().close(cache);
+    },
+  });
+  return cache;
+};
+
+/// `limits.size`, the most bytes of compiled code a cache keeps (a non-negative integer, `undefined` for no cap).
+const limitsOf = (what, options) => {
+  const limits = own(options, 'limits');
+  if (limits !== undefined && (limits === null || typeof limits !== 'object')) throw invalid(`${what}: limits must be an object`);
+  return freeze({ size: capacity(what, 'limits.size', own(limits, 'size')) });
+};
 
 export const CodeCache = freeze({
   /// No code cache: every compile parses.
-  none,
-  /// Bytes kept in the graph's memory and shared by all of its contexts. `bytes` caps it.
+  none: new h.Cache({ host: h.CodeCacheHost.None, kind: 'codeCache', flush: () => Promise.resolve(0), close: () => {} }),
+  /// Bytes kept in memory and shared by every module made with this cache. `limits.size` caps them.
   memory(options = {}) {
-    return withCapacity('codeCacheMemory', 'codeCache', 'bytes', capacity('CodeCache.memory', 'bytes', own(options, 'bytes')), {});
+    return codeCache({ host: h.CodeCacheHost.Memory, limits: limitsOf('CodeCache.memory', options) });
   },
-  /// Files in the directory `fs` (a grant of `api.fs` with write access) grants, one per distinct source
-  /// text at `__codecache__/<32 hex digits of BLAKE3(runtime, module kind, source text)>.v8-code-cache`:
-  /// the module id is not in the name, so a virtual id or one with `..` stays inside `__codecache__` and
-  /// identical sources share a file. Each file holds the hash of the source it was made from and is
-  /// ignored for any other text. Reads and writes touch the disk; writes happen at `graph.flush()`.
-  dir(fs, options = {}) {
-    if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant');
-    return withCapacity('codeCacheDir', 'codeCache', 'bytes', capacity('CodeCache.dir', 'bytes', own(options, 'bytes')), { fs });
+  /// Files in the directory `path` (relative to the root of `fs`, a sync grant of `api.fs` with write
+  /// access) one per distinct source text, named
+  /// `<32 hex digits of BLAKE3(runtime, module kind, source text)>.v8-code-cache`: the module id is not in the name, so a
+  /// virtual id or one with `..` stays inside the directory and identical sources share a file. The files sit
+  /// directly in `path`; the directory is made on the first write. Each file holds the hash of the source it was
+  /// made from and is ignored for any other text. Reads and writes touch the disk; writes happen at `flush()`.
+  /// V8 trusts these files: give `path` to no one who should not plant code.
+  dir(options) {
+    const fs = own(options, 'fs');
+    if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant made by api.fs');
+    const path = own(options, 'path');
+    if (typeof path !== 'string' || path === '' || path.includes('\0')) throw invalid('CodeCache.dir: path must be a non-empty string without NUL');
+    return codeCache({ host: h.CodeCacheHost.Dir, fs, path, limits: limitsOf('CodeCache.dir', options) });
   },
-  /// Your own store, for modules the graph compiles. Both functions may be async and run in the
+  /// Your own store, for modules made with this cache. Both functions may be async and run in the
   /// creating realm.
   ///
   /// - `key` is `{ id, hash }`: the module id (its `name` for a root module) and the lowercase hex
   ///   BLAKE3 digest of the exact text V8 compiles, after every transformer, so a key identifies one
   ///   source text of one module.
-  /// - `store(key, blob)` runs at `graph.flush()` for each module that compiled without a usable
+  /// - `store(key, blob)` runs at `flush()` for each module that compiled without a usable
   ///   cache. `blob` is an opaque `Uint8Array`: keep it whole and unchanged.
   /// - `load(key, source)` runs once the source of a module is final and before it compiles, with that
   ///   text. Return the blob kept under that same key, or `undefined`. A blob that was made for another
@@ -109,6 +139,6 @@ export const CodeCache = freeze({
     const load = own(options, 'load');
     const store = own(options, 'store');
     if (typeof load !== 'function' || typeof store !== 'function') throw invalid('CodeCache.custom: load and store must be functions');
-    return new h.Cache({ kind: 'codeCache', native: false, load, store });
+    return codeCache({ native: false, load, store });
   },
 });

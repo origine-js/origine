@@ -320,11 +320,12 @@ test "init cache: code caches are named by their source text and only served for
     embedded.module_id = "origine:@std/io";
     hook.store(hook.data, embedded, payload);
     try t.expect(hook.load(hook.data, embedded) == null);
-    // A graph's cache directory keeps the files in a subdirectory of the grant root.
-    var flat = cache.CodeCacheState.initFlat(host, .{ .handle = tmp.dir.handle });
+    // A `CodeCache.dir` keeps the files directly in the directory it was given inside the grant.
+    var flat = try cache.CodeCacheState.initIn(host, .{ .handle = tmp.dir.handle }, "kept/here");
+    defer flat.deinit();
     const flat_hook = flat.hook();
     flat_hook.store(flat_hook.data, request, payload);
-    const flat_path = try std.fmt.allocPrint(t.allocator, "{s}/{s}", .{ cache.dir_name, name });
+    const flat_path = try std.fmt.allocPrint(t.allocator, "kept/here/{s}", .{name});
     defer t.allocator.free(flat_path);
     _ = try tmp.dir.statFile(t.io, flat_path, .{});
     try t.expectEqualStrings(payload, flat_hook.load(flat_hook.data, request) orelse return error.TestExpectedHit);

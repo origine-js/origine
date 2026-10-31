@@ -3,7 +3,7 @@ import type { FsCap } from "./fs.d.ts";
 import type { IoCap } from "./io.d.ts";
 import type { NetCap } from "./net.d.ts";
 import type { ContextCap } from "./context.d.ts";
-import type { ModuleGraph } from "./graph.d.ts";
+import type { GraphCap } from "./graph.d.ts";
 import type { IsolateCap } from "./isolate.d.ts";
 
 /**
@@ -22,7 +22,7 @@ export interface Api {
   /** The machine and process: arguments and environment variables. */
   readonly host: HostCap;
   /** Module graph: sources, code caches and the authority modules are produced with. */
-  readonly graph: ModuleGraph;
+  readonly graph: GraphCap;
   /** Realms whose imports run through an import handler. */
   readonly context: ContextCap;
   /** Isolates on other threads (where the embedder allows them). */

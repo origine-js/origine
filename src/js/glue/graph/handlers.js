@@ -1,8 +1,8 @@
 // `api.graph` import handlers: the registry that flattens a handler to the host and frees it again. Built by graph.js.
-import { ImportHandler } from '../handles.js';
+import { HookHost, CodeCacheHost, CodeCacheKind, ImportHandler, ReadMode } from '../handles.js';
 import { freeze } from '../util.js';
 export default g => {
-  const { native, take, host, invalid } = g;
+  const { native, take, host, invalid, grantOf, customCaches } = g;
 
   // ---- import handlers -------------------------------------------------------------------------
 
@@ -56,6 +56,35 @@ export default g => {
     return id;
   };
 
+  /// The host's `CodeCache` for a descriptor, made when a handler or recipe first names it. 0: none. A cache
+  /// that was closed (or whose realm ended) cannot be named again.
+  const codeCacheIds = new WeakMap();
+  const codeCacheId = cache => {
+    if (cache.host === CodeCacheHost.None) return 0;
+    const known = codeCacheIds.get(cache);
+    if (known !== undefined) {
+      if (!host(native.graph.codeCacheAlive, known)) throw invalid('the CodeCache is closed');
+      return known;
+    }
+    let grant;
+    if (cache.host === CodeCacheHost.Dir) {
+      grant = grantOf(cache.fs, 'CodeCache.dir');
+      if (grant.async) throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
+    }
+    const kind = cache.native === false ? CodeCacheKind.Custom : cache.host === CodeCacheHost.Dir ? CodeCacheKind.Dir : CodeCacheKind.Memory;
+    const id = host(native.graph.codeCacheCreate, kind, cache.limits?.size ?? 0, grant?.raw, cache.path ?? '');
+    codeCacheIds.set(cache, id);
+    if (kind === CodeCacheKind.Custom) customCaches.set(id, cache);
+    return id;
+  };
+  /// What a recipe's `codeCache` says to the host: 0 unset (its handler's applies), `NO_CODE_CACHE` none.
+  const NO_CODE_CACHE = 0xffffffff;
+  const recipeCacheId = recipe => {
+    const cache = recipe.codeCache;
+    if (cache === null) return 0;
+    return cache.host === CodeCacheHost.None ? NO_CODE_CACHE : codeCacheId(cache);
+  };
+
   const flatten = handler => {
     const resolver = handler.resolver;
     const layers = [];
@@ -74,18 +103,22 @@ export default g => {
     const hooks = [];
     const hookFns = [];
     const hookHosts = [];
+    const hookGrants = [];
     for (const hook of handler.hooks) {
       hookHosts.push(typeof hook === 'function' ? null : hook.host);
+      hookGrants.push(typeof hook !== 'function' && (hook.host === HookHost.Fs || hook.host === HookHost.Json) ? grantOf(hook.fs, hook.host === HookHost.Fs ? 'fsProvider' : 'json') : null);
       if (typeof hook === 'function') {
         hooks.push({ js: true });
         hookFns.push(hook);
       } else {
         hooks.push(
-          hook.host === 'origine'
-            ? { host: 'origine', std: hook.std }
-            : hook.host === 'fs'
-              ? { host: 'fs', read: hook.read }
-              : { host: hook.host },
+          hook.host === HookHost.Origine
+            ? { host: HookHost.Origine, std: hook.std }
+            : hook.host === HookHost.Fs
+              ? { host: HookHost.Fs, read: hook.read, fs: { async: hookGrants.at(-1).async, id: hookGrants.at(-1).id } }
+              : hook.host === HookHost.Json
+                ? { host: HookHost.Json, fs: { async: hookGrants.at(-1).async, id: hookGrants.at(-1).id } }
+                : { host: hook.host },
         );
         hookFns.push(null);
       }
@@ -105,9 +138,10 @@ export default g => {
       hooks,
       maker: makerSpec,
       cache: { id: cacheId(handler.cache) },
+      codeCache: codeCacheId(handler.codeCache),
       meta: handler.meta !== null,
     };
-    return { spec, layerFns, hookFns, hookHosts, transformerFns };
+    return { spec, layerFns, hookFns, hookHosts, hookGrants, transformerFns };
   };
 
   const register = handler => {
@@ -116,7 +150,7 @@ export default g => {
     const known = handlers.get(handler);
     if (known !== undefined && byId.get(known.id) === known) return known;
     g.bindDriver();
-    const { spec, layerFns, hookFns, hookHosts, transformerFns } = flatten(handler);
+    const { spec, layerFns, hookFns, hookHosts, hookGrants, transformerFns } = flatten(handler);
     const id = host(native.graph.handler, JSON.stringify(spec));
     const record = freeze({
       id,
@@ -124,13 +158,16 @@ export default g => {
       layerFns,
       hookFns,
       hookHosts,
+      hookGrants,
       transformerFns,
       native: handler.native,
+      /// An async grant is read by the host's chain (or this realm's loop), never by a synchronous native step.
+      reads: hookGrants.some(grant => grant !== null && grant.async) ? ReadMode.Async : ReadMode.Sync,
     });
     handlers.set(handler, record);
     byId.set(id, record);
     return record;
   };
 
-  return { byId, cacheIds, pinned, register };
+  return { byId, cacheIds, codeCacheIds, codeCacheId, recipeCacheId, pinned, register };
 };

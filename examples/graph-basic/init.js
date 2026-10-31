@@ -1,6 +1,6 @@
 // Run: zig-out/bin/origine examples/graph-basic/init.js   (or: zig build run -- examples/graph-basic/init.js)
-// The smallest module-graph program. A recipe names a file; a graph reads files through an fs grant;
-// a reference is declared, then loaded (its static imports are known), then evaluated in a context.
+// The smallest module-graph program. A recipe names a file and the fs grant that reads it; a hook names the grant
+// that reads its imports; a reference is declared, then loaded (its static imports are known), then evaluated in a context.
 //
 // Prints (stderr), with the modules' own lines in between:
 //   declared: declared
@@ -21,15 +21,17 @@ import { eprintln } from 'origine:@std/debug';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  // 1. Authority: the graph reads files only through this read-only grant of the example directory.
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-basic', access: 'r' }) });
-  // 2. The pipeline for the module's own imports: './x' resolved against the importer, then read by the fs provider.
+  // 1. Authority: files are read only through this read-only grant of the example directory. The graph holds
+  //    none; what reads a file names its grant.
+  const src = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-basic', access: 'r' });
+  const graph = api.graph.create();
+  // 2. The pipeline for the module's own imports: './x' resolved against the importer, then read through `src` by the fs provider.
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered().layer(relative()),
-    hooks: [fsProvider({ read: 'copy' })],
+    hooks: [fsProvider({ fs: src, read: 'copy' })],
   });
-  // 3. A recipe describes the root module. Building it reads nothing.
-  const recipe = ModuleRecipe({ source: ModuleSource.file('recipe.js'), import: handler });
+  // 3. A recipe describes the root module, read through `src`. Building it reads nothing.
+  const recipe = ModuleRecipe({ source: ModuleSource.file('recipe.js', { fs: src }), import: handler });
   // 4. The graph declares it and gives back a reference, an inert ticket: it shows `name`, `status` and `context` and
   //    can do nothing; the graph loads, runs, reads and frees it. Still nothing is read.
   const reference = graph.declare(recipe);

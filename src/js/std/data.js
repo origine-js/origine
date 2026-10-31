@@ -45,7 +45,7 @@ export function snapshot(value, options) {
 function copyOf(value, path, seen) {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
   if (typeof value === 'function')
-    throw unsupported(`snapshot: ${path} is a function; a function cannot be copied, pass it to Import.exports as it is`);
+    throw unsupported(`snapshot: ${path} is a function; a function cannot be copied, pass it to ImportHook.exports as it is`);
   const known = seen.get(value);
   if (known !== undefined) return known;
   if (isProxy(value)) throw unsupported(`snapshot: ${path} is a Proxy`);

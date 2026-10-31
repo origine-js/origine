@@ -21,7 +21,7 @@ declare module "origine:@std/errors" {
   export { ImportError } from "origine:@std/graph/import";
   /**
    * An import, an evaluated source or a preload that failed. `errno` is the kind of the cause (a hook's
-   * `Import.reject(ImportError.PermissionDenied)`, a missing file `NotFound`; `Unexpected` when the module itself threw),
+   * `ImportHook.reject(ImportError.PermissionDenied)`, a missing file `NotFound`; `Unexpected` when the module itself threw),
    * `subject` the module that failed (the id the resolver gave; what the call named when none was reached), `referrer` the module that imported it, and `cause` an error rebuilt in the importing realm (nothing of the failing
    * realm's objects crosses).
    */

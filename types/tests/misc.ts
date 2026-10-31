@@ -60,7 +60,7 @@ export const main: Main = async (api: Api) => {
   });
   using child = await api.context.create({
     import: handler,
-    graph: api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: "r" }) }),
+    graph: api.graph.create(),
     preload: [{ source: "(values) => {}", values: { n: 1 } }, { module: "export default () => {}" }],
   });
   const imported = await child.import("a");
@@ -105,18 +105,18 @@ export const main: Main = async (api: Api) => {
   // @ts-expect-error `import` is required: it decides what the realm can load
   await api.context.create({});
   // @ts-expect-error a preload is a script or a module, not both
-  await api.context.create({ graph: api.graph, import: handler, preload: [{ source: "", module: "" }] });
+  await api.context.create({ graph: api.graph.root, import: handler, preload: [{ source: "", module: "" }] });
   // @ts-expect-error misspelled option
-  await api.context.create({ import: handler, grph: api.graph });
+  await api.context.create({ import: handler, grph: api.graph.root });
   // @ts-expect-error `graph` is required: there is no default
   await api.context.create({ import: handler });
   // Off unless set: a boolean, and the only key.
-  await api.context.create({ import: handler, graph: api.graph, security: { codeGeneration: true } });
-  await api.context.create({ import: handler, graph: api.graph, security: {} });
+  await api.context.create({ import: handler, graph: api.graph.root, security: { codeGeneration: true } });
+  await api.context.create({ import: handler, graph: api.graph.root, security: {} });
   // @ts-expect-error `security` takes `codeGeneration`, not a verb phrase
-  await api.context.create({ import: handler, graph: api.graph, security: { allowCodeGeneration: true } });
+  await api.context.create({ import: handler, graph: api.graph.root, security: { allowCodeGeneration: true } });
   // @ts-expect-error a boolean
-  await api.context.create({ import: handler, graph: api.graph, security: { codeGeneration: "yes" } });
+  await api.context.create({ import: handler, graph: api.graph.root, security: { codeGeneration: "yes" } });
   // @ts-expect-error `context` has no `narrow`
   api.context.narrow({});
   // @ts-expect-error environment views have no narrowing API

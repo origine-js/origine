@@ -482,7 +482,7 @@ test "api: io narrowing enforces quotas and env exposes only reads" {
         \\  await io.close();
         \\  out.home = api.host.env.get('HOME'); out.path = api.host.env.get('PATH');
         \\  out.envReads = Object.keys(api.host.env).join(',') === 'args,get,list' && Object.isFrozen(api.host.env);
-        \\  out.noContextNarrow = api.context.narrow === undefined && api.graph.derive !== undefined;
+        \\  out.noContextNarrow = api.context.narrow === undefined && api.graph.create !== undefined && api.graph.root !== undefined && api.graph.derive === undefined && api.graph.declare === undefined;
         \\  out.frozen = Object.isFrozen(api) && Object.isFrozen(api.fs) && api.fs.narrow === undefined;
         \\}
     , true, &.{});
@@ -521,11 +521,11 @@ test "api: contexts with an import map layer, sync and async hooks and preload v
         \\  const loader = id => id === 'app:/main.js' ? "import { v } from 'dep'; globalThis.seen = v + preloaded" : { source: 'export const v = 40' };
         \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { dep: 'app:/dep.js', main: 'app:/main.js' } })), hooks: [fromLoader(load)] });
         \\  const preload = [{ source: '(values) => { globalThis.preloaded = values.n }', values: { n: 2 } }];
-        \\  const a = await api.context.create({ graph: api.graph, import: handlerFor(loader), preload });
-        \\  const b = await api.context.create({ graph: api.graph, import: handlerFor(async id => loader(id)), preload });
+        \\  const a = await api.context.create({ graph: api.graph.root, import: handlerFor(loader), preload });
+        \\  const b = await api.context.create({ graph: api.graph.root, import: handlerFor(async id => loader(id)), preload });
         \\  await a.import('main');
         \\  await b.import('main');
-        \\  const c = await api.context.create({ graph: api.graph, import: handlerFor(() => { throw new Error('nope') }) });
+        \\  const c = await api.context.create({ graph: api.graph.root, import: handlerFor(() => { throw new Error('nope') }) });
         \\  await c.import('main').catch(e => { globalThis.failed = e.name; });
         \\  c.close();
         \\  try { await c.import('main') } catch (e) { globalThis.closed = e.errno }
@@ -558,7 +558,7 @@ test "typescript: contexts get only the transformers the handler names" {
         \\    maker: MakeRecipe.inherit(transformer === undefined ? {} : { transformer }),
         \\  });
         \\  const load = async (load, transformer, specifier = 'main') => {
-        \\    const ctx = await api.context.create({ graph: api.graph, import: handlerFor(load, transformer) });
+        \\    const ctx = await api.context.create({ graph: api.graph.root, import: handlerFor(load, transformer) });
         \\    return ctx.import(specifier);
         \\  };
         \\  const byTs = Transform.byExtension({ '.ts': transform });
@@ -616,7 +616,7 @@ test "leaks: oxc descriptors validate options and run their diagnostics through 
         \\  for (const source of ['export const n: number = 1', 'const x: number = ;']) {
         \\    for (const load of [() => source, async () => source]) {
         \\      const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.ts' } })), hooks: [fromLoader(load)], maker: MakeRecipe.inherit({ transformer }) });
-        \\      const ctx = await api.context.create({ graph: api.graph, import: handler });
+        \\      const ctx = await api.context.create({ graph: api.graph.root, import: handler });
         \\      await ctx.import('m').catch(() => { out.childFailed = (out.childFailed ?? 0) + 1; });
         \\      ctx.close();
         \\    }
@@ -639,12 +639,12 @@ test "leaks: a rejecting context settles the parent's import promise, repeatedly
         \\  const names = [];
         \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js' } })), hooks: [fromLoader(load)] });
         \\  for (let i = 0; i < 5; i++) {
-        \\    const child = await api.context.create({ graph: api.graph, import: handlerFor(() => 'throw new Error("boom")') });
+        \\    const child = await api.context.create({ graph: api.graph.root, import: handlerFor(() => 'throw new Error("boom")') });
         \\    await child.import('m').catch(e => { names.push(e.name + ':' + e.message.includes('boom')); });
         \\    child.close();
         \\  }
         \\  // A child whose module graph fails to load rejects through the same path.
-        \\  const missing = await api.context.create({ graph: api.graph, import: handlerFor(async () => { throw new Error('nope'); }) });
+        \\  const missing = await api.context.create({ graph: api.graph.root, import: handlerFor(async () => { throw new Error('nope'); }) });
         \\  await missing.import('m').catch(e => { names.push(e.name); });
         \\  globalThis.names = names.join(',');
         \\}
@@ -665,11 +665,11 @@ test "leaks: loads that never settle are freed with the host" {
         \\  const handlerFor = (load, map) => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: map })), hooks: [fromLoader(load)] });
         \\  // Never-settling hook promises; their imports are deliberately not awaited.
         \\  for (let i = 0; i < 3; i++) {
-        \\    const child = await api.context.create({ graph: api.graph, import: handlerFor(() => new Promise(() => {}), { m: 'app:/m' + i + '.js', dep: 'app:/dep.js' }) });
+        \\    const child = await api.context.create({ graph: api.graph.root, import: handlerFor(() => new Promise(() => {}), { m: 'app:/m' + i + '.js', dep: 'app:/dep.js' }) });
         \\    child.import('m').catch(() => {});
         \\  }
         \\  // One load that settles next to one that does not.
-        \\  const mixed = await api.context.create({ graph: api.graph, import: handlerFor(id => id === 'app:/main.js' ? Promise.resolve("import 'app:/hang.js'") : new Promise(() => {}), { main: 'app:/main.js', hang: 'app:/hang.js' }) });
+        \\  const mixed = await api.context.create({ graph: api.graph.root, import: handlerFor(id => id === 'app:/main.js' ? Promise.resolve("import 'app:/hang.js'") : new Promise(() => {}), { main: 'app:/main.js', hang: 'app:/hang.js' }) });
         \\  mixed.import('main').catch(() => {});
         \\  globalThis.started = true;
         \\}
@@ -691,7 +691,7 @@ test "api: contexts inherit no authority and no capability" {
         \\    resolver: ImportResolver.layered().layer(importMap({ imports: { main: 'app:/main.js' } })),
         \\    hooks: [fromLoader(() => "globalThis.keys = Object.getOwnPropertyNames(globalThis).filter(k => k === 'api' || k === 'context' || k === 'graph' || k === 'scope').length")],
         \\  });
-        \\  const child = await api.context.create({ graph: api.graph, import: handler });
+        \\  const child = await api.context.create({ graph: api.graph.root, import: handler });
         \\  await child.import('main');
         \\}
     , true, &.{});
@@ -804,7 +804,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource, SourceMap, ModuleImportPhase } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import, ImportError, MakeRecipe, Transform } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook, ImportError, MakeRecipe, Transform } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative, origine, importMap } from 'origine:@std/graph/resolve/layers';
         \\import { origineProvider, fsProvider, json, fromLoader } from 'origine:@std/graph/providers';
@@ -813,13 +813,14 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\export async function main() {
         \\  const out = globalThis.report = {};
         \\  const js = (source) => source;
+        \\  const src = Object.freeze({});
         \\  // sources: immutable chain, the receiver never changes
-        \\  const file = ModuleSource.file('./a.ts');
+        \\  const file = ModuleSource.file('./a.ts', { fs: src });
         \\  const chained = file.withTransformer(js).withTransformer(Transform.byExtension({ '.ts': js }));
         \\  out.chain = file.transformers.length === 0 && chained.transformers.length === 2 && file.native && !chained.native;
         \\  out.sourceFrozen = Object.isFrozen(file) && Object.isFrozen(chained.transformers) && ModuleSource.is(file);
-        \\  out.sourceBad = invalid(() => ModuleSource.file('')) && invalid(() => ModuleSource.file('a\0b')) && invalid(() => ModuleSource.text(1))
-        \\    && invalid(() => file.withTransformer(42)) && invalid(() => ModuleSource.file('x', { kind: 'nope' }));
+        \\  out.sourceBad = invalid(() => ModuleSource.file('', { fs: src })) && invalid(() => ModuleSource.file('a\0b', { fs: src })) && invalid(() => ModuleSource.text(1))
+        \\    && invalid(() => file.withTransformer(42)) && invalid(() => ModuleSource.file('x')) && invalid(() => ModuleSource.file('x', { fs: 1 }));
         \\  out.maps = SourceMap.None.kind === 'none' && SourceMap.url('a.map').value === 'a.map' && SourceMap.text('{}').kind === 'text' && invalid(() => SourceMap.url(''));
         \\  out.phases = ModuleImportPhase.Evaluation === 'evaluation' && Object.isFrozen(ModuleImportPhase);
         \\  // resolver: layers are appended to a copy
@@ -831,13 +832,13 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  // a chain made only of host descriptors is native; one function makes it js
         \\  const native = ImportHandler.make({
         \\    resolver,
-        \\    hooks: [origineProvider({ std: { include: ['text'] } }), json(), fsProvider({ read: 'copy' })],
+        \\    hooks: [origineProvider({ std: { include: ['text'] } }), json({ fs: src }), fsProvider({ fs: src, read: 'copy' })],
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({}) }),
         \\    cache: ImportCache.native({ retain: 'used' }),
         \\  });
         \\  out.native = native.native === true && native.plan.every(e => e.kind === 'native') && native.plan.length === 3 + 3 + 1 + 1 + 1
         \\    && native.plan[0].stage === 'resolver' && native.plan[0].name === 'relative' && native.plan[3].name === 'origine' && Object.isFrozen(native.plan);
-        \\  const mixed = ImportHandler.make({ resolver, hooks: async () => Import.next(), meta: ({ id }) => ({ url: id }) });
+        \\  const mixed = ImportHandler.make({ resolver, hooks: async () => ImportHook.next(), meta: ({ id }) => ({ url: id }) });
         \\  out.mixed = mixed.native === false && mixed.plan.filter(e => e.kind === 'js').length === 2 && mixed.hooks.length === 1 && typeof mixed.meta === 'function';
         \\  out.defaults = mixed.cache.retain === 'all' && mixed.maker.host === 'maker' && native.meta === null;
         \\  out.handlerBad = invalid(() => ImportHandler.make({ resolver, hooks: [] }) && ImportHandler.make({ resolver: ImportResolver.layered(), hooks: [] }))
@@ -848,9 +849,9 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  out.customMaker = !customMaker.native && customMaker.plan.some(e => e.stage === 'maker' && e.kind === 'js');
         \\  out.makerImport = MakeRecipe.inherit({ import: native }).import === native && invalid(() => MakeRecipe.inherit({ import: {} })) && invalid(() => MakeRecipe.fn(1));
         \\  // recipes: the name defaults to the path, text needs one, native follows the parts
-        \\  const recipe = ModuleRecipe({ source: ModuleSource.file('./main.js'), import: native });
+        \\  const recipe = ModuleRecipe({ source: ModuleSource.file('./main.js', { fs: src }), import: native });
         \\  const text = ModuleRecipe({ source: ModuleSource.text('export {}'), import: native, name: 'inline', codeCache: CodeCache.none });
-        \\  const tainted = ModuleRecipe({ source: ModuleSource.file('./m.ts').withTransformer(js), import: native });
+        \\  const tainted = ModuleRecipe({ source: ModuleSource.file('./m.ts', { fs: src }).withTransformer(js), import: native });
         \\  out.recipe = recipe.name === './main.js' && recipe.native === true && recipe.codeCache === null && text.native && text.codeCache.host === 'codeCacheNone'
         \\    && !tainted.native && !ModuleRecipe({ source: file, import: mixed }).native && Object.isFrozen(recipe) && ModuleRecipe.is(recipe) && ImportHandler.is(native);
         \\  out.recipeBad = invalid(() => ModuleRecipe({ source: ModuleSource.text(''), import: native })) && invalid(() => ModuleRecipe({ source: file }))
@@ -858,14 +859,14 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  // option bags are read as data: a getter is ignored, so the required option is missing
         \\  out.getter = invalid(() => ModuleRecipe({ source: file, get import() { return native; } }));
         \\  // verdicts
-        \\  out.verdicts = Import.next() === Import.next() && Import.accept().kind === 'accept' && Object.isFrozen(Import.next())
-        \\    && Import.source(file).source === file && Import.source(file).kind === 'source' && Import.recipe(recipe).recipe === recipe && Import.recipe(recipe).kind === 'recipe' && invalid(() => Import.source({})) && invalid(() => Import.source(recipe)) && invalid(() => Import.recipe(file)) && Import.provide === undefined;
-        \\  const rejected = Import.reject(ImportError.NotFound);
-        \\  const other = Import.reject(ImportError.other('Not allowed'));
+        \\  out.verdicts = ImportHook.next() === ImportHook.next() && ImportHook.accept({ fs: src }).kind === 'accept' && Object.isFrozen(ImportHook.next())
+        \\    && ImportHook.source(file).source === file && ImportHook.source(file).kind === 'source' && ImportHook.recipe(recipe).recipe === recipe && ImportHook.recipe(recipe).kind === 'recipe' && invalid(() => ImportHook.source({})) && invalid(() => ImportHook.source(recipe)) && invalid(() => ImportHook.recipe(file)) && ImportHook.provide === undefined;
+        \\  const rejected = ImportHook.reject(ImportError.NotFound);
+        \\  const other = ImportHook.reject(ImportError.other('Not allowed'));
         \\  out.reject = rejected.error.name === 'NotFound' && ImportError.is(rejected.error, ImportError.NotFound) && other.error.message === 'Not allowed' && other.error.name === 'Unexpected'
-        \\    && invalid(() => Import.reject(123456)) && invalid(() => Import.reject({})) && invalid(() => ImportError.other(1)) && ImportError.is(Import.reject(ImportError.PermissionDenied).error, ImportError.PermissionDenied);
+        \\    && invalid(() => ImportHook.reject(123456)) && invalid(() => ImportHook.reject({})) && invalid(() => ImportError.other(1)) && ImportError.is(ImportHook.reject(ImportError.PermissionDenied).error, ImportError.PermissionDenied);
         \\  const ref = Object.freeze({});
-        \\  out.link = Import.link(ref).kind === 'link' && Import.link(ref).reference === ref && Import.link(ref).mode === undefined && invalid(() => Import.link(null)) && invalid(() => Import.link());
+        \\  out.link = ImportHook.link(ref).kind === 'link' && ImportHook.link(ref).reference === ref && ImportHook.link(ref).mode === undefined && invalid(() => ImportHook.link(null)) && invalid(() => ImportHook.link());
         \\  // transformers by extension
         \\  const byExt = Transform.byExtension({ '.ts': js, '.d.ts': js });
         \\  out.byExt = byExt.entries.length === 2 && byExt.native === false && Transform.byExtension({}).native === true
@@ -873,9 +874,9 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\    && invalid(() => Transform.byExtension({ '.a..b': js })) && invalid(() => Transform.byExtension({ '.ts': 1 })) && invalid(() => Transform.byExtension(null));
         \\  // providers
         \\  const std = origineProvider({ std: { exclude: ['fs'] } });
-        \\  out.providers = std.std.exclude[0] === 'fs' && origineProvider({ std: { include: ['text', 'text'] } }).std.include.length === 1 && fsProvider({ read: 'mmap' }).read === 'mmap'
-        \\    && json().kind === 'provider' && invalid(() => origineProvider({ std: {} })) && invalid(() => origineProvider({ std: { include: [], exclude: [] } }))
-        \\    && invalid(() => origineProvider({ std: { include: ['origine:@std/text'] } })) && origineProvider({}).std.all === true && origineProvider().std.all === true && origineProvider({ std: true }).std.all === true && invalid(() => origineProvider({ std: false })) && invalid(() => fsProvider({})) && invalid(() => fsProvider({ read: 'map' }));
+        \\  out.providers = std.std.exclude[0] === 'fs' && origineProvider({ std: { include: ['text', 'text'] } }).std.include.length === 1 && fsProvider({ fs: src, read: 'mmap' }).read === 'mmap'
+        \\    && json({ fs: src }).kind === 'provider' && invalid(() => origineProvider({ std: {} })) && invalid(() => origineProvider({ std: { include: [], exclude: [] } }))
+        \\    && invalid(() => origineProvider({ std: { include: ['origine:@std/text'] } })) && origineProvider({}).std.all === true && origineProvider().std.all === true && origineProvider({ std: true }).std.all === true && invalid(() => origineProvider({ std: false })) && invalid(() => fsProvider({})) && invalid(() => fsProvider({ fs: src, read: 'map' }));
         \\  const hook = fromLoader(async (id, attributes) => id === 'a' ? 'export default 1' : id === 'b' ? { source: 'export default ' + attributes.type } : 42);
         \\  const a = await hook({ id: 'a', attributes: {} });
         \\  const b = await hook({ id: 'b', attributes: { type: 'json' } });
@@ -885,7 +886,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  out.caches = ImportCache.native({ retain: 'all' }).retain === 'all' && !('entries' in ImportCache.native({ retain: 'all' }))
         \\    && invalid(() => ImportCache.native({})) && invalid(() => ImportCache.native({ retain: 'some' })) && invalid(() => ImportCache.native({ retain: 'all', entries: 10 })) && invalid(() => ImportCache.native({ retain: 'used', entries: 0 }))
         \\    && ResolveCache.native({ entries: 8 }).entries === 8 && ResolveCache.native().host === 'resolveCache'
-        \\    && CodeCache.memory({ bytes: 1024 }).bytes === 1024 && CodeCache.dir(Object.freeze({ kind: 'async' })).fs.kind === 'async' && invalid(() => CodeCache.dir(null)) && invalid(() => CodeCache.memory({ bytes: -5 }));
+        \\    && CodeCache.memory({ limits: { size: 1024 } }).limits.size === 1024 && CodeCache.dir({ fs: src, path: 'c' }).path === 'c' && invalid(() => CodeCache.dir(null)) && invalid(() => CodeCache.dir({ fs: src })) && invalid(() => CodeCache.memory({ limits: { size: -5 } }));
         \\  const custom = CodeCache.custom({ load: () => undefined, store: () => {} });
         \\  out.custom = custom.kind === 'codeCache' && custom.native === false && invalid(() => CodeCache.custom({ load: () => {} })) && Object.isFrozen(CodeCache);
         \\}
@@ -911,10 +912,11 @@ test "graph: a native handler reads, links and evaluates modules without enterin
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }) });
-        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const graph = api.graph.create();
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ fs: src, read: 'copy' })] });
         \\  out.native = handler.native;
-        \\  const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
+        \\  const recipe = ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: handler });
         \\  const ref = graph.declare(recipe);
         \\  out.declared = ref.status + ':' + graph.requests(ref);
         \\  await graph.load(ref);
@@ -963,34 +965,34 @@ test "graph: a reference is an inert ticket; the graph that declared it loads, r
         \\  const name = f => { try { const r = f(); return r instanceof Promise ? r.then(() => 'ok', e => e.name) : 'ok'; } catch (e) { return e.name; } };
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
         \\  const recipe = ModuleRecipe({ source: ModuleSource.text('export const n = 1;'), import: handler, name: 'm.js' });
-        \\  const ref = api.graph.declare(recipe);
+        \\  const ref = api.graph.root.declare(recipe);
         \\  // A reference can do nothing and has no dispose: the methods are gone, with no alias.
         \\  out.inert = ['load', 'evaluate', 'exports', 'release', 'requests', Symbol.dispose].every(key => ref[key] === undefined);
         \\  out.views = ref.name + ':' + ref.status + ':' + ref.context;
         \\  out.frozen = Object.isFrozen(ref);
-        \\  out.notRecipe = [await name(() => api.graph.declare({})), await name(() => api.graph.declare(ref)), await name(() => api.graph.declare(undefined))].join(',');
-        \\  out.notRef = [await name(() => api.graph.load({})), await name(() => api.graph.exports({ name: 'm.js' })), await name(() => api.graph.release(recipe))].join(',');
+        \\  out.notRecipe = [await name(() => api.graph.root.declare({})), await name(() => api.graph.root.declare(ref)), await name(() => api.graph.root.declare(undefined))].join(',');
+        \\  out.notRef = [await name(() => api.graph.root.load({})), await name(() => api.graph.root.exports({ name: 'm.js' })), await name(() => api.graph.root.release(recipe))].join(',');
         \\  // A reference belongs to one graph: a derived graph cannot use its parent's, nor the parent the derived's.
-        \\  const derived = api.graph.derive({});
-        \\  const ctx = await api.context.create({ import: handler, graph: api.graph });
+        \\  const derived = api.graph.create();
+        \\  const ctx = await api.context.create({ import: handler, graph: api.graph.root });
         \\  const dctx = await api.context.create({ import: handler, graph: derived });
         \\  out.derivedRef = [await name(() => derived.load(ref)), await name(() => derived.requests(ref)), await name(() => derived.evaluate(ref, dctx)), await name(() => derived.exports(ref)), await name(() => derived.release(ref))].join(',');
         \\  const mine = derived.declare(recipe);
-        \\  out.parentRef = [await name(() => api.graph.load(mine)), await name(() => api.graph.evaluate(mine, ctx))].join(',');
+        \\  out.parentRef = [await name(() => api.graph.root.load(mine)), await name(() => api.graph.root.evaluate(mine, ctx))].join(',');
         \\  // The context must be made with the same graph as the reference.
-        \\  out.wrongContext = [await name(() => api.graph.evaluate(ref, dctx)), await name(() => derived.evaluate(mine, ctx)), await name(() => api.graph.evaluate(ref, {})), await name(() => api.graph.evaluate(ref, undefined))].join(',');
+        \\  out.wrongContext = [await name(() => api.graph.root.evaluate(ref, dctx)), await name(() => derived.evaluate(mine, ctx)), await name(() => api.graph.root.evaluate(ref, {})), await name(() => api.graph.root.evaluate(ref, undefined))].join(',');
         \\  out.stillDeclared = ref.status + ':' + mine.status;
-        \\  await api.graph.evaluate(ref, ctx);
+        \\  await api.graph.root.evaluate(ref, ctx);
         \\  await derived.evaluate(mine, dctx);
-        \\  out.exports = api.graph.exports(ref).n + ':' + derived.exports(mine).n;
-        \\  out.requests = api.graph.requests(ref) === undefined;
+        \\  out.exports = api.graph.root.exports(ref).n + ':' + derived.exports(mine).n;
+        \\  out.requests = api.graph.root.requests(ref) === undefined;
         \\  // Closing a derived graph makes its references stale; the parent's are untouched.
         \\  const loaded = derived.declare(recipe);
         \\  derived.close();
         \\  out.stale = [await name(() => derived.load(loaded)), await name(() => derived.evaluate(loaded, dctx)), await name(() => derived.exports(mine)), await name(() => derived.release(mine)), await name(() => derived.declare(recipe))].join(',');
-        \\  out.parentFine = await name(() => api.graph.exports(ref));
-        \\  api.graph.release(ref);
-        \\  out.released = [await name(() => api.graph.load(ref)), await name(() => api.graph.exports(ref))].join(',');
+        \\  out.parentFine = await name(() => api.graph.root.exports(ref));
+        \\  api.graph.root.release(ref);
+        \\  out.released = [await name(() => api.graph.root.load(ref)), await name(() => api.graph.root.exports(ref))].join(',');
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -1040,7 +1042,7 @@ test "errors: a failed import is a ModuleError with the kind of its cause, the m
     try fx.setup(
         \\import { ModuleError, OrigineError } from 'origine:@std/errors';
         \\import { ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import, ImportError } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook, ImportError } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { importMap } from 'origine:@std/graph/resolve/layers';
         \\export async function main(api) {
@@ -1048,13 +1050,13 @@ test "errors: a failed import is a ModuleError with the kind of its cause, the m
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(importMap({ imports: { secret: 'app:/secret.js', boom: 'app:/boom.js', top: 'app:/top.js' } })),
         \\    hooks: [async resolved => {
-        \\      if (resolved.id === 'app:/secret.js') return Import.reject(ImportError.PermissionDenied);
-        \\      if (resolved.id === 'app:/boom.js') return Import.source(ModuleSource.text('throw new Error("boom")'));
-        \\      if (resolved.id === 'app:/top.js') return Import.source(ModuleSource.text("import 'secret'"));
-        \\      return Import.next();
+        \\      if (resolved.id === 'app:/secret.js') return ImportHook.reject(ImportError.PermissionDenied);
+        \\      if (resolved.id === 'app:/boom.js') return ImportHook.source(ModuleSource.text('throw new Error("boom")'));
+        \\      if (resolved.id === 'app:/top.js') return ImportHook.source(ModuleSource.text("import 'secret'"));
+        \\      return ImportHook.next();
         \\    }],
         \\  });
-        \\  const ctx = await api.context.create({ import: handler, graph: api.graph });
+        \\  const ctx = await api.context.create({ import: handler, graph: api.graph.root });
         \\  const seen = {};
         \\  for (const specifier of ['secret', 'boom', 'nowhere', 'top']) {
         \\    seen[specifier] = await ctx.import(specifier).then(() => 'no', e => ({
@@ -1087,13 +1089,14 @@ test "graph: JS layers, hooks, makers and transformers run in the creating realm
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import, ImportError, MakeRecipe } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook, ImportError, MakeRecipe } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative, importMap } from 'origine:@std/graph/resolve/layers';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const calls = [];
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered()
@@ -1102,20 +1105,20 @@ test "graph: JS layers, hooks, makers and transformers run in the creating realm
         \\      .layer(relative()),
         \\    hooks: [
         \\      async resolved => {
-        \\        if (resolved.id === 'mem:secret') return Import.reject(ImportError.PermissionDenied);
-        \\        if (resolved.id === 'mem:gone') return Import.reject(ImportError.other('gone for good'));
-        \\        if (resolved.id === 'app:/value.js') return Import.source(ModuleSource.text('export const value = 40;'));
-        \\        if (resolved.id === 'mem:ts') return Import.source(ModuleSource.text('export const t = 1;').withTransformer(async s => s + ' export const u = 2;'));
-        \\        if (resolved.id === 'mem:recipe') return Import.recipe(ModuleRecipe({ source: ModuleSource.text('export const r = "recipe"; export const where = import.meta.url;'), import: leaf, name: 'mem:recipe' }));
-        \\        if (resolved.id === 'mem:accept') return Import.accept();
-        \\        return Import.next();
+        \\        if (resolved.id === 'mem:secret') return ImportHook.reject(ImportError.PermissionDenied);
+        \\        if (resolved.id === 'mem:gone') return ImportHook.reject(ImportError.other('gone for good'));
+        \\        if (resolved.id === 'app:/value.js') return ImportHook.source(ModuleSource.text('export const value = 40;'));
+        \\        if (resolved.id === 'mem:ts') return ImportHook.source(ModuleSource.text('export const t = 1;').withTransformer(async s => s + ' export const u = 2;'));
+        \\        if (resolved.id === 'mem:recipe') return ImportHook.recipe(ModuleRecipe({ source: ModuleSource.text('export const r = "recipe"; export const where = import.meta.url;'), import: leaf, name: 'mem:recipe' }));
+        \\        if (resolved.id === 'mem:accept') return ImportHook.accept({ fs: src });
+        \\        return ImportHook.next();
         \\      },
         \\    ],
         \\    maker: MakeRecipe.fn(({ id }) => ({ transformer: text => text + `\n/* made ${id} */` })),
         \\    meta: ({ id }) => ({ id, n: 7, nested: { ok: true } }),
         \\  });
         \\  out.mixed = handler.native === false;
-        \\  const graph = api.graph;
+        \\  const graph = api.graph.root;
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const text = (name, source) => graph.declare(ModuleRecipe({ source: ModuleSource.text(source), import: handler, name }));
         \\  await graph.evaluate(text('main', "import { value } from 'alias'; import { t, u } from 'mem:ts'; import { r, where } from 'mem:recipe'; globalThis.sum = value + t + u; globalThis.r = r + where; globalThis.here = import.meta.id + import.meta.n + import.meta.nested.ok;"), ctx);
@@ -1127,12 +1130,12 @@ test "graph: JS layers, hooks, makers and transformers run in the creating realm
         \\  const scratch = await api.context.create({ import: handler, graph });
         \\  out.failed = await ctx.import('mem:secret').then(() => 'no', e => e.name);
         \\}
-    , false, &.{});
+    , true, &.{});
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.mixed && report.calls");
     try check(fx.scope, "report.denied.includes('PermissionDenied') && report.other.includes('gone for good')");
-    try check(fx.scope, "report.accept.includes('PermissionDenied') && report.missing.includes('NotFound') && report.failed === 'ModuleError'");
+    try check(fx.scope, "report.accept.includes('NotFound') && report.missing.includes('NotFound') && report.failed === 'ModuleError'");
     try check(fx.rt.scopes.items[1], "sum === 43");
     try check(fx.rt.scopes.items[1], "r === 'recipemem:recipe'");
     try check(fx.rt.scopes.items[1], "here === 'main7true'");
@@ -1143,7 +1146,7 @@ test "graph: JS layers and hooks never run on the stack of a child's import()" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
@@ -1153,20 +1156,20 @@ test "graph: JS layers and hooks never run on the stack of a child's import()" {
         \\  const seen = [];
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => { seen.push('layer:' + marked); return { id: specifier }; }),
-        \\    hooks: [async r => { seen.push('hook:' + marked); return Import.source(ModuleSource.text('export const v = 1;')); }],
+        \\    hooks: [async r => { seen.push('hook:' + marked); return ImportHook.source(ModuleSource.text('export const v = 1;')); }],
         \\  });
-        \\  const ctx = await api.context.create({ graph: api.graph,
+        \\  const ctx = await api.context.create({ graph: api.graph.root,
         \\    import: handler,
         \\    preload: [{ source: '(values) => { globalThis.start = () => { values.mark(1); const p = import("dyn"); values.mark(0); return p; }; }', values: { mark: n => { marked = n; } } }],
         \\  });
-        \\  await api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text('await start(); globalThis.done = 1;'), import: handler, name: 'root' })), ctx);
+        \\  await api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text('await start(); globalThis.done = 1;'), import: handler, name: 'root' })), ctx);
         \\  out.seen = seen.join(',');
         \\  // A hook may create a context: it runs from the microtask checkpoint.
         \\  const maker = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => { const inner = await api.context.create({ graph: api.graph, import: handler }); inner.close(); return Import.source(ModuleSource.text('export const w = 2;')); }],
+        \\    hooks: [async r => { const inner = await api.context.create({ graph: api.graph.root, import: handler }); inner.close(); return ImportHook.source(ModuleSource.text('export const w = 2;')); }],
         \\  });
-        \\  const outer = await api.context.create({ graph: api.graph, import: maker });
+        \\  const outer = await api.context.create({ graph: api.graph.root, import: maker });
         \\  out.nested = await outer.import('x').then(r => r.status, e => e.name + ':' + e.message);
         \\}
     , false, &.{});
@@ -1181,33 +1184,33 @@ test "graph: a settled driver call is freed and a second evaluate waits for the 
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative } from 'origine:@std/graph/resolve/layers';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const js = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.source(ModuleSource.text(`export const id = '${r.id}';`))],
+        \\    hooks: [async r => ImportHook.source(ModuleSource.text(`export const id = '${r.id}';`))],
         \\  });
-        \\  const kept = await api.context.create({ graph: api.graph, import: js });
+        \\  const kept = await api.context.create({ graph: api.graph.root, import: js });
         \\  for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) await kept.import(id);
         \\  out.imports = kept.references.length;
         \\  // Two evaluate calls for one context: the second settles with the first, after the module ran.
         \\  let done = 0;
         \\  const plain = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
-        \\  const ctx = await api.context.create({ graph: api.graph, import: plain, preload: [{ source: '(values) => { globalThis.finish = values.finish; }', values: { finish: () => { done++; } } }] });
-        \\  const ref = api.graph.declare(ModuleRecipe({ source: ModuleSource.text('await Promise.resolve(); await Promise.resolve(); finish();'), import: plain, name: 'tla' }));
-        \\  const first = api.graph.evaluate(ref, ctx);
-        \\  const second = api.graph.evaluate(ref, ctx);
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: plain, preload: [{ source: '(values) => { globalThis.finish = values.finish; }', values: { finish: () => { done++; } } }] });
+        \\  const ref = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text('await Promise.resolve(); await Promise.resolve(); finish();'), import: plain, name: 'tla' }));
+        \\  const first = api.graph.root.evaluate(ref, ctx);
+        \\  const second = api.graph.root.evaluate(ref, ctx);
         \\  out.same = first === second;
         \\  await second;
         \\  out.afterSecond = done;
         \\  await first;
         \\  out.runs = done;
         \\  // A failure reaches both callers, and the reference can be tried again.
-        \\  const bad = api.graph.declare(ModuleRecipe({ source: ModuleSource.text('await Promise.resolve(); throw new Error("boom");'), import: plain, name: 'bad' }));
-        \\  const failures = await Promise.all([api.graph.evaluate(bad, ctx).then(() => 'ok', e => e.name), api.graph.evaluate(bad, ctx).then(() => 'ok', e => e.name)]);
+        \\  const bad = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text('await Promise.resolve(); throw new Error("boom");'), import: plain, name: 'bad' }));
+        \\  const failures = await Promise.all([api.graph.root.evaluate(bad, ctx).then(() => 'ok', e => e.name), api.graph.root.evaluate(bad, ctx).then(() => 'ok', e => e.name)]);
         \\  out.failures = failures.join(',') + ':' + bad.status;
         \\}
     , false, &.{});
@@ -1222,26 +1225,27 @@ test "graph: a handler with functions in it runs its host elements natively and 
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import, MakeRecipe, Transform } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook, MakeRecipe, Transform } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative } from 'origine:@std/graph/resolve/layers';
         \\import { fsProvider } from 'origine:@std/graph/providers';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }) });
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const graph = api.graph.create();
         \\  const calls = [];
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(relative()).layer(({ specifier }) => { calls.push('layer:' + specifier); return specifier === 'virtual' ? { id: 'virtual' } : undefined; }),
         \\    hooks: [
-        \\      async r => { calls.push('hook:' + r.id); return r.id === 'virtual' ? Import.source(ModuleSource.text('export const v = 5;')) : Import.next(); },
-        \\      fsProvider({ read: 'copy' }),
+        \\      async r => { calls.push('hook:' + r.id); return r.id === 'virtual' ? ImportHook.source(ModuleSource.text('export const v = 5;')) : ImportHook.next(); },
+        \\      fsProvider({ fs: src, read: 'copy' }),
         \\    ],
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.txt': async text => { calls.push('transform'); return text + ' export const t = 1;'; } }) }),
         \\  });
         \\  out.plan = handler.plan.map(e => e.stage + ':' + e.kind).join(',');
         \\  const ctx = await api.context.create({ import: handler, graph });
-        \\  await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler })), ctx);
+        \\  await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: handler })), ctx);
         \\  out.calls = calls.sort().join(',');
         \\}
     , true, &.{});
@@ -1263,7 +1267,7 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { origine } from 'origine:@std/graph/resolve/layers';
         \\import { origineProvider } from 'origine:@std/graph/providers';
@@ -1272,12 +1276,12 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
         \\  const out = globalThis.report = {};
         \\  const make = hooks => ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()), hooks });
         \\  const text = origineProvider({ std: { include: ['text'] } });
-        \\  const forging = make([async resolved => (resolved.id === 'origine:evil' || resolved.id === 'origine:@std/text' ? Import.source(ModuleSource.text('export const encodeUtf8 = () => ({ length: 99 }); export const x = 1;')) : Import.next())]);
+        \\  const forging = make([async resolved => (resolved.id === 'origine:evil' || resolved.id === 'origine:@std/text' ? ImportHook.source(ModuleSource.text('export const encodeUtf8 = () => ({ length: 99 }); export const x = 1;')) : ImportHook.next())]);
         \\  const handler = make([text]);
         \\  out.native = handler.native;
         \\  const run = async (h, name, source) => {
-        \\    const ctx = await api.context.create({ graph: api.graph, import: h });
-        \\    return api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(source), import: h, name })), ctx).then(() => 'ok', e => e.message);
+        \\    const ctx = await api.context.create({ graph: api.graph.root, import: h });
+        \\    return api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(source), import: h, name })), ctx).then(() => 'ok', e => e.message);
         \\  };
         \\  out.served = await run(handler, 'a', "import { encodeUtf8 } from 'origine:@std/text'; globalThis.len = encodeUtf8('héllo').length;");
         \\  out.excluded = await run(handler, 'b', "import 'origine:@std/fs'");
@@ -1289,7 +1293,7 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
         \\  const all = make([origineProvider({ std: { exclude: ['fs'] } })]);
         \\  out.excludeServed = await run(all, 'f', "import { eprintln } from 'origine:@std/debug'; globalThis.debugOk = typeof eprintln;");
         \\  out.excludeDenied = await run(all, 'g', "import 'origine:@std/fs'");
-        \\  const bad = await api.context.create({ graph: api.graph, import: handler }).then(() => 'ok');
+        \\  const bad = await api.context.create({ graph: api.graph.root, import: handler }).then(() => 'ok');
         \\  out.bad = bad;
         \\  out.empty = await run(make([]), 'h', "import 'origine:@std/text'");
         \\  // No options, or std: true, serves every origine:@std/* the creating context has.
@@ -1332,7 +1336,7 @@ test "graph: the origine ceiling of a context is the exact union of its hooks" {
         \\    make(true),                                                      // everything the creator has
         \\    make(undefined, { include: ['text'] }),                          // the same, plus text
         \\  ];
-        \\  for (const handler of contexts) await api.context.create({ graph: api.graph, import: handler });
+        \\  for (const handler of contexts) await api.context.create({ graph: api.graph.root, import: handler });
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -1369,17 +1373,17 @@ test "api: context.create needs a graph the host made: missing, forged and close
         \\export async function main(api) {
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })), hooks: [] });
         \\  const attempt = async options => api.context.create({ import: handler, ...options }).then(ctx => { ctx.close(); return 'ok'; }, e => e.name + ':' + e.message);
-        \\  const closed = api.graph.derive();
+        \\  const closed = api.graph.create();
         \\  closed.close();
         \\  globalThis.report = {
         \\    missing: await attempt({}),
         \\    undefinedGraph: await attempt({ graph: undefined }),
         \\    forged: await attempt({ graph: {} }),
-        \\    lookalike: await attempt({ graph: { ...api.graph, id: 1 } }),
+        \\    lookalike: await attempt({ graph: { ...api.graph.root, id: 1 } }),
         \\    notAnObject: await attempt({ graph: 'api.graph' }),
         \\    closed: await attempt({ graph: closed }),
-        \\    root: await attempt({ graph: api.graph }),
-        \\    derived: await attempt({ graph: api.graph.derive() }),
+        \\    root: await attempt({ graph: api.graph.root }),
+        \\    derived: await attempt({ graph: api.graph.create() }),
         \\  };
         \\}
     , false, &.{});
@@ -1399,9 +1403,9 @@ test "graph: an origineProvider with no std serves what its creator has and cann
         \\export async function main(api) {
         \\  const make = std => ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()), hooks: [origineProvider({ std })] });
         \\  // A context that may import only text and io.
-        \\  await api.context.create({ graph: api.graph, import: make({ include: ['text', 'io'] }) });
+        \\  await api.context.create({ graph: api.graph.root, import: make({ include: ['text', 'io'] }) });
         \\  // One that may import everything but fs.
-        \\  await api.context.create({ graph: api.graph, import: make({ exclude: ['fs'] }) });
+        \\  await api.context.create({ graph: api.graph.root, import: make({ exclude: ['fs'] }) });
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -1439,8 +1443,9 @@ test "graph: a file of the graph never serves an origine: id, not even as json" 
         \\import { fsProvider, json } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }) });
-        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()).layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const graph = api.graph.create();
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()).layer(relative()), hooks: [json({ fs: src }), fsProvider({ fs: src, read: 'copy' })] });
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const run = (name, text) => graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
         \\  out.json = await run('a', "import d from 'origine:@std/text' with { type: 'json' }; globalThis.d = d;");
@@ -1458,17 +1463,32 @@ test "graph: a file of the graph never serves an origine: id, not even as json" 
     try check(fx.rt.scopes.items[1], "typeof d === 'undefined' && k === 7");
 }
 
-test "graph: only a grant that api.fs made can be the authority of a graph" {
+test "graph: only a grant that api.fs made can be named by a hook, a source or a code cache" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { CodeCache } from 'origine:@std/graph/cache';
+        \\import { ImportHandler } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { relative } from 'origine:@std/graph/resolve/layers';
+        \\import { fsProvider, json } from 'origine:@std/graph/providers';
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create({});
         \\  const real = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const remote = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
-        \\  const name = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
+        \\  const resolver = ImportResolver.layered().layer(relative());
+        \\  const name = async f => { try { await f(); return 'ok'; } catch (e) { return e.name; } };
+        \\  // The grant is checked when a context takes the handler (the hook), or when a source is read.
+        \\  const hooked = fs => name(async () => (await api.context.create({ import: ImportHandler.make({ resolver, hooks: [fsProvider({ fs, read: 'copy' })] }), graph: api.graph.root })).close());
+        \\  const jsoned = fs => name(async () => (await api.context.create({ import: ImportHandler.make({ resolver, hooks: [json({ fs })] }), graph: api.graph.root })).close());
+        \\  const cached = fs => name(async () => (await api.context.create({ import: ImportHandler.make({ resolver, hooks: [], codeCache: CodeCache.dir({ fs, path: 'c' }) }), graph: api.graph.root })).close());
+        \\  const sourced = fs => name(async () => {
+        \\    const handler = ImportHandler.make({ resolver, hooks: [] });
+        \\    const ref = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs }), import: handler }));
+        \\    await api.graph.root.load(ref);
+        \\  });
         \\  // Every way a script can copy a grant: the copy has all of its properties and is not a grant, because
         \\  // the host's secret on the real object cannot be read, copied, cloned, spread, proxied or inherited.
         \\  const copies = grant => [
@@ -1482,30 +1502,33 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
         \\    new Proxy(grant, {}),
         \\    new Proxy(grant, { getOwnPropertyDescriptor: (target, key) => Reflect.getOwnPropertyDescriptor(target, key), get: (target, key) => target[key] }),
         \\  ];
-        \\  out.forged = [...copies(real), ...copies(remote)].map(copy => name(() => api.graph.derive({ fs: copy })));
-        \\  out.forgedCache = copies(rw).map(copy => name(() => api.graph.derive({ codeCache: CodeCache.dir(copy) })));
-        \\  out.notObjects = [1, 'sync', () => {}, 0n].map(value => name(() => api.graph.derive({ fs: value })));
-        \\  // A real grant still works, across derive, as the graph's fs and as the cache's.
-        \\  out.real = name(() => api.graph.derive({ fs: real, codeCache: CodeCache.dir(rw) }));
-        \\  out.async = name(() => api.graph.derive({ fs: remote }));
-        \\  out.chained = name(() => api.graph.derive({ fs: real }).derive({ codeCache: CodeCache.memory() }).derive({ fs: remote }));
+        \\  out.forged = await Promise.all([...copies(real), ...copies(remote)].map(hooked));
+        \\  out.forgedJson = await Promise.all(copies(real).map(jsoned));
+        \\  out.forgedCache = await Promise.all(copies(rw).map(cached));
+        \\  out.forgedSource = await Promise.all(copies(real).map(sourced));
+        \\  out.notObjects = [1, 'sync', () => {}, 0n].map(value => { try { fsProvider({ fs: value, read: 'copy' }); return 'ok'; } catch (e) { return e.name; } });
+        \\  // A real grant still works in each place, sync or async.
+        \\  out.real = [await hooked(real), await jsoned(real), await cached(rw), await hooked(remote)];
         \\  // An async grant cannot be a cache directory (the cache is written with the host's own file calls).
-        \\  out.asyncCache = name(() => api.graph.derive({ codeCache: CodeCache.dir(remote) }));
+        \\  out.asyncCache = await cached(remote);
+        \\  // A grant without write access cannot be a cache directory either.
+        \\  out.readOnlyCache = await cached(real);
         \\  // Subclasses, prototypes and clones of a real grant are not grants either.
         \\  class Sub { constructor(grant) { return Object.defineProperties(Object.create(grant), { kind: { value: grant.kind }, id: { value: grant.id } }); } }
         \\  class Derived extends Object { constructor(grant) { super(); Object.defineProperties(this, Object.getOwnPropertyDescriptors(grant)); } }
         \\  const clone = grant => { try { return structuredClone(grant); } catch (e) { return { ...grant, cloneFailed: e.name }; } };
-        \\  out.exotic = [real, remote].flatMap(grant => [new Sub(grant), new Derived(grant), Object.setPrototypeOf({ kind: grant.kind, id: grant.id }, grant), clone(grant)]).map(copy => name(() => api.graph.derive({ fs: copy })));
-        \\  // Closing the io runtime ends the async grants opened on it: the host refuses them as an authority.
+        \\  out.exotic = await Promise.all([real, remote].flatMap(grant => [new Sub(grant), new Derived(grant), Object.setPrototypeOf({ kind: grant.kind, id: grant.id }, grant), clone(grant)]).map(hooked));
+        \\  // Closing the io runtime ends the async grants opened on it: the host refuses them.
         \\  await io.close();
-        \\  out.closedAsync = name(() => api.graph.derive({ fs: remote }));
-        \\  out.stillSync = name(() => api.graph.derive({ fs: real }));
+        \\  out.closedAsync = await hooked(remote);
+        \\  out.stillSync = await hooked(real);
         \\}
     , true, &.{});
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.forged.length === 18 && report.forged.every(n => n === 'InvalidInput') && report.forgedCache.every(n => n === 'InvalidInput')");
-    try check(fx.scope, "report.notObjects.every(n => n === 'InvalidInput') && report.real === 'ok' && report.async === 'ok' && report.chained === 'ok'");
+    try check(fx.scope, "report.forgedJson.every(n => n === 'InvalidInput') && report.forgedSource.every(n => n === 'InvalidInput')");
+    try check(fx.scope, "report.notObjects.every(n => n === 'InvalidInput') && report.real.every(n => n === 'ok') && report.asyncCache === 'InvalidInput' && report.readOnlyCache === 'PermissionDenied'");
     try check(fx.scope, "report.exotic.length === 8 && report.exotic.every(n => n === 'InvalidInput') && report.closedAsync === 'InvalidInput' && report.stillSync === 'ok'");
 }
 
@@ -1521,15 +1544,15 @@ test "graph: graph.exports(ref) is the live namespace of the context: no copy, e
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fromLoader(() => '')] });
-        \\  const make = (text, name) => api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }));
-        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
+        \\  const make = (text, name) => api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }));
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: handler });
         \\  const good = make("export let n = 41; export function inc() { n++; return n; } export const obj = { tag: 'a', list: [1] }; export const getTag = () => obj.tag; export const m = new Map([[1, 2]]); export const t = new Uint8Array(2); export const g = { get x() { return 7; } }; export class Box { static kind = 'box'; } export default 5;", 'good.js');
         \\  const code = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
-        \\  out.before = code(() => api.graph.exports(good));
-        \\  await api.graph.evaluate(good, ctx);
-        \\  const ns = api.graph.exports(good);
+        \\  out.before = code(() => api.graph.root.exports(good));
+        \\  await api.graph.root.evaluate(good, ctx);
+        \\  const ns = api.graph.root.exports(good);
         \\  // The namespace of the context itself: the same object each call, no prototype of this realm.
-        \\  out.same = ns === api.graph.exports(good) && Object.keys(ns).join(',') === 'Box,default,g,getTag,inc,m,n,obj,t';
+        \\  out.same = ns === api.graph.root.exports(good) && Object.keys(ns).join(',') === 'Box,default,g,getTag,inc,m,n,obj,t';
         \\  // Bindings are live: the module changes `n`, and the namespace shows it.
         \\  out.live = ns.n + ',' + ns.inc() + ',' + ns.n;
         \\  // Nothing is copied or frozen: the objects are the context's own, in another realm, and stay writable.
@@ -1540,9 +1563,9 @@ test "graph: graph.exports(ref) is the live namespace of the context: no copy, e
         \\  out.types = [ns.m.get(1), ns.t.length, ns.g.x, ns.Box.kind, ns.default].join(',');
         \\  out.map = Object.prototype.toString.call(ns.m) + ':' + (ns.m instanceof Map);
         \\  // A reference that is not evaluated has no namespace; neither has one of a closed context.
-        \\  out.declared = code(() => api.graph.exports(make('export {}', 'd.js')));
+        \\  out.declared = code(() => api.graph.root.exports(make('export {}', 'd.js')));
         \\  ctx.close();
-        \\  out.closed = code(() => api.graph.exports(good));
+        \\  out.closed = code(() => api.graph.root.exports(good));
         \\}
     , false, &.{});
     defer fx.deinit();
@@ -1569,25 +1592,25 @@ test "graph: load() goes one level at a time, through dependency references, thr
         \\    'e.js': "import './b.js'; export const e = 4;",
         \\  };
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fromLoader(id => sources[id])] });
-        \\  const root = api.graph.declare(ModuleRecipe({ source: ModuleSource.text("import './b.js'; export const a = 0;"), import: handler, name: 'a.js' }));
-        \\  await api.graph.load(root);
-        \\  const names = ref => api.graph.requests(ref).map(r => r.reference.name + '/' + r.reference.status).join(',');
+        \\  const root = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text("import './b.js'; export const a = 0;"), import: handler, name: 'a.js' }));
+        \\  await api.graph.root.load(root);
+        \\  const names = ref => api.graph.root.requests(ref).map(r => r.reference.name + '/' + r.reference.status).join(',');
         \\  out.level1 = names(root);
-        \\  const b = api.graph.requests(root)[0].reference;
-        \\  out.beforeB = api.graph.requests(b) === undefined;
+        \\  const b = api.graph.root.requests(root)[0].reference;
+        \\  out.beforeB = api.graph.root.requests(b) === undefined;
         \\  // A dependency loads the same way, and a second call (also one that overlaps the first) shares it.
-        \\  await Promise.all([api.graph.load(b), api.graph.load(b)]);
+        \\  await Promise.all([api.graph.root.load(b), api.graph.root.load(b)]);
         \\  out.level2 = names(b);
-        \\  const c = api.graph.requests(b)[0].reference;
-        \\  await api.graph.load(c);
+        \\  const c = api.graph.root.requests(b)[0].reference;
+        \\  await api.graph.root.load(c);
         \\  out.level3 = names(c);
-        \\  const e = api.graph.requests(c)[1].reference;
-        \\  await api.graph.load(e);
+        \\  const e = api.graph.root.requests(c)[1].reference;
+        \\  await api.graph.root.load(e);
         \\  out.level4 = names(e);
         \\  // d imports nothing; loading it twice changes nothing.
-        \\  const d = api.graph.requests(c)[0].reference;
-        \\  await api.graph.load(d);
-        \\  await api.graph.load(d);
+        \\  const d = api.graph.root.requests(c)[0].reference;
+        \\  await api.graph.root.load(d);
+        \\  await api.graph.root.load(d);
         \\  out.leaf = names(d) === '' && d.status === 'loaded';
         \\  out.status = [root, b, c, e].map(ref => ref.status).join(',');
         \\}
@@ -1598,50 +1621,11 @@ test "graph: load() goes one level at a time, through dependency references, thr
     try check(fx.scope, "report.leaf && report.status === 'loaded,loaded,loaded,loaded'");
 }
 
-test "graph: a source larger than the graph's limit fails the import, never cut short, for sync and async grants" {
-    var fx: Fixture = undefined;
-    try fx.setup(
-        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler } from 'origine:@std/graph/import';
-        \\import { ImportResolver } from 'origine:@std/graph/resolve';
-        \\import { relative } from 'origine:@std/graph/resolve/layers';
-        \\import { fsProvider } from 'origine:@std/graph/providers';
-        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
-        \\async function body(api) {
-        \\  const out = globalThis.report = {};
-        \\  const io = api.io.create({});
-        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
-        \\  out.root = api.graph.sourceBytes;
-        \\  let counter = 0;
-        \\  const tryImport = async graph => {
-        \\    const ctx = await api.context.create({ import: handler, graph });
-        \\    const run = specifier => graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text('import ' + JSON.stringify(specifier) + ';'), import: handler, name: 'entry' + (counter++) + '.js' })), ctx).then(() => 'ok', e => e.message);
-        \\    const answers = [await run('./fits.js'), await run('./big.js')];
-        \\    ctx.close();
-        \\    return answers;
-        \\  };
-        \\  const sync = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }), sourceBytes: 40 });
-        \\  out.syncLimit = sync.sourceBytes;
-        \\  out.sync = await tryImport(sync);
-        \\  out.async = await tryImport(api.graph.derive({ fs: await api.fs.requestAsync({ handle: 'plain', io, access: 'r' }), sourceBytes: 40 }));
-        \\  out.bad = [0, 1.5, -1, '9'].map(n => { try { api.graph.derive({ sourceBytes: n }); return 'ok'; } catch (e) { return e.name; } }).join(',');
-        \\  await io.close();
-        \\}
-    , true, &.{});
-    defer fx.deinit();
-    // 40 bytes exactly fits; one more does not.
-    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "fits.js", .data = "export const k = 1; //xxxxxxxxxxxxxxxxxx" });
-    try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "big.js", .data = "export const k = 1; //xxxxxxxxxxxxxxxxxxx" });
-    try fx.run();
-    try check(fx.scope, "report.root === 67108864 && report.syncLimit === 40 && report.bad === 'InvalidInput,InvalidInput,InvalidInput,InvalidInput'");
-    try check(fx.scope, "report.sync[0] === 'ok' && report.sync[1].includes('FileTooLarge') && report.async[0] === 'ok' && report.async[1].includes('FileTooLarge')");
-}
-
 test "graph: an async fs grant serves source files on its io runtime without entering JS" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative } from 'origine:@std/graph/resolve/layers';
         \\import { fsProvider, json } from 'origine:@std/graph/providers';
@@ -1649,12 +1633,12 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create({});
-        \\  const ro = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
-        \\  const graph = api.graph.derive({ fs: ro });
-        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
+        \\  const src = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
+        \\  const graph = api.graph.create();
+        \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json({ fs: src }), fsProvider({ fs: src, read: 'copy' })] });
         \\  out.native = handler.native;
         \\  const ctx = await api.context.create({ import: handler, graph });
-        \\  const main = graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler }));
+        \\  const main = graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: handler }));
         \\  await graph.load(main);
         \\  out.requests = graph.requests(main).map(r => r.specifier + '=' + r.reference.name + '/' + r.reference.status).join(',');
         \\  await graph.evaluate(main, ctx);
@@ -1662,15 +1646,13 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  out.imported = (await ctx.import('./dep.js')).status;
         \\  const run = async (g, c, text, name) => g.evaluate(g.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), c).then(() => 'ok', e => e.message);
         \\  out.missing = await run(graph, ctx, "import './nope.js'", 'm1');
-        \\  out.codecache = await run(graph, ctx, "import './__codecache__/x.js'", 'm2');
         \\  const wo = await api.fs.requestAsync({ handle: 'plain', io, access: 'w' });
-        \\  const writeOnly = api.graph.derive({ fs: wo });
         \\  // Its own handler: one that shared the cache of `handler` would take dep.js from `ctx`, which read it with more authority.
-        \\  const narrower = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
-        \\  const wctx = await api.context.create({ import: narrower, graph: writeOnly });
-        \\  out.writeOnly = await writeOnly.evaluate(writeOnly.declare(ModuleRecipe({ source: ModuleSource.text("import './dep.js'"), import: narrower, name: 'm3' })), wctx).then(() => 'ok', e => e.message);
+        \\  const narrower = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json({ fs: wo }), fsProvider({ fs: wo, read: 'copy' })] });
+        \\  const wctx = await api.context.create({ import: narrower, graph });
+        \\  out.writeOnly = await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text("import './dep.js'"), import: narrower, name: 'm3' })), wctx).then(() => 'ok', e => e.message);
         \\  out.accept = await (async () => {
-        \\    const accepting = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [async () => Import.accept()] });
+        \\    const accepting = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [async () => ImportHook.accept({ fs: src })] });
         \\    const actx = await api.context.create({ import: accepting, graph });
         \\    return graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text("import { k } from './dep.js'; globalThis.k2 = k;"), import: accepting, name: 'm4' })), actx).then(() => 'ok', e => e.message);
         \\  })();
@@ -1684,50 +1666,41 @@ test "graph: an async fs grant serves source files on its io runtime without ent
     try fx.run();
     try check(fx.scope, "report.native === true && report.status === 'evaluated' && report.imported === 'evaluated'");
     try check(fx.scope, "report.requests === './dep.js=dep.js/declared,./data.json=data.json/declared'");
-    try check(fx.scope, "report.missing.includes('NotFound') && report.codecache.includes('PermissionDenied') && report.writeOnly.includes('PermissionDenied')");
+    try check(fx.scope, "report.missing.includes('NotFound') && report.writeOnly.includes('PermissionDenied')");
     try check(fx.scope, "report.accept === 'ok'");
     try check(fx.rt.scopes.items[1], "answer === 42");
     // The native handler and the accept hook's own read: only the JS hook (accept) entered the driver.
     try t.expectEqual(@as(usize, 1), fx.host.driver_calls);
-    // The graphs read through the async grant's natives, not through a sync grant.
-    var async_graphs: usize = 0;
-    for (fx.host.graphs.values()) |graph| {
-        if (graph.async_fs != null) {
-            async_graphs += 1;
-            try t.expect(graph.fs == null);
-        }
-    }
-    try t.expect(async_graphs >= 2);
 }
 
 test "graph: link makes a context use the module of another context itself: live bindings, same objects" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph;
+        \\  const graph = api.graph.root;
         \\  const layer = ({ specifier }) => (specifier.startsWith('link:') ? { id: specifier } : undefined);
         \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
-        \\  const a = await api.context.create({ graph: api.graph, import: leaf });
+        \\  const a = await api.context.create({ graph: api.graph.root, import: leaf });
         \\  const source = graph.declare(ModuleRecipe({ source: ModuleSource.text('export let n = 1; export function inc() { n++; } export const obj = { tag: "a" };'), import: leaf, name: 'a-mod' }));
-        \\  out.unbound = await (async () => { try { Import.link(source); return 'made'; } catch (e) { return e.name; } })();
+        \\  out.unbound = await (async () => { try { ImportHook.link(source); return 'made'; } catch (e) { return e.name; } })();
         \\  await graph.evaluate(source, a);
         \\  const linker = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(layer),
-        \\    hooks: [async r => (r.id === 'link:shared' ? Import.link(source) : Import.next())],
+        \\    hooks: [async r => (r.id === 'link:shared' ? ImportHook.link(source) : ImportHook.next())],
         \\  });
-        \\  const b = await api.context.create({ graph: api.graph, import: linker });
+        \\  const b = await api.context.create({ graph: api.graph.root, import: linker });
         \\  const run = (name, text) => graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name })), b).then(() => 'ok', e => e.message);
         \\  out.shared = await run('s', "import { n, inc, obj } from 'link:shared'; inc(); obj.tag = 'b'; globalThis.shared = [n, obj.tag, Object.isFrozen(obj), Object.isFrozen(inc), obj.constructor === Object];");
         \\  // The exporter sees what the importer did: the same objects, nothing copied.
-        \\  out.seen = api.graph.exports(source).obj.tag + ',' + api.graph.exports(source).n;
+        \\  out.seen = api.graph.root.exports(source).obj.tag + ',' + api.graph.root.exports(source).n;
         \\  const stale = graph.declare(ModuleRecipe({ source: ModuleSource.text('export const z = 1;'), import: leaf, name: 'declared-only' }));
-        \\  const unbound = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [async () => Import.link(stale)] });
-        \\  const c = await api.context.create({ graph: api.graph, import: unbound });
+        \\  const unbound = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [async () => ImportHook.link(stale)] });
+        \\  const c = await api.context.create({ graph: api.graph.root, import: unbound });
         \\  out.notBound = await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text("import 'link:x'"), import: unbound, name: 'u' })), c).then(() => 'ok', e => e.message);
         \\}
     , false, &.{});
@@ -1737,30 +1710,30 @@ test "graph: link makes a context use the module of another context itself: live
     try check(fx.rt.scopes.items[2], "shared[0] === 2 && shared[1] === 'b' && shared[2] === false && shared[3] === false && shared[4] === false");
 }
 
-test "graph: Import.exports gives the importer a synthetic module of the values, shared as they are" {
+test "graph: ImportHook.exports gives the importer a synthetic module of the values, shared as they are" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const code = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
         \\  // The verdict: a snapshot of own data properties; accessors and non-objects are InvalidInput when it is built.
-        \\  const verdict = Import.exports({ a: 1 });
+        \\  const verdict = ImportHook.exports({ a: 1 });
         \\  out.verdict = verdict.kind === 'exports' && verdict.values.a === 1 && Object.isFrozen(verdict.values);
-        \\  out.invalid = [code(() => Import.exports({ get x() { return 1; } })), code(() => Import.exports(null)), code(() => Import.exports(() => {})), code(() => Import.exports(1))].join(',');
+        \\  out.invalid = [code(() => ImportHook.exports({ get x() { return 1; } })), code(() => ImportHook.exports(null)), code(() => ImportHook.exports(() => {})), code(() => ImportHook.exports(1))].join(',');
         \\  const shared = { tag: 'a', list: [1] };
         \\  let pinned = 0;
         \\  const values = { answer: 42, shared, bump: () => ++pinned, default: () => 'dflt', 'odd name': 7 };
         \\  const layer = ({ specifier }) => (specifier.startsWith('values:') || specifier.startsWith('origine:') ? { id: specifier } : undefined);
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(layer),
-        \\    hooks: [async r => (r.id === 'values:x' ? Import.exports(values) : r.id === 'origine:evil' ? Import.exports({ x: 1 }) : Import.next())],
+        \\    hooks: [async r => (r.id === 'values:x' ? ImportHook.exports(values) : r.id === 'origine:evil' ? ImportHook.exports({ x: 1 }) : ImportHook.next())],
         \\  });
-        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
-        \\  const run = (name, text) => api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: handler });
+        \\  const run = (name, text) => api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
         \\  out.ok = await run('m', "import dflt, { answer, shared, bump, 'odd name' as odd } from 'values:x'; import * as ns from 'values:x'; globalThis.got = [answer, dflt(), bump(), odd, Object.keys(ns).sort().join('|'), Object.isFrozen(shared), shared.constructor === Object, Object.isFrozen(bump)]; globalThis.sharedInside = shared;");
         \\  // Nothing was copied or frozen: the importer holds the caller's own objects.
         \\  shared.tag = 'z';
@@ -1823,10 +1796,10 @@ test "data: snapshot copies plain data, deepFreeze freezes in place, and they co
         \\  out.ownerFails = code(() => { owned.n = 2; });
         \\  // Composed with the live namespace of another context: data is copied, a function is refused.
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
-        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
-        \\  const ref = api.graph.declare(ModuleRecipe({ source: ModuleSource.text('export const data = { n: 1, list: [1, 2] }; export const bump = () => 1;'), import: handler, name: 'a.js' }));
-        \\  await api.graph.evaluate(ref, ctx);
-        \\  const ns = api.graph.exports(ref);
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: handler });
+        \\  const ref = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text('export const data = { n: 1, list: [1, 2] }; export const bump = () => 1;'), import: handler, name: 'a.js' }));
+        \\  await api.graph.root.evaluate(ref, ctx);
+        \\  const ns = api.graph.root.exports(ref);
         \\  const data = snapshot(ns.data, { deepFreeze: true });
         \\  out.composed = data.n === 1 && data.list.length === 2 && data.constructor === Object && Object.isFrozen(data) && ns.data.constructor !== Object && !Object.isFrozen(ns.data);
         \\  out.nsFn = code(() => snapshot(ns)) + ':' + text(() => snapshot(ns)).includes('$.bump');
@@ -1848,7 +1821,7 @@ test "context: string-to-code is off by default, per realm, and security.codeGen
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { deepFreeze } from 'origine:@std/data';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
@@ -1857,8 +1830,8 @@ test "context: string-to-code is off by default, per realm, and security.codeGen
         \\  const code = f => { try { return String(f()); } catch (e) { return e.name; } };
         \\  const layer = ({ specifier }) => (specifier.startsWith('link:') ? { id: specifier } : undefined);
         \\  const plain = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
-        \\  const make = (security, handler = plain) => api.context.create({ graph: api.graph, import: handler, ...(security === undefined ? {} : { security }) });
-        \\  const run = (ctx, handler, name, text) => api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
+        \\  const make = (security, handler = plain) => api.context.create({ graph: api.graph.root, import: handler, ...(security === undefined ? {} : { security }) });
+        \\  const run = (ctx, handler, name, text) => api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
         \\  // (a) every string-to-code door is shut by default; (c) security.codeGeneration opens them in that realm only.
         \\  const probe = "const t = f => { try { return typeof f(); } catch (e) { return e.name; } }; globalThis.doors = [t(() => eval('1')), t(() => new Function('return 1')), t(() => (async () => {}).constructor('return 1')), t(() => (function* () {}).constructor('return 1')), t(() => (async function* () {}).constructor('return 1'))].join(','); globalThis.message = (() => { try { eval('1'); } catch (e) { return e.message; } })(); globalThis.wasm = t(() => new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))); globalThis.marker = 'closed';";
         \\  const closed = await make();
@@ -1875,11 +1848,11 @@ test "context: string-to-code is off by default, per realm, and security.codeGen
         \\  const a = await make();
         \\  const a2 = await make({ codeGeneration: true });
         \\  const exporter = (text, name) => ModuleRecipe({ source: ModuleSource.text(text), import: plain, name });
-        \\  const refA = api.graph.declare(exporter("export const f = () => 1; export const e = eval; globalThis.marker = 'A';", 'exporter-a'));
-        \\  const refA2 = api.graph.declare(exporter("export const f = () => 1; export const e = eval; globalThis.marker = 'A2';", 'exporter-a2'));
-        \\  await api.graph.evaluate(refA, a);
-        \\  await api.graph.evaluate(refA2, a2);
-        \\  const nsA = api.graph.exports(refA), nsA2 = api.graph.exports(refA2);
+        \\  const refA = api.graph.root.declare(exporter("export const f = () => 1; export const e = eval; globalThis.marker = 'A';", 'exporter-a'));
+        \\  const refA2 = api.graph.root.declare(exporter("export const f = () => 1; export const e = eval; globalThis.marker = 'A2';", 'exporter-a2'));
+        \\  await api.graph.root.evaluate(refA, a);
+        \\  await api.graph.root.evaluate(refA2, a2);
+        \\  const nsA = api.graph.root.exports(refA), nsA2 = api.graph.root.exports(refA2);
         \\  const direct = fn => { try { return String(fn.constructor('return globalThis.marker')()); } catch (e) { return e.name + ':' + e.message; } };
         \\  const directEval = fn => { try { return String(fn('globalThis.marker')); } catch (e) { return e.name; } };
         \\  const micro = async fn => { try { return String((await Promise.resolve('return globalThis.marker').then(fn.constructor))()); } catch (e) { return e.name; } };
@@ -1888,7 +1861,7 @@ test "context: string-to-code is off by default, per realm, and security.codeGen
         \\  out.hostMicro = (await Promise.all([micro(nsA.f), micro(nsA2.f), microEval(nsA.e), microEval(nsA2.e)])).join(',');
         \\  const importer = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(layer),
-        \\    hooks: [async r => (r.id === 'link:a' ? Import.link(refA) : r.id === 'link:a2' ? Import.link(refA2) : r.id === 'link:ex' ? Import.exports({ f: nsA.f, e: nsA.e, f2: deepFreeze(nsA2.f), e2: nsA2.e }) : Import.next())],
+        \\    hooks: [async r => (r.id === 'link:a' ? ImportHook.link(refA) : r.id === 'link:a2' ? ImportHook.link(refA2) : r.id === 'link:ex' ? ImportHook.exports({ f: nsA.f, e: nsA.e, f2: deepFreeze(nsA2.f), e2: nsA2.e }) : ImportHook.next())],
         \\  });
         \\  const b = await make(undefined, importer);
         \\  const reach = "const micro = async fn => { try { return String((await Promise.resolve('return globalThis.marker').then(fn.constructor))()); } catch (e) { return e.name; } }; const microEval = async fn => { try { return String(await Promise.resolve('globalThis.marker').then(fn)); } catch (e) { return e.name; } }; const direct = fn => { try { return String(fn.constructor('return globalThis.marker')()); } catch (e) { return e.name; } };";
@@ -1896,7 +1869,7 @@ test "context: string-to-code is off by default, per realm, and security.codeGen
         \\  out.exportsVerdict = await run(b, importer, 'via-exports', reach + "import { f, e, f2, e2 } from 'link:ex'; globalThis.exportsMicro = (await Promise.all([micro(f), micro(f2), microEval(e), microEval(e2)])).join(',');");
         \\  // A function from the init realm (preload values) is in a realm that is shut too.
         \\  const indirect = eval;
-        \\  const pre = await api.context.create({ graph: api.graph, import: plain, preload: [{ source: "(values) => { globalThis.initF = values.f; globalThis.initE = values.e; }", values: { f: () => 1, e: indirect } }] });
+        \\  const pre = await api.context.create({ graph: api.graph.root, import: plain, preload: [{ source: "(values) => { globalThis.initF = values.f; globalThis.initE = values.e; }", values: { f: () => 1, e: indirect } }] });
         \\  out.preloadMicro = await run(pre, plain, 'init-fns', "const micro = async fn => { try { return String((await Promise.resolve('return 1').then(fn.constructor))()); } catch (e) { return e.name; } }; globalThis.fromInit = [await micro(initF), await Promise.resolve('1').then(initE).then(String, e => e.name)].join(',');");
         \\  globalThis.keep = { closed, explicit, empty, open, a, a2, b, pre };
         \\}
@@ -1922,33 +1895,33 @@ test "graph: link refuses a module that is still evaluating and a failed import 
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative } from 'origine:@std/graph/resolve/layers';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  let parked;
         \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [] });
-        \\  const a = await api.context.create({ graph: api.graph, import: leaf, preload: [{ source: '(values) => { globalThis.park = values.park; }', values: { park: resolve => { parked = resolve; } } }] });
-        \\  const slow = api.graph.declare(ModuleRecipe({ source: ModuleSource.text('export const n = 1; await new Promise(r => park(r));'), import: leaf, name: 'slow' }));
-        \\  const running = api.graph.evaluate(slow, a);
+        \\  const a = await api.context.create({ graph: api.graph.root, import: leaf, preload: [{ source: '(values) => { globalThis.park = values.park; }', values: { park: resolve => { parked = resolve; } } }] });
+        \\  const slow = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text('export const n = 1; await new Promise(r => park(r));'), import: leaf, name: 'slow' }));
+        \\  const running = api.graph.root.evaluate(slow, a);
         \\  for (let i = 0; i < 1000 && parked === undefined; i++) await Promise.resolve();
         \\  out.status = slow.status;
         \\  const linker = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => (r.id === 'slow' ? Import.link(slow) : Import.next())],
+        \\    hooks: [async r => (r.id === 'slow' ? ImportHook.link(slow) : ImportHook.next())],
         \\  });
-        \\  const run = async (name, text) => api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name })), await api.context.create({ graph: api.graph, import: linker })).then(() => 'ok', e => e.message);
+        \\  const run = async (name, text) => api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name })), await api.context.create({ graph: api.graph.root, import: linker })).then(() => 'ok', e => e.message);
         \\  out.early = await run('early', "import { n } from 'slow';");
         \\  parked();
         \\  await running;
         \\  out.late = await run('late', "import { n } from 'slow'; globalThis.n = n;");
         \\  // A failed import leaves modules that were compiled but never instantiated in the table;
         \\  // a later successful import in the same context must not trip over them.
-        \\  const ctx = await api.context.create({ graph: api.graph, import: linker });
-        \\  const make = (name, text) => api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name }));
-        \\  out.failed = await api.graph.evaluate(make('f1', "import 'nowhere'; import 'also-nowhere'"), ctx).then(() => 'ok', e => e.message);
-        \\  out.after = await api.graph.evaluate(make('ok1', 'globalThis.fine = 1;'), ctx).then(() => 'ok', e => e.message);
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: linker });
+        \\  const make = (name, text) => api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name }));
+        \\  out.failed = await api.graph.root.evaluate(make('f1', "import 'nowhere'; import 'also-nowhere'"), ctx).then(() => 'ok', e => e.message);
+        \\  out.after = await api.graph.root.evaluate(make('ok1', 'globalThis.fine = 1;'), ctx).then(() => 'ok', e => e.message);
         \\  out.imported = await ctx.import('slow').then(r => r.status, e => e.message);
         \\}
     , false, &.{});
@@ -1963,7 +1936,7 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import, MakeRecipe, Transform } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook, MakeRecipe, Transform } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative, importMap } from 'origine:@std/graph/resolve/layers';
         \\import { fsProvider, json } from 'origine:@std/graph/providers';
@@ -1971,25 +1944,21 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const fs = api.fs.requestSync({ handle: 'plain', access: 'r' });
-        \\  const graph = api.graph.derive({ fs });
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const graph = api.graph.create();
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(importMap({ imports: { dep: './dep.js' } })).layer(relative()),
-        \\    hooks: [json(), fsProvider({ read: 'mmap' })],
+        \\    hooks: [json({ fs: src }), fsProvider({ fs: src, read: 'mmap' })],
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.ts': ts() }) }),
         \\  });
         \\  out.native = handler.native + ':' + handler.plan.map(e => e.kind).join(',');
         \\  const ctx = await api.context.create({ import: handler, graph });
-        \\  const main = graph.declare(ModuleRecipe({ source: ModuleSource.file('main.ts').withTransformer(ts()), import: handler }));
+        \\  const main = graph.declare(ModuleRecipe({ source: ModuleSource.file('main.ts', { fs: src }).withTransformer(ts()), import: handler }));
         \\  out.recipeNative = main.status;
         \\  await graph.load(main);
         \\  out.requests = graph.requests(main).map(r => r.specifier + '=' + r.reference.name).join(',');
         \\  await graph.evaluate(main, ctx);
         \\  out.evaluated = main.status;
-        \\  const closed = api.graph.derive({});
-        \\  const bare = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'mmap' })] });
-        \\  const noFs = await api.context.create({ import: bare, graph: closed });
-        \\  out.noFs = await closed.evaluate(closed.declare(ModuleRecipe({ source: ModuleSource.text('import "./a.ts"'), import: bare, name: 'nofs' })), noFs).then(() => 'ok', e => e.message);
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -2001,7 +1970,6 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
     try fx.run();
     try check(fx.scope, "report.native === 'true:native,native,native,native,native,native,native'");
     try check(fx.scope, "report.requests === './a.ts=a.ts,dep=app:/dep.js,./data.json=data.json' && report.evaluated === 'evaluated'");
-    try check(fx.scope, "report.noFs.includes('PermissionDenied')");
     try check(fx.rt.scopes.items[1], "answer === 42");
     try t.expectEqual(@as(usize, 0), fx.host.driver_calls);
 }
@@ -2018,28 +1986,34 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const ro = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const graph = api.graph.create();
         \\  // A handler per context: contexts of one handler share its modules and would compile nothing the second time.
-        \\  const make = () => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
-        \\  const run = async (graph, count) => {
-        \\    const one = make();
+        \\  const make = codeCache => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ fs: src, read: 'copy' })], codeCache });
+        \\  const run = async cache => {
+        \\    const one = make(cache);
         \\    const a = await api.context.create({ import: one, graph });
-        \\    await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js'), import: one })), a);
-        \\    const first = await graph.flush();
-        \\    const two = make();
+        \\    await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: one })), a);
+        \\    const first = await cache.flush();
+        \\    const two = make(cache);
         \\    const b = await api.context.create({ import: two, graph });
-        \\    await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js'), import: two })), b);
-        \\    return [first, await graph.flush()];
+        \\    await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: two })), b);
+        \\    return [first, await cache.flush()];
         \\  };
-        \\  out.memory = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.memory() }))).join(':');
-        \\  out.none = (await run(api.graph.derive({ fs: ro }))).join(':');
+        \\  out.memory = (await run(CodeCache.memory())).join(':');
+        \\  out.none = (await run(CodeCache.none)).join(':');
         \\  const stored = [];
         \\  const custom = CodeCache.custom({ load: () => undefined, store: (key, bytes) => { stored.push(key.id + ':' + (bytes instanceof Uint8Array) + ':' + (bytes.length > 0)); } });
-        \\  out.custom = (await run(api.graph.derive({ fs: ro, codeCache: custom }))).join(':');
+        \\  out.custom = (await run(custom)).join(':');
         \\  out.stored = stored.join(',');
         \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw' });
-        \\  out.dir = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
-        \\  out.dirAgain = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
+        \\  out.dir = (await run(CodeCache.dir({ fs: rw, path: 'kept' }))).join(':');
+        \\  out.dirAgain = (await run(CodeCache.dir({ fs: rw, path: 'kept' }))).join(':');
+        \\  // A closed cache is no longer named.
+        \\  const closing = CodeCache.memory();
+        \\  await run(closing);
+        \\  closing.close();
+        \\  out.closed = await run(closing).then(() => 'ok', e => e.name);
         \\}
     , true, &.{});
     defer fx.deinit();
@@ -2050,8 +2024,9 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
     try check(fx.scope, "report.memory === '2:0'");
     try check(fx.scope, "report.none === '0:0'");
     try check(fx.scope, "report.custom === '2:0' && report.stored.split(',').length === 2 && report.stored.includes('dep.js:true:true')");
-    try check(fx.scope, "report.dir === '2:0' && report.dirAgain === '0:0'");
-    var cache_dir = try fx.tmp.dir.openDir(t.io, "__codecache__", .{ .iterate = true });
+    try check(fx.scope, "report.dir === '2:0' && report.dirAgain === '0:0' && report.closed === 'InvalidInput'");
+    // The files sit directly in the directory the program chose.
+    var cache_dir = try fx.tmp.dir.openDir(t.io, "kept", .{ .iterate = true });
     defer cache_dir.close(t.io);
     var seen: usize = 0;
     var it = cache_dir.iterate();
@@ -2073,8 +2048,9 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const ro = api.fs.requestSync({ handle: 'plain', access: 'r' });
-        \\  const make = () => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
+        \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const graph = api.graph.create();
+        \\  const make = codeCache => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ fs: src, read: 'copy' })], codeCache });
         \\  const store = new Map();
         \\  const calls = [];
         \\  const keyOf = k => k.id + '@' + k.hash;
@@ -2083,11 +2059,10 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
         \\    store: async (key, blob) => { store.set(keyOf(key), blob); },
         \\  });
         \\  const run = async codeCache => {
-        \\    const graph = api.graph.derive({ fs: ro, codeCache });
-        \\    const handler = make();
+        \\    const handler = make(codeCache);
         \\    const ctx = await api.context.create({ import: handler, graph });
-        \\    await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler })), ctx);
-        \\    return graph.flush();
+        \\    await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: handler })), ctx);
+        \\    return codeCache.flush();
         \\  };
         \\  out.first = await run(custom());
         \\  out.stored = store.size;
@@ -2115,34 +2090,35 @@ test "graph: CodeCache.dir keeps the files of virtual and escaping module ids in
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { CodeCache } from 'origine:@std/graph/cache';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw', root: 'cache' });
+        \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const graph = api.graph.create();
+        \\  const cache = CodeCache.dir({ fs: rw, path: 'cache' });
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.source(ModuleSource.text(`export const id = ${JSON.stringify(r.id)}; export function f() { return 1; }`))],
+        \\    hooks: [async r => ImportHook.source(ModuleSource.text(`export const id = ${JSON.stringify(r.id)}; export function f() { return 1; }`))],
+        \\    codeCache: cache,
         \\  });
         \\  const ids = ['app:/x.js', '../../escape.js', 'https://example.com/a/b.js', 'mem:y'];
         \\  const run = async () => {
-        \\    const graph = api.graph.derive({ codeCache: CodeCache.dir(rw) });
         \\    const ctx = await api.context.create({ import: handler, graph });
         \\    for (const id of ids) await ctx.import(id);
-        \\    return graph.flush();
+        \\    return cache.flush();
         \\  };
         \\  out.first = await run();
         \\  out.second = await run();
         \\}
     , true, &.{});
     defer fx.deinit();
-    try fx.tmp.dir.createDirPath(t.io, "cache");
     try fx.run();
-    // Four modules compile without a cache once, and a second graph finds all four on disk.
+    // Four modules compile without a cache once, and a second context finds all four on disk.
     try check(fx.scope, "report.first === 4 && report.second === 0");
-    var cache_dir = try fx.tmp.dir.openDir(t.io, "cache/__codecache__", .{ .iterate = true });
+    var cache_dir = try fx.tmp.dir.openDir(t.io, "cache", .{ .iterate = true });
     defer cache_dir.close(t.io);
     var files: usize = 0;
     var it = cache_dir.iterate();
@@ -2167,7 +2143,7 @@ test "graph: ImportCache objects name separate tables, also inside one context" 
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { ImportCache } from 'origine:@std/graph/cache';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
@@ -2175,20 +2151,20 @@ test "graph: ImportCache objects name separate tables, also inside one context" 
         \\  const out = globalThis.report = {};
         \\  const handlerFor = cache => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.source(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const n = globalThis.count;`))],
+        \\    hooks: [async r => ImportHook.source(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const n = globalThis.count;`))],
         \\    cache,
         \\  });
-        \\  const entry = (handler, name) => api.graph.declare(ModuleRecipe({ source: ModuleSource.text("import { n } from 'dep'; globalThis['seen' + n] = true;"), import: handler, name }));
+        \\  const entry = (handler, name) => api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text("import { n } from 'dep'; globalThis['seen' + n] = true;"), import: handler, name }));
         \\  // One cache object for two handlers: the module 'dep' is one module in the context.
         \\  const shared = ImportCache.native({ retain: 'all' });
-        \\  const one = await api.context.create({ graph: api.graph, import: handlerFor(shared) });
-        \\  await api.graph.evaluate(entry(handlerFor(shared), 'a.js'), one);
+        \\  const one = await api.context.create({ graph: api.graph.root, import: handlerFor(shared) });
+        \\  await api.graph.root.evaluate(entry(handlerFor(shared), 'a.js'), one);
         \\  out.sameCache = (await one.import('dep')).name + ':' + shared.size;
         \\  // Two cache objects: one module per object, in the same context.
         \\  const left = ImportCache.native({ retain: 'all' });
         \\  const right = ImportCache.native({ retain: 'all' });
-        \\  const two = await api.context.create({ graph: api.graph, import: handlerFor(left) });
-        \\  await api.graph.evaluate(entry(handlerFor(right), 'b.js'), two);
+        \\  const two = await api.context.create({ graph: api.graph.root, import: handlerFor(left) });
+        \\  await api.graph.root.evaluate(entry(handlerFor(right), 'b.js'), two);
         \\  await two.import('dep');
         \\  out.sizes = left.size + ',' + right.size;
         \\  // delete() on one is not seen by the other.
@@ -2196,9 +2172,9 @@ test "graph: ImportCache objects name separate tables, also inside one context" 
         \\  // Retention is per object: a 'used' table frees what a reference does not hold, an 'all' one keeps it.
         \\  const used = ImportCache.native({ retain: 'used' });
         \\  const keep = ImportCache.native({ retain: 'all' });
-        \\  const mixed = await api.context.create({ graph: api.graph, import: handlerFor(used) });
-        \\  await api.graph.evaluate(entry(handlerFor(keep), 'c.js'), mixed);
-        \\  api.graph.release(await mixed.import('dep'));
+        \\  const mixed = await api.context.create({ graph: api.graph.root, import: handlerFor(used) });
+        \\  await api.graph.root.evaluate(entry(handlerFor(keep), 'c.js'), mixed);
+        \\  api.graph.root.release(await mixed.import('dep'));
         \\  out.mixed = used.size + ',' + keep.size;
         \\  out.cleared = keep.clear() + ':' + keep.size + ',' + right.size;
         \\}
@@ -2216,7 +2192,7 @@ test "graph: contexts that use one ImportCache object share its modules; two obj
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { ImportCache } from 'origine:@std/graph/cache';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
@@ -2225,33 +2201,33 @@ test "graph: contexts that use one ImportCache object share its modules; two obj
         \\  const text = "globalThis.count = (globalThis.count ?? 0) + 1; export let n = 0; export function inc() { return ++n; } export const o = { v: 1 };";
         \\  const handlerFor = options => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.source(ModuleSource.text(text))],
+        \\    hooks: [async r => ImportHook.source(ModuleSource.text(text))],
         \\    ...options,
         \\  });
         \\  // Two contexts made from the SAME handler object share the default cache it made, so one module.
         \\  const same = handlerFor();
-        \\  const a = await api.context.create({ graph: api.graph, import: same });
-        \\  const b = await api.context.create({ graph: api.graph, import: same });
+        \\  const a = await api.context.create({ graph: api.graph.root, import: same });
+        \\  const b = await api.context.create({ graph: api.graph.root, import: same });
         \\  const ma = await a.import('m');
         \\  const mb = await b.import('m');
-        \\  out.once = api.graph.exports(ma).n + ':' + api.graph.exports(mb).n;
+        \\  out.once = api.graph.root.exports(ma).n + ':' + api.graph.root.exports(mb).n;
         \\  // Live bindings and the same objects: a change through one context is seen through the other.
-        \\  api.graph.exports(ma).inc();
-        \\  out.live = api.graph.exports(mb).n;
+        \\  api.graph.root.exports(ma).inc();
+        \\  out.live = api.graph.root.exports(mb).n;
         \\  // Two handlers with two cache objects do not.
-        \\  const c = await api.context.create({ graph: api.graph, import: handlerFor({ cache: ImportCache.native({ retain: 'all' }) }) });
-        \\  const d = await api.context.create({ graph: api.graph, import: handlerFor({ cache: ImportCache.native({ retain: 'all' }) }) });
+        \\  const c = await api.context.create({ graph: api.graph.root, import: handlerFor({ cache: ImportCache.native({ retain: 'all' }) }) });
+        \\  const d = await api.context.create({ graph: api.graph.root, import: handlerFor({ cache: ImportCache.native({ retain: 'all' }) }) });
         \\  await c.import('m');
         \\  await d.import('m');
-        \\  out.separate = api.graph.exports(await c.import('m')).n + ':' + api.graph.exports(await d.import('m')).o.v;
+        \\  out.separate = api.graph.root.exports(await c.import('m')).n + ':' + api.graph.root.exports(await d.import('m')).o.v;
         \\  // Imports that start together still run the module once: the later waits for the home.
         \\  const cache = ImportCache.native({ retain: 'all' });
         \\  const shared = handlerFor({ cache });
-        \\  const e = await api.context.create({ graph: api.graph, import: shared });
-        \\  const f = await api.context.create({ graph: api.graph, import: shared });
+        \\  const e = await api.context.create({ graph: api.graph.root, import: shared });
+        \\  const f = await api.context.create({ graph: api.graph.root, import: shared });
         \\  const both = await Promise.all([e.import('m'), f.import('m')]);
-        \\  api.graph.exports(both[0]).inc();
-        \\  out.together = api.graph.exports(both[1]).n;
+        \\  api.graph.root.exports(both[0]).inc();
+        \\  out.together = api.graph.root.exports(both[1]).n;
         \\  out.size = cache.size;
         \\}
     , false, &.{});
@@ -2272,7 +2248,7 @@ test "graph: contexts that use one ImportCache object share its modules; two obj
 test "graph: delete in one context is seen by all, a closed home hands the module over, retain used counts users" {
     var fx: Fixture = undefined;
     try fx.setup(
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { ModuleSource } from 'origine:@std/graph/module';
         \\import { ImportCache } from 'origine:@std/graph/cache';
@@ -2282,14 +2258,14 @@ test "graph: delete in one context is seen by all, a closed home hands the modul
         \\  const text = "globalThis.count = (globalThis.count ?? 0) + 1; export let n = globalThis.count;";
         \\  const handlerFor = cache => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.source(ModuleSource.text(text))],
+        \\    hooks: [async r => ImportHook.source(ModuleSource.text(text))],
         \\    cache,
         \\  });
         \\  // delete(id) forgets the module in every context that holds it; the next import makes a new one.
         \\  const cache = ImportCache.native({ retain: 'all' });
         \\  const handler = handlerFor(cache);
-        \\  const a = await api.context.create({ graph: api.graph, import: handler });
-        \\  const b = await api.context.create({ graph: api.graph, import: handler });
+        \\  const a = await api.context.create({ graph: api.graph.root, import: handler });
+        \\  const b = await api.context.create({ graph: api.graph.root, import: handler });
         \\  await a.import('m');
         \\  await b.import('m');
         \\  out.before = cache.size;
@@ -2298,28 +2274,28 @@ test "graph: delete in one context is seen by all, a closed home hands the modul
         \\  // b imports first now, so b is the new home.
         \\  const again = await b.import('m');
         \\  await a.import('m');
-        \\  out.reimported = api.graph.exports(again).n + ':' + cache.size;
+        \\  out.reimported = api.graph.root.exports(again).n + ':' + cache.size;
         \\  // The home closes: the context that used its module drops it, and the next import evaluates a new one there.
-        \\  const c = await api.context.create({ graph: api.graph, import: handler });
-        \\  const d = await api.context.create({ graph: api.graph, import: handler });
+        \\  const c = await api.context.create({ graph: api.graph.root, import: handler });
+        \\  const d = await api.context.create({ graph: api.graph.root, import: handler });
         \\  cache.clear();
         \\  await c.import('m');
         \\  const linked = await d.import('m');
         \\  c.close();
-        \\  out.closedHome = (() => { try { api.graph.exports(linked); return 'readable'; } catch (e) { return e.name; } })();
+        \\  out.closedHome = (() => { try { api.graph.root.exports(linked); return 'readable'; } catch (e) { return e.name; } })();
         \\  const fresh = await d.import('m');
-        \\  out.handedOver = api.graph.exports(fresh).n;
+        \\  out.handedOver = api.graph.root.exports(fresh).n;
         \\  // retain 'used': the home keeps a module while another context still uses it.
         \\  const used = ImportCache.native({ retain: 'used' });
         \\  const hu = handlerFor(used);
-        \\  const e = await api.context.create({ graph: api.graph, import: hu });
-        \\  const f = await api.context.create({ graph: api.graph, import: hu });
+        \\  const e = await api.context.create({ graph: api.graph.root, import: hu });
+        \\  const f = await api.context.create({ graph: api.graph.root, import: hu });
         \\  const me = await e.import('m');
         \\  const mf = await f.import('m');
         \\  out.usedStart = used.size;
-        \\  api.graph.release(me);
+        \\  api.graph.root.release(me);
         \\  out.homeReleased = used.size;
-        \\  api.graph.release(mf);
+        \\  api.graph.root.release(mf);
         \\  out.allReleased = used.size;
         \\}
     , false, &.{});
@@ -2333,7 +2309,7 @@ test "graph: retain used frees unused modules, delete resets identity, release u
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportHandler, ImportHook } from 'origine:@std/graph/import';
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { ImportCache } from 'origine:@std/graph/cache';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
@@ -2341,24 +2317,24 @@ test "graph: retain used frees unused modules, delete resets identity, release u
         \\  const out = globalThis.report = {};
         \\  const handlerFor = cache => ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => Import.source(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const id = '${r.id}';`))],
+        \\    hooks: [async r => ImportHook.source(ModuleSource.text(`globalThis.count = (globalThis.count ?? 0) + 1; export const id = '${r.id}';`))],
         \\    cache,
         \\  });
         \\  // retain 'used': a module lives while a reference holds it.
         \\  const used = ImportCache.native({ retain: 'used' });
         \\  const handler = handlerFor(used);
-        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: handler });
         \\  const first = await ctx.import('m1');
         \\  out.held = used.size + ':' + ctx.references.length;
         \\  const same = await ctx.import('m1');
         \\  out.same = same === first;
-        \\  api.graph.release(first);
+        \\  api.graph.root.release(first);
         \\  out.released = used.size + ':' + ctx.references.length + ':' + first.status;
-        \\  await ctx.import('m1').then(r => api.graph.release(r));
+        \\  await ctx.import('m1').then(r => api.graph.root.release(r));
         \\  out.afterRelease = used.size;
         \\  // retain 'all': delete is an identity reset.
         \\  const all = ImportCache.native({ retain: 'all' });
-        \\  const keep = await api.context.create({ graph: api.graph, import: handlerFor(all) });
+        \\  const keep = await api.context.create({ graph: api.graph.root, import: handlerFor(all) });
         \\  const one = await keep.import('m2');
         \\  out.table = all.size;
         \\  out.deleted = all.delete('m2');
@@ -2369,8 +2345,8 @@ test "graph: retain used frees unused modules, delete resets identity, release u
         \\  out.bad = (() => { try { all.delete(1); } catch (e) { return e.name; } })();
         \\  // there is no cap: a table never evicts one module while others stay.
         \\  const wide = ImportCache.native({ retain: 'all' });
-        \\  const many = await api.context.create({ graph: api.graph, import: handlerFor(wide) });
-        \\  for (const id of ['a', 'b', 'c', 'd']) api.graph.release(await many.import(id));
+        \\  const many = await api.context.create({ graph: api.graph.root, import: handlerFor(wide) });
+        \\  for (const id of ['a', 'b', 'c', 'd']) api.graph.root.release(await many.import(id));
         \\  out.uncapped = wide.size;
         \\}
     , false, &.{});
@@ -4214,19 +4190,19 @@ test "api: closing a context disposes it, including one with a load in flight" {
         \\  const ids = [];
         \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js', late: 'app:/late.js' } })), hooks: [fromLoader(load)] });
         \\  for (let n = 0; n < 20; n++) {
-        \\    const child = await api.context.create({ graph: api.graph, import: handlerFor(id => 'export const x = ' + id.length) });
+        \\    const child = await api.context.create({ graph: api.graph.root, import: handlerFor(id => 'export const x = ' + id.length) });
         \\    await child.import('m');
         \\    child.close();
         \\    try { child.close(); ids.push('twice'); } catch (e) { ids.push('stale'); }
         \\  }
-        \\  const disposable = await api.context.create({ graph: api.graph, import: handlerFor(() => '') });
+        \\  const disposable = await api.context.create({ graph: api.graph.root, import: handlerFor(() => '') });
         \\  disposable[Symbol.dispose]();
         \\  disposable[Symbol.dispose]();
         \\  ids.push(await disposable.import('m').then(() => 'imported', e => e.name));
         \\  // A context whose hook promise settles only after the context was closed.
         \\  let release;
         \\  const gate = new Promise(resolve => { release = resolve; });
-        \\  const late = await api.context.create({ graph: api.graph, import: handlerFor(() => gate.then(() => 'export const y = 1')) });
+        \\  const late = await api.context.create({ graph: api.graph.root, import: handlerFor(() => gate.then(() => 'export const y = 1')) });
         \\  const running = late.import('late').then(() => 'ran', () => 'rejected');
         \\  await Promise.resolve();
         \\  late.close();
@@ -4252,16 +4228,16 @@ test "api: a closed context is freed with its imports and driver calls; ids are 
         \\export async function main(api) {
         \\  const handlerFor = load => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js', late: 'app:/late.js' } })), hooks: [fromLoader(load)] });
         \\  for (let n = 0; n < 30; n++) {
-        \\    const child = await api.context.create({ graph: api.graph, import: handlerFor(() => 'export const x = 1'), preload: [{ module: 'export default () => {};', values: {} }] });
+        \\    const child = await api.context.create({ graph: api.graph.root, import: handlerFor(() => 'export const x = 1'), preload: [{ module: 'export default () => {};', values: {} }] });
         \\    await child.import('m');
         \\    child.close();
         \\  }
         \\  // A hook that settles after its context was closed, and one that never settles.
         \\  let release;
         \\  const gate = new Promise(resolve => { release = resolve; });
-        \\  const late = await api.context.create({ graph: api.graph, import: handlerFor(() => gate.then(() => 'export const y = 1')) });
+        \\  const late = await api.context.create({ graph: api.graph.root, import: handlerFor(() => gate.then(() => 'export const y = 1')) });
         \\  const running = late.import('late').then(() => 'ran', () => 'rejected');
-        \\  const stuck = await api.context.create({ graph: api.graph, import: handlerFor(() => new Promise(() => {})) });
+        \\  const stuck = await api.context.create({ graph: api.graph.root, import: handlerFor(() => new Promise(() => {})) });
         \\  stuck.import('m').catch(() => {});
         \\  await Promise.resolve();
         \\  late.close();
@@ -4299,26 +4275,26 @@ test "api: a handler no live context reaches is freed, and a handler object regi
         \\export async function main(api) {
         \\  const make = body => ImportHandler.make({ resolver: ImportResolver.layered().layer(importMap({ imports: { m: 'app:/m.js' } })), hooks: [fromLoader(body)] });
         \\  const kept = make(() => 'export const x = 1');
-        \\  const ref = api.graph.declare(ModuleRecipe({ source: ModuleSource.text("import { x } from 'm'; globalThis.seenX = x; export {};"), import: kept, name: 'app:/entry.js' }));
+        \\  const ref = api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text("import { x } from 'm'; globalThis.seenX = x; export {};"), import: kept, name: 'app:/entry.js' }));
         \\  // Many contexts, each with a handler of its own that closes over something; the last pump
         \\  // of the host frees them when they are closed.
         \\  globalThis.phase1 = async () => {
-        \\    const first = await api.context.create({ graph: api.graph, import: kept });
-        \\    await api.graph.load(ref);
+        \\    const first = await api.context.create({ graph: api.graph.root, import: kept });
+        \\    await api.graph.root.load(ref);
         \\    first.close();
         \\    for (let n = 0; n < 40; n++) {
         \\      const held = new Array(1000).fill(n);
-        \\    const child = await api.context.create({ graph: api.graph, import: make(() => 'export const x = ' + held.length) });
+        \\    const child = await api.context.create({ graph: api.graph.root, import: make(() => 'export const x = ' + held.length) });
         \\      await child.import('m');
         \\      child.close();
         \\    }
         \\  };
         \\  // The handler of the first context was freed with it; its object works again.
         \\  globalThis.phase2 = async () => {
-        \\    const second = await api.context.create({ graph: api.graph, import: kept });
+        \\    const second = await api.context.create({ graph: api.graph.root, import: kept });
         \\    const report = { reused: (await second.import('m')).name };
-        \\    await api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text("export const y = 2;"), import: kept, name: 'app:/y.js' })), second);
-        \\    await api.graph.evaluate(ref, second);
+        \\    await api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text("export const y = 2;"), import: kept, name: 'app:/y.js' })), second);
+        \\    await api.graph.root.evaluate(ref, second);
         \\    report.status = ref.status;
         \\    globalThis.report = report;
         \\  };
@@ -4364,7 +4340,7 @@ test "api: a closed graph is freed with the last context that uses it" {
         \\  globalThis.phase1 = async () => {
         \\    const names = [];
         \\    for (let n = 0; n < 30; n++) {
-        \\      const graph = api.graph.derive({ codeCache: CodeCache.memory() });
+        \\      const graph = api.graph.create();
         \\      const child = await api.context.create({ import: handler, graph });
         \\      await child.import('m');
         \\      graph.close();
@@ -4375,11 +4351,11 @@ test "api: a closed graph is freed with the last context that uses it" {
         \\      child.close();
         \\    }
         \\    {
-        \\      using scoped = api.graph.derive();
-        \\      scoped.flush();
+        \\      using scoped = api.graph.create();
+        \\      void scoped;
         \\    }
         \\    let rootClose;
-        \\    try { api.graph.close(); rootClose = 'closed'; } catch (e) { rootClose = e.name; }
+        \\    try { api.graph.root.close(); rootClose = 'closed'; } catch (e) { rootClose = e.name; }
         \\    globalThis.report = { names: names.join(','), rootClose };
         \\  };
         \\}
@@ -4408,7 +4384,7 @@ test "api: module preloads, with the origine allowlist per context" {
         \\  const without = ImportHandler.make({ resolver, hooks: [fromLoader(() => '')] });
         \\  // A module preload imports host modules when the handler serves them, and its default
         \\  // export receives the (frozen) values.
-        \\  const child = await api.context.create({ graph: api.graph,
+        \\  const child = await api.context.create({ graph: api.graph.root,
         \\    import: withText,
         \\    preload: [
         \\      { source: '(values) => { globalThis.first = values.n; }', values: { n: 2 } },
@@ -4419,9 +4395,9 @@ test "api: module preloads, with the origine allowlist per context" {
         \\  child.close();
         \\  report.ok = true;
         \\  // Without a provider the same import is refused, and a failing preload rejects create.
-        \\  report.refused = await api.context.create({ graph: api.graph, import: without, preload: [{ module: "import 'origine:@std/text';" }] }).then(() => false, () => true);
-        \\  report.thrown = await api.context.create({ graph: api.graph, import: without, preload: [{ module: 'export default () => { throw new Error("boom"); };', values: {} }] }).then(() => false, e => e.name === 'ModuleError');
-        \\  report.both = await api.context.create({ graph: api.graph, import: without, preload: [{ source: '() => 1', module: 'export {}' }] }).then(() => false, () => true);
+        \\  report.refused = await api.context.create({ graph: api.graph.root, import: without, preload: [{ module: "import 'origine:@std/text';" }] }).then(() => false, () => true);
+        \\  report.thrown = await api.context.create({ graph: api.graph.root, import: without, preload: [{ module: 'export default () => { throw new Error("boom"); };', values: {} }] }).then(() => false, e => e.name === 'ModuleError');
+        \\  report.both = await api.context.create({ graph: api.graph.root, import: without, preload: [{ source: '() => 1', module: 'export {}' }] }).then(() => false, () => true);
         \\  globalThis.report = report;
         \\}
     , false, &.{});
@@ -4588,7 +4564,6 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\    emptyEntry: io => cwd.createDir(io, ''),
         \\    dotdot: io => cwd.openFile(io, '../x'),
         \\    absolute: io => cwd.openFile(io, '/etc/passwd'),
-        \\    cacheDir: io => cwd.createFile(io, 'a/__codecache__/x'),
         \\    nameTooLong: io => cwd.createFile(io, 'a'.repeat(300)),
         \\    loopStat: io => cwd.statFile(io, 'loop'),
         \\    loopOpen: io => cwd.openFile(io, 'loop'),
@@ -4626,7 +4601,7 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\  return n.missing === 'NotFound' && n.mkdirExisting === 'AlreadyExists' && n.openFileAsDir === 'NotADirectory' &&
         \\    n.openDirAsFile === 'IsADirectory' && n.rmdirNotEmpty === 'DirectoryNotEmpty' && n.renameOntoNotEmpty === 'DirectoryNotEmpty' &&
         \\    n.exclusive === 'AlreadyExists' && n.mkdirPathOverFile === 'NotADirectory' && n.nul === 'InvalidInput' && n.emptyEntry === 'InvalidInput' &&
-        \\    n.dotdot === 'PermissionDenied' && n.absolute === 'PermissionDenied' && n.cacheDir === 'PermissionDenied' &&
+        \\    n.dotdot === 'PermissionDenied' && n.absolute === 'PermissionDenied' &&
         \\    n.nameTooLong === 'InvalidFilename' && n.loopStat === 'FilesystemLoop' && n.loopOpen === 'FilesystemLoop' &&
         \\    (n.locked === 'PermissionDenied' || n.locked === 'ok');
         \\})()
@@ -4706,7 +4681,7 @@ test "api: std factories import private JS records without native metadata" {
         \\      globalThis.privateDenied = await import('origine:@internal/handles').then(() => false, () => true);
         \\    `)],
         \\  });
-        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
+        \\  const ctx = await api.context.create({ graph: api.graph.root, import: handler });
         \\  await ctx.import('main');
         \\}
     , false, &.{});

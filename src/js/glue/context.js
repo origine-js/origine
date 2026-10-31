@@ -1,7 +1,7 @@
 // `api.context`: realms whose imports run through an ImportHandler. An ES module factory used by
 // index.js. It builds on the parts the graph glue
 // publishes in shared module state (index.js prepares `graph` before `context`).
-import { Data } from './handles.js';
+import { Data, ModuleImportPhase, ModuleStatus } from './handles.js';
 import { freeze, own, shared, errors, seal, moduleSettled } from './util.js';
 class Context extends Data {}
 seal(Context);
@@ -72,8 +72,8 @@ export default (native, { take, takeError }) => {
           async import(specifier, o) {
             if (typeof specifier !== 'string') throw invalid('import: specifier must be a string');
             const attributes = own(o, 'attributes') ?? {};
-            const phase = own(o, 'phase') ?? 'evaluation';
-            if (phase !== 'evaluation') throw named(errors.Unsupported, `${phase} imports are not implemented`);
+            const phase = own(o, 'phase') ?? ModuleImportPhase.Evaluation;
+            if (phase !== ModuleImportPhase.Evaluation) throw named(errors.Unsupported, `${phase} imports are not implemented`);
             // A synchronous failure is in the cell as the call returns; read it before awaiting anything.
             const importing = native.context.importSpecifier(id, specifier, attributesJson(attributes));
             const failed = takeError();
@@ -84,7 +84,7 @@ export default (native, { take, takeError }) => {
               name,
               text: undefined,
               handler,
-              status: 'evaluated',
+              status: ModuleStatus.Evaluated,
               context: id,
               contextObject: context,
             });

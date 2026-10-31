@@ -8,7 +8,7 @@
 //! chain in the creating realm and asks this file to run the native elements one by one
 //! (`layer`, `hook`, `transform`, `readSource`). Both paths use the same step functions.
 //!
-//! Authority is not in the descriptors: file reads go through the graph's fs grant, and
+//! Authority is not in the descriptors: file reads go through the fs grant a hook or source names, and
 //! `origine:` modules are served only by the `origine` hook, within the allowlist of the realm
 //! that created the handler.
 const std = @import("std");
@@ -43,7 +43,11 @@ comptime {
     errno.requireBinding(readSource);
     errno.requireBinding(compileRequests);
     errno.requireBinding(bind);
-    errno.requireBinding(asyncFs);
+    errno.requireBinding(asyncOps);
+    errno.requireBinding(grantRef);
+    errno.requireBinding(codeCacheCreate);
+    errno.requireBinding(codeCacheClose);
+    errno.requireBinding(codeCacheAlive);
     errno.requireBinding(utf8);
     errno.requireBinding(sourceHash);
     errno.requireBinding(jsonModule);
@@ -229,10 +233,23 @@ pub const Layer = union(enum) {
 
 pub const ReadMode = enum { copy, mmap };
 
+/// What a recipe's `codeCache` says when it names `CodeCache.none`: no cache, whatever the handler's default is.
+pub const no_code_cache: u32 = std.math.maxInt(u32);
+
+/// The grant a hook or an accepted import reads through, named by the program that wrote the hook.
+pub const Source = union(enum) {
+    /// A sync grant of the realm that registered the handler: read by the host.
+    sync: *fs_api.FsGrant,
+    /// An async grant (its id): read on its io runtime, through the graph's `AsyncOps`.
+    async: u32,
+    /// Only while a handler is parsed: the grant `handler` has yet to check.
+    named: struct { is_async: bool, id: u32 },
+};
+
 pub const Hook = union(enum) {
     origine: StdFilter,
-    fs: ReadMode,
-    json,
+    fs: struct { read: ReadMode, source: Source },
+    json: Source,
     js,
 };
 
@@ -263,6 +280,8 @@ pub const Handler = struct {
     maker: Maker,
     /// The `ImportCache` the modules this handler's pipeline finds are kept in (`CacheTable.id`).
     cache: u32,
+    /// The `CodeCacheStore` modules this handler makes are cached in (0: none).
+    code_cache: u32 = 0,
     /// A `meta` function exists (always a JS barrier).
     meta: bool,
     /// No JS function anywhere: the whole pipeline runs natively.
@@ -300,6 +319,23 @@ fn parseStringList(alloc: std.mem.Allocator, value: ?std.json.Value) !?[]const [
         slot.* = try alloc.dupe(u8, item.string);
     }
     return out;
+}
+
+/// `fs: { async, id }` of a hook: the grant it reads through, to be checked by `handler`.
+fn parseSource(object: std.json.ObjectMap) !Source {
+    const named = switch (object.get("fs") orelse return error.InvalidInput) {
+        .object => |named| named,
+        else => return error.InvalidInput,
+    };
+    const is_async = switch (named.get("async") orelse return error.InvalidInput) {
+        .bool => |flag| flag,
+        else => return error.InvalidInput,
+    };
+    const id = switch (named.get("id") orelse return error.InvalidInput) {
+        .integer => |number| std.math.cast(u32, number) orelse return error.InvalidInput,
+        else => return error.InvalidInput,
+    };
+    return .{ .named = .{ .is_async = is_async, .id = id } };
 }
 
 /// Builds a handler from its flattened JSON spec. Everything is validated before it is used; the
@@ -395,9 +431,9 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
             slot.* = .{ .origine = .{ .include = try parseStringList(alloc, std_object.get("include")), .exclude = try parseStringList(alloc, std_object.get("exclude")), .inherit = inherit } };
         } else if (std.mem.eql(u8, host, "fs")) {
             const read = jsonString(object.get("read")) orelse return error.InvalidInput;
-            slot.* = .{ .fs = std.meta.stringToEnum(ReadMode, read) orelse return error.InvalidInput };
+            slot.* = .{ .fs = .{ .read = std.meta.stringToEnum(ReadMode, read) orelse return error.InvalidInput, .source = try parseSource(object) } };
         } else if (std.mem.eql(u8, host, "json")) {
-            slot.* = .json;
+            slot.* = .{ .json = try parseSource(object) };
         } else return error.InvalidInput;
     }
     result.hooks = hooks;
@@ -434,6 +470,11 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
         .integer => |number| std.math.cast(u32, number) orelse return error.InvalidInput,
         else => return error.InvalidInput,
     };
+    if (root.get("codeCache")) |value| switch (value) {
+        .integer => |number| result.code_cache = std.math.cast(u32, number) orelse return error.InvalidInput,
+        .null => {},
+        else => return error.InvalidInput,
+    };
     if (root.get("meta")) |value| {
         result.meta = value == .bool and value.bool;
         if (result.meta) result.native = false;
@@ -443,49 +484,59 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
 
 // ---- graph -----------------------------------------------------------------
 
-/// What a graph does with V8 code caches.
-pub const CodeCacheKind = enum { none, memory, dir, custom };
+/// What a code cache does with V8's bytes.
+pub const CodeCacheKind = enum { memory, dir, custom };
 
-/// The artifacts and authority shared by the contexts that use a graph.
-/// The Rust natives that read a file of an async fs grant (`native.fsAsync`: open, read all, close)
-/// and the grant's id. Calling them from Zig runs the read on the grant's io runtime; no user JS runs.
-pub const AsyncFs = struct {
-    id: u32,
+/// The Rust natives that read a file of an async fs grant (`native.fsAsync`: open, read all, close).
+/// Calling them from Zig runs the read on the grant's io runtime; no user JS runs. They hold no
+/// authority: every call names the grant it reads through.
+pub const AsyncOps = struct {
     open: v8.Global.Of(v8.Function),
     read_all: v8.Global.Of(v8.Function),
     close: v8.Global.Of(v8.Function),
 };
 
+/// The table of modules the contexts that use it share, with the async ops their sources are read with.
+/// It holds no fs grant and no code cache: handlers, recipes and sources name those.
 pub const Graph = struct {
     host: *Host,
     id: u32,
     /// The realm that created it (its allowlist bounds the `origine` hooks used with it).
     owner: *ScopeState,
-    fs: ?*fs_api.FsGrant = null,
-    /// Set instead of `fs` for an async grant.
-    async_fs: ?AsyncFs = null,
-    kind: CodeCacheKind = .none,
-    /// `bytes` cap of the memory cache (0: none).
-    cache_bytes: usize = 0,
-    /// Largest source file a hook reads through the graph's fs grant; a larger one is `FileTooLarge`.
-    source_limit: usize,
-    /// Code-cache entries of this graph: `id ++ 0 ++ <32 byte hash of the source>` to bytes.
+    async_ops: ?AsyncOps = null,
+    closed: bool = false,
+
+    pub fn deinit(self: *Graph) void {
+        if (self.async_ops) |ops| {
+            ops.open.deinit();
+            ops.read_all.deinit();
+            ops.close.deinit();
+        }
+    }
+};
+
+/// A `CodeCache` object to the host: where V8's bytes of the modules naming it are kept.
+pub const CodeCacheStore = struct {
+    host: *Host,
+    id: u32,
+    owner: *ScopeState,
+    kind: CodeCacheKind,
+    /// `limits.size` of the memory cache (0: none).
+    limit: usize = 0,
+    /// Entries of this cache: `id ++ 0 ++ <32 byte hash of the source>` to bytes.
     memory: std.StringHashMapUnmanaged([]u8) = .empty,
     memory_size: usize = 0,
-    /// Entries stored since the last `flush` that a `dir` or `custom` cache still has to persist.
+    /// Modules this cache stored since the last `flush`.
+    stored: usize = 0,
+    /// Entries stored since the last `flush` that a `custom` cache still has to persist.
     fresh: std.ArrayList(Fresh) = .empty,
     dir_state: ?init_cache.CodeCacheState = null,
     closed: bool = false,
 
     pub const Fresh = struct { id: []u8, hash: [32]u8, bytes: []u8 };
 
-    pub fn deinit(self: *Graph) void {
+    pub fn deinit(self: *CodeCacheStore) void {
         const alloc = self.host.allocator;
-        if (self.async_fs) |ops| {
-            ops.open.deinit();
-            ops.read_all.deinit();
-            ops.close.deinit();
-        }
         var it = self.memory.iterator();
         while (it.next()) |entry| {
             alloc.free(entry.key_ptr.*);
@@ -497,6 +548,7 @@ pub const Graph = struct {
             alloc.free(item.bytes);
         }
         self.fresh.deinit(alloc);
+        if (self.dir_state) |*state| state.deinit();
     }
 
     fn key(alloc: std.mem.Allocator, id: []const u8, hash: [32]u8) ![]u8 {
@@ -507,20 +559,20 @@ pub const Graph = struct {
         return out;
     }
 
-    pub fn lookup(self: *Graph, alloc: std.mem.Allocator, id: []const u8, hash: [32]u8) ?[]u8 {
+    pub fn lookup(self: *CodeCacheStore, alloc: std.mem.Allocator, id: []const u8, hash: [32]u8) ?[]u8 {
         const probe = key(alloc, id, hash) catch return null;
         defer alloc.free(probe);
         return self.memory.get(probe);
     }
 
-    pub fn remember(self: *Graph, id: []const u8, hash: [32]u8, bytes: []const u8) void {
+    pub fn remember(self: *CodeCacheStore, id: []const u8, hash: [32]u8, bytes: []const u8) void {
         const alloc = self.host.allocator;
         const owned_key = key(alloc, id, hash) catch return;
         const owned_bytes = alloc.dupe(u8, bytes) catch {
             alloc.free(owned_key);
             return;
         };
-        if (self.cache_bytes != 0 and self.memory_size + bytes.len > self.cache_bytes) {
+        if (self.limit != 0 and self.memory_size + bytes.len > self.limit) {
             alloc.free(owned_key);
             alloc.free(owned_bytes);
             return;
@@ -546,18 +598,21 @@ pub fn graphFor(host: *Host, id: u32) !*Graph {
     return found;
 }
 
-/// `create(fs?, cacheKind, bytes, cacheFs?, sourceBytes)`: a graph. `fs` is a grant `api.fs` made, as
-/// the host built it (`fs.request` / `fs.requestAsync`): a sync one is read by the host, an async one is attached with
-/// `asyncFs`; without one `fs` hooks are `PermissionDenied`. `cacheKind` is 0 none, 1 memory, 2 dir
-/// (`cacheFs`, a sync grant with write access, is where `__codecache__` lives), 3 custom. Anything that is
-/// not a grant of this realm is `InvalidInput`.
-/// `sourceBytes` (at least 1) is the largest source file the graph reads.
-pub fn graphCreate(state: *ScopeState, call: *Call, fs: ?v8.Object, cache_kind: u32, bytes: f64, cache_fs: ?v8.Object, source_bytes: f64) Error!u32 {
-    return graphCreateImpl(state, call, fs, cache_kind, bytes, cache_fs, source_bytes) catch |err| return errno.narrow(err);
+/// The code cache `id`, or null for 0, a closed cache or one that was freed.
+pub fn codeCacheFor(host: *Host, id: u32) ?*CodeCacheStore {
+    if (id == 0) return null;
+    const found = host.code_caches.get(id) orelse return null;
+    return if (found.closed) null else found;
 }
 
-/// `close(graph)`: the graph takes no more contexts or references, and is freed (with the code
-/// caches it kept) once the contexts that use it are gone. Code caches not yet flushed are discarded.
+/// `create()`: a graph. It has no options: files are read through the grants hooks and sources name,
+/// and code caches are named by handlers and recipes.
+pub fn graphCreate(state: *ScopeState) Error!u32 {
+    return graphCreateImpl(state) catch |err| return errno.narrow(err);
+}
+
+/// `close(graph)`: the graph takes no more contexts or references, and is freed once the contexts
+/// that use it are gone.
 pub fn graphClose(state: *ScopeState, id: u32) Error!void {
     const graph = graphFor(state.host, id) catch |err| return errno.narrow(err);
     if (graph.owner != state) return error.BadHandle;
@@ -574,33 +629,64 @@ pub fn releaseGraph(host: *Host, graph: *Graph) void {
     host.allocator.destroy(graph);
 }
 
-fn graphCreateImpl(state: *ScopeState, call: *Call, fs: ?v8.Object, cache_kind: u32, bytes: f64, cache_fs: ?v8.Object, source_bytes: f64) !u32 {
+fn graphCreateImpl(state: *ScopeState) !u32 {
     const host = state.host;
     const alloc = host.allocator;
-    const kind = std.enums.fromInt(CodeCacheKind, cache_kind) orelse return error.InvalidInput;
-    if (!(bytes >= 0) or bytes > 9007199254740991) return error.InvalidInput;
-    if (!(source_bytes >= 1) or source_bytes > 9007199254740991) return error.InvalidInput;
     const created = try alloc.create(Graph);
     errdefer alloc.destroy(created);
-    created.* = .{ .host = host, .id = try host.graphs.issue(), .owner = state, .source_limit = @intFromFloat(source_bytes), .kind = kind, .cache_bytes = @intFromFloat(bytes) };
-    if (fs) |object| {
-        const ref = try fs_api.grantOf(state, call, object);
-        // An async grant is attached by `asyncFs`; the graph has no sync one.
-        if (ref.kind == .sync) {
-            const grant = try fs_api.syncGrantOf(state, ref.id);
-            if (!grant.read) return error.PermissionDenied;
-            created.fs = grant;
-        }
-    }
-    if (kind == .dir) {
-        const ref = try fs_api.grantOf(state, call, cache_fs orelse return error.InvalidInput);
-        if (ref.kind != .sync) return error.InvalidInput;
-        const grant = try fs_api.syncGrantOf(state, ref.id);
-        if (!grant.write) return error.PermissionDenied;
-        created.dir_state = init_cache.CodeCacheState.initFlat(host, grant.root);
-    }
+    created.* = .{ .host = host, .id = try host.graphs.issue(), .owner = state };
     try host.graphs.put(alloc, created.id, created);
     return created.id;
+}
+
+/// `codeCacheCreate(kind, limit, grant?, path)`: a code cache. `kind` is 0 memory, 1 dir, 2 custom. `limit`
+/// is the most bytes a memory cache keeps (0: no cap). A `dir` cache writes into `path` of `grant`, a
+/// sync grant of this realm with write access; the files sit directly in that directory.
+pub fn codeCacheCreate(state: *ScopeState, call: *Call, kind: u32, limit: f64, grant: ?v8.Object, path: []const u8) Error!u32 {
+    return codeCacheCreateImpl(state, call, kind, limit, grant, path) catch |err| return errno.narrow(err);
+}
+
+fn codeCacheCreateImpl(state: *ScopeState, call: *Call, kind_number: u32, limit: f64, grant: ?v8.Object, path: []const u8) !u32 {
+    const host = state.host;
+    const alloc = host.allocator;
+    const kind = std.enums.fromInt(CodeCacheKind, kind_number) orelse return error.InvalidInput;
+    if (!(limit >= 0) or limit > 9007199254740991) return error.InvalidInput;
+    const created = try alloc.create(CodeCacheStore);
+    errdefer alloc.destroy(created);
+    created.* = .{ .host = host, .id = try host.code_caches.issue(), .owner = state, .kind = kind, .limit = @intFromFloat(limit) };
+    if (kind == .dir) {
+        const ref = try fs_api.grantOf(state, call, grant orelse return error.InvalidInput);
+        if (ref.kind != .sync) return error.InvalidInput;
+        const found = try fs_api.syncGrantOf(state, ref.id);
+        if (!found.write) return error.PermissionDenied;
+        try fs_api.cleanPath(path);
+        created.dir_state = try init_cache.CodeCacheState.initIn(host, found.root, path);
+    }
+    errdefer created.deinit();
+    try host.code_caches.put(alloc, created.id, created);
+    return created.id;
+}
+
+/// `codeCacheClose(cache)`: the cache keeps and serves nothing from now on; what it held is freed.
+pub fn codeCacheClose(state: *ScopeState, id: u32) Error!void {
+    const found = state.host.code_caches.get(id) orelse return;
+    if (found.owner != state) return error.BadHandle;
+    found.closed = true;
+}
+
+/// `codeCacheAlive(cache)`: whether the cache is still open.
+pub fn codeCacheAlive(state: *ScopeState, id: u32) Error!bool {
+    return codeCacheFor(state.host, id) != null;
+}
+
+/// `grantRef(grant)`: `[isAsync, id]` of a grant of this realm that is still open. Anything else is
+/// `InvalidInput`: a lookalike has no issuer.
+pub fn grantRef(state: *ScopeState, call: *Call, grant: v8.Object) Error!v8.Value {
+    const ref = fs_api.grantOf(state, call, grant) catch |err| return errno.narrow(err);
+    var out = call.array();
+    out.push(@as(f64, if (ref.kind == .async) 1 else 0)) catch |err| return errno.narrow(err);
+    out.push(@as(f64, @floatFromInt(ref.id))) catch |err| return errno.narrow(err);
+    return out.finish();
 }
 
 // ---- native steps ----------------------------------------------------------
@@ -622,21 +708,20 @@ pub fn layerStep(h: *Handler, index: usize, alloc: std.mem.Allocator, specifier:
 }
 
 /// What a hook answered.
-pub const HookResult = union(enum) {
+pub const ImportHook = union(enum) {
     next,
     /// Source text allocated from the caller's allocator.
     source: []u8,
     /// The graph reads through an async fs grant: the file named by the id has to be read on its io
     /// runtime and then continues as `source` (wrapped as a JSON module when `json`). Only the
     /// context's chain can park for that; the synchronous callers fail `Unsupported`.
-    read: struct { json: bool },
+    read: struct { json: bool, grant: u32 },
 };
 
-/// Where a hook runs: the graph (fs grant), the realm's `origine` ceiling, the allocator for
-/// results, and `serve` to mark an `origine:` id as served by the host.
+/// Where a hook runs: the realm's `origine` ceiling, the allocator for results, and `serve` to
+/// mark an `origine:` id as served by the host.
 pub const HookEnv = struct {
     host: *Host,
-    graph: *Graph,
     alloc: std.mem.Allocator,
     /// Ceiling of the realm using the handler; null: unrestricted. Hooks were checked against it
     /// when registered, so this is a second line.
@@ -648,18 +733,22 @@ fn attributesAsk(attributes: []const module_types.ImportAttribute, key: []const 
     return false;
 }
 
-fn readFromGraph(env: HookEnv, id: []const u8) ![]u8 {
-    const grant = env.graph.fs orelse return error.PermissionDenied;
+/// The file `id` of the sync grant `grant`, whole: the program that named the grant checks sizes.
+pub fn readFromGrant(grant: *fs_api.FsGrant, alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     if (grant.closed) return error.StaleHandle;
+    if (!grant.read) return error.PermissionDenied;
     try fs_api.cleanPath(id);
-    // `limited(n)` rejects a file of n bytes or more; one that is exactly the limit still fits.
-    return grant.root.readFileAlloc(id, env.alloc, .limited(env.graph.source_limit + 1)) catch |err| switch (err) {
-        error.StreamTooLong => error.FileTooLarge,
-        else => |other| other,
+    return grant.root.readFileAlloc(id, alloc, .unlimited);
+}
+
+fn readFromSource(source: Source, env: HookEnv, id: []const u8) ![]u8 {
+    return switch (source) {
+        .sync => |grant| readFromGrant(grant, env.alloc, id),
+        .async, .named => error.Unsupported,
     };
 }
 
-pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attributes: []const module_types.ImportAttribute) !HookResult {
+pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attributes: []const module_types.ImportAttribute) !ImportHook {
     switch (h.hooks[index]) {
         .js => return error.Unsupported,
         .origine => |filter| {
@@ -674,28 +763,30 @@ pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attribu
             }
             return .next;
         },
-        .fs => {
+        .fs => |fs_hook| {
             if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
             if (attributesAsk(attributes, "type", "json")) return .next;
-            if (env.graph.fs == null and env.graph.async_fs != null) return .{ .read = .{ .json = false } };
-            return .{ .source = try readFromGraph(env, id) };
+            switch (fs_hook.source) {
+                .async => |grant| return .{ .read = .{ .json = false, .grant = grant } },
+                else => return .{ .source = try readFromSource(fs_hook.source, env, id) },
+            }
         },
-        .json => {
+        .json => |source| {
             if (!attributesAsk(attributes, "type", "json")) return .next;
             // The namespace is the host's: a file of the graph never serves an `origine:` id.
             if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
-            if (env.graph.fs == null and env.graph.async_fs != null) return .{ .read = .{ .json = true } };
-            const text = try readFromGraph(env, id);
+            if (source == .async) return .{ .read = .{ .json = true, .grant = source.async } };
+            const text = try readFromSource(source, env, id);
             defer env.alloc.free(text);
             return .{ .source = try json_module.wrap(env.alloc, text) };
         },
     }
 }
 
-/// The default source for `Import.accept()`: the id read as a file of the graph.
-pub fn acceptStep(env: HookEnv, id: []const u8) ![]u8 {
+/// The default source for `ImportHook.accept({ fs })`: the id read as a file of the sync grant `grant`.
+pub fn acceptStep(env: HookEnv, grant: *fs_api.FsGrant, id: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return error.PermissionDenied;
-    return readFromGraph(env, id);
+    return readFromGrant(grant, env.alloc, id);
 }
 
 /// Applies a native maker to `source`: returns the (possibly transformed) text, or the
@@ -738,6 +829,8 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         host.allocator.destroy(parsed);
     }
     for (parsed.hooks) |*item| switch (item.*) {
+        .fs => |*fs_hook| fs_hook.source = try resolveSource(state, fs_hook.source),
+        .json => |*source| source.* = try resolveSource(state, source.*),
         .origine => |filter| {
             const ceiling = host.ceilingOf(state.scope);
             // A realm that serves no `origine:` module has no namespace to give.
@@ -758,10 +851,27 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         else => {},
     };
     if (host.caches.get(parsed.cache) == null) return error.StaleHandle;
+    if (parsed.code_cache != 0 and codeCacheFor(host, parsed.code_cache) == null) return error.StaleHandle;
     const id = try host.handlers.issue();
     parsed.id = id;
     try host.handlers.put(host.allocator, id, parsed);
     return id;
+}
+
+/// The grant a hook named, checked: a sync grant of this realm that can read, or an async one.
+pub fn resolveSource(state: *ScopeState, source: Source) !Source {
+    const named = switch (source) {
+        .named => |named| named,
+        else => return source,
+    };
+    if (named.is_async) {
+        const ref: fs_api.GrantRef = .{ .kind = .async, .id = named.id };
+        for (state.host.async_grants.items) |known| if (known.id == ref.id and known.owner == state and !known.closed) return .{ .async = ref.id };
+        return error.InvalidInput;
+    }
+    const grant = try fs_api.syncGrantOf(state, named.id);
+    if (!grant.read) return error.PermissionDenied;
+    return .{ .sync = grant };
 }
 
 /// `handlerPin(handler)` / `handlerUnpin(handler)`: keep a handler through an operation that spans
@@ -912,19 +1022,18 @@ pub fn layer(state: *ScopeState, call: *Call, handler_id: u32, index: u32, speci
 /// A hook answer for the JS driver: `[]` to pass, or the source text.
 const HookReply = struct { source: ?[]const u8 };
 
-/// `hook(handler, index, graph, context, id, attributesJson)`: runs a native hook; undefined passes,
+/// `hook(handler, index, context, id, attributesJson)`: runs a native hook; undefined passes,
 /// a string is the source it supplied. `context` (0: none) is told when an `origine:` module was served.
-pub fn hook(state: *ScopeState, call: *Call, handler_id: u32, index: u32, graph_id: u32, context_id: u32, id: []const u8, attributes: []const u8) Error!?[]const u8 {
-    return hookImpl(state, call, handler_id, index, graph_id, context_id, id, attributes) catch |err| return errno.narrow(err);
+pub fn hook(state: *ScopeState, call: *Call, handler_id: u32, index: u32, context_id: u32, id: []const u8, attributes: []const u8) Error!?[]const u8 {
+    return hookImpl(state, call, handler_id, index, context_id, id, attributes) catch |err| return errno.narrow(err);
 }
 
-fn hookImpl(state: *ScopeState, call: *Call, handler_id: u32, index: u32, graph_id: u32, context_id: u32, id: []const u8, attributes: []const u8) !?[]const u8 {
+fn hookImpl(state: *ScopeState, call: *Call, handler_id: u32, index: u32, context_id: u32, id: []const u8, attributes: []const u8) !?[]const u8 {
     const host = state.host;
     const h = try handlerFor(host, handler_id);
     if (index >= h.hooks.len) return error.InvalidInput;
-    const graph = try graphFor(host, graph_id);
     var served = false;
-    const result = try hookStep(h, index, .{ .host = host, .graph = graph, .alloc = call.arena, .served = &served }, id, try attributesOf(call, attributes));
+    const result = try hookStep(h, index, .{ .host = host, .alloc = call.arena, .served = &served }, id, try attributesOf(call, attributes));
     if (served and context_id != 0) @import("context.zig").markServedFor(host, state, context_id, id);
     return switch (result) {
         .next => null,
@@ -933,10 +1042,12 @@ fn hookImpl(state: *ScopeState, call: *Call, handler_id: u32, index: u32, graph_
     };
 }
 
-/// `readSource(graph, path)`: a file of the graph's fs grant, as text.
-pub fn readSource(state: *ScopeState, call: *Call, graph_id: u32, path: []const u8) Error![]const u8 {
-    const graph = graphFor(state.host, graph_id) catch |err| return errno.narrow(err);
-    return readFromGraph(.{ .host = state.host, .graph = graph, .alloc = call.arena }, path) catch |err| return errno.narrow(err);
+/// `readSource(grant, path)`: a file of the sync grant `grant` (an `api.fs` grant of this realm), as text.
+pub fn readSource(state: *ScopeState, call: *Call, grant: v8.Object, path: []const u8) Error![]const u8 {
+    const ref = fs_api.grantOf(state, call, grant) catch |err| return errno.narrow(err);
+    if (ref.kind != .sync) return error.InvalidInput;
+    const found = fs_api.syncGrantOf(state, ref.id) catch |err| return errno.narrow(err);
+    return readFromGrant(found, call.arena, path) catch |err| return errno.narrow(err);
 }
 
 /// `transform(specJson, id, source)`: runs a native transformer; throws a SyntaxError with the
@@ -1006,16 +1117,13 @@ pub fn bind(state: *ScopeState, step_fn: v8.Function) Error!void {
     state.driver = .{ .step = .new(isolate, step_fn) };
 }
 
-/// `asyncFs(graph, grant, open, readAll, close)`: makes the graph read through the async fs grant
-/// `grant` (an object the host built) with the Rust natives of `native.fsAsync`. The graph must have
-/// no sync grant.
-pub fn asyncFs(state: *ScopeState, call: *Call, graph_id: u32, grant: v8.Object, open_fn: v8.Function, read_fn: v8.Function, close_fn: v8.Function) Error!void {
+/// `asyncOps(graph, open, readAll, close)`: gives the graph the Rust natives of `native.fsAsync`, which
+/// its contexts call to read a file of an async grant a hook named. They hold no authority.
+pub fn asyncOps(state: *ScopeState, graph_id: u32, open_fn: v8.Function, read_fn: v8.Function, close_fn: v8.Function) Error!void {
     const graph = graphFor(state.host, graph_id) catch |err| return errno.narrow(err);
-    if (graph.fs != null or graph.async_fs != null) return error.InvalidInput;
-    const ref = fs_api.grantOf(state, call, grant) catch |err| return errno.narrow(err);
-    if (ref.kind != .async) return error.InvalidInput;
+    if (graph.async_ops != null) return error.InvalidInput;
     const isolate = state.scope.runtime.isolate;
-    graph.async_fs = .{ .id = ref.id, .open = .new(isolate, open_fn), .read_all = .new(isolate, read_fn), .close = .new(isolate, close_fn) };
+    graph.async_ops = .{ .open = .new(isolate, open_fn), .read_all = .new(isolate, read_fn), .close = .new(isolate, close_fn) };
 }
 
 /// `utf8(bytes)`: the text of UTF-8 bytes (invalid sequences become U+FFFD, as V8 decodes them).
@@ -1049,18 +1157,17 @@ pub fn pipelineResolve(state: *ScopeState, call: *Call, handler_id: u32, specifi
     return resolveNative(h, call.arena, specifier, referrer) catch |err| return errno.narrow(err);
 }
 
-/// `pipelineLoad(handler, graph, id, attributesJson)`: `{ source, handler, diagnostics }` of the whole
+/// `pipelineLoad(handler, id, attributesJson)`: `{ source, handler, diagnostics }` of the whole
 /// native load stage.
-pub fn pipelineLoad(state: *ScopeState, call: *Call, handler_id: u32, graph_id: u32, id: []const u8, attributes: []const u8) Error!v8.Value {
-    return pipelineLoadImpl(state, call, handler_id, graph_id, id, attributes) catch |err| return errno.narrow(err);
+pub fn pipelineLoad(state: *ScopeState, call: *Call, handler_id: u32, id: []const u8, attributes: []const u8) Error!v8.Value {
+    return pipelineLoadImpl(state, call, handler_id, id, attributes) catch |err| return errno.narrow(err);
 }
 
-fn pipelineLoadImpl(state: *ScopeState, call: *Call, handler_id: u32, graph_id: u32, id: []const u8, attributes: []const u8) !v8.Value {
+fn pipelineLoadImpl(state: *ScopeState, call: *Call, handler_id: u32, id: []const u8, attributes: []const u8) !v8.Value {
     const host = state.host;
     const h = try handlerFor(host, handler_id);
     if (!h.native) return error.InvalidInput;
-    const graph = try graphFor(host, graph_id);
-    const loaded = try loadNative(.{ .host = host, .graph = graph, .alloc = call.arena }, h, handler_id, id, try attributesOf(call, attributes));
+    const loaded = try loadNative(.{ .host = host, .alloc = call.arena }, h, handler_id, id, try attributesOf(call, attributes));
     const object = eu.v.object(call.isolate);
     switch (loaded) {
         .source => |item| {

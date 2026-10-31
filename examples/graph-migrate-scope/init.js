@@ -52,7 +52,7 @@ export async function main(api) {
   });
 
   // The old `main` is the module imported here, and `run()` is its evaluation.
-  using ctx = await api.context.create({ import: handler, graph: api.graph });
+  using ctx = await api.context.create({ import: handler, graph: api.graph.root });
   await ctx.import('main');
   await ctx.import('nothing').catch(e => eprintln(`nothing: ${e.name}: ${e.message}`));
 }

@@ -1,7 +1,7 @@
 // origine:@std/graph/*: the data side of the module graph. Type-checked only, never run.
 import { ModuleRecipe, ModuleSource, SourceMap, ModuleImportPhase } from "origine:@std/graph/module";
 import type { ModuleRecipe as Recipe } from "origine:@std/graph/module";
-import { ImportHandler, Import, ImportError, MakeRecipe, Transform } from "origine:@std/graph/import";
+import { ImportHandler, ImportHook, ImportError, MakeRecipe, Transform } from "origine:@std/graph/import";
 import type { Verdict } from "origine:@std/graph/import";
 import { ImportResolver } from "origine:@std/graph/resolve";
 import { relative, origine, importMap } from "origine:@std/graph/resolve/layers";
@@ -9,6 +9,8 @@ import { origineProvider, fsProvider, json, fromLoader } from "origine:@std/grap
 import { ImportCache, ResolveCache, CodeCache } from "origine:@std/graph/cache";
 import { ts } from "origine:@std/transformer/oxc";
 import { snapshot, deepFreeze } from "origine:@std/data";
+
+declare const files: object;
 
 const resolver = ImportResolver.layered()
   .layer(relative())
@@ -20,16 +22,17 @@ const handler = ImportHandler.make({
   resolver,
   hooks: [
     async resolved => {
-      if (resolved.id === "secret") return Import.reject(ImportError.PermissionDenied);
-      if (resolved.id.startsWith("node:")) return Import.reject(ImportError.other("no node builtins"));
-      return Import.next();
+      if (resolved.id === "secret") return ImportHook.reject(ImportError.PermissionDenied);
+      if (resolved.id.startsWith("node:")) return ImportHook.reject(ImportError.other("no node builtins"));
+      return ImportHook.next();
     },
     origineProvider({ std: { include: ["text"] } }),
-    json(),
-    fsProvider({ read: "copy" }),
+    json({ fs: files }),
+    fsProvider({ fs: files, read: "copy" }),
   ],
   maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ ".ts": ts(), ".txt": (source, id) => `/* ${id} */ ${source}` }) }),
   cache: ImportCache.native({ retain: "used" }),
+  codeCache: CodeCache.memory({ limits: { size: 1 << 20 } }),
   meta: ({ id }) => ({ url: id }),
 });
 const planned: "native" | "js" = handler.plan[0]!.kind;
@@ -37,27 +40,31 @@ const allNative: boolean = handler.native;
 void [planned, allNative, ResolveCache.native({ entries: 10 })];
 
 const recipe: Recipe = ModuleRecipe({
-  source: ModuleSource.file("./main.ts", SourceMap.None).withTransformer(ts()).withTransformer((source) => source),
+  source: ModuleSource.file("./main.ts", { fs: files }, SourceMap.None).withTransformer(ts()).withTransformer((source) => source),
   import: handler,
   name: "main",
-  codeCache: CodeCache.memory({ bytes: 1 << 20 }),
+  codeCache: CodeCache.none,
 });
 const inline = ModuleRecipe({ source: ModuleSource.text("export {}", SourceMap.text("{}")), import: handler, name: "inline" });
 const pure: boolean = recipe.native && inline.native;
 export async function graphUse(api: import("@origine/types").Api): Promise<void> {
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: "r" }), codeCache: CodeCache.memory() });
-  // An async grant is read on its io runtime, without blocking.
+  const graph = api.graph.create();
+  // An async grant is read on its io runtime, without blocking; the hook or source that names it says so.
   const io = api.io.create({});
-  const asyncGraph = api.graph.derive({ fs: await api.fs.requestAsync({ handle: 'plain', io, access: "r" }) });
-  void asyncGraph;
-  // A derived graph is the caller's: it can be closed (or disposed); `api.graph` itself cannot.
-  asyncGraph.close();
+  const remote = await api.fs.requestAsync({ handle: 'plain', io, access: "r" });
+  void ModuleSource.file("./a.js", { fs: remote });
+  // A created graph is the caller's: it can be closed (or disposed); `api.graph.root` cannot.
+  api.graph.create().close();
   {
-    using scoped = api.graph.derive();
+    using scoped = api.graph.create();
     void scoped;
   }
-  // @ts-expect-error api.graph lives as long as the realm
-  api.graph.close();
+  // @ts-expect-error there is no derive: a graph holds no fs grant and no code cache
+  api.graph.derive();
+  // @ts-expect-error api.graph is a namespace, not a graph
+  api.graph.declare(recipe);
+  // @ts-expect-error the root graph lives as long as the realm
+  api.graph.root.close();
   const reference = graph.declare(recipe);
   await graph.load(reference);
   const requests: number = graph.requests(reference)?.length ?? 0;
@@ -67,7 +74,7 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   void exported;
   // @ts-expect-error exports() takes the reference only
   graph.exports(reference, ctx.context);
-  const stored: number = await graph.flush();
+  const stored: number = await CodeCache.memory().flush();
   const view = ImportCache.native({ retain: "used" });
   void [requests, stored, view.size, view.delete("a"), view.clear()];
   // @ts-expect-error a table is not looked up through a context
@@ -88,11 +95,11 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
   // @ts-expect-error declare takes a recipe
   graph.declare({});
 }
-const provided: Verdict = Import.recipe(recipe);
-const sourced: Verdict = Import.source(ModuleSource.text("export default 1"));
-const linked: Verdict = Import.link({});
-const synthetic: Verdict = Import.exports({ answer: 42, default: () => 1 });
-void [pure, provided, sourced, linked, synthetic, Import.accept(), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
+const provided: Verdict = ImportHook.recipe(recipe);
+const sourced: Verdict = ImportHook.source(ModuleSource.text("export default 1"));
+const linked: Verdict = ImportHook.link({});
+const synthetic: Verdict = ImportHook.exports({ answer: 42, default: () => 1 });
+void [pure, provided, sourced, linked, synthetic, ImportHook.accept({ fs: files }), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
 void ImportHandler.make({ resolver, hooks: fromLoader((id, attributes) => (attributes.type === "json" ? { source: "{}" } : id)) });
 void ImportHandler.make({ resolver, hooks: [], maker: MakeRecipe.fn(async ({ id, source }) => (id.endsWith(".ts") ? { transformer: ts(), import: handler } : {})) });
 const equal: boolean = ImportError.is({ errno: ImportError.NotFound }, ImportError.NotFound);
@@ -106,7 +113,7 @@ ImportHandler.make({ hooks: [] });
 ImportCache.native({});
 // @ts-expect-error `retain` is 'all' or 'used'
 ImportCache.native({ retain: "some" });
-// @ts-expect-error `read` is required (it has a cost)
+// @ts-expect-error `fs` and `read` are required (a grant is named where it is used; reading has a cost)
 fsProvider({});
 // With no options, or `std: true`, it serves everything the creating context may import.
 origineProvider();
@@ -116,21 +123,21 @@ origineProvider({ std: false });
 // @ts-expect-error exactly one of include and exclude
 origineProvider({ std: { include: ["text"], exclude: ["fs"] } });
 // @ts-expect-error values are an object of exports, not a function
-Import.exports(() => {});
+ImportHook.exports(() => {});
 // @ts-expect-error there is no mode: a link is the module itself, nothing is copied
-Import.link({}, { mode: "shared" });
+ImportHook.link({}, { mode: "shared" });
 // @ts-expect-error `import` is required: it decides what the module can load
-ModuleRecipe({ source: ModuleSource.file("./a.js") });
+ModuleRecipe({ source: ModuleSource.file("./a.js", { fs: files }) });
 // @ts-expect-error a source is not a recipe
-Import.source({ kind: "file" });
+ImportHook.source({ kind: "file" });
 // @ts-expect-error a source is not a recipe
-Import.recipe(ModuleSource.text(""));
+ImportHook.recipe(ModuleSource.text(""));
 // @ts-expect-error `maker` returns options (import, transformer), not a source or a recipe
-MakeRecipe.fn(() => ({ source: ModuleSource.file("./a.js") }));
+MakeRecipe.fn(() => ({ source: ModuleSource.file("./a.js", { fs: files }) }));
 // @ts-expect-error only the codes of ImportError can be rejected
-Import.reject(123);
+ImportHook.reject(123);
 // @ts-expect-error the receiver of withTransformer is immutable data without a `transformers` setter
-ModuleSource.file("./a.js").transformers = [];
+ModuleSource.file("./a.js", { fs: files }).transformers = [];
 // @ts-expect-error a layer is not a hook
 ImportHandler.make({ resolver, hooks: [relative()] });
 

@@ -67,19 +67,15 @@ fn denied() -> NativeError {
     NativeError::Errno(errno::PERMISSION_DENIED)
 }
 
-/// The directory a graph's `CodeCache.dir` keeps V8 code caches in (`init_cache.dir_name` in Zig): V8
-/// trusts what it finds there, so a guest must not be able to plant it through its own grants.
-const CACHE_DIR: &str = "__codecache__";
-
 /// Rejects NUL (`InvalidInput`: a malformed path) and, as policy denials (`PermissionDenied`, like
-/// the OS's own), absolute paths, `..` components and `__codecache__` components. Lexical only:
+/// the OS's own), absolute paths and `..` components. Lexical only:
 /// symlinks are not resolved here, so following one can leave the grant's root. The Zig twin is
 /// `cleanPath` in `src/api/fs.zig`.
 fn clean(path: &str) -> Result<(), NativeError> {
     if path.contains('\0') {
         return Err(invalid_input());
     }
-    if path.starts_with('/') || path.split('/').any(|part| part == ".." || part == CACHE_DIR) {
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
         return Err(denied());
     }
     // The rest of `sanitize` (non-Unix prefixes) is a policy denial too.

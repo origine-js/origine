@@ -63,7 +63,7 @@ the draft stage). `0` is "no error" and is never a member.
 | `FilesystemLoop` | 15 | `ELOOP`: too many symlinks |
 | `InvalidFilename` | 16 | `ENAMETOOLONG` or a name the file system cannot encode |
 | `CrossesDevices` | 17 | `EXDEV`: a rename across file systems |
-| `PermissionDenied` | 20 | every denial: the grant's (`..`, an absolute path, a `__codecache__` component, a write on a read-only grant, a read on a write-only one, a request above the host ceiling) and the OS's (`EACCES`, `EPERM`) |
+| `PermissionDenied` | 20 | every denial: the grant's (`..`, an absolute path, a write on a read-only grant, a read on a write-only one, a request above the host ceiling) and the OS's (`EACCES`, `EPERM`) |
 | `ReadOnlyFilesystem` | 21 | `EROFS` |
 | `ResourceBusy` | 22 | `EBUSY`, `ETXTBSY` |
 | `Unsupported` | 23 | |
@@ -106,7 +106,7 @@ The errors the glue throws and rejects with get the set fields as own properties
 detail object itself is not part of the API.
 
 A failed import, evaluated source or preload is a `ModuleError` (`origine:@std/errors`): its `errno` is the kind of the cause
-(`Import.reject(ImportError.PermissionDenied)` is `PermissionDenied`, a missing file is `NotFound`, a module that threw is
+(`ImportHook.reject(ImportError.PermissionDenied)` is `PermissionDenied`, a missing file is `NotFound`, a module that threw is
 `Unexpected`), `subject` the module that failed (the id the resolver gave; what the call named when none was reached),
 `referrer` the module that imported it (when it failed as a static import of another module), and `cause` an error rebuilt in the importing realm. Nothing of the failing
 realm's objects crosses.

@@ -13,7 +13,7 @@
 import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError, ImportError } from 'origine:@std/errors';
-import { ImportCache } from 'origine:@std/graph/cache';
+import { CodeCache, ImportCache } from 'origine:@std/graph/cache';
 
 const freeze = Object.freeze;
 const invalid = message => new IoError(ERRNO.io.InvalidInput, message);
@@ -21,6 +21,12 @@ const own = (object, key) => {
   if (object === null || typeof object !== 'object') return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(object, key);
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+};
+
+/// The fs grant a file source or provider reads with: an object `api.fs` made (the graph checks it).
+const checkFs = (what, fs) => {
+  if (fs === null || typeof fs !== 'object') throw invalid(`${what}: fs must be an fs grant made by api.fs`);
+  return fs;
 };
 
 const isTransformer = value => typeof value === 'function' || value instanceof h.Transformer;
@@ -41,35 +47,37 @@ export { ImportError };
 class Maker extends h.Data {}
 class PlanEntry extends h.Data {}
 h.seal(Maker, PlanEntry);
-const NEXT = new h.ImportVerdict({ kind: 'next' });
-const ACCEPT = new h.ImportVerdict({ kind: 'accept' });
+const NEXT = new h.ImportVerdict({ kind: h.VerdictKind.Next });
 
 /// Verdicts a hook returns. All are immutable JS class instances.
-export const Import = freeze({
+export const ImportHook = freeze({
   /// Not mine: continue with the next hook.
   next: () => NEXT,
-  /// Stop the chain and use the default `maker` on whatever the pipeline supplies itself.
-  accept: () => ACCEPT,
+  /// Stop the chain and use the default `maker` on the file the id names, read whole through `options.fs`,
+  /// a grant `api.fs` made (sync or async).
+  accept(options) {
+    return new h.ImportVerdict({ kind: h.VerdictKind.Accept, fs: checkFs('ImportHook.accept', own(options, 'fs')) });
+  },
   /// Stop the chain with a source: text the `maker` turns into a module (its transformers, its handler, its name).
   /// The importing context gets its own module.
   source(source) {
-    if (!(source instanceof h.ModuleSource)) throw invalid('Import.source: expected a ModuleSource');
-    return new h.ImportVerdict({ kind: 'source', source });
+    if (!(source instanceof h.ModuleSource)) throw invalid('ImportHook.source: expected a ModuleSource');
+    return new h.ImportVerdict({ kind: h.VerdictKind.Source, source });
   },
   /// Stop the chain with a recipe: final, the maker is skipped and the recipe's own handler answers the imports of
   /// its module. The importing context gets its own fresh module of it, with its own state.
   recipe(recipe) {
-    if (!(recipe instanceof h.ModuleRecipe)) throw invalid('Import.recipe: expected a ModuleRecipe');
-    return new h.ImportVerdict({ kind: 'recipe', recipe });
+    if (!(recipe instanceof h.ModuleRecipe)) throw invalid('ImportHook.recipe: expected a ModuleRecipe');
+    return new h.ImportVerdict({ kind: h.VerdictKind.Recipe, recipe });
   },
   /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a fresh
   /// copy: the importer links the module itself, with live bindings and the other realm's objects. This
   /// crosses the realm boundary on purpose: a function or object exported that way runs in, and reaches,
-  /// the exporting realm. Nothing is copied or frozen; use `snapshot` and `deepFreeze` with `Import.exports` to hand
+  /// the exporting realm. Nothing is copied or frozen; use `snapshot` and `deepFreeze` with `ImportHook.exports` to hand
   /// over data instead. A reference of the importer's own context is an alias.
   link(reference) {
-    if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
-    return new h.ImportVerdict({ kind: 'link', reference });
+    if (reference === null || typeof reference !== 'object') throw invalid('ImportHook.link: reference must be a ModuleReference');
+    return new h.ImportVerdict({ kind: h.VerdictKind.Link, reference });
   },
   /// Stop the chain with a module whose namespace is `values`: its own enumerable string-keyed data properties,
   /// `default` included (an accessor is `InvalidInput`). The importer gets one synthetic module with those
@@ -77,27 +85,27 @@ export const Import = freeze({
   /// this hands the importer whatever the values reach. Build the values from `snapshot` and `deepFreeze` to give data.
   /// An `origine:` id can never be served this way; it is `PermissionDenied`.
   exports(values) {
-    if (values === null || typeof values !== 'object') throw invalid('Import.exports: values must be an object');
+    if (values === null || typeof values !== 'object') throw invalid('ImportHook.exports: values must be an object');
     const own = Object.create(null);
     for (const key of Object.keys(values)) {
       const descriptor = Object.getOwnPropertyDescriptor(values, key);
-      if (!('value' in descriptor)) throw invalid(`Import.exports: ${JSON.stringify(key)} is an accessor; exports are data properties`);
+      if (!('value' in descriptor)) throw invalid(`ImportHook.exports: ${JSON.stringify(key)} is an accessor; exports are data properties`);
       own[key] = descriptor.value;
     }
-    return new h.ImportVerdict({ kind: 'exports', values: freeze(own) });
+    return new h.ImportVerdict({ kind: h.VerdictKind.Exports, values: freeze(own) });
   },
   /// Stop the chain with an error: a code of `ImportError` or the value of `ImportError.other(...)`.
   reject(error) {
     if (typeof error === 'number') {
       const name = NAMES.get(error);
-      if (name === undefined || error === ERRNO.host.Unexpected) throw invalid('Import.reject: not an ImportError code');
-      return new h.ImportVerdict({ kind: 'reject', error: new ImportError(error) });
+      if (name === undefined || error === ERRNO.host.Unexpected) throw invalid('ImportHook.reject: not an ImportError code');
+      return new h.ImportVerdict({ kind: h.VerdictKind.Reject, error: new ImportError(error) });
     }
     const code = own(error, 'errno');
     const message = own(error, 'message');
     if (code !== ERRNO.host.Unexpected || typeof message !== 'string')
-      throw invalid('Import.reject: expected an ImportError code or ImportError.other(message)');
-    return new h.ImportVerdict({ kind: 'reject', error: new ImportError(code, message) });
+      throw invalid('ImportHook.reject: expected an ImportError code or ImportError.other(message)');
+    return new h.ImportVerdict({ kind: h.VerdictKind.Reject, error: new ImportError(code, message) });
   },
 });
 
@@ -175,7 +183,8 @@ const isHook = value => typeof value === 'function' || value instanceof h.Provid
 export const ImportHandler = freeze({
   /// Options: `resolver` (required, an `ImportResolver` with at least one layer), `hooks` (required: a
   /// function or provider, or an array of them; may be empty), `maker` (default `MakeRecipe.inherit()`),
-  /// `cache` (default `ImportCache.native({ retain: 'all' })`), `meta` (optional
+  /// `cache` (default `ImportCache.native({ retain: 'all' })`), `codeCache` (default `CodeCache.none`: the code
+  /// cache of the modules this handler makes; a recipe's own `codeCache` wins for its module), `meta` (optional
   /// `({ id }) => data`, called when a module is made; the plain-data result becomes its `import.meta`).
   make(options) {
     const resolver = own(options, 'resolver');
@@ -189,6 +198,8 @@ export const ImportHandler = freeze({
     if (!(maker instanceof Maker)) throw invalid('ImportHandler.make: maker must come from MakeRecipe');
     const cache = own(options, 'cache') ?? ImportCache.native({ retain: 'all' });
     if (!(cache instanceof h.Cache) || cache.host !== 'importCache') throw invalid('ImportHandler.make: cache must be an ImportCache');
+    const codeCache = own(options, 'codeCache') ?? CodeCache.none;
+    if (!(codeCache instanceof h.Cache) || codeCache.kind !== 'codeCache') throw invalid('ImportHandler.make: codeCache must be a CodeCache');
     const meta = own(options, 'meta');
     if (meta !== undefined && typeof meta !== 'function') throw invalid('ImportHandler.make: meta must be a function');
 
@@ -198,12 +209,14 @@ export const ImportHandler = freeze({
     plan.push(planEntry('maker', maker));
     if (maker.transformer !== undefined) plan.push(planEntry('transformer', maker.transformer));
     plan.push(planEntry('cache', cache));
+    if (codeCache.host !== h.CodeCacheHost.None) plan.push(planEntry('codeCache', codeCache));
     if (meta !== undefined) plan.push(new PlanEntry({ stage: 'meta', kind: 'js' }));
     return new h.ImportHandler({
       resolver,
       hooks: freeze([...hooks]),
       maker,
       cache,
+      codeCache,
       meta: meta ?? null,
       /// Every element in pipeline order, `{ stage, kind: 'native' | 'js', name? }`.
       plan: freeze(plan),

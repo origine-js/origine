@@ -13,7 +13,7 @@ export interface ContextSecurity {
    * `false`: they throw `EvalError: Code generation from strings disallowed for this context`.
    *
    * CAUTION: enabling it lets code in the realm compile strings (`eval`, `new Function`, `fn.constructor('...')`).
-   * Functions are shared across realms (by `Import.link`, `graph.exports(ref)`, `Import.exports` values and
+   * Functions are shared across realms (by `ImportHook.link`, `graph.exports(ref)`, `ImportHook.exports` values and
    * preload `values`), and V8 checks the realm the constructor belongs to, not the caller's. So any function
    * exported from a context with this enabled lets its importers run arbitrary code in that realm
    * (`Promise.resolve('return globalThis.secret').then(fn.constructor)` from another realm builds and returns a
@@ -34,7 +34,7 @@ export interface ContextOptions {
    */
   readonly import: import("origine:@std/graph/import").ImportHandler;
   /**
-   * The graph the realm's modules are produced with: `api.graph` or a graph derived from it. Required, no
+   * The graph the realm's modules are produced with: `api.graph.root` or a graph made by `api.graph.create()`. Required, no
    * default: it decides what authority sources are read with and where code caches live. Missing, not a
    * graph the host made, or closed is `InvalidInput`.
    */

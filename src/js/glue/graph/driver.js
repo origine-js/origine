@@ -1,10 +1,10 @@
 // `api.graph` driver: the steps the host calls for the functions of a handler, and the pipeline run from JS. Built by graph.js.
-import { SourceMap, ImportVerdict } from '../handles.js';
+import { SourceMap, ImportVerdict, HookHost, ModuleImportPhase, SourceMapKind, SourceKind, ModuleStatus, PipelineKind, ReadMode, VerdictKind } from '../handles.js';
 import { PipelineResult, ResolveRequest, ResolvedImport, ProvidedSource, MakerRequest, TransformResult } from './data.js';
 import { freeze, own, errors } from '../util.js';
 export default g => {
   const { native, host, named } = g;
-  const { applyTransformer, byId, graphFs, loadCache, metaOf, pinned, readText, referenceState, register, sourceText } = g;
+  const { applyTransformer, byId, grantOf, loadCache, metaOf, pinned, readText, recipeCacheId, referenceState, register, sourceText } = g;
   const { InvalidInput, NotFound, InvalidData } = errors;
 
   /// The host's chain of a handler runs its host elements itself and calls `step` only for a function
@@ -15,13 +15,13 @@ export default g => {
   const settled = () => Promise.resolve();
 
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
-  const NEXT = new PipelineResult({ kind: 'next' });
+  const NEXT = new PipelineResult({ kind: PipelineKind.Next });
 
   const steps = {
     /// A resolver layer that is a function: the id it answers, or undefined to pass.
     layer: async (hid, ctxId, index, specifier, referrer, attributes) => {
       await settled();
-      const request = new ResolveRequest({ specifier, referrer, attributes: freeze({ ...attributes }), phase: 'evaluation' });
+      const request = new ResolveRequest({ specifier, referrer, attributes: freeze({ ...attributes }), phase: ModuleImportPhase.Evaluation });
       const answer = await byId.get(hid).layerFns[index](request);
       if (answer === undefined) return undefined;
       const id = typeof answer === 'string' ? answer : own(answer, 'id');
@@ -29,37 +29,45 @@ export default g => {
       return id;
     },
     /// A hook that is a function: its verdict as data `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link' | 'exports' }`.
-    hook: async (hid, ctxId, graphId, index, id, attributes, specifier, referrer) => {
+    hook: async (hid, ctxId, index, id, attributes, specifier, referrer) => {
       await settled();
       const resolved = new ResolvedImport({
         id,
         attributes: freeze({ ...attributes }),
         specifier,
         referrer,
-        phase: 'evaluation',
+        phase: ModuleImportPhase.Evaluation,
       });
       const verdict = await byId.get(hid).hookFns[index](resolved);
-      if (!(verdict instanceof ImportVerdict)) throw named(InvalidData, 'a hook must return an Import verdict');
+      if (!(verdict instanceof ImportVerdict)) throw named(InvalidData, 'a hook must return an ImportHook');
       switch (verdict.kind) {
-        case 'next':
+        case VerdictKind.Next:
           return NEXT;
-        case 'accept':
-          return new PipelineResult({ kind: 'accept' });
-        case 'recipe': {
-          const source = await sourceText(verdict.recipe.source, graphId, id);
-          return new PipelineResult({ kind: 'final', source, handler: register(verdict.recipe.import).id });
+        case VerdictKind.Accept: {
+          // The host checks the grant again when it reads; `grant` is for this realm's own reads.
+          const grant = grantOf(verdict.fs, 'ImportHook.accept');
+          return new PipelineResult({ kind: PipelineKind.Accept, fs: grant.id, fsAsync: grant.async ? 1 : 0, grant: verdict.fs });
         }
-        case 'source':
-          return new PipelineResult({ kind: 'provide', source: await sourceText(verdict.source, graphId, id) });
-        case 'link': {
+        case VerdictKind.Recipe: {
+          const source = await sourceText(verdict.recipe.source, id);
+          return new PipelineResult({
+            kind: PipelineKind.Final,
+            source,
+            handler: register(verdict.recipe.import).id,
+            codeCache: recipeCacheId(verdict.recipe),
+          });
+        }
+        case VerdictKind.Source:
+          return new PipelineResult({ kind: PipelineKind.Provide, source: await sourceText(verdict.source, id) });
+        case VerdictKind.Link: {
           const state = referenceState.get(verdict.reference);
-          if (state === undefined || state.context === null || state.status !== 'evaluated')
+          if (state === undefined || state.context === null || state.status !== ModuleStatus.Evaluated)
             throw named(InvalidInput, 'link needs a reference that is evaluated in a context');
-          return new PipelineResult({ kind: 'link', context: state.context, name: state.name });
+          return new PipelineResult({ kind: PipelineKind.Link, context: state.context, name: state.name });
         }
-        case 'exports':
-          return new PipelineResult({ kind: 'exports', exports: verdict.values });
-        case 'reject':
+        case VerdictKind.Exports:
+          return new PipelineResult({ kind: PipelineKind.Exports, exports: verdict.values });
+        case VerdictKind.Reject:
           throw verdict.error;
         default:
           throw named(InvalidData, 'unknown verdict');
@@ -70,9 +78,9 @@ export default g => {
       await settled();
       const record = byId.get(hid);
       const source = new ProvidedSource({
-        kind: 'text',
+        kind: SourceKind.Text,
         text,
-        map: new SourceMap({ kind: 'none' }),
+        map: new SourceMap({ kind: SourceMapKind.None }),
         transformers: freeze([]),
         native: true,
       });
@@ -91,10 +99,10 @@ export default g => {
       await settled();
       return metaOf(byId.get(hid), id);
     },
-    /// The graph's `custom` code cache gets to load what it kept for the final source of `id`.
-    cacheload: async (graphId, id, hash, text) => {
+    /// The `custom` code cache of the module (by its host id) gets to load what it kept for the final source of `id`.
+    cacheload: async (cacheId, id, hash, text) => {
       await settled();
-      await loadCache(graphId, id, hash, text);
+      await loadCache(cacheId, id, hash, text);
     },
   };
   const stepByKind = [steps.layer, steps.hook, steps.maker, steps.transform, steps.meta, steps.cacheload];
@@ -114,35 +122,35 @@ export default g => {
   };
 
   /// The `source` reply of `reference.load()`: `handler` is the handler object that governs the module's own imports.
-  const finished = (child, source, id) =>
-    pinned(child, async () => new PipelineResult({ kind: 'source', source, handler: child.handler, meta: await metaOf(child, id) }));
+  const finished = (child, source, id, codeCache = 0) =>
+    pinned(child, async () => new PipelineResult({ kind: PipelineKind.Source, source, handler: child.handler, meta: await metaOf(child, id), codeCache }));
 
   /// Answers `{ kind: 'source', source, handler, meta }` or the `link` reply of a hook.
-  const loadInJs = async (hid, graphId, id, attributes, specifier, referrer) => {
+  const loadInJs = async (hid, id, attributes, specifier, referrer) => {
     const record = byId.get(hid);
     const json = attributesJson(attributes);
     let supplied;
     for (let index = 0; index < record.hookFns.length && supplied === undefined; index++) {
       let reply;
       if (record.hookFns[index] !== null) {
-        reply = await steps.hook(hid, 0, graphId, index, id, attributes, specifier, referrer);
-      } else if (graphFs.get(graphId)?.kind === 'async' && (record.hookHosts[index] === 'fs' || record.hookHosts[index] === 'json')) {
+        reply = await steps.hook(hid, 0, index, id, attributes, specifier, referrer);
+      } else if (record.hookGrants[index]?.async === true) {
         // The host's hook cannot wait for an async read; this loop can.
         const isJson = attributes.type === 'json';
-        const serves = !id.startsWith('origine:') && (record.hookHosts[index] === 'json' ? isJson : !isJson);
+        const serves = !id.startsWith('origine:') && (record.hookHosts[index] === HookHost.Json ? isJson : !isJson);
         if (!serves) reply = NEXT;
         else {
-          const text = await readText(graphId, id);
-          reply = new PipelineResult({ kind: 'provide', source: isJson ? host(native.graph.jsonModule, text) : text });
+          const text = await readText(record.handler.hooks[index].fs, id);
+          reply = new PipelineResult({ kind: PipelineKind.Provide, source: isJson ? host(native.graph.jsonModule, text) : text });
         }
       } else {
-        const text = host(native.graph.hook, hid, index, graphId, 0, id, json);
-        reply = text === undefined ? NEXT : new PipelineResult({ kind: 'provide', source: text });
+        const text = host(native.graph.hook, hid, index, 0, id, json);
+        reply = text === undefined ? NEXT : new PipelineResult({ kind: PipelineKind.Provide, source: text });
       }
-      if (reply.kind === 'accept') supplied = await readText(graphId, id);
-      else if (reply.kind === 'provide') supplied = reply.source;
-      else if (reply.kind === 'final') return finished(byId.get(reply.handler), reply.source, id);
-      else if (reply.kind === 'link') return reply;
+      if (reply.kind === PipelineKind.Accept) supplied = await readText(reply.grant, id);
+      else if (reply.kind === PipelineKind.Provide) supplied = reply.source;
+      else if (reply.kind === PipelineKind.Final) return finished(byId.get(reply.handler), reply.source, id, reply.codeCache);
+      else if (reply.kind === PipelineKind.Link) return reply;
     }
     if (supplied === undefined) throw named(NotFound, `${id} is not provided`);
     const maker = record.handler.maker;
@@ -169,18 +177,18 @@ export default g => {
 
   /// The native pipeline of a `native` handler, or the driver, for code that is not a context
   /// (`reference.load()` asks for the sources of a module's dependencies this way).
-  const pipeline = async (handler, graphId, specifier, referrer, attributes) => {
+  const pipeline = async (handler, specifier, referrer, attributes) => {
     const record = register(handler);
-    if (record.native && graphFs.get(graphId)?.kind !== 'async') {
+    if (record.native && record.reads !== ReadMode.Async) {
       const id = host(native.graph.pipelineResolve, record.id, specifier, referrer);
       if (id === undefined) throw named(NotFound, `cannot resolve ${specifier}`);
-      const loaded = host(native.graph.pipelineLoad, record.id, graphId, id, attributesJson(attributes));
+      const loaded = host(native.graph.pipelineLoad, record.id, id, attributesJson(attributes));
       if (loaded.diagnostics !== undefined) throw new SyntaxError(loaded.diagnostics);
       return { id, source: loaded.source, handler: byId.get(loaded.handler).handler, meta: undefined };
     }
     return pinned(record, async () => {
       const id = await resolveInJs(record.id, specifier, referrer, attributes);
-      const answer = await loadInJs(record.id, graphId, id, attributes, specifier, referrer);
+      const answer = await loadInJs(record.id, id, attributes, specifier, referrer);
       return { id, answer };
     });
   };

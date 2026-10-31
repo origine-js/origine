@@ -56,7 +56,7 @@ export class IoError extends OrigineError {
 
 export class HostError extends OrigineError {}
 // An import, an evaluated source or a preload that failed. `errno` is the kind of the cause (a hook's
-// `Import.reject(ImportError.PermissionDenied)`, else `Unexpected`), `subject` the module it was for and
+// `ImportHook.reject(ImportError.PermissionDenied)`, else `Unexpected`), `subject` the module it was for and
 // `referrer` the module that imported it (when it was a static import), and `cause` an error rebuilt in this realm from what the child reported: nothing of the child's objects crosses.
 export class ModuleError extends OrigineError {
   constructor(errno, message = '', subject = undefined, cause = undefined, referrer = undefined) {

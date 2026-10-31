@@ -19,7 +19,7 @@ rs.OpenOptions.new().write(true).create(true).open('b.txt');
 A grant is the object `requestSync` / `requestAsync` returned. Its issuer is the native grant the host built,
 kept in a private field that a script cannot read, copy or inherit, so a copy with every property (`{ ...grant }`, `Object.assign`,
 `Object.create(grant)`, a `Proxy`) still runs the same operations but is not a grant where one is the
-authority: `api.graph.derive({ fs })` and `CodeCache.dir(fs)` reject it with `InvalidInput`.
+authority: `fsProvider({ fs })`, `ModuleSource.file(path, { fs })` and `CodeCache.dir({ fs, path })` reject it with `InvalidInput`.
 
 `fs(io, dir = Dir.cwd())` returns a frozen object; paths are relative to `dir`.
 Rust's `Result` maps to **throw** (sync) / **reject** (async) with an `OrigineError` subclass
@@ -77,7 +77,7 @@ or `api.fs` async ops (`fileReadInto`, `fileReadAlloc`).
 ## Symlinks and confinement
 
 Paths are confined to the grant's root **lexically** only (no `..`, no absolute path, no
-`__codecache__` component: `PermissionDenied`; a NUL byte: `InvalidInput`). Symlinks are not
+component named `..`: `PermissionDenied`; a NUL byte: `InvalidInput`). Symlinks are not
 resolved by that check, so `metadata`, `try_exists`, `File.open` and friends, which follow a symlink,
 can leave the root when the root contains a link that points outside it. Do not grant a root you do
 not trust the contents of until confinement of symlinks is decided.

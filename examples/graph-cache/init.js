@@ -1,8 +1,10 @@
 // Run: zig-out/bin/origine examples/graph-cache/init.js   (or: zig build run -- examples/graph-cache/init.js)
 // Two caches with different jobs. ImportCache names a table of modules (module id -> reference) that the
 // contexts using the same object share; `retain` says whether an entry outlives its holders, which decides if a re-import evaluates
-// again. CodeCache keeps V8's compiled code, so a compile can be skipped; it never changes what runs.
-// The dir cache writes examples/graph-cache/__codecache__/ on the first run (not in .gitignore).
+// again. CodeCache keeps V8's compiled code, so a compile can be skipped; it never changes what runs. A handler
+// names the CodeCache of the modules it makes (a recipe can name its own), and the cache has its own flush().
+// The dir cache writes its files straight into the directory it is given: examples/graph-cache/cache/ on the
+// first run (not in .gitignore).
 //
 // Prints (stderr), with side.js's own line each time it evaluates:
 //   retain all: same reference: true , table size: 1
@@ -19,8 +21,8 @@ import { relative } from 'origine:@std/graph/resolve/layers';
 import { fsProvider } from 'origine:@std/graph/providers';
 import { eprintln } from 'origine:@std/debug';
 
-const makeHandler = cache =>
-  ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })], cache });
+const makeHandler = (src, cache, codeCache) =>
+  ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ fs: src, read: 'copy' })], cache, codeCache });
 
 /** A context whose modules print through `print`. */
 const context = (api, handler, graph) =>
@@ -32,12 +34,14 @@ const context = (api, handler, graph) =>
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const fs = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-cache', access: 'rw' });
-  const graph = api.graph.derive({ fs });
+  // Sources are read-only; the code cache gets its own writable grant, and the directory is a path in it.
+  const src = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-cache', access: 'r' });
+  const work = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-cache', access: 'rw' });
+  const graph = api.graph.create();
 
   // 1. retain 'all' (the default): a module lives as long as its context. Importing twice evaluates once.
   const all = ImportCache.native({ retain: 'all' });
-  using ctxAll = await context(api, makeHandler(all), graph);
+  using ctxAll = await context(api, makeHandler(src, all), graph);
   const first = await ctxAll.import('./side.js');
   const second = await ctxAll.import('./side.js');
   eprintln('retain all: same reference:', first === second, ', table size:', all.size);
@@ -52,7 +56,7 @@ export async function main(api) {
 
   // 2. retain 'used': an entry is dropped once nothing holds it, so releasing the reference re-evaluates.
   const used = ImportCache.native({ retain: 'used' });
-  using ctxUsed = await context(api, makeHandler(used), graph);
+  using ctxUsed = await context(api, makeHandler(src, used), graph);
   const held = await ctxUsed.import('./side.js');
   graph.release(held);
   const again = await ctxUsed.import('./side.js');
@@ -62,22 +66,22 @@ export async function main(api) {
   //     (its print shows), the other links that module: live bindings, the same objects. Two contexts made from one
   //     handler object share too, because the handler made its default cache once; that leaks the realm boundary.
   const together = ImportCache.native({ retain: 'all' });
-  const sharedHandler = makeHandler(together);
+  const sharedHandler = makeHandler(src, together);
   using home = await context(api, sharedHandler, graph);
   using guest = await context(api, sharedHandler, graph);
   const inHome = await home.import('./side.js');
   const inGuest = await guest.import('./side.js');
   eprintln('one cache, two contexts: same module:', graph.exports(inHome).id === graph.exports(inGuest).id, ', table size:', together.size);
 
-  // 3. Code caches. `memory` keeps bytes in this graph; `dir` writes one file per distinct source under __codecache__.
-  //    Both are written at graph.flush(): it resolves how many modules' caches were stored this time.
-  const memory = api.graph.derive({ fs, codeCache: CodeCache.memory() });
-  using ctxMem = await context(api, makeHandler(ImportCache.native({ retain: 'all' })), memory);
+  // 3. Code caches. `memory` keeps bytes in memory; `dir` writes one file per distinct source in the directory
+  //    it is given. Both are written at cache.flush(): it resolves how many modules were stored this time.
+  const memory = CodeCache.memory();
+  using ctxMem = await context(api, makeHandler(src, ImportCache.native({ retain: 'all' }), memory), graph);
   await ctxMem.import('./side.js');
   eprintln('code cache memory: flush stored', await memory.flush(), 'modules');
 
-  const onDisk = api.graph.derive({ fs, codeCache: CodeCache.dir(fs) });
-  using ctxDir = await context(api, makeHandler(ImportCache.native({ retain: 'all' })), onDisk);
+  const onDisk = CodeCache.dir({ fs: work, path: 'cache' });
+  using ctxDir = await context(api, makeHandler(src, ImportCache.native({ retain: 'all' }), onDisk), graph);
   await ctxDir.import('./side.js');
   eprintln('code cache dir: flush stored', await onDisk.flush(), 'modules');
 }

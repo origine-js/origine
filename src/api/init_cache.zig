@@ -31,9 +31,6 @@ const config = @import("origine_config");
 
 const cache_dir = @import("cache_dir.zig");
 
-/// The directory a graph's `CodeCache.dir` keeps its code caches in, inside the fs grant the guest
-/// chose (the guest cannot name it through its own grants).
-pub const dir_name = "__codecache__";
 pub const extension = cache_dir.snapshot_extension[1..];
 /// Bump when the file layout or the meaning of the key changes.
 const format_version = 3;
@@ -386,6 +383,7 @@ pub const CodeCacheState = struct {
     root: sys.Dir,
     /// A directory inside `root` that holds the files (empty: directly in `root`, the global cache).
     subdir: []const u8 = "",
+    owns_subdir: bool = false,
     /// Names the writer (the isolate) in temporary file names; 0 for the first isolate.
     writer_id: u32 = 0,
     /// False stores nothing (a cache budget of 0); files are still read.
@@ -398,11 +396,19 @@ pub const CodeCacheState = struct {
         return initWithKey(cachedEngineKey(host), host, root);
     }
 
-    /// A state for a graph's cache directory: files are `root/__codecache__/<hash>.v8-code-cache`.
-    pub fn initFlat(host: *Host, root: sys.Dir) CodeCacheState {
+    /// A state for a `CodeCache.dir` cache: files are `root/<path>/<hash>.v8-code-cache`. `path` is
+    /// copied (free it with `deinit`).
+    pub fn initIn(host: *Host, root: sys.Dir, path: []const u8) !CodeCacheState {
         var state = init(host, root);
-        state.subdir = dir_name;
+        state.subdir = try host.allocator.dupe(u8, path);
+        state.owns_subdir = true;
         return state;
+    }
+
+    pub fn deinit(self: *CodeCacheState) void {
+        if (self.owns_subdir) self.host.allocator.free(self.subdir);
+        self.subdir = "";
+        self.owns_subdir = false;
     }
 
     /// `init` with a fingerprint the caller already has.

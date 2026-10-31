@@ -1,8 +1,9 @@
 // `api.graph` sources: reading and transforming module text, the `custom` code cache, copies of exports. Built by graph.js.
+import { issuerOf, FsGrant, SourceKind } from '../handles.js';
 import { CodeCacheKey, MetaRequest } from './data.js';
 import { own, errors, shared } from '../util.js';
 export default g => {
-  const { native, take, host, named } = g;
+  const { native, take, host, named, invalid } = g;
   const { Unsupported, InvalidData } = errors;
 
   // ---- sources and transformers -----------------------------------------------------------------
@@ -32,47 +33,51 @@ export default g => {
     return host(native.graph.transform, JSON.stringify(hostSpec(t)), id, text);
   };
 
-  /// The fs grant of each graph by graph id: `{ kind: 'sync' | 'async', id }`, or absent.
-  const graphFs = new Map();
+  /// A grant `api.fs` made, checked by the host: `{ async, id, raw }` (`raw` is the host's own object, kept only
+  /// for the sync natives). Anything else, a lookalike included, is `InvalidInput`.
+  const grantOf = (fs, what) => {
+    const raw = fs instanceof FsGrant ? issuerOf(fs) : undefined;
+    if (raw === undefined) throw invalid(`${what}: fs must be a fs grant made by api.fs`);
+    const [isAsync, id] = host(native.graph.grantRef, raw);
+    if (isAsync === 1 && shared.fsAsync === undefined) throw invalid('async fs is not available');
+    return { async: isAsync === 1, id, raw };
+  };
 
-  /// A file of the graph's fs grant as text. A sync grant is read by the host at once; an async
-  /// one through its io runtime (open, read all, close: the natives of `api.fs.requestAsync`).
-  const readText = async (graphId, path) => {
-    const grant = graphFs.get(graphId);
-    if (grant === undefined || grant.kind !== 'async') return host(native.graph.readSource, graphId, path);
-    const limit = grant.limit;
+  /// A file of the grant `fs` as text, whole: a sync grant is read by the host at once; an async one
+  /// through its io runtime (open, read all, close: the natives of `api.fs.requestAsync`).
+  const readText = async (fs, path) => {
+    const grant = grantOf(fs, 'read');
+    if (!grant.async) return host(native.graph.readSource, grant.raw, path);
     const ops = shared.fsAsync;
     const file = await ops.openFile(grant.id, 0, path, 0);
     try {
-      // One byte more than the limit tells a file that is too large from one that just fits.
-      const bytes = await ops.readAll(grant.id, file, limit + 1);
-      if (bytes.length > limit) throw named(errors.FileTooLarge, `${path} is larger than ${limit} bytes`);
+      const bytes = await ops.readAll(grant.id, file, Number.MAX_SAFE_INTEGER);
       return host(native.graph.utf8, bytes);
     } finally {
       await ops.close(grant.id, file).catch(() => {});
     }
   };
 
-  /// The text of a `ModuleSource`: read through the graph's fs grant or given, then its transformer chain.
-  const sourceText = async (source, graphId, id) => {
-    let text = source.kind === 'text' ? source.text : await readText(graphId, source.path);
+  /// The text of a `ModuleSource`: read through the grant it names or given, then its transformer chain.
+  const sourceText = async (source, id) => {
+    let text = source.kind === SourceKind.Text ? source.text : await readText(source.fs, source.path);
     for (const t of source.transformers) text = await applyTransformer(t, id, text);
     return text;
   };
 
-  /// The `custom` code cache of each graph by graph id.
-  const graphCache = new Map();
+  /// The `custom` code cache of each host cache, by id.
+  const customCaches = new Map();
 
-  /// Asks the graph's `custom` cache for the blob it kept for `id` compiled from `text` (`hash` is the
+  /// Asks the `custom` code cache `cacheId` for the blob it kept for `id` compiled from `text` (`hash` is the
   /// lowercase hex BLAKE3 digest of `text`) and hands it to the host, which keeps it only if the hash
   /// inside it is `hash`. A cache that throws, or returns anything else, is a miss.
-  const loadCache = async (graphId, id, hash, text) => {
-    const cache = graphCache.get(graphId);
+  const loadCache = async (cacheId, id, hash, text) => {
+    const cache = customCaches.get(cacheId);
     if (cache === undefined) return;
     try {
       const blob = await cache.load(new CodeCacheKey({ id, hash }), text);
       if (blob instanceof Uint8Array) {
-        native.context.cachePut(graphId, id, hash, blob);
+        native.context.cachePut(cacheId, id, hash, blob);
         take();
       }
     } catch {}
@@ -86,5 +91,5 @@ export default g => {
     return JSON.stringify(data);
   };
 
-  return { applyTransformer, graphCache, graphFs, loadCache, metaOf, readText, sourceText };
+  return { applyTransformer, customCaches, grantOf, loadCache, metaOf, readText, sourceText };
 };

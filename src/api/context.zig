@@ -19,6 +19,7 @@ const binding = @import("binding.zig");
 const Call = binding.Call;
 const errno = @import("errno.zig");
 const graph_api = @import("graph.zig");
+const fs_api = @import("fs.zig");
 const Graph = graph_api.Graph;
 const Handler = graph_api.Handler;
 const StdFilter = graph_api.StdFilter;
@@ -89,6 +90,8 @@ pub const PendingJs = struct {
     /// An async read: the file once opened, and whether it is a JSON module.
     file: u32 = 0,
     json: bool = false,
+    /// The async grant that file is read through.
+    grant: u32 = 0,
     settled: bool = false,
     /// A completion callback ran (its sibling never will): nothing refers to it any more.
     fired: bool = false,
@@ -186,6 +189,8 @@ pub const Context = struct {
     ceiling_arena: std.heap.ArenaAllocator,
     /// Module id -> id of the handler that answers its own imports. Keys are owned.
     handler_of: std.StringHashMapUnmanaged(u32) = .empty,
+    /// Module id -> the code cache that keeps its compiled code. Keys are owned.
+    code_cache_of: std.StringHashMapUnmanaged(u32) = .empty,
     /// `id ++ 0 ++ attributes` -> how it was resolved. Keys and values are owned.
     resolved: std.StringHashMapUnmanaged(Info) = .empty,
     /// Ids the native `origine` hook served. Keys are owned.
@@ -356,6 +361,9 @@ pub const Context = struct {
         var it = self.handler_of.keyIterator();
         while (it.next()) |key| alloc.free(key.*);
         self.handler_of.deinit(alloc);
+        var caches = self.code_cache_of.keyIterator();
+        while (caches.next()) |key| alloc.free(key.*);
+        self.code_cache_of.deinit(alloc);
         var resolved = self.resolved.iterator();
         while (resolved.next()) |entry| {
             alloc.free(entry.key_ptr.*);
@@ -413,6 +421,19 @@ pub const Context = struct {
         const slot = try self.handler_of.getOrPut(alloc, probe);
         if (!slot.found_existing) slot.key_ptr.* = try alloc.dupe(u8, probe);
         slot.value_ptr.* = handler;
+    }
+
+    /// The code cache the module `id` is compiled with (0: none).
+    fn setCodeCache(self: *Context, id: []const u8, store: u32) !void {
+        const alloc = self.host.allocator;
+        const slot = try self.code_cache_of.getOrPut(alloc, id);
+        if (!slot.found_existing) {
+            slot.key_ptr.* = alloc.dupe(u8, id) catch |err| {
+                _ = self.code_cache_of.remove(id);
+                return err;
+            };
+        }
+        slot.value_ptr.* = store;
     }
 
     fn setMeta(self: *Context, namespace: u32, id: []const u8, json: []const u8) !void {
@@ -709,14 +730,14 @@ fn advanceHooks(self: *Context, scratch: std.mem.Allocator, work: Work, from: us
             return .parked;
         }
         var served = false;
-        switch (try graph_api.hookStep(h, index, .{ .host = self.host, .graph = self.graph, .alloc = scratch, .served = &served }, work.id, work.attributes)) {
+        switch (try graph_api.hookStep(h, index, .{ .host = self.host, .alloc = scratch, .served = &served }, work.id, work.attributes)) {
             .next => {},
             .source => |text| {
                 if (served) try self.markServed(work.id);
                 return supplied(self, scratch, work, text);
             },
             .read => |read| {
-                try startRead(self, work, read.json);
+                try startRead(self, work, read.json, read.grant);
                 return .parked;
             },
         }
@@ -739,15 +760,15 @@ fn supplied(self: *Context, scratch: std.mem.Allocator, work: Work, text: []cons
         },
         .inherit => |inherit| {
             const import = if (inherit.import != 0) inherit.import else work.handler;
-            const spec = inherit.transformer orelse return made(self, scratch, work, text, import);
-            const leaf = spec.leaf(work.id) orelse return made(self, scratch, work, text, import);
+            const spec = inherit.transformer orelse return made(self, scratch, work, text, import, null);
+            const leaf = spec.leaf(work.id) orelse return made(self, scratch, work, text, import, null);
             switch (leaf.*) {
                 .js => |index| {
                     try park(self, .transform, work, index, import, text);
                     return .parked;
                 },
                 else => switch (try leaf.apply(scratch, work.id, text)) {
-                    .source => |out| return made(self, scratch, work, out, import),
+                    .source => |out| return made(self, scratch, work, out, import, null),
                     .diagnostics => |diagnostics| return .{ .done = .{ .syntax_error = diagnostics } },
                 },
             }
@@ -756,9 +777,12 @@ fn supplied(self: *Context, scratch: std.mem.Allocator, work: Work, text: []cons
 }
 
 /// The module is made: remember which handler answers its imports, then ask for its `import.meta`.
-fn made(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8, import: u32) !LoadAdvance {
+fn made(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8, import: u32, code_cache: ?u32) !LoadAdvance {
     _ = scratch;
     try self.setHandler(work.namespace, work.id, import);
+    // The recipe's cache wins over the default of the handler that made the module.
+    const store = if (code_cache) |chosen| (if (chosen == graph_api.no_code_cache) 0 else chosen) else (try graph_api.handlerFor(self.host, work.handler)).code_cache;
+    try self.setCodeCache(work.id, store);
     const h = try graph_api.handlerFor(self.host, import);
     if (h.meta) {
         var meta_work = work;
@@ -772,9 +796,11 @@ fn made(self: *Context, scratch: std.mem.Allocator, work: Work, text: []const u8
 /// The source V8 will compile is final: a `custom` code cache gets to load what it kept for this exact
 /// text (its answer lands in the graph, where the compile finds it), then the load completes.
 fn finish(self: *Context, work: Work, text: []const u8) !LoadAdvance {
-    if (self.graph.kind == .custom and !std.mem.startsWith(u8, work.id, module_types.origine_prefix)) {
-        try park(self, .cacheload, work, 0, 0, text);
-        return .parked;
+    if (!std.mem.startsWith(u8, work.id, module_types.origine_prefix)) {
+        if (graph_api.codeCacheFor(self.host, self.code_cache_of.get(work.id) orelse 0)) |store| if (store.kind == .custom) {
+            try park(self, .cacheload, work, 0, 0, text);
+            return .parked;
+        };
     }
     return .{ .done = .{ .content = .{ .source = text } } };
 }
@@ -808,17 +834,17 @@ fn park(self: *Context, step: Step, work: Work, index: usize, import: u32, text:
     const kind = numValue(isolate, @backingInt(step));
     const result = switch (step) {
         .layer => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), numValue(isolate, index), binding.string(isolate, work.specifier), binding.string(isolate, work.referrer), bag.value }),
-        .hook => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), numValue(isolate, self.graph.id), numValue(isolate, index), binding.string(isolate, work.id), bag.value, binding.string(isolate, work.specifier), binding.string(isolate, work.referrer) }),
+        .hook => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), numValue(isolate, index), binding.string(isolate, work.id), bag.value, binding.string(isolate, work.specifier), binding.string(isolate, work.referrer) }),
         .maker => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, self.id), binding.string(isolate, work.id), binding.string(isolate, text) }),
         .transform => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), numValue(isolate, index), binding.string(isolate, work.id), binding.string(isolate, text) }),
         .meta => function.call(parent_ctx, undef, &.{ kind, numValue(isolate, work.handler), binding.string(isolate, work.id) }),
         .cacheload => blk: {
             const hex = std.fmt.bytesToHex(sourceHash(text), .lower);
-            break :blk function.call(parent_ctx, undef, &.{ kind, numValue(isolate, self.graph.id), binding.string(isolate, work.id), binding.string(isolate, &hex), binding.string(isolate, text) });
+            break :blk function.call(parent_ctx, undef, &.{ kind, numValue(isolate, self.code_cache_of.get(work.id) orelse 0), binding.string(isolate, work.id), binding.string(isolate, &hex), binding.string(isolate, text) });
         },
         .open, .read => unreachable,
     } orelse return failureOf(parent_ctx, isolate, &tc);
-    try track(self, parent_ctx, isolate, result, step, work, index, import, text, 0, false);
+    try track(self, parent_ctx, isolate, result, step, work, index, import, text, 0, false, 0);
 }
 
 fn numValue(isolate: v8.Isolate, value: usize) v8.Value {
@@ -828,11 +854,11 @@ fn numValue(isolate: v8.Isolate, value: usize) v8.Value {
 /// Records the call whose answer is `result` (a promise, or a plain value finished through the same
 /// path after the call returns) and chains the completion callbacks. Requires the creating realm's
 /// context entered and a live HandleScope.
-fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8.Value, step: Step, work: Work, index: usize, import: u32, text: []const u8, file: u32, json: bool) !void {
+fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8.Value, step: Step, work: Work, index: usize, import: u32, text: []const u8, file: u32, json: bool, grant: u32) !void {
     const alloc = self.host.allocator;
     const pending = try alloc.create(PendingJs);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .host = self.host, .context = self, .token = work.token, .namespace = work.namespace, .referrer_namespace = work.referrer_namespace, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json };
+    pending.* = .{ .host = self.host, .context = self, .token = work.token, .namespace = work.namespace, .referrer_namespace = work.referrer_namespace, .step = step, .index = @intCast(index), .handler = work.handler, .import = import, .file = file, .json = json, .grant = grant };
     pending.id = try alloc.dupe(u8, work.id);
     errdefer alloc.free(pending.id);
     pending.specifier = try alloc.dupe(u8, work.specifier);
@@ -867,9 +893,10 @@ fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8
 // calls them itself and parks on their promises, so the read runs on the grant's io runtime and no
 // user JS is involved. `open` answers the file, `read` its bytes.
 
-/// Starts reading the file `work.id` of the graph's async grant; `json` wraps it as a JSON module.
-fn startRead(self: *Context, work: Work, json: bool) !void {
-    const async_fs = self.graph.async_fs orelse return error.PermissionDenied;
+/// Starts reading the file `work.id` of the async grant `grant`, which a hook or an accepted import
+/// named; `json` wraps it as a JSON module.
+fn startRead(self: *Context, work: Work, json: bool, grant: u32) !void {
+    const async_fs = self.graph.async_ops orelse return error.PermissionDenied;
     const creator = self.creator;
     if (creator.released) return error.ScopeDisposed;
     const isolate = creator.scope.runtime.isolate;
@@ -884,13 +911,14 @@ fn startRead(self: *Context, work: Work, json: bool) !void {
     defer tc.deinit();
     const undef = eu.v.undefined_value(isolate).value;
     // dir 0 is the grant's root, open bits 0 read only.
-    const result = async_fs.open.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, 0), binding.string(isolate, work.id), numValue(isolate, 0) }) orelse return failureOf(parent_ctx, isolate, &tc);
-    try track(self, parent_ctx, isolate, result, .open, work, 0, 0, "", 0, json);
+    const result = async_fs.open.deref().call(parent_ctx, undef, &.{ numValue(isolate, grant), numValue(isolate, 0), binding.string(isolate, work.id), numValue(isolate, 0) }) orelse return failureOf(parent_ctx, isolate, &tc);
+    try track(self, parent_ctx, isolate, result, .open, work, 0, 0, "", 0, json, grant);
 }
 
 /// The file is open: asks for all of its bytes.
 fn continueRead(self: *Context, work: Work, pending: *PendingJs, value: v8.Value, ctx: v8.Context) !void {
-    const async_fs = self.graph.async_fs orelse return error.PermissionDenied;
+    const async_fs = self.graph.async_ops orelse return error.PermissionDenied;
+    const grant = pending.grant;
     const file = value.u32Value(ctx) orelse return error.InvalidData;
     const creator = self.creator;
     if (creator.released) return error.ScopeDisposed;
@@ -905,22 +933,21 @@ fn continueRead(self: *Context, work: Work, pending: *PendingJs, value: v8.Value
     tc.init(isolate);
     defer tc.deinit();
     const undef = eu.v.undefined_value(isolate).value;
-    // One byte more than the limit tells a file that is too large from one that just fits (`readAll`
-    // stops at its limit without an error).
-    const limit = eu.v.num_f64(isolate, @as(f64, @floatFromInt(self.graph.source_limit)) + 1).numeric.primitive.value;
-    const result = async_fs.read_all.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, file), limit }) orelse {
-        closeFile(self, file);
+    // The whole file: the program that named the grant checks sizes.
+    const limit = eu.v.num_f64(isolate, 9007199254740991).numeric.primitive.value;
+    const result = async_fs.read_all.deref().call(parent_ctx, undef, &.{ numValue(isolate, grant), numValue(isolate, file), limit }) orelse {
+        closeFile(self, grant, file);
         return failureOf(parent_ctx, isolate, &tc);
     };
-    track(self, parent_ctx, isolate, result, .read, work, 0, 0, "", file, pending.json) catch |err| {
-        closeFile(self, file);
+    track(self, parent_ctx, isolate, result, .read, work, 0, 0, "", file, pending.json, grant) catch |err| {
+        closeFile(self, grant, file);
         return err;
     };
 }
 
 /// Closes a file the chain opened; the answer is of no interest.
-fn closeFile(self: *Context, file: u32) void {
-    const async_fs = self.graph.async_fs orelse return;
+fn closeFile(self: *Context, grant: u32, file: u32) void {
+    const async_fs = self.graph.async_ops orelse return;
     const creator = self.creator;
     if (creator.released) return;
     const isolate = creator.scope.runtime.isolate;
@@ -934,7 +961,7 @@ fn closeFile(self: *Context, file: u32) void {
     tc.init(isolate);
     defer tc.deinit();
     const undef = eu.v.undefined_value(isolate).value;
-    const result = async_fs.close.deref().call(parent_ctx, undef, &.{ numValue(isolate, async_fs.id), numValue(isolate, file) }) orelse return;
+    const result = async_fs.close.deref().call(parent_ctx, undef, &.{ numValue(isolate, grant), numValue(isolate, file) }) orelse return;
     // A failed close would be an unhandled rejection; swallow it with a handler that does nothing.
     if (result.isPromise()) {
         const promise = v8.Promise.from_opaque(result.data.handle).?;
@@ -1051,9 +1078,8 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
         .layer, .open => unreachable,
         .read => blk: {
             // The bytes of the file; the grant's file is closed whatever happens next.
-            defer closeFile(self, pending.file);
+            defer closeFile(self, pending.grant, pending.file);
             const bytes = binding.viewBytes(value) orelse return error.InvalidData;
-            if (bytes.len > self.graph.source_limit) return error.FileTooLarge;
             const text = try alloc.dupe(u8, bytes);
             const source = if (pending.json) try json_module.wrap(alloc, text) else text;
             break :blk try supplied(self, alloc, work, source);
@@ -1063,12 +1089,12 @@ fn resume_(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate: v
             const object = value.toObject(ctx) orelse return error.InvalidData;
             const text = (try stringOf(ctx, isolate, alloc, object, "text")) orelse return error.InvalidData;
             const handler = numberOf(ctx, isolate, object, "handler") orelse return error.InvalidData;
-            break :blk try made(self, alloc, work, text, handler);
+            break :blk try made(self, alloc, work, text, handler, null);
         },
         .transform => blk: {
             if (!value.isString()) return error.InvalidData;
             const text = try stringValue(ctx, isolate, alloc, value);
-            break :blk try made(self, alloc, work, text, pending.import);
+            break :blk try made(self, alloc, work, text, pending.import, null);
         },
         .meta => blk: {
             if (value.isString()) try self.setMeta(work.namespace, work.id, try stringValue(ctx, isolate, alloc, value));
@@ -1090,12 +1116,21 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
     if (std.mem.eql(u8, kind, "next")) return advanceHooks(self, alloc, work, pending.index + 1);
     if (std.mem.startsWith(u8, work.id, module_types.origine_prefix)) return error.PermissionDenied;
     if (std.mem.eql(u8, kind, "accept")) {
-        if (self.graph.fs == null and self.graph.async_fs != null) {
-            try startRead(self, work, false);
-            return .parked;
+        // The grant the hook named in `ImportHook.accept({ fs })`, checked again here: a sync one of the
+        // creating realm that can read, or one of its async grants.
+        const grant_id = numberOf(ctx, isolate, object, "fs") orelse return error.InvalidData;
+        const is_async = (numberOf(ctx, isolate, object, "fsAsync") orelse 0) != 0;
+        switch (try graph_api.resolveSource(self.creator, .{ .named = .{ .is_async = is_async, .id = grant_id } })) {
+            .async => |id| {
+                try startRead(self, work, false, id);
+                return .parked;
+            },
+            .sync => |grant| {
+                const text = try graph_api.acceptStep(.{ .host = self.host, .alloc = alloc }, grant, work.id);
+                return supplied(self, alloc, work, text);
+            },
+            .named => unreachable,
         }
-        const text = try graph_api.acceptStep(.{ .host = self.host, .graph = self.graph, .alloc = alloc }, work.id);
-        return supplied(self, alloc, work, text);
     }
     if (std.mem.eql(u8, kind, "provide")) {
         const text = (try stringOf(ctx, isolate, alloc, object, "source")) orelse return error.InvalidData;
@@ -1105,7 +1140,7 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
         // A recipe: final, so the maker is skipped, and its own handler answers its imports.
         const text = (try stringOf(ctx, isolate, alloc, object, "source")) orelse return error.InvalidData;
         const handler = numberOf(ctx, isolate, object, "handler") orelse return error.InvalidData;
-        return made(self, alloc, work, text, handler);
+        return made(self, alloc, work, text, handler, numberOf(ctx, isolate, object, "codeCache"));
     }
     if (std.mem.eql(u8, kind, "exports")) {
         // A synthetic module of the values the hook handed over: neither copied nor frozen here.
@@ -1128,7 +1163,7 @@ fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     if (pending.settled or self.closed) return;
     pending.settled = true;
     defer retire(self, pending);
-    if (pending.step == .read) closeFile(self, pending.file);
+    if (pending.step == .read) closeFile(self, pending.grant, pending.file);
     // A code cache that fails to load is a miss, not a reason to fail the import.
     if (pending.step == .cacheload) {
         self.scope.runtime.completeLoad(pending.token, .{ .content = .{ .source = pending.text } }) catch {};
@@ -1286,17 +1321,27 @@ fn sourceHash(source: []const u8) [32]u8 {
     return out;
 }
 
+fn storeOf(self: *Context, module_id: []const u8) ?*graph_api.CodeCacheStore {
+    return graph_api.codeCacheFor(self.host, self.code_cache_of.get(module_id) orelse return null);
+}
+
+fn cacheKeeps(data: ?*anyopaque, module_id: []const u8) bool {
+    const self: *Context = @ptrCast(@alignCast(data.?));
+    if (std.mem.startsWith(u8, module_id, module_types.origine_prefix)) return false;
+    return storeOf(self, module_id) != null;
+}
+
 fn cacheLoad(data: ?*anyopaque, request: module_types.CodeCacheRequest) ?[]const u8 {
     const self: *Context = @ptrCast(@alignCast(data.?));
-    const graph = self.graph;
     if (std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) return null;
-    if (graph.lookup(request.allocator, request.module_id, sourceHash(request.source))) |bytes| {
+    const store = storeOf(self, request.module_id) orelse return null;
+    if (store.lookup(request.allocator, request.module_id, sourceHash(request.source))) |bytes| {
         // The module map needs 8-aligned bytes that live in the request allocator.
         const copy = request.allocator.alignedAlloc(u8, .@"8", bytes.len) catch return null;
         @memcpy(copy, bytes);
         return copy;
     }
-    if (graph.dir_state) |*state| {
+    if (store.dir_state) |*state| {
         const hook = state.hook();
         if (hook.load(hook.data, request)) |bytes| return bytes;
     }
@@ -1305,21 +1350,21 @@ fn cacheLoad(data: ?*anyopaque, request: module_types.CodeCacheRequest) ?[]const
 
 fn cacheStore(data: ?*anyopaque, request: module_types.CodeCacheRequest, bytes: []const u8) void {
     const self: *Context = @ptrCast(@alignCast(data.?));
-    const graph = self.graph;
     if (std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) return;
+    const store = storeOf(self, request.module_id) orelse return;
     const hash = sourceHash(request.source);
-    graph.remember(request.module_id, hash, bytes);
-    switch (graph.kind) {
-        .none => {},
+    store.remember(request.module_id, hash, bytes);
+    store.stored += 1;
+    switch (store.kind) {
         .memory => {},
-        .dir => if (graph.dir_state) |*state| {
+        .dir => if (store.dir_state) |*state| {
             const hook = state.hook();
             hook.store(hook.data, request, bytes);
         },
         .custom => {
             // The blob a custom store keeps starts with the hash of the source the cache was made for,
             // so one returned for another text is recognised and ignored (V8 only compares lengths).
-            const alloc = graph.host.allocator;
+            const alloc = store.host.allocator;
             const id = alloc.dupe(u8, request.module_id) catch return;
             const copy = alloc.alloc(u8, hash.len + bytes.len) catch {
                 alloc.free(id);
@@ -1327,7 +1372,7 @@ fn cacheStore(data: ?*anyopaque, request: module_types.CodeCacheRequest, bytes: 
             };
             @memcpy(copy[0..hash.len], &hash);
             @memcpy(copy[hash.len..], bytes);
-            graph.fresh.append(alloc, .{ .id = id, .hash = hash, .bytes = copy }) catch {
+            store.fresh.append(alloc, .{ .id = id, .hash = hash, .bytes = copy }) catch {
                 alloc.free(id);
                 alloc.free(copy);
             };
@@ -1390,7 +1435,7 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32, code_gener
         .table_policy = .{ .data = host, .call = tablePolicy },
         .shared_released = .{ .data = context, .call = sharedReleased },
     };
-    if (graph.kind != .none) options.code_cache = .{ .data = context, .load = cacheLoad, .store = cacheStore };
+    options.code_cache = .{ .data = context, .load = cacheLoad, .store = cacheStore, .keeps = cacheKeeps };
     const scope = try state.scope.runtime.createScope(options);
     errdefer state.scope.runtime.disposeScope(scope);
     context.scope = scope;
@@ -1416,7 +1461,7 @@ pub const ImportState = struct {
 
 /// The rejection value of a failed import or preload: `{ errno, name: 'ModuleError', message, subject, os }`,
 /// which `glue/errors.js` turns into a `ModuleError`. `errno` is the one the child's error carries as an own
-/// data property (a hook's `Import.reject(ImportError.PermissionDenied)`), else `Unexpected`; nothing else of
+/// data property (a hook's `ImportHook.reject(ImportError.PermissionDenied)`), else `Unexpected`; nothing else of
 /// the child's error crosses, only its text.
 fn failureValue(env: binding.Env, child_ctx: v8.Context, reason: v8.Value, subject: []const u8) !v8.Value {
     const message = if (reason.toDetailString(child_ctx)) |text| text.name.primitive.value else binding.string(env.isolate, "module evaluation failed");
@@ -1442,7 +1487,7 @@ fn stampOf(isolate: v8.Isolate, child_ctx: v8.Context, reason: v8.Value, comptim
 }
 
 /// The `errno` an error of the child realm stands for, else `Unexpected`: the own data property `errno` (a
-/// hook's `Import.reject(ImportError.PermissionDenied)`), or, for an error the module map made from a Zig error,
+/// hook's `ImportHook.reject(ImportError.PermissionDenied)`), or, for an error the module map made from a Zig error,
 /// the own data property `message` read as the error's name (`FileNotFound` is `NotFound`). A proxy or an
 /// accessor is not read: the child's code does not run for it.
 fn causeErrno(isolate: v8.Isolate, child_ctx: v8.Context, reason: v8.Value) u32 {
@@ -1577,13 +1622,13 @@ fn importImpl(state: *ScopeState, call: *Call, id: u32, specifier: []const u8, a
 /// `evaluateSource(context, name, source, handler, metaJson)`: registers `source` as the module
 /// `name` of the context (its own imports go through `handler`) and evaluates it. A parent-realm
 /// promise of `name`. `name` must not be taken in this context's table.
-pub fn evaluateSource(state: *ScopeState, call: *Call, id: u32, name: []const u8, source: []const u8, handler: u32, meta: []const u8) Error!v8.Promise {
-    return evaluateImpl(state, call, id, name, source, handler, meta) catch |err| return errno.narrow(err);
+pub fn evaluateSource(state: *ScopeState, call: *Call, id: u32, name: []const u8, source: []const u8, handler: u32, meta: []const u8, code_cache: u32) Error!v8.Promise {
+    return evaluateImpl(state, call, id, name, source, handler, meta, code_cache) catch |err| return errno.narrow(err);
 }
 
-fn evaluateImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8, source: []const u8, handler: u32, meta: []const u8) !v8.Promise {
+fn evaluateImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8, source: []const u8, handler: u32, meta: []const u8, code_cache: u32) !v8.Promise {
     const context = try contextFor(state, id);
-    _ = try graph_api.handlerFor(state.host, handler);
+    const governing = try graph_api.handlerFor(state.host, handler);
     if (name.len == 0 or std.mem.startsWith(u8, name, module_types.origine_prefix)) return error.InvalidInput;
     // The module lives in the table of the handler that governs its imports.
     const table = context.cacheOfHandler(handler);
@@ -1593,6 +1638,8 @@ fn evaluateImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8, sour
     }
     // The handler is known before the source compiles: compiling resolves the module's imports through it.
     try context.setHandler(table, name, handler);
+    // The recipe's cache (0: it names none) wins over the default of the handler that governs the module.
+    try context.setCodeCache(name, if (code_cache == 0) governing.code_cache else if (code_cache == graph_api.no_code_cache) 0 else code_cache);
     if (meta.len != 0) try context.setMeta(table, name, meta);
     try context.scope.updateImportCache(.{ .module_id = name, .namespace = table }, .{ .source = source }, null);
     context.root = name;
@@ -1651,25 +1698,26 @@ pub fn cacheClear(state: *ScopeState, cache: u32) Error!u32 {
     return @intCast(count);
 }
 
-/// `flush(graph)`: asks every live context of the graph to hand over the code caches of modules
-/// that compiled without one. Returns `[[id, hashHex, bytes], ...]` for the entries a `custom` cache
-/// has to persist (a `dir` cache wrote its files; a `memory` cache kept them); the count of stored
-/// modules is the array length plus `stored`.
-pub fn flush(state: *ScopeState, call: *Call, graph_id: u32) Error!v8.Value {
-    return flushImpl(state, call, graph_id) catch |err| return errno.narrow(err);
+/// `flush(cache)`: asks every live context of this realm to hand over the code caches of modules that
+/// compiled without one, and returns what `cache` stored: `[count, [id, hashHex, bytes]...]`, the
+/// entries being the ones a `custom` cache has to persist (a `dir` cache wrote its files, a `memory`
+/// cache kept them). `count` is how many modules `cache` stored since its last flush.
+pub fn flush(state: *ScopeState, call: *Call, cache_id: u32) Error!v8.Value {
+    return flushImpl(state, call, cache_id) catch |err| return errno.narrow(err);
 }
 
-fn flushImpl(state: *ScopeState, call: *Call, graph_id: u32) !v8.Value {
+fn flushImpl(state: *ScopeState, call: *Call, cache_id: u32) !v8.Value {
     const host = state.host;
-    const graph = try graph_api.graphFor(host, graph_id);
-    var stored: usize = 0;
+    const store = graph_api.codeCacheFor(host, cache_id) orelse return error.StaleHandle;
+    if (store.owner != state) return error.BadHandle;
     for (host.contexts.values()) |context| {
-        if (context.closed or context.graph != graph) continue;
-        stored += context.scope.flushCodeCache();
+        if (context.closed or context.creator != state) continue;
+        _ = context.scope.flushCodeCache();
     }
     var out = call.array();
-    try out.push(@as(f64, @floatFromInt(stored)));
-    for (graph.fresh.items) |item| {
+    try out.push(@as(f64, @floatFromInt(store.stored)));
+    store.stored = 0;
+    for (store.fresh.items) |item| {
         var entry = call.array();
         try entry.push(item.id);
         const hex = std.fmt.bytesToHex(item.hash, .lower);
@@ -1679,20 +1727,20 @@ fn flushImpl(state: *ScopeState, call: *Call, graph_id: u32) !v8.Value {
         host.allocator.free(item.id);
         host.allocator.free(item.bytes);
     }
-    graph.fresh.clearRetainingCapacity();
+    store.fresh.clearRetainingCapacity();
     return out.finish();
 }
 
-/// `cachePut(graph, id, hashHex, blob)`: hands the graph a blob a `custom` store loaded: its first 32
+/// `cachePut(cache, id, hashHex, blob)`: hands a cache a blob a `custom` store loaded: its first 32
 /// bytes are the hash of the source it was made for, which must be `hashHex` (otherwise it is ignored),
 /// then V8's bytes.
-pub fn cachePut(state: *ScopeState, graph_id: u32, id: []const u8, hash_hex: []const u8, bytes: []u8) Error!void {
-    const graph = graph_api.graphFor(state.host, graph_id) catch |err| return errno.narrow(err);
+pub fn cachePut(state: *ScopeState, cache_id: u32, id: []const u8, hash_hex: []const u8, bytes: []u8) Error!void {
+    const store = graph_api.codeCacheFor(state.host, cache_id) orelse return error.StaleHandle;
     var hash: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&hash, hash_hex) catch return error.InvalidInput;
     // A blob made for another source text is a miss, not an error.
     if (bytes.len <= hash.len or !std.mem.eql(u8, bytes[0..hash.len], &hash)) return;
-    graph.remember(id, hash, bytes[hash.len..]);
+    store.remember(id, hash, bytes[hash.len..]);
 }
 
 /// Records that the native `origine` hook served `id` for the context `context_id` of `state`'s

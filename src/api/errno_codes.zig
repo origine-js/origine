@@ -57,7 +57,7 @@ pub const IoErrno = enum(u32) {
     /// EXDEV: a rename across file systems.
     CrossesDevices = 17,
     // 20-29: permission and state
-    /// Every denial: the grant's own (`..`, absolute paths, `__codecache__`, an access or ceiling that
+    /// Every denial: the grant's own (`..`, absolute paths, an access or ceiling that
     /// does not allow the call) and the OS's (EACCES, EPERM).
     PermissionDenied = 20,
     /// EROFS.

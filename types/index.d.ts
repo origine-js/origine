@@ -1,7 +1,7 @@
 // `@origine/types`: declarations for origine programs. See README.md.
 //
 // Importing this file (or listing the package in `types`) also declares the ambient modules
-// `origine:@std/errno|io|fs|text|debug|quansync|transformer/oxc|graph/*`.
+// `origine:@std/errno|errors|io|fs|text|data|debug|quansync|transformer/oxc|graph/*`.
 /// <reference path="./globals.d.ts" />
 /// <reference path="./std/errno.d.ts" />
 /// <reference path="./std/io.d.ts" />
@@ -78,4 +78,4 @@ export type {
   SocketEvents,
 } from "./net.d.ts";
 export type { Context, ContextCap, ContextOptions, ContextSecurity, Preload } from "./context.d.ts";
-export type { GraphOptions, ModuleGraph, DerivedGraph, ModuleReference, ModuleReferenceStatus, ModuleRequest } from "./graph.d.ts";
+export type { GraphCap, ModuleGraph, OwnedGraph, ModuleReference, ModuleReferenceStatus, ModuleRequest } from "./graph.d.ts";

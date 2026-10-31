@@ -1,6 +1,6 @@
 // Run: zig-out/bin/origine examples/graph-transform/init.js   (or: zig build run -- examples/graph-transform/init.js)
 // Transformers run between reading a source and compiling it. Two places hold them:
-//   - on a source: ModuleSource.file(p).withTransformer(t), for this module only;
+//   - on a source: ModuleSource.file(p, { fs }).withTransformer(t), for this module only;
 //   - on the handler's maker: MakeRecipe.inherit({ transformer: Transform.byExtension({...}) }), for every
 //     module the handler supplies, picked by the extension of its id.
 // A function transformer is (source, id) => string | { source, map }; it runs in this realm, so this
@@ -24,16 +24,17 @@ const textModule = text => `export default ${JSON.stringify(text.trimEnd())};`;
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-transform', access: 'r' }) });
+  const src = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-transform', access: 'r' });
+  const graph = api.graph.create();
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered().layer(relative()),
-    hooks: [fsProvider({ read: 'copy' })],
+    hooks: [fsProvider({ fs: src, read: 'copy' })],
     // Applied to every module this handler supplies: here, only ids ending in .txt have a transformer.
     maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.txt': textModule }) }),
   });
 
   // withTransformer returns a new source; the receiver is unchanged.
-  const plain = ModuleSource.file('main.js');
+  const plain = ModuleSource.file('main.js', { fs: src });
   const stamped = plain.withTransformer(stampBuild);
   eprintln('transformers: plain', plain.transformers.length, 'stamped', stamped.transformers.length);
   // `native` is true only when no chained transformer is a function: these are functions, so false.

@@ -51,18 +51,18 @@ export async function main(api) {
   eprintln('plan:', JSON.stringify(handler.plan));
 
   // Every source is text, so the root graph (api.graph, no fs grant) is enough.
-  const main = api.graph.declare(
+  const main = api.graph.root.declare(
     ModuleRecipe({ source: ModuleSource.text(sources['app:/main.js']), import: handler, name: 'app:/main.js' }),
   );
-  await api.graph.load(main);
-  for (const r of api.graph.requests(main)) eprintln(`app:/main.js: ${r.specifier} -> ${r.reference.name}`);
+  await api.graph.root.load(main);
+  for (const r of api.graph.root.requests(main)) eprintln(`app:/main.js: ${r.specifier} -> ${r.reference.name}`);
   // Not shown: the requests of a dependency. Its load() returns without compiling it today, so its
   // `requests` stay undefined (see graph-NOTES.md). The scope is visible in what the module evaluates to.
 
   using ctx = await api.context.create({
     import: handler,
-    graph: api.graph,
+    graph: api.graph.root,
     preload: [{ source: '(values) => { globalThis.print = values.print; }', values: { print: (...a) => eprintln(...a) } }],
   });
-  await api.graph.evaluate(main, ctx);
+  await api.graph.root.evaluate(main, ctx);
 }

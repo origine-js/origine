@@ -3,16 +3,16 @@
 Source: [std/data.js](../std/data.js). Types: `types/std/data.d.ts`. Importable only from the **init context**.
 
 Hand data to another realm without sharing the realm. The graph API never copies or freezes on a caller's behalf
-(`graph.exports(ref)` is the live namespace, `Import.link(ref)` is the module itself); these are the two separate
+(`graph.exports(ref)` is the live namespace, `ImportHook.link(ref)` is the module itself); these are the two separate
 calls that do, applied to any object.
 
 ```js
 import { snapshot, deepFreeze } from 'origine:@std/data';
-import { Import } from 'origine:@std/graph/import';
+import { ImportHook } from 'origine:@std/graph/import';
 
-const ns = api.graph.exports(ref);                       // live: the context's own objects
+const ns = api.graph.root.exports(ref);                       // live: the context's own objects
 const data = snapshot(ns.config, { deepFreeze: true });      // a frozen copy in this realm
-hooks: [r => (r.id === 'cfg:app' ? Import.exports({ config: data }) : Import.next())]
+hooks: [r => (r.id === 'cfg:app' ? ImportHook.exports({ config: data }) : ImportHook.next())]
 ```
 
 | Call | Returns | Cost |

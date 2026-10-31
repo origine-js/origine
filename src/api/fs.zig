@@ -8,7 +8,6 @@ const std = @import("std");
 const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("binding.zig");
-const init_cache = @import("init_cache.zig");
 const func = binding.func;
 const Call = binding.Call;
 const sys = @import("../managed/sys.zig");
@@ -47,8 +46,7 @@ pub const FileRef = struct {
 };
 
 /// Rejects NUL (`InvalidInput`: a malformed path) and, as policy denials (`PermissionDenied`, like
-/// the OS's own), absolute paths, `..` components and the `__codecache__` directories
-/// of a graph's code caches (V8 trusts them, so a guest must not be able to plant them).
+/// the OS's own), absolute paths and `..` components.
 /// Lexical only: symlinks inside the root are not resolved here, so following one can leave the
 /// root (docs/api-design.md). The Rust twin is `clean` in rust/crates/origine_api_fs.
 pub fn cleanPath(path: []const u8) !void {
@@ -56,7 +54,7 @@ pub fn cleanPath(path: []const u8) !void {
     if (path.len != 0 and path[0] == '/') return error.PermissionDenied;
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
-        if (std.mem.eql(u8, part, "..") or std.mem.eql(u8, part, init_cache.dir_name)) return error.PermissionDenied;
+        if (std.mem.eql(u8, part, "..")) return error.PermissionDenied;
     }
 }
 

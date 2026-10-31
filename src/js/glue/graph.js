@@ -2,8 +2,8 @@
 // index.js. The factory also publishes the shared parts in imported `shared.graph` (handler registry,
 // JS driver, references) for the context glue; both modules import the shared state directly.
 //
-// A graph holds the authority modules are produced with (an fs grant, a code cache) and the table of the
-// modules made with it. It is the entry point: a recipe is declared in it (`graph.declare(recipe)`), which
+// A graph holds the table of the modules made with it and no authority: the fs grants and code caches are
+// named by the hooks, sources, handlers and recipes that use them. It is the entry point: a recipe is declared in it (`graph.declare(recipe)`), which
 // gives an inert `ModuleReference`, and the graph loads it (`graph.load(reference)`), evaluates it in one
 // context (`graph.evaluate(reference, ctx)`), reads its exports and frees it.
 //
@@ -12,8 +12,8 @@
 // (`steps`: one layer, hook, maker, transformer or `meta` at a time), in the creating realm. The
 // host runs the chain and calls the driver only when it reaches a function, so a handler with no
 // function in it never reaches the driver. See docs/graph-api.md.
-import { issuerOf, FsGrant, Cache, ModuleRecipe } from './handles.js';
-import { CodeCacheKey, Graph, GraphFs } from './graph/data.js';
+import { ModuleRecipe } from './handles.js';
+import { Graph } from './graph/data.js';
 import { freeze, failure, own, errors, shared } from './util.js';
 import source from './graph/source.js';
 import handlers from './graph/handlers.js';
@@ -56,16 +56,12 @@ export default (native, { take, takeError }) => {
   Object.assign(g, handlers(g));
   Object.assign(g, driver(g));
   Object.assign(g, reference(g));
-  const { byId, contextRefs, contexts, graphCache, graphFs, makeReference, referenceState, refsById, register } = g;
+  const { byId, contextRefs, contexts, makeReference, referenceState, refsById, register } = g;
   const { loadRef, requestsOf, exportsOf, evaluateRef, releaseRef, isReference } = g;
 
   // ---- graphs ------------------------------------------------------------------------------------
 
   const graphs = new WeakMap();
-
-  /// The native grant behind an `api.fs` grant, or undefined for anything else.
-  const rawOf = fs => (fs instanceof FsGrant ? issuerOf(fs) : undefined);
-  const cacheKinds = freeze({ codeCacheNone: 0, codeCacheMemory: 1, codeCacheDir: 2 });
 
   /// Ids of the graphs that were closed: their references are stale.
   const closedGraphs = new Set();
@@ -87,45 +83,27 @@ export default (native, { take, takeError }) => {
     }
   };
 
-  const makeGraph = (id, config) => {
+  const makeGraph = (id, owned) => {
     const graph = new Graph({
-      /// A graph with the same authority except what `options` replaces: `fs` (a grant of `api.fs.requestSync`)
-      /// and `codeCache` (`origine:@std/graph/cache`). It cannot hold more than the realm already does.
-      derive(options) {
-        const fs = own(options, 'fs') ?? config.fs;
-        const codeCache = own(options, 'codeCache') ?? config.codeCache;
-        return build(fs, codeCache, own(options, 'sourceBytes') ?? config.sourceBytes);
-      },
-      /// The largest source file the graph reads through its fs grant, in bytes.
-      sourceBytes: config.sourceBytes,
-      /// Persists the code caches of modules compiled without one; resolves how many modules were stored.
-      async flush() {
-        const out = host(native.context.flush, id);
-        const cache = config.codeCache;
-        if (cache !== undefined && cache.native === false) {
-          for (let index = 1; index < out.length; index++)
-            await cache.store(new CodeCacheKey({ id: out[index][0], hash: out[index][1] }), out[index][2]);
-        }
-        return out[0];
-      },
-      /// Ends the graph: no more contexts or references can be made with it, its references are stale, and
-      /// the host frees what it kept (code caches not yet flushed are dropped) once the contexts using it are gone.
-      close() {
-        host(native.graph.close, id);
-        closedGraphs.add(id);
-        graphFs.delete(id);
-        graphCache.delete(id);
-      },
-      [dispose]() {
-        native.graph.close(id);
-        take();
-        closedGraphs.add(id);
-        graphFs.delete(id);
-        graphCache.delete(id);
-      },
+      // Only a graph made by `create` is the caller's to end; the root lives as long as the realm.
+      ...(owned
+        ? {
+            /// Ends the graph: no more contexts or references can be made with it, its references are stale, and
+            /// the host frees what it kept once the contexts using it are gone.
+            close() {
+              host(native.graph.close, id);
+              closedGraphs.add(id);
+            },
+            [dispose]() {
+              native.graph.close(id);
+              take();
+              closedGraphs.add(id);
+            },
+          }
+        : {}),
       ...tableOps(id, () => graph),
     });
-    graphs.set(graph, { id, config });
+    graphs.set(graph, { id });
     return graph;
   };
 
@@ -157,41 +135,17 @@ export default (native, { take, takeError }) => {
     release: reference => releaseRef(own_(id, reference)),
   });
 
-  /// The largest source file a graph reads unless `derive({ sourceBytes })` says otherwise.
-  const DEFAULT_SOURCE_BYTES = 64 * 1024 * 1024;
-
-  const build = (fs, codeCache, sourceBytes = DEFAULT_SOURCE_BYTES) => {
-    if (!Number.isSafeInteger(sourceBytes) || sourceBytes < 1) throw invalid('sourceBytes must be a positive integer');
-    // JS private-field identity protects the wrapper. Only its closure-private state
-    // reaches the native graph operation, which checks grant ownership and liveness.
-    const rawFs = fs === undefined ? undefined : rawOf(fs);
-    if (fs !== undefined && rawFs === undefined) throw invalid('graph fs must be a fs grant made by api.fs');
-    let kind = 0;
-    let bytes = 0;
-    let cacheFs;
-    let rawCacheFs;
-    if (codeCache !== undefined) {
-      if (!(codeCache instanceof Cache) || codeCache.kind !== 'codeCache') throw invalid('codeCache must be a CodeCache');
-      if (codeCache.native === false) kind = 3;
-      else {
-        kind = cacheKinds[codeCache.host] ?? -1;
-        if (kind < 0) throw invalid('unknown CodeCache');
-        if (kind === 2) {
-          cacheFs = codeCache.fs;
-          rawCacheFs = rawOf(cacheFs);
-          if (rawCacheFs === undefined) throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
-        }
-      }
-      bytes = codeCache.bytes ?? 0;
+  /// A graph. It has no options yet: files are read through the grants hooks and sources name, and code caches
+  /// are named by handlers and recipes. An option is `InvalidInput` so a stale `fs`, `codeCache` or `sourceBytes` is loud.
+  const build = (options, owned) => {
+    if (options !== undefined) {
+      if (options === null || typeof options !== 'object') throw invalid('graph.create: options must be an object');
+      for (const key of Reflect.ownKeys(options)) throw invalid(`graph.create: unknown option ${String(key)}`);
     }
-    if (fs !== undefined && fs.kind === 'async' && shared.fsAsync === undefined) throw invalid('async fs is not available');
-    const id = host(native.graph.create, rawFs, kind, bytes, rawCacheFs, sourceBytes);
-    if (kind === 3) graphCache.set(id, codeCache);
-    if (fs !== undefined) {
-      if (fs.kind === 'async') host(native.graph.asyncFs, id, rawFs, shared.fsAsync.openFile, shared.fsAsync.readAll, shared.fsAsync.close);
-      graphFs.set(id, new GraphFs({ kind: fs.kind, id: fs.id, limit: sourceBytes }));
-    }
-    return makeGraph(id, freeze({ fs, codeCache, sourceBytes }));
+    const id = host(native.graph.create);
+    // The natives that read a file of an async grant a hook names; they hold no authority themselves.
+    if (shared.fsAsync !== undefined) host(native.graph.asyncOps, id, shared.fsAsync.openFile, shared.fsAsync.readAll, shared.fsAsync.close);
+    return makeGraph(id, owned);
   };
 
   let root;
@@ -202,7 +156,7 @@ export default (native, { take, takeError }) => {
     return found.id;
   };
 
-  const rootGraph = () => (root ??= build(undefined, undefined));
+  const rootGraph = () => (root ??= build(undefined, false));
 
   shared.graph = freeze({
     register,
@@ -219,27 +173,15 @@ export default (native, { take, takeError }) => {
     named,
   });
 
-  const makeGraphCap = () => {
-    // The root graph is made on first use: building it calls the host, which a snapshot cannot.
-    const cap = {
-      derive: options => rootGraph().derive(options),
-      flush: () => rootGraph().flush(),
-      sourceBytes: DEFAULT_SOURCE_BYTES,
-      declare: recipe => rootGraph().declare(recipe),
-      load: reference => rootGraph().load(reference),
-      requests: reference => rootGraph().requests(reference),
-      evaluate: (reference, ctx) => rootGraph().evaluate(reference, ctx),
-      exports: reference => rootGraph().exports(reference),
-      release: reference => rootGraph().release(reference),
-    };
-    graphs.set(cap, {
-      get id() {
-        return graphId(rootGraph());
+  // `api.graph` is a namespace: `root` is the shared graph (no `close`), `create` makes a separate one.
+  const makeGraphCap = () =>
+    freeze({
+      create: options => build(options, true),
+      /// Made on first use: building it calls the host, which a snapshot cannot.
+      get root() {
+        return rootGraph();
       },
-      config: freeze({}),
     });
-    return freeze(cap);
-  };
   g.graphId = graphId;
 
   return makeGraphCap;

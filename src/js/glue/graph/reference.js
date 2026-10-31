@@ -1,10 +1,10 @@
 // `api.graph` module references (`graph.declare(recipe)`) and the cache operations of `ImportCache`. Built by graph.js.
-import { provide } from '../handles.js';
-import { ModuleRequest } from './data.js';
+import { ModuleStatus, provide } from '../handles.js';
+import { CodeCacheKey, ModuleRequest } from './data.js';
 import { freeze, errors, moduleSettled } from '../util.js';
 export default g => {
   const { native, take, takeError, host, named, invalid } = g;
-  const { cacheIds, contextRefs, contexts, graphCache, loadCache, metaOf, pipeline, referenceState, refsById, register, sourceText } = g;
+  const { cacheIds, codeCacheId, codeCacheIds, contextRefs, contexts, customCaches, loadCache, metaOf, pipeline, recipeCacheId, referenceState, refsById, register, sourceText } = g;
 
   // ---- references -------------------------------------------------------------------------------
 
@@ -38,7 +38,7 @@ export default g => {
   const loadRef = reference => {
     const state = referenceState.get(reference);
     if (state.released) return Promise.reject(named(errors.BadHandle, 'released'));
-    if (state.status !== 'declared') return Promise.resolve(reference);
+    if (state.status !== ModuleStatus.Declared) return Promise.resolve(reference);
     state.loading ??= loadState(reference, state).finally(() => {
       state.loading = undefined;
     });
@@ -49,13 +49,13 @@ export default g => {
     // A module with no source text of its own (nothing was read for it) imports nothing.
     if (state.text === undefined) {
       state.requests = freeze([]);
-      state.status = 'loaded';
+      state.status = ModuleStatus.Loaded;
       return reference;
     }
     const requests = host(native.graph.compileRequests, state.text, state.name);
     const out = [];
     for (const [specifier, attributes, phase] of requests) {
-      const answer = await pipeline(state.handler, g.graphId(state.graph), specifier, state.name, attributes);
+      const answer = await pipeline(state.handler, specifier, state.name, attributes);
       let dependency;
       if (answer.answer !== undefined && answer.answer.kind === 'link') {
         for (const candidate of refsById.get(answer.answer.context) ?? []) {
@@ -64,12 +64,13 @@ export default g => {
       } else {
         const source = answer.answer !== undefined ? answer.answer.source : answer.source;
         const handler = answer.answer !== undefined ? answer.answer.handler : answer.handler;
-        dependency = makeReference(state.graph, null, { name: answer.id, text: source, handler, status: 'declared' });
+        const codeCache = answer.answer !== undefined ? (answer.answer.codeCache ?? 0) : 0;
+        dependency = makeReference(state.graph, null, { name: answer.id, text: source, handler, status: ModuleStatus.Declared, codeCache });
       }
       out.push(new ModuleRequest({ specifier, attributes: freeze({ ...attributes }), phase, reference: dependency }));
     }
     state.requests = freeze(out);
-    state.status = 'loaded';
+    state.status = ModuleStatus.Loaded;
     return reference;
   };
 
@@ -82,7 +83,7 @@ export default g => {
   const exportsOf = reference => {
     const state = referenceState.get(reference);
     if (state.released) throw named(errors.BadHandle, 'released');
-    if (state.status !== 'evaluated' || state.context === null) throw invalid('exports needs a reference that is evaluated in a context');
+    if (state.status !== ModuleStatus.Evaluated || state.context === null) throw invalid('exports needs a reference that is evaluated in a context');
     return host(native.context.namespaceOf, state.context, state.name);
   };
 
@@ -98,22 +99,23 @@ export default g => {
     state.context = contextId;
     state.contextObject = ctx;
     contextRefs.get(ctx)?.add(reference);
-    state.status = 'evaluating';
+    state.status = ModuleStatus.Evaluating;
     state.evaluation = (async () => {
       try {
         await ensureText(state);
         const meta = state.meta ?? (await metaOf(register(state.handler), state.name));
-        const cacheGraph = g.graphId(state.graph);
-        if (graphCache.has(cacheGraph)) await loadCache(cacheGraph, state.name, host(native.graph.sourceHash, state.text), state.text);
+        // The recipe's code cache wins over the handler's (`NO_CODE_CACHE`: none, whatever the handler says).
+        const cacheId = state.codeCache === 0 ? codeCacheId(state.handler.codeCache) : state.codeCache === 0xffffffff ? 0 : state.codeCache;
+        if (customCaches.has(cacheId)) await loadCache(cacheId, state.name, host(native.graph.sourceHash, state.text), state.text);
         // A synchronous failure is in the cell as the call returns; read it before awaiting anything.
-        const evaluating = native.context.evaluateSource(contextId, state.name, state.text, register(state.handler).id, meta ?? '');
+        const evaluating = native.context.evaluateSource(contextId, state.name, state.text, register(state.handler).id, meta ?? '', state.codeCache);
         const failed = takeError();
         if (failed !== undefined) throw failed;
         await moduleSettled(evaluating);
         state.pin = host(native.context.pin, contextId, state.name);
-        state.status = 'evaluated';
+        state.status = ModuleStatus.Evaluated;
       } catch (error) {
-        state.status = 'errored';
+        state.status = ModuleStatus.Errored;
         contextRefs.get(ctx)?.delete(reference);
         state.context = null;
         state.contextObject = undefined;
@@ -166,12 +168,31 @@ export default g => {
       return count;
     },
   });
-  provide('graph/cache-ops', cacheOps);
+  provide('graph/cache-ops', {
+    ...cacheOps,
+    /// `CodeCache#flush`: the code of the modules made with `cache` that compiled without a usable cache is stored.
+    async flush(cache) {
+      const id = codeCacheIds.get(cache);
+      if (id === undefined) return 0;
+      const out = host(native.context.flush, id);
+      if (cache.native === false) {
+        for (let index = 1; index < out.length; index++) await cache.store(new CodeCacheKey({ id: out[index][0], hash: out[index][1] }), out[index][2]);
+      }
+      return out[0];
+    },
+    /// `CodeCache#close`.
+    close(cache) {
+      const id = codeCacheIds.get(cache);
+      if (id === undefined) return;
+      host(native.graph.codeCacheClose, id);
+      customCaches.delete(id);
+    },
+  });
 
   /// The text of a reference made from a recipe (read, transformed) once.
   const ensureText = async state => {
     if (state.text !== undefined || state.recipe === null) return;
-    state.text = await sourceText(state.recipe.source, g.graphId(state.graph), state.name);
+    state.text = await sourceText(state.recipe.source, state.name);
   };
 
   const makeReference = (graph, recipe, extra) => {
@@ -180,7 +201,9 @@ export default g => {
       recipe,
       name: recipe !== null ? recipe.name : extra.name,
       handler: recipe !== null ? recipe.import : extra.handler,
-      status: extra?.status ?? 'declared',
+      /// The recipe's own `codeCache` for the host (0: the handler's applies, `0xffffffff`: none).
+      codeCache: recipe !== null ? recipeCacheId(recipe) : (extra?.codeCache ?? 0),
+      status: extra?.status ?? ModuleStatus.Declared,
       requests: undefined,
       text: recipe === null ? extra?.text : undefined,
       context: extra?.context ?? null,

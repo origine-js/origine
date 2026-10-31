@@ -11,5 +11,4 @@ export class MakerRequest extends Data {}
 export class TransformResult extends Data {}
 export class ModuleRequest extends Data {}
 export class Graph extends Data {}
-export class GraphFs extends Data {}
-seal(CodeCacheKey, PipelineResult, MetaRequest, ResolveRequest, ResolvedImport, ProvidedSource, MakerRequest, TransformResult, ModuleRequest, Graph, GraphFs);
+seal(CodeCacheKey, PipelineResult, MetaRequest, ResolveRequest, ResolvedImport, ProvidedSource, MakerRequest, TransformResult, ModuleRequest, Graph);

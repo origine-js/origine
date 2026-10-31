@@ -1,5 +1,5 @@
 // Run: zig-out/bin/origine examples/graph-hooks/init.js   (or: zig build run -- examples/graph-hooks/init.js)
-// Hooks answer a resolved id in order: the first verdict that is not Import.next() wins.
+// Hooks answer a resolved id in order: the first verdict that is not ImportHook.next() wins.
 // Here: a policy that rejects, origineProvider for origine:@std/* names, a hook that provides a virtual
 // module, and fsProvider for files. The handler reports which elements run in JS (`plan`).
 //
@@ -11,7 +11,7 @@
 //   origine:@std/debug: ModuleError: origine:@std/debug: PermissionDenied    (not in include: the provider does not serve it)
 //   ./lib/nope.js: ModuleError: ./lib/nope.js: NotFound             (no hook serves it; the fs provider finds no file)
 import { ModuleSource } from 'origine:@std/graph/module';
-import { ImportHandler, Import, ImportError } from 'origine:@std/graph/import';
+import { ImportHandler, ImportHook, ImportError } from 'origine:@std/graph/import';
 import { ImportResolver } from 'origine:@std/graph/resolve';
 import { origine, relative } from 'origine:@std/graph/resolve/layers';
 import { origineProvider, fsProvider } from 'origine:@std/graph/providers';
@@ -20,7 +20,8 @@ import { eprintln } from 'origine:@std/debug';
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
   // Authority: a read-only grant of this directory. Files outside it cannot be reached by any hook.
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-hooks', access: 'r' }) });
+  const src = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-hooks', access: 'r' });
+  const graph = api.graph.create();
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered()
       .layer(origine()) // recognises origine: ids
@@ -28,13 +29,13 @@ export async function main(api) {
       .layer(({ specifier }) => (specifier === 'virtual:answer' ? { id: specifier } : undefined)),
     hooks: [
       // 1. Policy first. Nothing after this can serve a denied id.
-      resolved => (resolved.id === 'lib/secret.js' ? Import.reject(ImportError.PermissionDenied) : Import.next()),
+      resolved => (resolved.id === 'lib/secret.js' ? ImportHook.reject(ImportError.PermissionDenied) : ImportHook.next()),
       // 2. origine:@std/* modules. `std` is required; only the names listed are served.
       origineProvider({ std: { include: ['text'] } }),
       // 3. A module made from text the hook holds: nothing is read from disk.
-      resolved => (resolved.id === 'virtual:answer' ? Import.source(ModuleSource.text('export const answer = 42;')) : Import.next()),
+      resolved => (resolved.id === 'virtual:answer' ? ImportHook.source(ModuleSource.text('export const answer = 42;')) : ImportHook.next()),
       // 4. Files under the grant's root. `read` is required: 'copy' or 'mmap'.
-      fsProvider({ read: 'copy' }),
+      fsProvider({ fs: src, read: 'copy' }),
     ],
   });
   eprintln('native:', handler.native);

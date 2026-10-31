@@ -238,6 +238,8 @@ pub const Host = struct {
     handlers: registry.Registry(graph_api.Handler) = .{},
     /// The `ImportCache` tables handlers name; one lives as long as a handler uses it.
     caches: registry.Registry(graph_api.CacheTable) = .{},
+    /// The `CodeCache` objects handlers and recipes name; one lives until it is closed or its realm goes.
+    code_caches: registry.Registry(graph_api.CodeCacheStore) = .{},
     contexts: registry.Registry(context_api.Context) = .{},
     imports: std.ArrayList(*context_api.ImportState) = .empty,
     /// Calls into the JS driver whose context was freed before the promise settled; each is freed by
@@ -332,6 +334,11 @@ pub const Host = struct {
             alloc.destroy(item);
         }
         self.graphs.deinit(alloc);
+        for (self.code_caches.values()) |item| {
+            item.deinit();
+            alloc.destroy(item);
+        }
+        self.code_caches.deinit(alloc);
         for (self.glue_unbound) |pending| if (pending) |script| script.deinit();
         alloc.destroy(self);
     }
@@ -542,6 +549,9 @@ pub const Host = struct {
                 graph_api.releaseGraph(self, owned);
                 if (self.graphs.count() == before) index += 1;
             }
+            for (self.code_caches.values()) |owned| if (owned.owner == state) {
+                owned.closed = true;
+            };
             // The cell may live in the buffer being released: keep its value and move home.
             state.errno_local = state.shared.errno_cell.*;
             state.shared.errno_cell = &state.errno_local;
@@ -726,7 +736,11 @@ pub const Host = struct {
                         .readSource = func(graph_api.readSource, .{ .side_effect = .any }),
                         .compileRequests = func(graph_api.compileRequests, .{ .side_effect = .any }),
                         .bind = func(graph_api.bind, .{ .side_effect = .any }),
-                        .asyncFs = func(graph_api.asyncFs, .{ .side_effect = .any }),
+                        .asyncOps = func(graph_api.asyncOps, .{ .side_effect = .any }),
+                        .grantRef = func(graph_api.grantRef, .{ .side_effect = .any }),
+                        .codeCacheCreate = func(graph_api.codeCacheCreate, .{ .side_effect = .any }),
+                        .codeCacheClose = func(graph_api.codeCacheClose, .{ .side_effect = .any }),
+                        .codeCacheAlive = func(graph_api.codeCacheAlive, .{ .side_effect = .any }),
                         .utf8 = func(graph_api.utf8, .{ .side_effect = .any }),
                         .sourceHash = func(graph_api.sourceHash, .{ .side_effect = .any }),
                         .jsonModule = func(graph_api.jsonModule, .{ .side_effect = .any }),

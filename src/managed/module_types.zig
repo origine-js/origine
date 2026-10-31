@@ -75,7 +75,7 @@ pub const ResolveCompletion = union(enum) {
 /// name is borrowed UTF-8; value is a borrowed persistent handle from this runtime.
 /// The receiving content API copies the name and retains its own handle. `harden` (the default) deep-freezes
 /// the value when the module is made, so a native producer cannot hand over a mutable object; a producer that
-/// hands over an object it shares on purpose (`Import.exports`) turns it off and the value is used as it is.
+/// hands over an object it shares on purpose (`ImportHook.exports`) turns it off and the value is used as it is.
 pub const Export = struct { name: []const u8, value: v8.Global.Of(v8.Value), harden: bool = true };
 /// All slices, nested export names, and handles are borrowed until the receiving
 /// updateImportCache/completeLoad call returns (success or error). No ownership is
@@ -196,4 +196,7 @@ pub const CodeCache = struct {
     /// build or flag set): the hook may discard them. The module is compiled without them and its
     /// fresh cache goes to `store`.
     rejected: ?*const fn (data: ?*anyopaque, request: CodeCacheRequest) void = null,
+    /// Whether a module compiled without a usable cache is worth keeping for `store` (its source is
+    /// held until `flushCodeCache`). Null: every module is.
+    keeps: ?*const fn (data: ?*anyopaque, module_id: ModuleId) bool = null,
 };

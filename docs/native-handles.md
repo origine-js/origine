@@ -18,7 +18,7 @@ nothing it should not. A resource reference alone confers no authority; the gran
 `FileHandle` and `DirHandle` carry `kind`, `fs` (the issuing grant's id) and `id`. `Dir.at(fs, id)` and
 `File.at(fs, id)` of `origine:@std/io` rebuild one without an issuer. An `fs` grant is a `Handle` whose
 issuer is the native grant behind it: `issuerOf` of the real object is the only way to that native, so a
-copy, a proxy or an object inheriting from a grant is not a grant (`derive({ fs })` refuses it).
+copy, a proxy or an object inheriting from a grant is not a grant (`fsProvider({ fs })` and `CodeCache.dir({ fs })` refuse it).
 
 Classes that more than one module makes or checks are declared in `src/js/glue/handles.js`; one module's
 own classes are declared in that module and extend `Handle` or `Data`. Embedded std modules import the same

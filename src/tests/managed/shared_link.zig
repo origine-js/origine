@@ -1,4 +1,4 @@
-//! Spike for `Import.link(ref, { mode: 'shared' })`: can a module of one context be linked into
+//! Spike for `ImportHook.link(ref, { mode: 'shared' })`: can a module of one context be linked into
 //! the module graph of another context of the same isolate (live bindings, same objects)?
 //! The answer decides whether the `'shared'` mode of the module graph ships or answers
 //! `Unsupported` (docs/graph-api.md).

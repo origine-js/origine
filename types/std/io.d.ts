@@ -45,6 +45,8 @@ declare module "origine:@std/io" {
     /** Whether `value` (a code, or anything with an `errno`) is `code`. Narrows an unknown caught value to that error. */
     is(value: number, code: number): boolean;
     is<C extends IoErrnoCode>(value: unknown, code: C): value is IoErrorByCode<C>;
+    /** Whether the condition behind `value` (an error or a code) may pass by itself; see `OrigineError.transient`. */
+    transient(value: unknown): boolean;
     /** An Error subclass instance for `code`. */
     of<C extends IoErrnoCode>(code: C, message?: string): IoErrorByCode<C>;
     /**
@@ -65,6 +67,8 @@ declare module "origine:@std/io" {
     /** Whether `value` (a code, or anything with an `errno`) is `code`. Narrows an unknown caught value to that error. */
     is(value: number, code: number): boolean;
     is<C extends HostErrnoCode>(value: unknown, code: C): value is HostErrorByCode<C>;
+    /** Whether the condition behind `value` (an error or a code) may pass by itself; see `OrigineError.transient`. */
+    transient(value: unknown): boolean;
     /** An Error subclass instance for `code`. */
     of<C extends HostErrnoCode>(code: C, message?: string): HostErrorByCode<C>;
   }

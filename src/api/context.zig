@@ -1108,6 +1108,12 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
         const handler = numberOf(ctx, isolate, object, "handler") orelse return error.InvalidData;
         return made(self, alloc, work, text, handler);
     }
+    if (std.mem.eql(u8, kind, "exports")) {
+        // A synthetic module of the values the hook handed over: neither copied nor frozen here.
+        const given = object.get(ctx, binding.string(isolate, "exports")) orelse return error.InvalidData;
+        if (!given.isObject()) return error.InvalidData;
+        return .{ .done = .{ .content = try linkExports(self, ctx, isolate, given.toObject(ctx).?, alloc) } };
+    }
     if (std.mem.eql(u8, kind, "link")) {
         const other_id = numberOf(ctx, isolate, object, "context") orelse return error.InvalidData;
         const name = (try stringOf(ctx, isolate, alloc, object, "name")) orelse return error.InvalidData;
@@ -1199,7 +1205,7 @@ fn linkExports(self: *Context, ctx: v8.Context, isolate: v8.Isolate, exports_obj
         const value = exports_object.get(ctx, key) orelse return error.InvalidData;
         const retained: v8.Global.Of(v8.Value) = .new(isolate, value);
         try self.link_values.append(self.host.allocator, retained);
-        exports[count] = .{ .name = bytes, .value = retained };
+        exports[count] = .{ .name = bytes, .value = retained, .harden = false };
         count += 1;
     }
     return .{ .exports = exports[0..count] };

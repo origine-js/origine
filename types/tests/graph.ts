@@ -90,7 +90,8 @@ export async function graphUse(api: import("@origine/types").Api): Promise<void>
 const provided: Verdict = Import.provide(recipe);
 const sourced: Verdict = Import.provide(ModuleSource.text("export default 1"));
 const linked: Verdict = Import.link({});
-void [pure, provided, sourced, linked, Import.accept(), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
+const synthetic: Verdict = Import.exports({ answer: 42, default: () => 1 });
+void [pure, provided, sourced, linked, synthetic, Import.accept(), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
 void ImportHandler.make({ resolver, hooks: fromLoader((id, attributes) => (attributes.type === "json" ? { source: "{}" } : id)) });
 void ImportHandler.make({ resolver, hooks: [], maker: MakeRecipe.fn(async ({ id, source }) => (id.endsWith(".ts") ? { transformer: ts(), import: handler } : {})) });
 const equal: boolean = ImportError.is({ errno: ImportError.NotFound }, ImportError.NotFound);
@@ -113,6 +114,8 @@ origineProvider({ std: true });
 origineProvider({ std: false });
 // @ts-expect-error exactly one of include and exclude
 origineProvider({ std: { include: ["text"], exclude: ["fs"] } });
+// @ts-expect-error values are an object of exports, not a function
+Import.exports(() => {});
 // @ts-expect-error there is no mode: a link is the module itself, nothing is copied
 Import.link({}, { mode: "shared" });
 // @ts-expect-error `import` is required: it decides what the module can load

@@ -184,6 +184,7 @@ declare module "origine:@std/graph/import" {
     | { readonly kind: "provide"; readonly source: ModuleSource; readonly recipe?: never }
     | { readonly kind: "provide"; readonly recipe: ModuleRecipe; readonly source?: never }
     | { readonly kind: "link"; readonly reference: object }
+    | { readonly kind: "exports"; readonly values: Readonly<Record<string, unknown>> }
     | { readonly kind: "reject"; readonly error: { readonly errno: number; readonly name: string; readonly message?: string } }) & import("origine:@std/graph/module").Descriptor;
 
   export const Import: {
@@ -201,6 +202,14 @@ declare module "origine:@std/graph/import" {
      * a module of copies with `Import.exports`.
      */
     link(reference: object): Verdict;
+    /**
+     * Stop the chain with a module whose namespace is `values`: its own enumerable string-keyed data
+     * properties, `default` included (an accessor is `InvalidInput`). The importer gets one synthetic module
+     * with those bindings. Nothing is copied or frozen: each value is the caller's own object or function, shared as it
+     * is, so the importer reaches whatever the values reach. Build them with `snapshot` and `seal` to hand data over.
+     * An `origine:` id is never served this way (`PermissionDenied`).
+     */
+    exports(values: Readonly<Record<string, unknown>>): Verdict;
     /** Stop the chain with an error. Throws `InvalidInput` for any other code. */
     reject(error: ImportErrorCode | ReturnType<typeof ImportError.other>): Verdict;
   };

@@ -57,6 +57,8 @@ export default g => {
             throw named(InvalidInput, 'link needs a reference that is evaluated in a context');
           return new PipelineResult({ kind: 'link', context: state.context, name: state.name });
         }
+        case 'exports':
+          return new PipelineResult({ kind: 'exports', exports: verdict.values });
         case 'reject':
           throw verdict.error;
         default:

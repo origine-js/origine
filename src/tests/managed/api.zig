@@ -1626,6 +1626,47 @@ test "graph: link makes a context use the module of another context itself: live
     try check(fx.rt.scopes.items[2], "shared[0] === 2 && shared[1] === 'b' && shared[2] === false && shared[3] === false && shared[4] === false");
 }
 
+test "graph: Import.exports gives the importer a synthetic module of the values, shared as they are" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const code = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
+        \\  // The verdict: a snapshot of own data properties; accessors and non-objects are InvalidInput when it is built.
+        \\  const verdict = Import.exports({ a: 1 });
+        \\  out.verdict = verdict.kind === 'exports' && verdict.values.a === 1 && Object.isFrozen(verdict.values);
+        \\  out.invalid = [code(() => Import.exports({ get x() { return 1; } })), code(() => Import.exports(null)), code(() => Import.exports(() => {})), code(() => Import.exports(1))].join(',');
+        \\  const shared = { tag: 'a', list: [1] };
+        \\  let pinned = 0;
+        \\  const values = { answer: 42, shared, bump: () => ++pinned, default: () => 'dflt', 'odd name': 7 };
+        \\  const layer = ({ specifier }) => (specifier.startsWith('values:') || specifier.startsWith('origine:') ? { id: specifier } : undefined);
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(layer),
+        \\    hooks: [async r => (r.id === 'values:x' ? Import.exports(values) : r.id === 'origine:evil' ? Import.exports({ x: 1 }) : Import.next())],
+        \\  });
+        \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
+        \\  const run = (name, text) => api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
+        \\  out.ok = await run('m', "import dflt, { answer, shared, bump, 'odd name' as odd } from 'values:x'; import * as ns from 'values:x'; globalThis.got = [answer, dflt(), bump(), odd, Object.keys(ns).sort().join('|'), Object.isFrozen(shared), shared.constructor === Object, Object.isFrozen(bump)]; globalThis.sharedInside = shared;");
+        \\  // Nothing was copied or frozen: the importer holds the caller's own objects.
+        \\  shared.tag = 'z';
+        \\  out.same = await run('n', "import { shared } from 'values:x'; globalThis.seen = shared.tag + shared.list.length;");
+        \\  out.frozen = Object.isFrozen(shared) || Object.isFrozen(values.bump);
+        \\  out.pinned = pinned;
+        \\  // An origine: id is never served by JS, not even this way.
+        \\  out.origine = await run('o', "import { x } from 'origine:evil';");
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.verdict === true && report.invalid === 'InvalidInput,InvalidInput,InvalidInput,InvalidInput' && report.ok === 'ok' && report.same === 'ok'");
+    try check(fx.scope, "report.frozen === false && report.pinned === 1 && report.origine.includes('PermissionDenied')");
+    try check(fx.rt.scopes.items[1], "got.join(',') === '42,dflt,1,7,answer|bump|default|odd name|shared,false,false,false' && sharedInside.tag === 'z' && seen === 'z1'");
+}
+
 test "graph: link refuses a module that is still evaluating and a failed import does not break later ones" {
     var fx: Fixture = undefined;
     try fx.setup(

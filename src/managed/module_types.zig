@@ -73,8 +73,10 @@ pub const ResolveCompletion = union(enum) {
     message: []const u8,
 };
 /// name is borrowed UTF-8; value is a borrowed persistent handle from this runtime.
-/// The receiving content API copies the name and retains its own handle.
-pub const Export = struct { name: []const u8, value: v8.Global.Of(v8.Value) };
+/// The receiving content API copies the name and retains its own handle. `harden` (the default) deep-freezes
+/// the value when the module is made, so a native producer cannot hand over a mutable object; a producer that
+/// hands over an object it shares on purpose (`Import.exports`) turns it off and the value is used as it is.
+pub const Export = struct { name: []const u8, value: v8.Global.Of(v8.Value), harden: bool = true };
 /// All slices, nested export names, and handles are borrowed until the receiving
 /// updateImportCache/completeLoad call returns (success or error). No ownership is
 /// transferred. Source is copied into V8; export names and handles are retained.

@@ -66,6 +66,21 @@ export const Import = freeze({
     if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
     return new h.ImportVerdict({ kind: 'link', reference });
   },
+  /// Stop the chain with a module whose namespace is `values`: its own enumerable string-keyed data properties,
+  /// `default` included (an accessor is `InvalidInput`). The importer gets one synthetic module with those
+  /// bindings. Nothing is copied or frozen: a value is the caller's own object or function, shared as it is, so
+  /// this hands the importer whatever the values reach. Build the values from `snapshot` and `seal` to give data.
+  /// An `origine:` id can never be served this way; it is `PermissionDenied`.
+  exports(values) {
+    if (values === null || typeof values !== 'object') throw invalid('Import.exports: values must be an object');
+    const own = Object.create(null);
+    for (const key of Object.keys(values)) {
+      const descriptor = Object.getOwnPropertyDescriptor(values, key);
+      if (!('value' in descriptor)) throw invalid(`Import.exports: ${JSON.stringify(key)} is an accessor; exports are data properties`);
+      own[key] = descriptor.value;
+    }
+    return new h.ImportVerdict({ kind: 'exports', values: freeze(own) });
+  },
   /// Stop the chain with an error: a code of `ImportError` or the value of `ImportError.other(...)`.
   reject(error) {
     if (typeof error === 'number') {

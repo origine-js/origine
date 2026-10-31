@@ -431,7 +431,7 @@ pub const ModuleMap = struct {
                 const names = try self.scope.runtime.allocator.alloc(v8.String, exports.len);
                 defer self.scope.runtime.allocator.free(names);
                 for (exports, 0..) |exp, i| {
-                    try self.scope.hardenLocal(exp.value.deref());
+                    if (exp.harden) try self.scope.hardenLocal(exp.value.deref());
                     for (exports[0..i]) |prior| if (std.mem.eql(u8, exp.name, prior.name)) return error.DuplicateExport;
                     owned[i] = .{ .name = try self.arenaAllocator().dupe(u8, exp.name), .value = .new(iso, exp.value.deref()) };
                     entry.exports = owned[0 .. i + 1];

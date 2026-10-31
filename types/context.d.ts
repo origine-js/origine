@@ -12,8 +12,12 @@ export interface ContextOptions {
    * `context.import`). Required: it decides what the realm can load.
    */
   readonly import: import("origine:@std/graph/import").ImportHandler;
-  /** Default `api.graph`. */
-  readonly graph?: ModuleGraph;
+  /**
+   * The graph the realm's modules are produced with: `api.graph` or a graph derived from it. Required, no
+   * default: it decides what authority sources are read with and where code caches live. Missing, not a
+   * graph the host made, or closed is `InvalidInput`.
+   */
+  readonly graph: ModuleGraph;
   /** Run in order before anything is imported; `values` is deep-frozen plain data and functions only. */
   readonly preload?: readonly Preload[];
 }
@@ -39,7 +43,7 @@ export interface ContextCap {
    * its default one once, so contexts made from one handler object use the same) share that cache's modules:
    * the first to import an id evaluates it and the others link that module (live bindings, same objects),
    * which leaks the realm boundary; give each context its own handler or cache to keep them apart.
-   * Rejects `InvalidInput` for malformed options (a missing `import`, a preload that is
+   * Rejects `InvalidInput` for malformed options (a missing `import`, a missing, forged or closed `graph`, a preload that is
    * not exactly one of `source`/`module`) and `ModuleError` when a preload fails.
    */
   create(options: ContextOptions): Promise<Context>;

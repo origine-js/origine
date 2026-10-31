@@ -11,14 +11,22 @@ export default (native, { take }) => {
     const graphShared = () => shared.graph;
     return freeze({
       /// A realm. `import` (an ImportHandler) answers the `import()` of code that has no module around it
-      /// (scripts, `ctx.import`) and is required: it decides what the realm can load. `graph` defaults to
-      /// `api.graph`.
+      /// (scripts, `ctx.import`) and is required: it decides what the realm can load. `graph` is required too:
+      /// the artifacts and authority the realm's modules are produced with (`api.graph` or a graph derived
+      /// from it); a choice with consequences has no default.
       async create(options) {
-        const { register, rootGraph, graphId, contexts, contextRefs, refsById, makeReference, host, invalid, named } = graphShared();
+        const { register, graphId, contexts, contextRefs, refsById, makeReference, host, invalid, named } = graphShared();
         const handler = own(options, 'import');
-        const graph = own(options, 'graph') ?? rootGraph();
+        const graph = own(options, 'graph');
         const preload = own(options, 'preload') ?? [];
         if (handler === undefined) throw invalid('create: import (an ImportHandler) is required');
+        if (graph === undefined) throw invalid('create: graph is required (pass api.graph or a graph derived from it)');
+        let graphNumber;
+        try {
+          graphNumber = graphId(graph);
+        } catch {
+          throw invalid('create: graph must be api.graph or a graph derived from it');
+        }
         if (!Array.isArray(preload)) throw invalid('create: preload must be an array');
         for (const entry of preload) {
           const script = own(entry, 'source');
@@ -27,7 +35,15 @@ export default (native, { take }) => {
             throw invalid('create: a preload is exactly one of source and module');
         }
         const record = register(handler);
-        const id = host(native.context.create, record.id, graphId(graph));
+        let id;
+        try {
+          id = host(native.context.create, record.id, graphNumber);
+        } catch (error) {
+          // The handler was registered a moment ago, so a stale handle here is the graph's.
+          if (error?.name === 'StaleHandle' || error?.name === 'BadHandle')
+            throw invalid('create: graph is closed, or not a graph of this realm');
+          throw error;
+        }
         const refs = new Set();
         const context = recordOf('Context', {
           graph,

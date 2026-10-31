@@ -28,6 +28,6 @@ export async function main(api: any): Promise<void> {
       }),
     }),
   });
-  using context = await api.context.create({ import: handler });
+  using context = await api.context.create({ graph: api.graph, import: handler });
   await context.import('main');
 }

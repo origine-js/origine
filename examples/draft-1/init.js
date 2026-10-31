@@ -42,7 +42,7 @@ export async function main(api) {
       ),
     ],
   });
-  const child = await api.context.create({
+  const child = await api.context.create({ graph: api.graph,
     import: handler,
     preload: [{ source: '(values) => { globalThis.preloaded = values.n }', values: { n: 2 } }],
   });

@@ -89,9 +89,11 @@ export const main: Main = async (api: Api) => {
   // @ts-expect-error `import` is required: it decides what the realm can load
   await api.context.create({});
   // @ts-expect-error a preload is a script or a module, not both
-  await api.context.create({ import: handler, preload: [{ source: "", module: "" }] });
+  await api.context.create({ graph: api.graph, import: handler, preload: [{ source: "", module: "" }] });
   // @ts-expect-error misspelled option
   await api.context.create({ import: handler, grph: api.graph });
+  // @ts-expect-error `graph` is required: there is no default
+  await api.context.create({ import: handler });
   // @ts-expect-error `context` has no `narrow`
   api.context.narrow({});
   // @ts-expect-error environment views have no narrowing API

@@ -260,7 +260,7 @@ export async function main(api) {
       ? "export default globalThis.nodeFs"   // installed by the preload below
       : await readSource(fs, id))],
   });
-  const app = await api.context.create({
+  const app = await api.context.create({ graph: api.graph,
     import: handler,
     preload:  [{ source: PRELOAD_GLOBALS, values: { process, nodeFs } }],
   });

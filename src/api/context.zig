@@ -1353,13 +1353,13 @@ pub fn free(host: *Host, context: *Context) void {
 
 // ---- natives ---------------------------------------------------------------
 
-/// `create(importHandler, graph)`: a realm whose imports run through `importHandler` with the
-/// authority of `graph`. Returns the context id.
-pub fn create(state: *ScopeState, import_handler: u32, graph_id: u32) Error!u32 {
-    return createImpl(state, import_handler, graph_id) catch |err| return errno.narrow(err);
+/// `create(importHandler, graph, codeGeneration)`: a realm whose imports run through `importHandler` with the
+/// authority of `graph`; `codeGeneration` lets it compile strings (`eval`, `new Function`). Returns the context id.
+pub fn create(state: *ScopeState, import_handler: u32, graph_id: u32, code_generation: bool) Error!u32 {
+    return createImpl(state, import_handler, graph_id, code_generation) catch |err| return errno.narrow(err);
 }
 
-fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
+fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32, code_generation: bool) !u32 {
     const host = state.host;
     const alloc = host.allocator;
     const h = try graph_api.handlerFor(host, import_handler);
@@ -1381,6 +1381,7 @@ fn createImpl(state: *ScopeState, import_handler: u32, graph_id: u32) !u32 {
     context.ceiling = try Context.ceilingOfHandler(context.ceiling_arena.allocator(), h);
     var options: Scope.Options = .{
         .origine_namespace = true,
+        .code_generation = code_generation,
         .resolver = .{ .data = context, .resolve_async = resolveAsync, .cancel = cancel, .namespace_of = namespaceOfHook },
         .loader = .{ .data = context, .load = load, .poll = poll },
         .meta = .{ .data = context, .init = metaHook },

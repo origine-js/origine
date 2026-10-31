@@ -1733,6 +1733,80 @@ test "data: snapshot copies plain data, deepFreeze freezes in place, and they co
     try check(fx.scope, "report.composed === true && report.nsFn === 'Unsupported:true'");
 }
 
+test "context: string-to-code is off by default, per realm, and security.codeGeneration opts a realm in" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { deepFreeze } from 'origine:@std/data';
+        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
+        \\async function body(api) {
+        \\  const out = globalThis.report = {};
+        \\  const code = f => { try { return String(f()); } catch (e) { return e.name; } };
+        \\  const layer = ({ specifier }) => (specifier.startsWith('link:') ? { id: specifier } : undefined);
+        \\  const plain = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
+        \\  const make = (security, handler = plain) => api.context.create({ graph: api.graph, import: handler, ...(security === undefined ? {} : { security }) });
+        \\  const run = (ctx, handler, name, text) => api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name })), ctx).then(() => 'ok', e => e.message);
+        \\  // (a) every string-to-code door is shut by default; (c) security.codeGeneration opens them in that realm only.
+        \\  const probe = "const t = f => { try { return typeof f(); } catch (e) { return e.name; } }; globalThis.doors = [t(() => eval('1')), t(() => new Function('return 1')), t(() => (async () => {}).constructor('return 1')), t(() => (function* () {}).constructor('return 1')), t(() => (async function* () {}).constructor('return 1'))].join(','); globalThis.message = (() => { try { eval('1'); } catch (e) { return e.message; } })(); globalThis.wasm = t(() => new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))); globalThis.marker = 'closed';";
+        \\  const closed = await make();
+        \\  const explicit = await make({ codeGeneration: false });
+        \\  const empty = await make({});
+        \\  const open = await make({ codeGeneration: true });
+        \\  for (const [name, ctx] of [['closed', closed], ['explicit', explicit], ['empty', empty], ['open', open]]) out['probe_' + name] = await run(ctx, plain, 'probe-' + name, probe.replace("'closed'", "'" + name + "'"));
+        \\  out.badSecurity = (await Promise.all([make(null), make(1), make({ codeGeneration: 'yes' }), make({ allow: true }), make({ codeGeneration: true, extra: 1 }), make({ get codeGeneration() { return true; } })].map(p => p.then(() => 'ok', e => e.name + ':' + e.message.includes('security')))))
+        \\    .join(',');
+        \\  // (b) a function shared out of a realm keeps that realm's setting: V8 checks the realm the constructor or `eval`
+        \\  // belongs to. Called directly from another realm, V8 also refuses on the security tokens (`fn.constructor(...)` is a
+        \\  // TypeError, `eval` returns undefined) whether or not the realm opted in; run from a microtask the call is made in the
+        \\  // function's own realm and only the flag decides. (c) So a realm that opted in can be made to compile strings.
+        \\  const a = await make();
+        \\  const a2 = await make({ codeGeneration: true });
+        \\  const exporter = (text, name) => ModuleRecipe({ source: ModuleSource.text(text), import: plain, name });
+        \\  const refA = api.graph.declare(exporter("export const f = () => 1; export const e = eval; globalThis.marker = 'A';", 'exporter-a'));
+        \\  const refA2 = api.graph.declare(exporter("export const f = () => 1; export const e = eval; globalThis.marker = 'A2';", 'exporter-a2'));
+        \\  await api.graph.evaluate(refA, a);
+        \\  await api.graph.evaluate(refA2, a2);
+        \\  const nsA = api.graph.exports(refA), nsA2 = api.graph.exports(refA2);
+        \\  const direct = fn => { try { return String(fn.constructor('return globalThis.marker')()); } catch (e) { return e.name + ':' + e.message; } };
+        \\  const directEval = fn => { try { return String(fn('globalThis.marker')); } catch (e) { return e.name; } };
+        \\  const micro = async fn => { try { return String((await Promise.resolve('return globalThis.marker').then(fn.constructor))()); } catch (e) { return e.name; } };
+        \\  const microEval = async fn => { try { return String(await Promise.resolve('globalThis.marker').then(fn)); } catch (e) { return e.name; } };
+        \\  out.hostDirect = [direct(nsA.f), direct(nsA2.f), directEval(nsA.e), directEval(nsA2.e)].join(',');
+        \\  out.hostMicro = (await Promise.all([micro(nsA.f), micro(nsA2.f), microEval(nsA.e), microEval(nsA2.e)])).join(',');
+        \\  const importer = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(layer),
+        \\    hooks: [async r => (r.id === 'link:a' ? Import.link(refA) : r.id === 'link:a2' ? Import.link(refA2) : r.id === 'link:ex' ? Import.exports({ f: nsA.f, e: nsA.e, f2: deepFreeze(nsA2.f), e2: nsA2.e }) : Import.next())],
+        \\  });
+        \\  const b = await make(undefined, importer);
+        \\  const reach = "const micro = async fn => { try { return String((await Promise.resolve('return globalThis.marker').then(fn.constructor))()); } catch (e) { return e.name; } }; const microEval = async fn => { try { return String(await Promise.resolve('globalThis.marker').then(fn)); } catch (e) { return e.name; } }; const direct = fn => { try { return String(fn.constructor('return globalThis.marker')()); } catch (e) { return e.name; } };";
+        \\  out.link = await run(b, importer, 'via-link', reach + "import { f, e } from 'link:a'; import { f as f2, e as e2 } from 'link:a2'; globalThis.linkDirect = [direct(f), direct(f2)].join(','); globalThis.linkMicro = (await Promise.all([micro(f), micro(f2), microEval(e), microEval(e2)])).join(',');");
+        \\  out.exportsVerdict = await run(b, importer, 'via-exports', reach + "import { f, e, f2, e2 } from 'link:ex'; globalThis.exportsMicro = (await Promise.all([micro(f), micro(f2), microEval(e), microEval(e2)])).join(',');");
+        \\  // A function from the init realm (preload values) is in a realm that is shut too.
+        \\  const indirect = eval;
+        \\  const pre = await api.context.create({ graph: api.graph, import: plain, preload: [{ source: "(values) => { globalThis.initF = values.f; globalThis.initE = values.e; }", values: { f: () => 1, e: indirect } }] });
+        \\  out.preloadMicro = await run(pre, plain, 'init-fns', "const micro = async fn => { try { return String((await Promise.resolve('return 1').then(fn.constructor))()); } catch (e) { return e.name; } }; globalThis.fromInit = [await micro(initF), await Promise.resolve('1').then(initE).then(String, e => e.name)].join(',');");
+        \\  globalThis.keep = { closed, explicit, empty, open, a, a2, b, pre };
+        \\}
+    , false, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.rt.scopes.items[1], "doors === 'EvalError,EvalError,EvalError,EvalError,EvalError' && message === 'Code generation from strings disallowed for this context' && marker === 'closed'");
+    // WebAssembly compiles bytes, not strings: the flag does not touch it, and wasm code cannot reach the realm's globals.
+    try check(fx.rt.scopes.items[1], "wasm === 'object'");
+    try check(fx.rt.scopes.items[2], "doors === 'EvalError,EvalError,EvalError,EvalError,EvalError' && marker === 'explicit'");
+    try check(fx.rt.scopes.items[3], "doors === 'EvalError,EvalError,EvalError,EvalError,EvalError' && marker === 'empty'");
+    try check(fx.rt.scopes.items[4], "doors === 'number,function,function,function,function' && message === undefined && marker === 'open'");
+    try check(fx.scope, "report.probe_closed === 'ok' && report.probe_explicit === 'ok' && report.probe_empty === 'ok' && report.probe_open === 'ok'");
+    try check(fx.scope, "report.badSecurity === 'InvalidInput:true,InvalidInput:true,InvalidInput:true,InvalidInput:true,InvalidInput:true,InvalidInput:true'");
+    try check(fx.scope, "report.hostDirect === 'TypeError:no access,TypeError:no access,undefined,undefined'");
+    try check(fx.scope, "report.hostMicro === 'EvalError,A2,EvalError,A2'");
+    try check(fx.scope, "report.link === 'ok' && report.exportsVerdict === 'ok' && report.preloadMicro === 'ok'");
+    try check(fx.rt.scopes.items[7], "linkDirect === 'TypeError,TypeError' && linkMicro === 'EvalError,A2,EvalError,A2' && exportsMicro === 'EvalError,A2,EvalError,A2'");
+    try check(fx.rt.scopes.items[8], "fromInit === 'EvalError,EvalError'");
+}
+
 test "graph: link refuses a module that is still evaluating and a failed import does not break later ones" {
     var fx: Fixture = undefined;
     try fx.setup(

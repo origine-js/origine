@@ -8,6 +8,22 @@ seal(Context);
 export default (native, { take }) => {
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
+  /// `security.codeGeneration` of the create options: whether the realm may compile strings (`eval`, `new Function`).
+  /// Off unless it is the boolean `true`; an unknown key or a non-boolean is `InvalidInput`.
+  const securityOf = (security, invalid) => {
+    if (security === undefined) return false;
+    if (security === null || typeof security !== 'object') throw invalid('create: security must be an object');
+    let codeGeneration = false;
+    for (const key of Reflect.ownKeys(security)) {
+      if (key !== 'codeGeneration') throw invalid(`create: unknown security option ${String(key)}`);
+      const descriptor = Object.getOwnPropertyDescriptor(security, key);
+      if (!('value' in descriptor) || (descriptor.value !== undefined && typeof descriptor.value !== 'boolean'))
+        throw invalid('create: security.codeGeneration must be a boolean');
+      codeGeneration = descriptor.value === true;
+    }
+    return codeGeneration;
+  };
+
   const attributesJson = attributes => (Object.keys(attributes).length === 0 ? '' : JSON.stringify(attributes));
 
   const makeContextCap = () => {
@@ -30,6 +46,7 @@ export default (native, { take }) => {
         } catch {
           throw invalid('create: graph must be api.graph or a graph derived from it');
         }
+        const codeGeneration = securityOf(own(options, 'security'), invalid);
         if (!Array.isArray(preload)) throw invalid('create: preload must be an array');
         for (const entry of preload) {
           const script = own(entry, 'source');
@@ -40,7 +57,7 @@ export default (native, { take }) => {
         const record = register(handler);
         let id;
         try {
-          id = host(native.context.create, record.id, graphNumber);
+          id = host(native.context.create, record.id, graphNumber, codeGeneration);
         } catch (error) {
           // The handler was registered a moment ago, so a stale handle here is the graph's.
           if (error?.name === 'StaleHandle' || error?.name === 'BadHandle')

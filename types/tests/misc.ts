@@ -94,6 +94,13 @@ export const main: Main = async (api: Api) => {
   await api.context.create({ import: handler, grph: api.graph });
   // @ts-expect-error `graph` is required: there is no default
   await api.context.create({ import: handler });
+  // Off unless set: a boolean, and the only key.
+  await api.context.create({ import: handler, graph: api.graph, security: { codeGeneration: true } });
+  await api.context.create({ import: handler, graph: api.graph, security: {} });
+  // @ts-expect-error `security` takes `codeGeneration`, not a verb phrase
+  await api.context.create({ import: handler, graph: api.graph, security: { allowCodeGeneration: true } });
+  // @ts-expect-error a boolean
+  await api.context.create({ import: handler, graph: api.graph, security: { codeGeneration: "yes" } });
   // @ts-expect-error `context` has no `narrow`
   api.context.narrow({});
   // @ts-expect-error environment views have no narrowing API

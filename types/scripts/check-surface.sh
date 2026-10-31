@@ -64,7 +64,7 @@ missing "isolate member" "$here/isolate.d.ts" CreateConfig create terminate join
 missing "host member" "$here/host.d.ts" env threading parallelism Channel Snapshot
 missing "env member" "$here/env.d.ts" args get list
 missing "io cap member" "$here/io.d.ts" create narrow close run now timer timerAt sleep sleepUntil
-missing "context member" "$here/context.d.ts" import graph preload references close create
+missing "context member" "$here/context.d.ts" import graph preload security references close create
 missing "graph member" "$here/graph.d.ts" derive flush load evaluate exports release requests status name context
 
 exit $status

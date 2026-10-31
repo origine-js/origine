@@ -5,6 +5,27 @@ export type Preload =
   | { readonly source: string; readonly module?: never; readonly values?: unknown }
   | { readonly module: string; readonly source?: never; readonly values?: unknown };
 
+/** The realm-hardening switches of {@link ContextOptions.security}. Every one is off unless set. */
+export interface ContextSecurity {
+  /**
+   * Whether code in the realm may compile strings: `eval`, `new Function` and the `AsyncFunction`,
+   * `GeneratorFunction` and `AsyncGeneratorFunction` constructors (reached through `fn.constructor`). Default
+   * `false`: they throw `EvalError: Code generation from strings disallowed for this context`.
+   *
+   * CAUTION: enabling it lets code in the realm compile strings (`eval`, `new Function`, `fn.constructor('...')`).
+   * Functions are shared across realms (by `Import.link`, `graph.exports(ref)`, `Import.exports` values and
+   * preload `values`), and V8 checks the realm the constructor belongs to, not the caller's. So any function
+   * exported from a context with this enabled lets its importers run arbitrary code in that realm
+   * (`Promise.resolve('return globalThis.secret').then(fn.constructor)` from another realm builds and returns a
+   * function that runs in this one): it effectively gives up the realm boundary. Do not enable it for a context
+   * whose functions reach less trusted code. Do not rely on V8 refusing a direct `fn.constructor(...)` call from
+   * another realm (a `TypeError: no access`, from the security tokens): a microtask gets around it. With the
+   * default every such call is an `EvalError`, in any realm. `WebAssembly` is not affected: it compiles bytes, and
+   * wasm code cannot reach the realm's globals.
+   */
+  readonly codeGeneration?: boolean;
+}
+
 /** Options of {@link ContextCap.create}. */
 export interface ContextOptions {
   /**
@@ -18,6 +39,12 @@ export interface ContextOptions {
    * graph the host made, or closed is `InvalidInput`.
    */
   readonly graph: ModuleGraph;
+  /**
+   * Switches that weaken the realm's hardening, all off by default (`codeGeneration`). An unknown key, a
+   * non-object or a non-boolean value is `InvalidInput`. Cost visible in the name: this is the place for switches
+   * a parent turns on knowingly.
+   */
+  readonly security?: ContextSecurity;
   /** Run in order before anything is imported; `values` is deep-frozen plain data and functions only. */
   readonly preload?: readonly Preload[];
 }

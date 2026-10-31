@@ -77,7 +77,7 @@ pub const Scope = struct {
         errdefer scope.hardener.deinit();
         scope.unsupported_prototype = helpers.unsupported_prototype;
         errdefer scope.unsupported_prototype.deinit();
-        ctx.allowCodeGenerationFromStrings(false);
+        ctx.allowCodeGenerationFromStrings(options.code_generation);
         try rt.scopes.append(rt.allocator, scope);
         startup_trace.mark(&timing, "scope_finalize");
         return scope;
@@ -147,6 +147,11 @@ pub const Scope = struct {
         /// reject no matter what the resolver, import map or loader would have served.
         /// The host decides which scopes get it; guest code cannot change it.
         origine_namespace: bool = false,
+        /// Whether `eval`, `new Function` and the `AsyncFunction`, `GeneratorFunction` and `AsyncGeneratorFunction`
+        /// constructors may compile strings in this realm. Off by default and set once the realm is bootstrapped, before
+        /// anything of the host's or the guest's runs in it. V8 checks the realm of the constructor being called, not the
+        /// caller's, so a function shared into another realm keeps the setting of the realm it was made in.
+        code_generation: bool = false,
         /// Optional hook that populates each module's `import.meta`; the one way to give
         /// specific modules host values that no importer or other module can reach.
         meta: ?module_types.MetaInitializer = null,

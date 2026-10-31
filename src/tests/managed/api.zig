@@ -2610,6 +2610,30 @@ test "api: closing an io runtime cancels in-flight operations and frees its slot
     try check(fx.scope, "report.third && report.settled && report.canceledKnown && report.otherWorks");
 }
 
+test "api: await using closes an io runtime at scope exit" {
+    var fx: Fixture = undefined;
+    try fx.setupRuntime(
+        \\import { HostError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const outer = api.io.create({});
+        \\  out.hasDispose = typeof outer[Symbol.asyncDispose] === 'function';
+        \\  let inner;
+        \\  {
+        \\    await using scoped = api.io.create({});
+        \\    inner = scoped;
+        \\    out.live = scoped.now() >= 0;
+        \\  }
+        \\  try { inner.now(); out.closed = false; } catch (e) { out.closed = HostError.is(e, HostError.BadHandle); }
+        \\  await outer[Symbol.asyncDispose]();
+        \\  try { outer.now(); out.outerClosed = false; } catch (e) { out.outerClosed = HostError.is(e, HostError.BadHandle); }
+        \\}
+    , true, .{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope, "report.hasDispose && report.live && report.closed && report.outerClosed");
+}
+
 test "api: requestAsync needs a live io handle of this scope" {
     var fx: Fixture = undefined;
     try fx.setupRuntime(

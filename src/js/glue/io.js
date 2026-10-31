@@ -82,6 +82,8 @@ export default native => {
         timerAt,
         sleep,
         sleepUntil,
+        // `await using io = api.io.create()` closes the runtime on scope exit, like `close()`.
+        [Symbol.asyncDispose]: close,
       });
       ioHandles.add(handle);
       for (const s of chain) s.live++;

@@ -51,6 +51,8 @@ export interface Io {
    * (`BadHandle`) for a runtime that is not this scope's.
    */
   close(): Promise<void>;
+  /** The same as `close()`: `await using io = api.io.create()` closes the runtime at scope exit. */
+  [Symbol.asyncDispose](): Promise<void>;
   /**
    * Resolves once every socket or server of this runtime that started flowing (an event handler
    * for `data` or `connection` was registered) has closed, immediately when there is none. Keeps

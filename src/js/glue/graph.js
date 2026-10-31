@@ -22,8 +22,6 @@ import reference from './graph/reference.js';
 export default (native, { take, takeError }) => {
   const { InvalidInput } = errors;
 
-  const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
-
   const named = (code, message) => failure(code, message);
   const invalid = message => named(InvalidInput, message);
   /// Calls a host native and throws what it left in the errno cell.
@@ -94,7 +92,7 @@ export default (native, { take, takeError }) => {
               host(native.graph.close, id);
               closedGraphs.add(id);
             },
-            [dispose]() {
+            [Symbol.dispose]() {
               native.graph.close(id);
               take();
               closedGraphs.add(id);

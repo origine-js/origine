@@ -101,7 +101,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `DirHandle` instan
   errno in `fs.errno`. Thrown/rejected errors extend `OrigineError` and `Error`, with errno, name, message, and stack. fs and net fail
   with an `IoError`, or a `HostError` for a bad handle.
 - **`HostError`** — an `OrigineError` subclass for origine's own runtime codes (`HostError.BadHandle`, `StaleHandle`,
-  `Canceled`, `Unexpected`; [`ERRNO.host`](errno.md)), with `name`, `is`, `of`. `io.close()`, timers
+  `Canceled`, `Unexpected`; [`ERRNO.host`](errno.md)), with `name`, `is`, `of`. `io.close()` (also `[Symbol.asyncDispose]`, so `await using io = api.io.create()` closes at scope exit), timers
   and scope handles fail with a `HostError` only.
 - **`Limit`** — byte limit with `std.Io.Limit` semantics: `Limit.unlimited` (`Infinity`),
   `Limit.nothing` (`0`), `Limit.limited(n)` (`RangeError` unless `n` is a non-negative safe integer).

@@ -6,8 +6,6 @@ import { freeze, own, shared, errors, seal, moduleSettled } from './util.js';
 class Context extends Data {}
 seal(Context);
 export default (native, { take, takeError }) => {
-  const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
-
   /// `security.codeGeneration` of the create options: whether the realm may compile strings (`eval`, `new Function`).
   /// Off unless it is the boolean `true`; an unknown key or a non-boolean is `InvalidInput`.
   const securityOf = (security, invalid) => {
@@ -99,7 +97,7 @@ export default (native, { take, takeError }) => {
             refsById.delete(id);
             host(native.context.close, id);
           },
-          [dispose]() {
+          [Symbol.dispose]() {
             refsById.delete(id);
             native.context.close(id);
             take();

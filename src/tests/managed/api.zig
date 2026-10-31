@@ -3638,18 +3638,14 @@ const events_source =
     \\  out.leaky = leaky;
     \\
     \\  // Symbol.dispose releases like unref.
-    \\  if (typeof Symbol.dispose === 'symbol') {
-    \\    const lease = (() => { let got; const r = client.register('data', ev => { got ??= ev.buffer(); }); return { r, get: () => got }; })();
-    \\    text = '';
-    \\    client.queued.put(enc('dispose'));
-    \\    await until(() => text === 'dispose');
-    \\    lease.r.unregister();
-    \\    const buf = lease.get();
-    \\    buf[Symbol.dispose]();
-    \\    out.dispose = buf.released && buf.length === 0;
-    \\  } else {
-    \\    out.dispose = true;
-    \\  }
+    \\  const lease = (() => { let got; const r = client.register('data', ev => { got ??= ev.buffer(); }); return { r, get: () => got }; })();
+    \\  text = '';
+    \\  client.queued.put(enc('dispose'));
+    \\  await until(() => text === 'dispose');
+    \\  lease.r.unregister();
+    \\  const buf = lease.get();
+    \\  buf[Symbol.dispose]();
+    \\  out.dispose = buf.released && buf.length === 0;
     \\
     \\  // A handler that throws reaches the error handlers.
     \\  text = '';
@@ -4224,8 +4220,7 @@ test "api: closing a context disposes it, including one with a load in flight" {
         \\  disposable[Symbol.dispose]();
         \\  ids.push(await disposable.import('m').then(() => 'imported', e => e.name));
         \\  // A context whose hook promise settles only after the context was closed.
-        \\  let release;
-        \\  const gate = new Promise(resolve => { release = resolve; });
+        \\  const { promise: gate, resolve: release } = Promise.withResolvers();
         \\  const late = await api.context.create({ graph: api.graph.root, import: handlerFor(() => gate.then(() => 'export const y = 1')) });
         \\  const running = late.import('late').then(() => 'ran', () => 'rejected');
         \\  await Promise.resolve();
@@ -4257,8 +4252,7 @@ test "api: a closed context is freed with its imports and driver calls; ids are 
         \\    child.close();
         \\  }
         \\  // A hook that settles after its context was closed, and one that never settles.
-        \\  let release;
-        \\  const gate = new Promise(resolve => { release = resolve; });
+        \\  const { promise: gate, resolve: release } = Promise.withResolvers();
         \\  const late = await api.context.create({ graph: api.graph.root, import: handlerFor(() => gate.then(() => 'export const y = 1')) });
         \\  const running = late.import('late').then(() => 'ran', () => 'rejected');
         \\  const stuck = await api.context.create({ graph: api.graph.root, import: handlerFor(() => new Promise(() => {})) });

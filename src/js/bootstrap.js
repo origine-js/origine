@@ -8,9 +8,7 @@
   const ownKeys = Reflect.ownKeys;
   const intrinsics = new WeakSet(intrinsicObjects);
   const unsupported = new WeakSet(unsupportedObjects);
-  for (const name of ['WeakRef', 'FinalizationRegistry']) {
-    if (typeof globalThis[name] === 'function') unsupported.add(globalThis[name].prototype);
-  }
+  for (const name of ['WeakRef', 'FinalizationRegistry']) unsupported.add(globalThis[name].prototype);
   // Kept in a host persistent handle; never installed in the guest global.
   // Borrows root and synchronous validator through return; freezes supported
   // objects in place and returns the identical root. Validation failure freezes

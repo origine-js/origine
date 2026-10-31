@@ -80,7 +80,9 @@ export default ({ native, token }) => {
         if (!isBytes(data)) throw new TypeError('data must be an ArrayBuffer or a view');
         const id = this.#attach();
         if (this.#waiting.length === 0 && this.#fits(id, data.byteLength)) return this.#submit(id, data);
-        return new Promise((resolve, reject) => this.#waiting.push({ data, resolve, reject }));
+        const { promise, resolve, reject } = Promise.withResolvers();
+        this.#waiting.push({ data, resolve, reject });
+        return promise;
       } catch (e) {
         return Promise.reject(e);
       }
@@ -89,7 +91,11 @@ export default ({ native, token }) => {
     drained() {
       try {
         const id = this.#attach();
-        if (this.#waiting.length > 0) return new Promise((resolve, reject) => this.#idle.push({ resolve, reject }));
+        if (this.#waiting.length > 0) {
+          const { promise, resolve, reject } = Promise.withResolvers();
+          this.#idle.push({ resolve, reject });
+          return promise;
+        }
         return this.#settled(id);
       } catch (e) {
         return Promise.reject(e);
@@ -98,7 +104,9 @@ export default ({ native, token }) => {
     #end() {
       const id = this.#attach();
       if (this.#waiting.length === 0) return this.#finish(id);
-      return new Promise((resolve, reject) => this.#waiting.push({ data: null, resolve, reject }));
+      const { promise, resolve, reject } = Promise.withResolvers();
+      this.#waiting.push({ data: null, resolve, reject });
+      return promise;
     }
     #fits(id, length) {
       const bytes = native.net.queued(id);

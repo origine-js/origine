@@ -58,15 +58,13 @@ export default k => {
       }
     }
   }
-  if (typeof Symbol.asyncDispose === 'symbol') {
-    Object.defineProperty(Handle.prototype, Symbol.asyncDispose, {
-      value: function () {
-        return this.close();
-      },
-      writable: true,
-      configurable: true,
-    });
-  }
+  Object.defineProperty(Handle.prototype, Symbol.asyncDispose, {
+    value: function () {
+      return this.close();
+    },
+    writable: true,
+    configurable: true,
+  });
 
   /** Base of the servers: the listening port. */
   class Server extends Handle {

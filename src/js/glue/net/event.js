@@ -33,15 +33,13 @@ export default ({ native, token }) => {
       native.net.release(this.#id, buffer);
     }
   }
-  if (typeof Symbol.dispose === 'symbol') {
-    Object.defineProperty(Lease.prototype, Symbol.dispose, {
-      value: function () {
-        this.unref();
-      },
-      writable: true,
-      configurable: true,
-    });
-  }
+  Object.defineProperty(Lease.prototype, Symbol.dispose, {
+    value: function () {
+      this.unref();
+    },
+    writable: true,
+    configurable: true,
+  });
 
   /** The `data` event: valid only while its handlers run. */
   class DataEvent {

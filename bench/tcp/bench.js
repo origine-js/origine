@@ -31,8 +31,7 @@ const expect = (seq, i) => (i < 8 ? seqByte(seq, i) : pat(i));
 let tWarmEnd, tEnd;
 const lats = [];
 let activeClients = CONNS;
-let finish;
-const finished = new Promise(r => (finish = r));
+const { promise: finished, resolve: finish } = Promise.withResolvers();
 
 // Client round-trip state machine shared by all variants. `write(u8)` must send the whole buffer
 // (queueing internally if the socket is backed up); the returned `onData(chunk)` is fed echoed bytes.

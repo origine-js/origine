@@ -62,7 +62,7 @@ Handles are instances of classes the guest cannot construct (`TypeError`), whose
 
 | | |
 |---|---|
-| `Handle` | base: `io`, `closed`, `close()` (idempotent, `Promise<void>`; discards what is still queued), `[Symbol.asyncDispose]()` when the engine has it |
+| `Handle` | base: `io`, `closed`, `close()` (idempotent, `Promise<void>`; discards what is still queued), `[Symbol.asyncDispose]()` |
 | `Server extends Handle` | base of servers: `port` |
 | `PullServer extends Server` | `accept(): Promise<PullSocket \| EventSocket>` (by the server's `socketMode`), `toEvent(): EventServer`, and `for await (const socket of server)`: the connections until the server is closed |
 | `EventServer extends Server` | `register`, `pause()`, `resume()`, `paused`, `toPull(): PullServer` |

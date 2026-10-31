@@ -27,12 +27,10 @@ export default native => {
       let nextTimer = 0;
       // Every call returns the same promise, which settles when the runtime is really closed. The
       // handle is marked closed (new work is refused) as soon as the first close starts, but the
-      // narrowing slots are only given back once it settles. Without `native.io.close` the call
-      // rejects Unsupported and the handle stays open.
+      // narrowing slots are only given back once it settles.
       let closing;
       const close = () => {
         if (closing !== undefined) return closing;
-        if (native.io.close === undefined) return Promise.reject(failure(Unsupported));
         closedIo.add(handle);
         shared.asyncFsClosed?.(handle);
         closing = (async () => {
@@ -48,7 +46,7 @@ export default native => {
       // none is): `await io.run()` keeps the program alive for event-style handlers.
       const run = () => {
         if (closedIo.has(handle)) return Promise.reject(failure(BadHandle));
-        return native.io.run === undefined ? Promise.reject(failure(Unsupported)) : native.io.run(made.id);
+        return native.io.run(made.id);
       };
       const now = () => {
         if (closedIo.has(handle)) throw failure(BadHandle);

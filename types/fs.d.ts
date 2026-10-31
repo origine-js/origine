@@ -131,7 +131,7 @@ export type AsyncFsOps = { readonly [K in keyof Shared]: Fn<Shared[K], Promise<S
 
 /**
  * A blocking grant from `api.fs.requestSync`: operations run on the isolate thread. What makes the
- * object a grant is a secret the host set when it built it, which a script cannot read or copy: a copy of every
+ * object a grant is its issuer, the native grant the host built, kept in a private field a script cannot read or copy: a copy of every
  * property (`{ ...grant }`, `Object.assign`, `Object.create(grant)`, a `Proxy`) calls the same operations but is
  * not accepted where a grant is the authority (`api.graph.derive({ fs })`, `CodeCache.dir`: `InvalidInput`).
  */

@@ -16,8 +16,8 @@ const f = rs.File.open('a.txt'); f.read(buf); f.close();
 rs.OpenOptions.new().write(true).create(true).open('b.txt');
 ```
 
-A grant is the object `requestSync` / `requestAsync` returned. The host builds it with a secret that
-a script cannot read, copy or inherit, so a copy with every property (`{ ...grant }`, `Object.assign`,
+A grant is the object `requestSync` / `requestAsync` returned. Its issuer is the native grant the host built,
+kept in a private field that a script cannot read, copy or inherit, so a copy with every property (`{ ...grant }`, `Object.assign`,
 `Object.create(grant)`, a `Proxy`) still runs the same operations but is not a grant where one is the
 authority: `api.graph.derive({ fs })` and `CodeCache.dir(fs)` reject it with `InvalidInput`.
 

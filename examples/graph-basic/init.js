@@ -10,7 +10,7 @@
 //   recipe: hello from greet.js
 //   evaluated: evaluated, bound to ctx: true
 //   exports of recipe.js:
-//   dependency greet.js: greeting=hello from greet.js, info frozen: true, same object each call: false
+//   dependency greet.js: greeting=hello from greet.js, info frozen: false, same object each call: true
 //   bound to a second context: InvalidInput
 import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
 import { ImportHandler } from 'origine:@std/graph/import';
@@ -50,8 +50,8 @@ export async function main(api) {
   //    must be made with the same graph.
   await graph.evaluate(reference, ctx);
   eprintln(`evaluated: ${reference.status}, bound to ctx: ${reference.context === ctx}`);
-  // 8. The creating realm can read a module's exports once it is evaluated: plain data is copied and frozen
-  //    (a snapshot, so every call copies again), functions would be shared and keep running in the context.
+  // 8. The creating realm can read a module's exports once it is evaluated: graph.exports is the live namespace,
+  //    nothing is copied or frozen, and a function you call keeps running in the context.
   //    recipe.js exports nothing. A dependency is read through its own reference, which is bound the same way.
   eprintln('exports of recipe.js:', ...Object.keys(graph.exports(reference)));
   const greet = await ctx.import('./greet.js');

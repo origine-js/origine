@@ -17,7 +17,7 @@
 //   loader             -> a hook: fromLoader(loader)
 //   transformers       -> the maker: MakeRecipe.inherit({ transformer: Transform.byExtension({...}) })
 //   main + run()       -> ctx.import(main)
-//   create(...)        -> api.context.create({ import }) and the handler is made once with ImportHandler.make
+//   create(...)        -> api.context.create({ import, graph }) and the handler is made once with ImportHandler.make
 // Prints (stderr):
 //   main: dep v1 | banner: hello from a template
 //   nothing: ModuleError: Error: InvalidData   (a loader that returns undefined is InvalidData now)
@@ -52,7 +52,7 @@ export async function main(api) {
   });
 
   // The old `main` is the module imported here, and `run()` is its evaluation.
-  using ctx = await api.context.create({ import: handler });
+  using ctx = await api.context.create({ import: handler, graph: api.graph });
   await ctx.import('main');
   await ctx.import('nothing').catch(e => eprintln(`nothing: ${e.name}: ${e.message}`));
 }

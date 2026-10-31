@@ -61,6 +61,7 @@ export async function main(api) {
 
   using ctx = await api.context.create({
     import: handler,
+    graph: api.graph,
     preload: [{ source: '(values) => { globalThis.print = values.print; }', values: { print: (...a) => eprintln(...a) } }],
   });
   await api.graph.evaluate(main, ctx);

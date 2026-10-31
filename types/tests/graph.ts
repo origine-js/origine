@@ -134,10 +134,10 @@ ModuleSource.file("./a.js").transformers = [];
 // @ts-expect-error a layer is not a hook
 ImportHandler.make({ resolver, hooks: [relative()] });
 
-const copied: { a: number[] } = snapshot({ a: [1] }, { freeze: true });
+const copied: { a: number[] } = snapshot({ a: [1] }, { deepFreeze: true });
 const frozenInPlace: { a: number } = deepFreeze({ a: 1 });
 void [copied, frozenInPlace];
-// @ts-expect-error `freeze` is a boolean
-snapshot({}, { freeze: "yes" });
-// @ts-expect-error the option is `freeze`; there is no `seal`
+// @ts-expect-error `deepFreeze` is a boolean
+snapshot({}, { deepFreeze: "yes" });
+// @ts-expect-error the option is `deepFreeze`; there is no `seal` or `freeze`
 snapshot({}, { seal: true });

@@ -1687,8 +1687,8 @@ test "data: snapshot copies plain data, deepFreeze freezes in place, and they co
         \\  src.self = src;
         \\  const copy = snapshot(src);
         \\  out.copy = copy !== src && copy.a !== src.a && copy.self === copy && copy.a[1].b === copy.c && copy.c !== shared && copy.e === 10n && copy.g === undefined && 'g' in copy && Object.getPrototypeOf(copy.nul) === null && Object.getOwnPropertySymbols(copy).length === 0;
-        \\  out.defaultNotFrozen = !Object.isFrozen(copy) && !Object.isFrozen(copy.a) && !Object.isFrozen(snapshot(src, {})) && !Object.isFrozen(snapshot(src, { freeze: false }));
-        \\  const frozen = snapshot(src, { freeze: true });
+        \\  out.defaultNotFrozen = !Object.isFrozen(copy) && !Object.isFrozen(copy.a) && !Object.isFrozen(snapshot(src, {})) && !Object.isFrozen(snapshot(src, { deepFreeze: false }));
+        \\  const frozen = snapshot(src, { deepFreeze: true });
         \\  out.frozen = Object.isFrozen(frozen) && Object.isFrozen(frozen.a) && Object.isFrozen(frozen.a[1].b) && !Object.isFrozen(src) && !Object.isFrozen(shared);
         \\  out.primitive = snapshot(5) === 5 && snapshot('s') === 's' && snapshot(null) === null;
         \\  // What cannot be copied is Unsupported and says where; nothing is shared silently.
@@ -1699,7 +1699,7 @@ test "data: snapshot copies plain data, deepFreeze freezes in place, and they co
         \\  };
         \\  out.bad = Object.entries(bad).map(([k, v]) => k + ':' + code(() => snapshot(v))).join(',');
         \\  out.path = text(() => snapshot({ a: [{ b: new Map() }] })).includes('$.a.0.b');
-        \\  out.options = [code(() => snapshot({}, null)), code(() => snapshot({}, { freeze: 'yes' }))].join(',');
+        \\  out.options = [code(() => snapshot({}, null)), code(() => snapshot({}, { deepFreeze: 'yes' }))].join(',');
         \\  // deepFreeze: in place, returns its argument, reaches data, functions, classes and the prototype chain.
         \\  class Box { static kind = 'box'; get() { return 1; } }
         \\  const target = { list: [1, { deep: true }], fn() { return 2; }, Box, inst: new Box() };
@@ -1716,7 +1716,7 @@ test "data: snapshot copies plain data, deepFreeze freezes in place, and they co
         \\  const ref = api.graph.declare(ModuleRecipe({ source: ModuleSource.text('export const data = { n: 1, list: [1, 2] }; export const bump = () => 1;'), import: handler, name: 'a.js' }));
         \\  await api.graph.evaluate(ref, ctx);
         \\  const ns = api.graph.exports(ref);
-        \\  const data = snapshot(ns.data, { freeze: true });
+        \\  const data = snapshot(ns.data, { deepFreeze: true });
         \\  out.composed = data.n === 1 && data.list.length === 2 && data.constructor === Object && Object.isFrozen(data) && ns.data.constructor !== Object && !Object.isFrozen(ns.data);
         \\  out.nsFn = code(() => snapshot(ns)) + ':' + text(() => snapshot(ns)).includes('$.bump');
         \\}

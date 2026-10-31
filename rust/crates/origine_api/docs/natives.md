@@ -20,8 +20,9 @@ code as it is.
 
 * All use `side_effect = "any"`.
 * Argument errors are `TypeError("argument N: expected X")` thrown (sync) or an already-rejected
-  promise (promise natives). Failures of the operation are an `OrigineError` subclass instance value
-  (`origine_api_core::errno`); none touches the shared errno cell.
+  promise (promise natives). Failures of the operation reject with an `Error` carrying `errno`, `name`, `subject` and `os`
+  (`origine_api_core::errno`, `native::error_value`), which `glue/util.js` `settled` turns into an `OrigineError` subclass
+  instance; none touches the shared errno cell. The path natives name their path as `subject` (`fs.rs` `named`).
 * Handles: `{fs, id}` handles are flattened into **two** JS arguments (`DirRef`/`FileRef` have
   `ARITY = 2`). Directory id 0 is the grant root. The sync twins in `src/api/fs.zig` take the same
   argument lists.

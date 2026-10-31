@@ -5,3 +5,4 @@ export const OrigineError = classes.OrigineError;
 export const IoError = classes.IoError;
 export const HostError = classes.HostError;
 export const ImportError = classes.ImportError;
+export const ModuleError = classes.ModuleError;

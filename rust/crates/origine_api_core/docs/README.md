@@ -135,7 +135,8 @@ How a native fails: sync natives throw it, async natives reject with it.
 | Variant | JS value |
 |---|---|
 | `Arg(ArgError)` | `TypeError("argument N: expected X")` |
-| `Errno(u32)` | an `OrigineError` subclass instance (same constructors as `failure(code)` in `src/js/glue/util.js`) |
+| `Errno(u32)` | an `Error` with `errno`, `name` and the `ErrorDetail` fields unset; `glue/util.js` `settled` turns it into the shared `OrigineError` subclass instance |
+| `Detailed(Detail)` | the same with `subject` (what the caller named) and `os` (the raw OS code) set; `From<io::Error>` makes it, `with_subject` names it |
 | `Type(String)` / `Range(String)` / `Error(String)` | `TypeError` / `RangeError` / `Error` |
 
 Constructors `type_error`, `range_error`, `error`; `From<ArgError>`; `From<io::Error>` goes through

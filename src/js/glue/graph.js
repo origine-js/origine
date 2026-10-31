@@ -19,7 +19,7 @@ import source from './graph/source.js';
 import handlers from './graph/handlers.js';
 import driver from './graph/driver.js';
 import reference from './graph/reference.js';
-export default (native, { take }) => {
+export default (native, { take, takeError }) => {
   const { InvalidInput } = errors;
 
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
@@ -29,8 +29,8 @@ export default (native, { take }) => {
   /// Calls a host native and throws what it left in the errno cell.
   const host = (fn, ...args) => {
     const value = fn(...args);
-    const code = take();
-    if (code !== 0) throw failure(code);
+    const failed = takeError();
+    if (failed !== undefined) throw failed;
     return value;
   };
 
@@ -40,6 +40,7 @@ export default (native, { take }) => {
   const g = {
     native,
     take,
+    takeError,
     host,
     named,
     invalid,

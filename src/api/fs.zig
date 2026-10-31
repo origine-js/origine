@@ -156,6 +156,9 @@ pub const FsGrant = struct {
     pub fn errnoCell(self: *FsGrant) *u32 {
         return self.owner.errnoCell();
     }
+    pub fn errorDetail(self: *FsGrant) ?v8.Object {
+        return self.owner.errorDetail();
+    }
     pub fn isDetached(self: *const FsGrant) bool {
         return self.owner.isDetached();
     }
@@ -244,18 +247,18 @@ pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Va
     host.next_fs_id += 1;
     const env = call.env();
     const object = try call.object(FsGrant, grant, .{
-        .dirOpenFile = func(grantDirOpenFile, .{ .side_effect = .any }),
-        .dirOpenDir = func(grantDirOpenDir, .{ .side_effect = .any }),
+        .dirOpenFile = func(grantDirOpenFile, .{ .side_effect = .any, .subject = 2 }),
+        .dirOpenDir = func(grantDirOpenDir, .{ .side_effect = .any, .subject = 2 }),
         .dirClose = func(grantDirClose, .{ .side_effect = .any }),
-        .dirStat = func(grantDirStat, .{ .side_effect = .none }),
-        .dirSymlinkStat = func(grantDirSymlinkStat, .{ .side_effect = .none }),
+        .dirStat = func(grantDirStat, .{ .side_effect = .none, .subject = 2 }),
+        .dirSymlinkStat = func(grantDirSymlinkStat, .{ .side_effect = .none, .subject = 2 }),
         .dirRead = func(grantDirRead, .{ .side_effect = .none }),
-        .dirCreateDir = func(grantDirCreateDir, .{ .side_effect = .any }),
-        .dirCreateDirPath = func(grantDirCreateDirPath, .{ .side_effect = .any }),
-        .dirDeleteFile = func(grantDirDeleteFile, .{ .side_effect = .any }),
-        .dirDeleteDir = func(grantDirDeleteDir, .{ .side_effect = .any }),
-        .dirDeleteTree = func(grantDirDeleteTree, .{ .side_effect = .any }),
-        .dirRename = func(grantDirRename, .{ .side_effect = .any }),
+        .dirCreateDir = func(grantDirCreateDir, .{ .side_effect = .any, .subject = 2 }),
+        .dirCreateDirPath = func(grantDirCreateDirPath, .{ .side_effect = .any, .subject = 2 }),
+        .dirDeleteFile = func(grantDirDeleteFile, .{ .side_effect = .any, .subject = 2 }),
+        .dirDeleteDir = func(grantDirDeleteDir, .{ .side_effect = .any, .subject = 2 }),
+        .dirDeleteTree = func(grantDirDeleteTree, .{ .side_effect = .any, .subject = 2 }),
+        .dirRename = func(grantDirRename, .{ .side_effect = .any, .subject = 2 }),
         .fileClose = func(grantFileClose, .{ .side_effect = .any }),
         .fileStat = func(grantFileStat, .{ .side_effect = .none }),
         .fileReadAll = func(grantFileReadAll, .{ .side_effect = .any }),

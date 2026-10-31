@@ -20,7 +20,7 @@
 //   create(...)        -> api.context.create({ import, graph }) and the handler is made once with ImportHandler.make
 // Prints (stderr):
 //   main: dep v1 | banner: hello from a template
-//   nothing: ModuleError: Error: InvalidData   (a loader that returns undefined is InvalidData now)
+//   nothing: ModuleError: nothing: InvalidData   (a loader that returns undefined is InvalidData now)
 import { ImportHandler, MakeRecipe, Transform } from 'origine:@std/graph/import';
 import { ImportResolver } from 'origine:@std/graph/resolve';
 import { importMap, origine } from 'origine:@std/graph/resolve/layers';

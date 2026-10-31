@@ -8,6 +8,7 @@ const v8 = @import("@v8");
 const eu = @import("@util");
 const errno = @import("errno.zig");
 const binding = @import("binding.zig");
+const error_detail = @import("error_detail.zig");
 
 /// The entered isolate and context that values are created in.
 pub const Env = struct {
@@ -36,6 +37,8 @@ pub const Call = struct {
     ctx: v8.Context,
     /// The scope's native errno cell (borrowed). Failures write it; it is cleared on entry.
     errno_cell: *u32,
+    /// The scope's `ErrorDetail` (borrowed), when its state has one. A failing native overwrites it.
+    detail: ?v8.Object = null,
     ret: v8.ReturnValue,
     /// Per-call arena: decoded strings live here and are freed when the call ends.
     /// Use `allocSlice` / `print`, which panic on out-of-memory instead of failing.
@@ -66,6 +69,20 @@ pub const Call = struct {
     /// an fs error, mapped by name (`errno.ofFs`).
     pub fn fail(self: *Call, err: anytype) void {
         record(self.errno_cell, err);
+        self.fillDetail(.{});
+    }
+
+    /// `fail`, and the failure's `subject` is the string argument at JS position `index` (what the native
+    /// acted on, as the caller named it). Anything else at `index` leaves the subject unset.
+    pub fn failAt(self: *Call, index: usize, err: anytype) void {
+        record(self.errno_cell, err);
+        const subject: ?[]const u8 = binding.decode([]const u8, self, index) catch null;
+        self.fillDetail(.{ .subject = subject });
+    }
+
+    fn fillDetail(self: *Call, fields: error_detail.Fields) void {
+        // A detail that cannot be written must not hide the errno: the error then has no subject.
+        if (self.detail) |detail| error_detail.fill(self.env(), detail, fields) catch {};
     }
 
     /// The raw JS argument at `index` (undefined when absent).

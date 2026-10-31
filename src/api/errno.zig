@@ -123,6 +123,12 @@ fn lookup(name: []const u8) ?Errno {
     return null;
 }
 
+/// The `Errno` a Zig error name (or an alias std uses) stands for, if any: how the managed layer's errors, which
+/// travel as `Error(@errorName(err))`, are mapped back to a code.
+pub fn ofName(name: []const u8) ?Errno {
+    return lookup(name);
+}
+
 /// Maps a binding error to its `Errno`. Total by construction: every member of
 /// `Error` has a code, checked at compile time.
 pub fn of(err: Error) Errno {

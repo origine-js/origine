@@ -74,8 +74,7 @@ where
 {
     match r {
         Ok(_) => panic!("expected an error at call time"),
-        Err(NativeError::Errno(code)) => code,
-        Err(other) => panic!("not an errno: {other}"),
+        Err(err) => err.code().unwrap_or_else(|| panic!("not an errno: {err}")),
     }
 }
 
@@ -85,8 +84,7 @@ async fn code_of<T: std::fmt::Debug>(r: Result<impl Future<Output = Result<T, Na
         Err(err) => Err(err),
     };
     match result {
-        Err(NativeError::Errno(code)) => code,
-        Err(other) => panic!("not an errno: {other}"),
+        Err(err) => err.code().unwrap_or_else(|| panic!("not an errno: {err}")),
         Ok(value) => panic!("expected an error, got {value:?}"),
     }
 }

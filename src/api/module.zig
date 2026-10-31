@@ -64,6 +64,9 @@ pub fn Cell(comptime S: type) type {
         pub fn errnoCell(self: *@This()) *u32 {
             return self.scope.errnoCell();
         }
+        pub fn errorDetail(self: *@This()) ?v8.Object {
+            return self.scope.errorDetail();
+        }
         pub fn allocator(self: *@This()) std.mem.Allocator {
             return self.scope.allocator();
         }

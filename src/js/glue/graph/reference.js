@@ -1,9 +1,9 @@
 // `api.graph` module references (`graph.declare(recipe)`) and the cache operations of `ImportCache`. Built by graph.js.
 import { provide } from '../handles.js';
 import { ModuleRequest } from './data.js';
-import { freeze, failure, errors } from '../util.js';
+import { freeze, errors, moduleSettled } from '../util.js';
 export default g => {
-  const { native, take, host, named, invalid } = g;
+  const { native, take, takeError, host, named, invalid } = g;
   const { cacheIds, contextRefs, contexts, graphCache, loadCache, metaOf, pipeline, referenceState, refsById, register, sourceText } = g;
 
   // ---- references -------------------------------------------------------------------------------
@@ -105,9 +105,11 @@ export default g => {
         const meta = state.meta ?? (await metaOf(register(state.handler), state.name));
         const cacheGraph = g.graphId(state.graph);
         if (graphCache.has(cacheGraph)) await loadCache(cacheGraph, state.name, host(native.graph.sourceHash, state.text), state.text);
-        await native.context.evaluateSource(contextId, state.name, state.text, register(state.handler).id, meta ?? '');
-        const code = take();
-        if (code !== 0) throw failure(code);
+        // A synchronous failure is in the cell as the call returns; read it before awaiting anything.
+        const evaluating = native.context.evaluateSource(contextId, state.name, state.text, register(state.handler).id, meta ?? '');
+        const failed = takeError();
+        if (failed !== undefined) throw failed;
+        await moduleSettled(evaluating);
         state.pin = host(native.context.pin, contextId, state.name);
         state.status = 'evaluated';
       } catch (error) {

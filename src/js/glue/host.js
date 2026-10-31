@@ -6,7 +6,7 @@ import { freeze, freezeMethods, own, shared, failure, errors, seal } from './uti
 class EventPort extends Data {}
 class PullPort extends Data {}
 seal(EventPort, PullPort);
-export default (native, { take }) => {
+export default (native, { takeError }) => {
   function makeEnvCap() {
     return freezeMethods({
       args: () => freeze(native.env.args()),
@@ -255,8 +255,8 @@ export default (native, { take }) => {
   const snapshotIds = new WeakMap();
   const SNAPSHOT_TOKEN = {};
   const checked = value => {
-    const code = take();
-    if (code !== 0) throw failure(code);
+    const failed = takeError();
+    if (failed !== undefined) throw failed;
     return value;
   };
   const initOption = options => {

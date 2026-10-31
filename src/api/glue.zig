@@ -5,6 +5,7 @@ const eu = @import("@util");
 const binding = @import("binding.zig");
 const Scope = @import("../managed/scope.zig").Scope;
 const slots = @import("../managed/context_slots.zig");
+const error_detail = @import("error_detail.zig");
 pub const context_slot = slots.glue;
 pub const full_index = 0;
 pub const basic_index = 1;
@@ -95,6 +96,8 @@ pub fn initialize(isolate: v8.Isolate, ctx: v8.Context, create: v8.Function) !v8
     // The cell is ordinary snapshot memory until Host.install rebinds its backing.
     const cell = v8.Uint32Array.init(eu.v.array_buffer(isolate, 4).?, 0, 1).?;
     try binding.set(env, native, "errno", cell.typedArray.arrayBufferView.object.value);
+    // The failure detail next to it: a plain object, never reassigned, overwritten by the native that fails.
+    try binding.set(env, native, "detail", (try error_detail.create(env)).value);
     const made = create.call(ctx, eu.v.undefined_value(isolate).value, &.{native.value}) orelse return error.JavaScriptException;
     const bundle = v8.Array.from_opaque(made.data.handle) orelse return error.BootstrapFailed;
     const buffer = v8.ArrayBuffer.from_opaque(cell.typedArray.arrayBufferView.buffer().?.object.value.data.handle).?;

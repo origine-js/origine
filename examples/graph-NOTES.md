@@ -18,6 +18,10 @@ From the repository root (an example's own directory is not the working director
 
 ## Solved
 
+- **Errors lose their names and their subject (was 4):** a failed import is a `ModuleError` whose `errno` is the kind of its
+  cause (a hook's `PermissionDenied`, a missing file `NotFound`), with `subject` (the specifier) and `cause`; sync and async fs
+  errors carry `subject` (the path) and, from async, `os`. See `src/js/docs/errno.md`.
+- **An uncaught `ModuleError` printed `[object Object]` (was 5):** it is a real `Error` now and prints its message and stack.
 - **A module's exports can be read from the host:** `graph.exports(ref)` is the live namespace.
 - **The graph is passed twice:** `api.context.create` requires `graph`, with no default, and rejects a missing one
   with `InvalidInput`.
@@ -32,11 +36,11 @@ From the repository root (an example's own directory is not the working director
 
 ## Open by decision
 
-- **Errors lose their names and their subject.** A hook's `Import.reject(ImportError.PermissionDenied)` reaches
-  the caller as `ModuleError: Error: PermissionDenied`; `ImportError.NotFound` shows up as `Error: FileNotFound`,
-  the fs errno name; no message names the module id. Deferred.
-- **An uncaught `ModuleError` ends the process as `[object Object]` and exit 134.** The shell's error print
-  loses the message. Deferred with the item above.
+- **`NotFound` of a missing file in an uncaught import still ends the process with `reached unreachable code`, exit 134,
+  after printing the error.** The message and kind are printed now (`ModuleError: ./zzz.js: NotFound`); the
+  trailing `unreachable` is the shell's `MainFailed` path. Deferred.
+- **`ModuleError` has `subject` (the specifier) and the cause's kind, but not `referrer` or the importer chain.** That needs the
+  module map's failure records. A follow-up.
 
 ## Open, undecided
 

@@ -18,6 +18,21 @@ use crate::pinned::{self, GuestBuf};
 use crate::{ArrayBufferArg, HostState, IntoJs};
 use origine_api_core::pin;
 
+/// Names `subject` (what the caller passed) on whatever `call` fails with, at call time or when its
+/// future settles. The name is moved in, so a call that succeeds allocates nothing for it.
+fn named<T, F>(
+    subject: String,
+    call: Result<F, NativeError>,
+) -> Result<impl Future<Output = Result<T, NativeError>> + use<T, F>, NativeError>
+where
+    F: Future<Output = Result<T, NativeError>>,
+{
+    match call {
+        Ok(future) => Ok(async move { future.await.map_err(|err| err.with_subject(subject)) }),
+        Err(err) => Err(err.with_subject(subject)),
+    }
+}
+
 /// The result of `request`: `{ id }`.
 #[derive(crate::IntoJs)]
 pub struct GrantOpened {
@@ -60,7 +75,8 @@ fn fs_async_open_file(
     bits: u32,
 ) -> Result<Op<'static, impl Future<Output = Result<u32, NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.open_file(dir.id, &path, bits)?))
+    let call = g.open_file(dir.id, &path, bits);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.openDir", needs = "async_fs", promise)]
@@ -71,7 +87,8 @@ fn fs_async_open_dir(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<u32, NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.open_dir(dir.id, &path)?))
+    let call = g.open_dir(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 /// `stat(fs, id, path)`: `std::fs::metadata`, follows a final symlink (see `symlinkStat`).
@@ -83,7 +100,8 @@ fn fs_async_stat(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<Stat, NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.stat(dir.id, &path)?))
+    let call = g.stat(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.symlinkStat", needs = "async_fs", promise)]
@@ -94,7 +112,8 @@ fn fs_async_symlink_stat(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<Stat, NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.symlink_stat(dir.id, &path)?))
+    let call = g.symlink_stat(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.createDir", needs = "async_fs", promise)]
@@ -105,7 +124,8 @@ fn fs_async_create_dir(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.create_dir(dir.id, &path)?))
+    let call = g.create_dir(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.deleteFile", needs = "async_fs", promise)]
@@ -116,7 +136,8 @@ fn fs_async_delete_file(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.delete_file(dir.id, &path)?))
+    let call = g.delete_file(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.readDir", needs = "async_fs", promise)]
@@ -192,7 +213,8 @@ fn fs_async_create_dir_path(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.create_dir_path(dir.id, &path)?))
+    let call = g.create_dir_path(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.deleteDir", needs = "async_fs", promise)]
@@ -203,7 +225,8 @@ fn fs_async_delete_dir(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.delete_dir(dir.id, &path)?))
+    let call = g.delete_dir(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.deleteTree", needs = "async_fs", promise)]
@@ -214,7 +237,8 @@ fn fs_async_delete_tree(
     path: String,
 ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
     let (g, runtime) = host.grant(key, dir.fs)?;
-    Ok(Op::new(runtime, g.delete_tree(dir.id, &path)?))
+    let call = g.delete_tree(dir.id, &path);
+    Ok(Op::new(runtime, named(path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.rename", needs = "async_fs", promise)]
@@ -230,7 +254,8 @@ fn fs_async_rename(
     if new_dir.fs != dir.fs {
         return Err(NativeError::Errno(errno::BAD_HANDLE));
     }
-    Ok(Op::new(runtime, g.rename(dir.id, &old_path, new_dir.id, &new_path)?))
+    let call = g.rename(dir.id, &old_path, new_dir.id, &new_path);
+    Ok(Op::new(runtime, named(old_path, call)?))
 }
 
 #[native(side_effect = "any", path = "fsAsync.fileStat", needs = "async_fs", promise)]

@@ -1004,6 +1004,80 @@ test "graph: a reference is an inert ticket; the graph that declared it loads, r
     try check(fx.scope, "report.released === 'BadHandle,BadHandle'");
 }
 
+test "errors: the sync detail is overwritten by every failure, never left over" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { Dir } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const cwd = Dir.cwd();
+        \\  const run = work => { try { work(); return null; } catch (e) { return { name: e.name, subject: e.subject, os: e.os, keys: Object.keys(e).join(',') }; } };
+        \\  const dir = cwd.openDir(io, 'dir');
+        \\  dir.close(io);
+        \\  out.named = JSON.stringify(run(() => cwd.openFile(io, 'nope.txt')));
+        \\  out.unnamed = JSON.stringify(run(() => dir.close(io)));
+        \\  out.after = JSON.stringify(run(() => cwd.statFile(io, 'also-missing')));
+        \\  out.ok = JSON.stringify(run(() => cwd.statFile(io, 'dir')));
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.tmp.dir.createDir(t.io, "dir", .default_dir);
+    try fx.run();
+    // A failure that names nothing carries no subject from the failure before it, and a success leaves nothing.
+    try check(fx.scope,
+        \\(() => {
+        \\  const named = JSON.parse(report.named), unnamed = JSON.parse(report.unnamed), after = JSON.parse(report.after);
+        \\  return named.name === 'NotFound' && named.subject === 'nope.txt' && named.keys === 'errno,name,subject' &&
+        \\    unnamed !== null && unnamed.subject === undefined && unnamed.keys === 'errno,name' &&
+        \\    after.subject === 'also-missing' && report.ok === 'null';
+        \\})()
+    );
+}
+
+test "errors: a failed import is a ModuleError with the kind of its cause, the module it was for and a cause" {
+    var fx: Fixture = undefined;
+    try fx.setup(
+        \\import { ModuleError, OrigineError } from 'origine:@std/errors';
+        \\import { ModuleSource } from 'origine:@std/graph/module';
+        \\import { ImportHandler, Import, ImportError } from 'origine:@std/graph/import';
+        \\import { ImportResolver } from 'origine:@std/graph/resolve';
+        \\import { importMap } from 'origine:@std/graph/resolve/layers';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const handler = ImportHandler.make({
+        \\    resolver: ImportResolver.layered().layer(importMap({ imports: { secret: 'app:/secret.js', boom: 'app:/boom.js' } })),
+        \\    hooks: [async resolved => {
+        \\      if (resolved.id === 'app:/secret.js') return Import.reject(ImportError.PermissionDenied);
+        \\      if (resolved.id === 'app:/boom.js') return Import.source(ModuleSource.text('throw new Error("boom")'));
+        \\      return Import.next();
+        \\    }],
+        \\  });
+        \\  const ctx = await api.context.create({ import: handler, graph: api.graph });
+        \\  const seen = {};
+        \\  for (const specifier of ['secret', 'boom', 'nowhere']) {
+        \\    seen[specifier] = await ctx.import(specifier).then(() => 'no', e => ({
+        \\      isModuleError: e instanceof ModuleError, isOrigine: e instanceof OrigineError, name: e.name, errno: e.errno,
+        \\      subject: e.subject, message: e.message, cause: e.cause === undefined ? null : e.cause.name,
+        \\    }));
+        \\  }
+        \\  out.seen = JSON.stringify(seen);
+        \\  ctx.close();
+        \\}
+    , true, &.{});
+    defer fx.deinit();
+    try fx.run();
+    try check(fx.scope,
+        \\(() => {
+        \\  const s = JSON.parse(report.seen);
+        \\  return s.secret.isModuleError && s.secret.isOrigine && s.secret.name === 'ModuleError' && s.secret.subject === 'secret' &&
+        \\    s.secret.message === 'secret: PermissionDenied' && s.secret.cause === 'PermissionDenied' &&
+        \\    s.nowhere.errno === 10 && s.nowhere.cause === 'NotFound' &&
+        \\    s.boom.errno === 1 && s.boom.cause === 'Error' && s.boom.message.includes('boom');
+        \\})()
+    );
+}
+
 test "graph: JS layers, hooks, makers and transformers run in the creating realm" {
     var fx: Fixture = undefined;
     try fx.setup(
@@ -4515,7 +4589,7 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\    loopOpen: io => cwd.openFile(io, 'loop'),
         \\    locked: io => cwd.openFile(io, 'locked.txt'),
         \\  };
-        \\  const attempt = async (io, work) => { try { await work(io); return 'ok'; } catch (e) { return e.name; } };
+        \\  const attempt = async (io, work) => { try { await work(io); return 'ok'; } catch (e) { return e.name + '|' + e.subject; } };
         \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const async = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
         \\  const s = {}, a = {};
@@ -4525,7 +4599,8 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\  }
         \\  out.same = JSON.stringify(s) === JSON.stringify(a);
         \\  out.mismatch = Object.keys(s).filter(k => s[k] !== a[k]).map(k => k + ':' + s[k] + '/' + a[k]).join(',');
-        \\  out.names = JSON.stringify(s);
+        \\  out.names = JSON.stringify(Object.fromEntries(Object.entries(s).map(([k, v]) => [k, v.split('|')[0]])));
+        \\  out.subjects = JSON.stringify(s);
         \\  await rt.close();
         \\}
     , true, &.{});
@@ -4549,6 +4624,14 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\    n.dotdot === 'PermissionDenied' && n.absolute === 'PermissionDenied' && n.cacheDir === 'PermissionDenied' &&
         \\    n.nameTooLong === 'InvalidFilename' && n.loopStat === 'FilesystemLoop' && n.loopOpen === 'FilesystemLoop' &&
         \\    (n.locked === 'PermissionDenied' || n.locked === 'ok');
+        \\})()
+    );
+    // Both backends name what the failure was about, as the caller wrote it, and only the Rust one has the raw OS code.
+    try check(fx.scope,
+        \\(() => {
+        \\  const n = JSON.parse(report.subjects);
+        \\  return n.missing === 'NotFound|nope.txt' && n.rmdirNotEmpty === 'DirectoryNotEmpty|full' &&
+        \\    n.renameOntoNotEmpty === 'DirectoryNotEmpty|dir' && n.dotdot === 'PermissionDenied|../x' && n.absolute === 'PermissionDenied|/etc/passwd';
         \\})()
     );
 }

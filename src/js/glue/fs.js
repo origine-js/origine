@@ -79,7 +79,7 @@ const shapeOf = value => {
   });
 };
 
-export default (native, { errno, take }) => {
+export default (native, { errno, detail, takeError }) => {
   // How one grant reads the handles it is given, without crossing into native code. A grant requested
   // with `handle: 'hardened'` takes only the handles it issued (and the root sentinel, which names no
   // resource); a plain one takes any file or directory handle and leaves the ids to the natives.
@@ -290,10 +290,11 @@ export default (native, { errno, take }) => {
         // The host stamps a private raw grant. The JS class exposes wrapped operations and the
         // shared errno cell; the raw grant stays in private state for authority consumers.
         const granted = native.fsRequest(grant.root, grant.access);
-        if (errno[0] !== 0) throw failure(take());
+        const failed = takeError();
+        if (failed !== undefined) throw failed;
         const issuer = freeze({});
         return new FsGrant(
-          { kind: granted.kind, id: granted.id, errno, ...makeSyncOps(granted, refsOf(grant.hardened, issuer), issuer) },
+          { kind: granted.kind, id: granted.id, errno, detail, ...makeSyncOps(granted, refsOf(grant.hardened, issuer), issuer) },
           granted,
         );
       },

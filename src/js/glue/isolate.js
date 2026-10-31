@@ -3,18 +3,19 @@
 // `data`, the second argument of its `main`; ports (`api.host.threading.Channel`) in `data` are how it
 // talks to its creator.
 import { Data } from './handles.js';
-import { freeze, freezeMethods, own, shared, failure, seal } from './util.js';
+import { freeze, freezeMethods, own, shared, seal } from './util.js';
 class IsolateConfig extends Data {}
 class IsolateOutcome extends Data {}
 class IsolateHandle extends Data {}
 seal(IsolateConfig, IsolateOutcome, IsolateHandle);
-export default (native, { take }) => {
+export default (native, { takeError }) => {
   const { ready } = shared.channels;
   const configs = new WeakSet();
   const statuses = ['running', 'completed', 'failed', 'terminated'];
 
-  const checked = code => {
-    if (code !== 0) throw failure(code);
+  const checked = () => {
+    const failed = takeError();
+    if (failed !== undefined) throw failed;
   };
   const strings = (value, name) => {
     if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new TypeError(name + ' must be an array of strings');
@@ -70,7 +71,7 @@ export default (native, { take }) => {
         data,
         config.snapshot === undefined ? 0 : shared.snapshotId(config.snapshot),
       );
-      checked(take());
+      checked();
     } catch (error) {
       for (const handle of [done.tx, done.rx]) {
         try {
@@ -102,9 +103,9 @@ export default (native, { take }) => {
         // Already closed.
       }
       const status = statuses[native.isolate.outcome(id)];
-      checked(take());
+      checked();
       const reason = native.isolate.failure(id);
-      checked(take());
+      checked();
       return new IsolateOutcome(reason === undefined ? { status } : { status, error: reason });
     };
     return freezeMethods(
@@ -112,7 +113,7 @@ export default (native, { take }) => {
         id,
         terminate() {
           native.isolate.terminate(id);
-          checked(take());
+          checked();
         },
         join: () => (joined ??= join()),
       }),

@@ -2,10 +2,10 @@
 // index.js. It builds on the parts the graph glue
 // publishes in shared module state (index.js prepares `graph` before `context`).
 import { Data } from './handles.js';
-import { freeze, failure, own, shared, errors, seal } from './util.js';
+import { freeze, own, shared, errors, seal, moduleSettled } from './util.js';
 class Context extends Data {}
 seal(Context);
-export default (native, { take }) => {
+export default (native, { take, takeError }) => {
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
   /// `security.codeGeneration` of the create options: whether the realm may compile strings (`eval`, `new Function`).
@@ -74,9 +74,11 @@ export default (native, { take }) => {
             const attributes = own(o, 'attributes') ?? {};
             const phase = own(o, 'phase') ?? 'evaluation';
             if (phase !== 'evaluation') throw named(errors.Unsupported, `${phase} imports are not implemented`);
-            const name = await native.context.importSpecifier(id, specifier, attributesJson(attributes));
-            const code = take();
-            if (code !== 0) throw failure(code);
+            // A synchronous failure is in the cell as the call returns; read it before awaiting anything.
+            const importing = native.context.importSpecifier(id, specifier, attributesJson(attributes));
+            const failed = takeError();
+            if (failed !== undefined) throw failed;
+            const name = await moduleSettled(importing);
             for (const known of refs) if (known.name === name) return known;
             const imported = makeReference(graph, null, {
               name,
@@ -114,9 +116,9 @@ export default (native, { take }) => {
               host(native.context.preload, id, script, 'preload:' + index, values);
             } else {
               const done = native.context.preloadModule(id, 'preload:' + index, own(preload[index], 'module'), values);
-              const code = take();
-              if (code !== 0) throw failure(code);
-              await done;
+              const failed = takeError();
+              if (failed !== undefined) throw failed;
+              await moduleSettled(done);
             }
           } catch (error) {
             refsById.delete(id);

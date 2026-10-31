@@ -89,3 +89,26 @@ Old names (before the Rust-name rename): `FileNotFound` → `NotFound`, `AccessD
 `PermissionDenied`, `NotDir` → `NotADirectory`, `IsDir` → `IsADirectory`, `PathAlreadyExists` →
 `AlreadyExists`, `InvalidPath` → `InvalidInput`, `NoSpaceLeft` → `StorageFull`, `FileTooBig` →
 `FileTooLarge`, `DirNotEmpty` → `DirectoryNotEmpty`. The numbers before the draft-stage renumbering are gone.
+
+## What a failure was about
+
+An errno is a kind. What the failure was about travels beside it, as an `ErrorDetail` (`detail_fields` in
+[errno_codes.zig](../../api/errno_codes.zig), the Rust table has the same list): a plain object of a fixed shape, every
+field always present and `undefined` when unset.
+
+| Field | Meaning |
+|---|---|
+| `subject` | What the failure was about, as the caller named it (a path, a module specifier). Set only where a native names it, never an absolute host path. |
+| `os` | The raw OS error code, when the failure came from the OS and the backend has it. Async fs (Rust) does; sync fs (Zig) does not. |
+
+The errors the glue throws and rejects with get the set fields as own properties (`e.subject`, `e.os`), and
+`message` is the subject (`NotFound: nope.txt`). There is no stack beyond the one `Error` captures where it is made, and the
+detail object itself is not part of the API.
+
+A failed import, evaluated source or preload is a `ModuleError` (`origine:@std/errors`): its `errno` is the kind of the cause
+(`Import.reject(ImportError.PermissionDenied)` is `PermissionDenied`, a missing file is `NotFound`, a module that threw is
+`Unexpected`), `subject` the module it was for, and `cause` an error rebuilt in the importing realm. Nothing of the failing
+realm's objects crosses.
+
+Natives name their subject in the `func` options of the binding table (`.subject = <JS argument index>`, `src/api/binding.zig`),
+or by calling `Call.failAt`. The fast call path reports only the kind.

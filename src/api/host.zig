@@ -138,12 +138,22 @@ pub const Config = struct {
 pub const ScopeCore = struct {
     gpa: std.mem.Allocator,
     errno_cell: *u32,
+    /// The scope's `ErrorDetail` (error_detail.zig), pinned by `Host.install` until the scope is
+    /// released. Null before that and after.
+    detail: ?v8.Global.Of(v8.Object) = null,
 
     pub fn errnoCell(self: *ScopeCore) *u32 {
         return self.errno_cell;
     }
     pub fn allocator(self: *ScopeCore) std.mem.Allocator {
         return self.gpa;
+    }
+    pub fn errorDetail(self: *ScopeCore) ?v8.Object {
+        return if (self.detail) |held| held.deref() else null;
+    }
+    fn dropDetail(self: *ScopeCore) void {
+        if (self.detail) |held| held.deinit();
+        self.detail = null;
     }
 };
 
@@ -180,6 +190,9 @@ pub const ScopeState = struct {
     }
     pub fn errnoCell(self: *ScopeState) *u32 {
         return self.shared.errno_cell;
+    }
+    pub fn errorDetail(self: *ScopeState) ?v8.Object {
+        return self.shared.errorDetail();
     }
     pub fn allocator(self: *ScopeState) std.mem.Allocator {
         return self.host.allocator;
@@ -288,12 +301,14 @@ pub const Host = struct {
         self.states.deinit(alloc);
         for (self.imports.items) |pending| {
             if (!pending.done) pending.resolver.deinit();
+            alloc.free(pending.subject);
             alloc.destroy(pending);
         }
         self.imports.deinit(alloc);
         for (self.preloads.items) |pending| {
             if (!pending.done) pending.resolver.deinit();
             if (pending.values) |held| held.deinit();
+            alloc.free(pending.subject);
             alloc.destroy(pending);
         }
         self.preloads.deinit(alloc);
@@ -532,6 +547,7 @@ pub const Host = struct {
             state.shared.errno_cell = &state.errno_local;
             if (state.errno_buffer) |buffer| buffer.deinit();
             state.errno_buffer = null;
+            state.shared.dropDetail();
             state.released = true;
             return;
         }
@@ -548,6 +564,7 @@ pub const Host = struct {
         state.module_states.deinit(alloc);
         if (state.driver) |driver| driver.step.deinit();
         if (state.errno_buffer) |buffer| buffer.deinit();
+        state.shared.dropDetail();
         alloc.destroy(state);
     }
 
@@ -620,6 +637,7 @@ pub const Host = struct {
         try binding.set(env, native, "bind", bind.object.value);
         const errno_value = bundle.object.getIndex(ctx, glue_script.errno_index) orelse return error.BootstrapFailed;
         try bindErrno(state, errno_value);
+        try bindDetail(state, ctx, native);
         const api = bundle.object.getIndex(ctx, if (self.runtime != null) glue_script.full_index else glue_script.basic_index) orelse return error.BootstrapFailed;
         startup_trace.mark(&timing, "api_bind_state");
         return .new(isolate, api);
@@ -916,6 +934,14 @@ pub const Host = struct {
         return @intCast(live);
     }
 };
+
+/// Pins the scope's `ErrorDetail` (`native.detail`, made with the glue) until the scope is released.
+fn bindDetail(state: *ScopeState, ctx: v8.Context, native: v8.Object) !void {
+    const isolate = state.scope.runtime.isolate;
+    const value = native.get(ctx, binding.string(isolate, "detail")) orelse return error.BootstrapFailed;
+    const detail = value.toObject(ctx) orelse return error.BootstrapFailed;
+    state.shared.detail = .new(isolate, detail);
+}
 
 /// Pins the template's non-detachable errno buffer until Host.destroy and borrows its
 /// storage for state.errno_cell. Requires the entered realm and a live HandleScope.

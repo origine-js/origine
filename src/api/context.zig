@@ -1409,7 +1409,55 @@ pub const ImportState = struct {
     creator: *ScopeState,
     resolver: v8.Global.Of(v8.Promise.Resolver),
     done: bool = false,
+    /// What the import was for, as the caller named it (a specifier, or the module name of an
+    /// evaluated source): the `subject` of the `ModuleError` it can reject with. Owned.
+    subject: []const u8 = "",
 };
+
+/// The rejection value of a failed import or preload: `{ errno, name: 'ModuleError', message, subject, os }`,
+/// which `glue/errors.js` turns into a `ModuleError`. `errno` is the one the child's error carries as an own
+/// data property (a hook's `Import.reject(ImportError.PermissionDenied)`), else `Unexpected`; nothing else of
+/// the child's error crosses, only its text.
+fn failureValue(env: binding.Env, child_ctx: v8.Context, reason: v8.Value, subject: []const u8) !v8.Value {
+    const message = if (reason.toDetailString(child_ctx)) |text| text.name.primitive.value else binding.string(env.isolate, "module evaluation failed");
+    return binding.encode(env, {}, .{
+        .errno = causeErrno(env.isolate, child_ctx, reason),
+        .name = "ModuleError",
+        .message = message,
+        .subject = @as(?[]const u8, if (subject.len == 0) null else subject),
+        .os = @as(?u32, null),
+    });
+}
+
+/// The `errno` an error of the child realm stands for, else `Unexpected`: the own data property `errno` (a
+/// hook's `Import.reject(ImportError.PermissionDenied)`), or, for an error the module map made from a Zig error,
+/// the own data property `message` read as the error's name (`FileNotFound` is `NotFound`). A proxy or an
+/// accessor is not read: the child's code does not run for it.
+fn causeErrno(isolate: v8.Isolate, child_ctx: v8.Context, reason: v8.Value) u32 {
+    const fallback: u32 = @backingInt(errno.Errno.Unexpected);
+    if (!reason.isObject() or reason.isProxy()) return fallback;
+    const object = reason.toObject(child_ctx) orelse return fallback;
+    if (ownData(isolate, child_ctx, object, "errno")) |value| {
+        if (!value.isUint32()) return fallback;
+        const code = value.u32Value(child_ctx) orelse return fallback;
+        return if (code != 0 and std.enums.fromInt(errno.Errno, code) != null) code else fallback;
+    }
+    const text = ownData(isolate, child_ctx, object, "message") orelse return fallback;
+    if (!text.isString()) return fallback;
+    const string = text.toString(child_ctx) orelse return fallback;
+    var buffer: [64]u8 = undefined;
+    if (string.lenUtf8(isolate) > buffer.len) return fallback;
+    const name = buffer[0..string.writeUtf8(isolate, &buffer)];
+    const code = errno.ofName(name) orelse return fallback;
+    return @backingInt(code);
+}
+
+/// The value of the own data property `key` of `object`, if it has one.
+fn ownData(isolate: v8.Isolate, ctx: v8.Context, object: v8.Object, comptime key: []const u8) ?v8.Value {
+    const descriptor = object.getOwnPropertyDescriptor(ctx, eu.v.str_utf8(isolate, key).name) orelse return null;
+    if (!descriptor.isObject()) return null;
+    return (descriptor.toObject(ctx) orelse return null).get(ctx, binding.string(isolate, "value"));
+}
 
 fn settleOk(pending: *ImportState, isolate: v8.Isolate, id: ?[]const u8) void {
     if (pending.done) return;
@@ -1425,14 +1473,9 @@ fn settleFail(pending: *ImportState, isolate: v8.Isolate, reason: v8.Value, chil
     pending.done = true;
     defer pending.resolver.deinit();
     const parent = pending.creator.scope.context.deref();
-    const message = if (reason.toDetailString(child_ctx)) |text| text.name.primitive.value else binding.string(isolate, "module evaluation failed");
     const env: binding.Env = .{ .isolate = isolate, .ctx = parent };
-    const failure = binding.encode(env, {}, .{
-        .errno = @backingInt(errno.Errno.Unexpected),
-        .name = "ModuleError",
-        .message = message,
-    }) catch {
-        _ = pending.resolver.deref().reject(parent, message);
+    const failure = failureValue(env, child_ctx, reason, pending.subject) catch {
+        _ = pending.resolver.deref().reject(parent, binding.string(isolate, "module evaluation failed"));
         return;
     };
     _ = pending.resolver.deref().reject(parent, failure);
@@ -1445,6 +1488,7 @@ fn freeImport(pending: *ImportState) void {
         _ = host.imports.swapRemove(index);
         break;
     };
+    host.allocator.free(pending.subject);
     host.allocator.destroy(pending);
 }
 
@@ -1466,14 +1510,16 @@ fn importRejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     freeImport(pending);
 }
 
-fn startImport(call: *Call, state: *ScopeState, context: *Context, promise: v8.Global.Of(v8.Promise)) !v8.Promise {
+fn startImport(call: *Call, state: *ScopeState, context: *Context, promise: v8.Global.Of(v8.Promise), subject: []const u8) !v8.Promise {
     defer promise.deinit();
     const host = state.host;
     const alloc = host.allocator;
     const resolver = eu.v.promise_resolver(call.ctx) orelse return error.Unexpected;
     const pending = try alloc.create(ImportState);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .host = host, .context = context, .creator = state, .resolver = .new(call.isolate, resolver) };
+    const owned_subject = try alloc.dupe(u8, subject);
+    errdefer alloc.free(owned_subject);
+    pending.* = .{ .host = host, .context = context, .creator = state, .resolver = .new(call.isolate, resolver), .subject = owned_subject };
     errdefer pending.resolver.deinit();
     try host.imports.append(alloc, pending);
     errdefer _ = host.imports.pop();
@@ -1513,7 +1559,7 @@ pub fn importSpecifier(state: *ScopeState, call: *Call, id: u32, specifier: []co
 fn importImpl(state: *ScopeState, call: *Call, id: u32, specifier: []const u8, attributes: []const u8) !v8.Promise {
     const context = try contextFor(state, id);
     const promise = try context.scope.importIn(context.cacheOfHandler(context.import_handler), specifier, try attributesOf(call, attributes), null);
-    return startImport(call, state, context, promise);
+    return startImport(call, state, context, promise, specifier);
 }
 
 /// `evaluateSource(context, name, source, handler, metaJson)`: registers `source` as the module
@@ -1540,7 +1586,7 @@ fn evaluateImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8, sour
     context.root = name;
     defer context.root = null;
     const promise = try context.scope.importIn(table, name, &.{}, null);
-    return startImport(call, state, context, promise);
+    return startImport(call, state, context, promise, name);
 }
 
 /// `close(context)`: disposes the realm. Its pending imports reject and its handles go stale.
@@ -1679,6 +1725,8 @@ pub const PreloadState = struct {
     done: bool = false,
     parent: *Scope,
     values: ?v8.Global.Of(v8.Value) = null,
+    /// The module name of the preload (`preload:<index>`): the `subject` of the `ModuleError` it can reject with. Owned.
+    subject: []const u8 = "",
 };
 
 /// `preloadModule(context, name, source, values)`: evaluates `source` as the module `name`, then, when
@@ -1698,7 +1746,9 @@ fn preloadModuleImpl(state: *ScopeState, call: *Call, id: u32, name: []const u8,
     const resolver = eu.v.promise_resolver(call.ctx) orelse return error.Unexpected;
     const pending = try alloc.create(PreloadState);
     errdefer alloc.destroy(pending);
-    pending.* = .{ .host = host, .resolver = .new(call.isolate, resolver), .parent = state.scope };
+    const owned_subject = try alloc.dupe(u8, name);
+    errdefer alloc.free(owned_subject);
+    pending.* = .{ .host = host, .resolver = .new(call.isolate, resolver), .parent = state.scope, .subject = owned_subject };
     errdefer pending.resolver.deinit();
     if (has_values) pending.values = .new(call.isolate, values);
     errdefer if (pending.values) |held| held.deinit();
@@ -1730,6 +1780,7 @@ fn preloadSettle(pending: *PreloadState, isolate: v8.Isolate, reason: ?v8.Value)
             _ = host.preloads.swapRemove(index);
             break;
         };
+        host.allocator.free(pending.subject);
         host.allocator.destroy(pending);
     }
     defer pending.resolver.deinit();
@@ -1743,14 +1794,9 @@ fn preloadSettle(pending: *PreloadState, isolate: v8.Isolate, reason: ?v8.Value)
         return;
     };
     const child_ctx = isolate.getCurrentContext();
-    const message = if (failed.toDetailString(child_ctx)) |text| text.name.primitive.value else binding.string(isolate, "module evaluation failed");
     const env: binding.Env = .{ .isolate = isolate, .ctx = parent_ctx };
-    const failure = binding.encode(env, {}, .{
-        .errno = @backingInt(errno.Errno.Unexpected),
-        .name = "ModuleError",
-        .message = message,
-    }) catch {
-        _ = pending.resolver.deref().reject(parent_ctx, message);
+    const failure = failureValue(env, child_ctx, failed, pending.subject) catch {
+        _ = pending.resolver.deref().reject(parent_ctx, binding.string(isolate, "module evaluation failed"));
         return;
     };
     _ = pending.resolver.deref().reject(parent_ctx, failure);

@@ -10,14 +10,22 @@ import type {
 
 export type { ErrnoTable, HostErrnoCode, HostErrnoName, HostErrnoTable, IoErrnoCode, IoErrnoName, IoErrnoTable };
 
+/** What a failure knows besides its kind: own properties, present only when known. */
+export interface ErrorDetails {
+  /** What the failure was about, as the caller named it (a path); never an absolute host path. */
+  readonly subject?: string;
+  /** The raw OS error code, when the failure came from the OS and the backend has it. */
+  readonly os?: number;
+}
+
 /** The error value of one I/O name, e.g. `IoErrorOf<'NotFound'>` is an Error instance with `{ errno: 10; name: 'NotFound' }`. */
 export type IoErrorOf<N extends IoErrnoName = IoErrnoName> = N extends IoErrnoName
-  ? Error & { readonly errno: IoErrnoTable[N]; readonly name: N }
+  ? Error & ErrorDetails & { readonly errno: IoErrnoTable[N]; readonly name: N }
   : never;
 
 /** The error value of one host name, e.g. `HostErrorOf<'BadHandle'>` is an Error instance with `{ errno: 2; name: 'BadHandle' }`. */
 export type HostErrorOf<N extends HostErrnoName = HostErrnoName> = N extends HostErrnoName
-  ? Error & { readonly errno: HostErrnoTable[N]; readonly name: N }
+  ? Error & ErrorDetails & { readonly errno: HostErrnoTable[N]; readonly name: N }
   : never;
 
 /** The error value of one I/O code, e.g. `IoErrorByCode<10>` is an Error instance with `{ errno: 10; name: 'NotFound' }`. */

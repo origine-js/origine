@@ -1,6 +1,7 @@
 // api.host.env, api.io, api.context, quansync, errno, globals. Type-checked only, never run.
 import type { Api, Main } from "@origine/types";
 import { ERRNO } from "origine:@std/errno";
+import { ModuleError, OrigineError } from "origine:@std/errors";
 import { quansync, run } from "origine:@std/quansync";
 import { ts } from "origine:@std/transformer/oxc";
 import { ImportHandler, MakeRecipe, Transform } from "origine:@std/graph/import";
@@ -74,6 +75,21 @@ export const main: Main = async (api: Api) => {
   ERRNO.io.BadHandle;
   // @ts-expect-error an io name is not in the host table
   ERRNO.host.NotFound;
+
+  // Errors carry what they were about (own properties, present only when known); a failed import is a ModuleError.
+  try {
+    await child.import("a");
+  } catch (e) {
+    if (e instanceof ModuleError) {
+      const name: "ModuleError" = e.name;
+      const kind: number = e.errno;
+      const subject: string | undefined = e.subject;
+      const os: number | undefined = e.os;
+      const cause: unknown = e.cause;
+      const isOrigine: OrigineError = e;
+      void [name, kind, subject, os, cause, isOrigine];
+    }
+  }
 
   // quansync
   const double = quansync({ sync: (n: number) => n * 2, async: async (n: number) => n * 2 });

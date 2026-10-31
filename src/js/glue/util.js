@@ -1,5 +1,5 @@
 import { ERRNO } from './errno.js';
-import { of } from './errors.js';
+import { of, fromDetail, resetDetail, moduleFailure } from './errors.js';
 
 // Shared helpers for the glue modules. Nothing here touches the host: the realm's `native` object
 // reaches a capability factory as an argument (index.js), so no module holds it ambiently.
@@ -10,15 +10,26 @@ export const errors = Object.freeze({ ...ERRNO.io, ...ERRNO.host });
 // What a failed native or a refused request throws: an `IoError` or `HostError` instance.
 export const failure = of;
 
-// The errno cell of one `native`, and the read-and-clear every native call is followed by.
+// The errno cell of one `native` with the `ErrorDetail` next to it (neither is ever reassigned), and
+// the read-and-clear every native call is followed by. `takeError` is the error the call left, or
+// undefined; `take` discards it.
 export function errnoCell(native) {
-  const errno = native.errno;
+  const { errno, detail } = native;
   const take = () => {
     const code = errno[0];
     errno[0] = 0;
+    if (code !== 0) resetDetail(detail);
     return code;
   };
-  return Object.freeze({ errno, take });
+  const takeError = () => {
+    const code = errno[0];
+    if (code === 0) return undefined;
+    errno[0] = 0;
+    const error = fromDetail(code, detail);
+    resetDetail(detail);
+    return error;
+  };
+  return Object.freeze({ errno, detail, take, takeError });
 }
 // Parts one factory publishes for another (the graph glue for the context glue). Glue modules are
 // evaluated once per realm, so these are per-realm state.
@@ -48,10 +59,17 @@ export function freezeMethods(object) {
   return freeze(object);
 }
 
-// The Rust natives reject with a plain `{ errno, name }`: callers get the error instance instead.
+// The Rust natives reject with an `Error` carrying `errno`, `name` and the `ErrorDetail` fields
+// (`subject`, `os`): callers get the shared error class instance, with those fields, instead.
 export const settled = promise =>
   promise.then(undefined, e => {
-    throw typeof e?.errno === 'number' ? failure(e.errno) : e;
+    throw typeof e?.errno === 'number' ? fromDetail(e.errno, e) : e;
+  });
+
+// A promise of a module import, evaluation or preload: its rejection becomes a `ModuleError`.
+export const moduleSettled = promise =>
+  promise.then(undefined, e => {
+    throw moduleFailure(e);
   });
 
 // `ops` with every promise one of its operations returns passed through `settled`.

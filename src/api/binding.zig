@@ -29,7 +29,9 @@
 //!
 //! - **State.** The first parameter is the state pointer (`*State`) the function was
 //!   bound to. `State` provides two methods: `errnoCell(self) *u32` (where failures are
-//!   reported) and `allocator(self) std.mem.Allocator` (backing the per-call arena).
+//!   reported) and `allocator(self) std.mem.Allocator` (backing the per-call arena). It may
+//!   also provide `errorDetail(self) ?v8.Object`, the scope's `ErrorDetail` (error_detail.zig)
+//!   that a failing native overwrites; without it a failure carries only its errno.
 //! - **Arguments.** Every other parameter is decoded from the JS arguments in order
 //!   (see `decode`): `u32`, `u64`, `f64`, `bool`, `[]const u8` (a string copied into the
 //!   call arena), `[]u8` (the bytes of a typed array, aliased), `v8.Value`,
@@ -48,7 +50,9 @@
 //!   the fast path a failure still writes the errno cell but the result is zero rather than
 //!   undefined; the guest reads the cell, so the difference is not observable there.
 //! - **Errors.** A returned error is mapped to an `Errno` (errno.zig), written into the
-//!   errno cell, and the call returns undefined. The guest reads the cell.
+//!   errno cell, and the call returns undefined. The guest reads the cell. The `ErrorDetail` is
+//!   reset by every failure and holds the `subject` when the native's `func` options name one
+//!   (`.subject = argument index`) or it calls `Call.failAt`. The fast path reports only the errno.
 const std = @import("std");
 const v8 = @import("@v8");
 const eu = @import("@util");
@@ -158,11 +162,11 @@ pub fn bytesValue(env: Env, data: []const u8) !v8.Value {
 /// Wraps the typed function `callee` as a V8 callback. `callee` must take `*State` first;
 /// see the file comment for argument, result and error handling.
 pub fn native(comptime State: type, comptime callee: anytype) v8.FunctionCallback {
-    return nativeWith(State, callee, .fail);
+    return nativeWith(State, callee, .fail, null);
 }
 
 /// `native` with an explicit policy for a detached scope (see the file comment).
-pub fn nativeWith(comptime State: type, comptime callee: anytype, comptime detached: Detached) v8.FunctionCallback {
+pub fn nativeWith(comptime State: type, comptime callee: anytype, comptime detached: Detached, comptime subject: ?usize) v8.FunctionCallback {
     comptime checkDetached(State, callee, detached);
     return struct {
         fn callback(info: v8.FunctionCallbackInfo) callconv(.c) void {
@@ -173,10 +177,13 @@ pub fn nativeWith(comptime State: type, comptime callee: anytype, comptime detac
             var arena = std.heap.ArenaAllocator.init(state.allocator());
             defer arena.deinit();
             var call = Call.init(info, state.errnoCell(), arena.allocator());
+            if (comptime @hasDecl(State, "errorDetail")) call.detail = state.errorDetail();
             if (comptime detached == .fail and @hasDecl(State, "isDetached")) {
                 if (state.isDetached()) return call.fail(error.StaleHandle);
             }
-            invoke(State, callee, state, &call) catch |err| call.fail(err);
+            invoke(State, callee, state, &call) catch |err| {
+                if (comptime subject) |index| call.failAt(index, err) else call.fail(err);
+            };
         }
     }.callback;
 }
@@ -477,6 +484,9 @@ pub const FuncOptions = struct {
     /// Keep the native on the slow callback even if it could take the fast API path.
     nofast: bool = false,
     constructor: Constructor = .throw,
+    /// The JS argument position (counting what the state takes as none) of the string that names what the
+    /// native acts on, as its caller wrote it. A failure carries it as `subject` in the scope's `ErrorDetail`.
+    subject: ?usize = null,
 };
 
 /// A native function plus its `Options`; build one with `func`. Immutable: each builder
@@ -561,7 +571,7 @@ fn function(env: Env, comptime State: type, state: *State, comptime callee: anyt
     const side_effect = options.side_effect.?.toV8();
     if (comptime options.detached == .allow and options.side_effect.? != .none)
         @compileError("a `.detached = .allow` native must be `side_effect = .none`");
-    const callback = comptime nativeWith(State, callee, options.detached);
+    const callback = comptime nativeWith(State, callee, options.detached, options.subject);
     // Natives for a snapshot are always plain callbacks over a static marker.
     if (env.rebind) |index| {
         const data = eu.v.external(env.isolate, &rebind_markers[index]).value.data;
@@ -782,7 +792,7 @@ pub fn callbacksOf(comptime State: type, comptime table: anytype) []const v8.Fun
             const field = @field(table, name);
             const F = @TypeOf(field);
             if (isWrapped(F)) {
-                out = out ++ [_]v8.FunctionCallback{nativeWith(State, field.callee.*, field.options.detached)};
+                out = out ++ [_]v8.FunctionCallback{nativeWith(State, field.callee.*, field.options.detached, field.options.subject)};
             } else if (isTable(F)) {
                 out = out ++ callbacksOf(State, field);
             }

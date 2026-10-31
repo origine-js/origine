@@ -7,9 +7,9 @@
 //   native: false
 //   plan: resolver:native:origine resolver:native:relative resolver:js hooks:js hooks:native:origine hooks:js hooks:native:fs ...
 //   hello hooks | answer 42 | utf8 bytes 2
-//   ./lib/secret.js: ModuleError: Error: PermissionDenied       (the policy hook; secret.js never runs)
-//   origine:@std/debug: ModuleError: Error: PermissionDenied    (not in include: the provider does not serve it)
-//   ./lib/nope.js: ModuleError: Error: FileNotFound             (no hook serves it; the fs provider finds no file)
+//   ./lib/secret.js: ModuleError: ./lib/secret.js: PermissionDenied       (the policy hook; secret.js never runs)
+//   origine:@std/debug: ModuleError: origine:@std/debug: PermissionDenied    (not in include: the provider does not serve it)
+//   ./lib/nope.js: ModuleError: ./lib/nope.js: NotFound             (no hook serves it; the fs provider finds no file)
 import { ModuleSource } from 'origine:@std/graph/module';
 import { ImportHandler, Import, ImportError } from 'origine:@std/graph/import';
 import { ImportResolver } from 'origine:@std/graph/resolve';

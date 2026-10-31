@@ -48,8 +48,9 @@ pub struct RawNative {
     pub needs: Needs,
 }
 
-/// The JS value for `error`: a `TypeError`/`RangeError`/`Error`, or for [`NativeError::Errno`] the
-/// shared Error subclass instance that `glue/util.js` `failure(code)` builds.
+/// The JS value for `error`: a `TypeError`/`RangeError`/`Error`, or for an errno failure a plain
+/// `Error` with `errno`, `name` and the `ErrorDetail` fields (`errno::DETAIL_FIELDS`), which
+/// `glue/util.js` `settled` turns into the shared Error subclass instance.
 pub fn error_value<'s>(scope: &mut v8::PinScope<'s, '_>, error: NativeError) -> v8::Local<'s, v8::Value> {
     let message = |scope: &mut v8::PinScope<'s, '_>, text: &str| v8::String::new(scope, text).unwrap_or_else(|| v8::String::empty(scope));
     match error {
@@ -69,34 +70,33 @@ pub fn error_value<'s>(scope: &mut v8::PinScope<'s, '_>, error: NativeError) -> 
             let text = message(scope, &text);
             v8::Exception::error(scope, text)
         }
-        NativeError::Errno(code) => {
-            let value = errno_value(scope, code);
-            value.unwrap_or_else(|_| v8::undefined(scope).into())
+        NativeError::Errno(code) => errno_value(scope, code, None, None).unwrap_or_else(|_| v8::undefined(scope).into()),
+        NativeError::Detailed(detail) => {
+            errno_value(scope, detail.code, detail.os, detail.subject.as_deref()).unwrap_or_else(|_| v8::undefined(scope).into())
         }
     }
 }
 
-fn errno_value<'s>(scope: &mut v8::PinScope<'s, '_>, code: u32) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-    // Zig's private glue bundle is raw embedder slot 3. rusty_v8 reserves
-    // two slots internally, so its public slot 1 addresses the same location.
-    let context = scope.get_current_context();
-    let bundle = context.get_embedder_data(scope, 1).and_then(|value| v8::Local::<v8::Array>::try_from(value).ok());
-    if let Some(bundle) = bundle {
-        let classes = bundle.get_index(scope, 6).and_then(|value| v8::Local::<v8::Object>::try_from(value).ok());
-        if let Some(classes) = classes {
-            let key = v8::String::new(scope, "of").ok_or_else(|| NativeError::error("error factory key"))?;
-            let factory = classes.get(scope, key.into()).and_then(|value| v8::Local::<v8::Function>::try_from(value).ok());
-            if let Some(factory) = factory {
-                let argument = v8::Integer::new_from_unsigned(scope, code);
-                return factory.call(scope, classes.into(), &[argument.into()]).ok_or_else(|| NativeError::error("error factory failed"));
-            }
-        }
-    }
+/// An errno failure as a JS value. Every `ErrorDetail` field is set, in the generated order
+/// (`undefined` when unset), so all of them share one map.
+fn errno_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    code: u32,
+    os: Option<i32>,
+    subject: Option<&str>,
+) -> Result<v8::Local<'s, v8::Value>, NativeError> {
     let text = v8::String::new(scope, errno::name_of(code)).unwrap_or_else(|| v8::String::empty(scope));
     let error = v8::Exception::error(scope, text);
     let object = v8::Local::<v8::Object>::try_from(error).map_err(|_| NativeError::error("error object"))?;
     crate::encode::set(scope, object, "errno", code)?;
     crate::encode::set(scope, object, "name", errno::name_of(code))?;
+    for field in errno::DETAIL_FIELDS {
+        match *field {
+            "subject" => crate::encode::set(scope, object, "subject", subject)?,
+            "os" => crate::encode::set(scope, object, "os", os)?,
+            other => return Err(NativeError::error(format!("unknown ErrorDetail field {other}"))),
+        }
+    }
     Ok(error)
 }
 

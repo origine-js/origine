@@ -1,5 +1,5 @@
 import * as util from './util.js';
-import { OrigineError, IoError, HostError, ImportError } from './errors.js';
+import { OrigineError, IoError, HostError, ImportError, ModuleError } from './errors.js';
 import fs from './fs.js';
 import host from './host.js';
 import graph from './graph.js';
@@ -46,8 +46,8 @@ export function create(native) {
       const previous = cell.errno[0];
       try {
         native.bind(name, native);
-        const code = cell.take();
-        if (code !== 0) throw util.failure(code);
+        const failed = cell.takeError();
+        if (failed !== undefined) throw failed;
         bound[name] = true;
       } finally {
         cell.errno[0] = previous;
@@ -66,5 +66,5 @@ export function create(native) {
     access('isolate');
     return util.shared.initial();
   };
-  return [freeze(full), freeze(basic), native, cell.errno, initial, freeze({ OrigineError, IoError, HostError, ImportError })];
+  return [freeze(full), freeze(basic), native, cell.errno, initial, freeze({ OrigineError, IoError, HostError, ImportError, ModuleError })];
 }

@@ -86,14 +86,11 @@ export interface ModuleGraph {
    */
   evaluate(reference: ModuleReference, ctx: Context): Promise<void>;
   /**
-   * A snapshot of the module's exports, for the realm that created the context. Needs `status` to be
-   * `evaluated` (otherwise `InvalidInput`); `StaleHandle` once the context is closed. The copy rules are
-   * those of `Import.link(reference, { mode: 'hardened' })`: plain data (primitives, arrays, objects with a
-   * plain prototype, cycles kept) is copied into this realm and frozen, so the context's own objects stay as
-   * mutable as they were; a function, a class or any other object cannot be copied, so it is shared and
-   * frozen in place with what it reaches, and keeps running in the context's realm; an accessor property
-   * (or a `Map`, a typed array, a promise) is `Unsupported`. Every call copies again and reads the bindings
-   * as they are at that moment; the result has no prototype.
+   * The live module namespace, in the context the reference is bound to. Needs `status` to be `evaluated`
+   * (otherwise `InvalidInput`); `StaleHandle` once the context is closed. Nothing is copied or frozen: every
+   * export type works, bindings follow the module, and what you read is the context's own objects, so this
+   * crosses the realm boundary (a function you call runs in that realm and can reach its globals). Hand data
+   * over with `snapshot` and `seal` instead.
    */
   exports(reference: ModuleReference): Readonly<Record<string, unknown>>;
   /** Lets the host free what the reference pins; with `retain: 'used'` the module goes once nothing else holds it. */

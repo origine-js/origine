@@ -1111,12 +1111,7 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
     if (std.mem.eql(u8, kind, "link")) {
         const other_id = numberOf(ctx, isolate, object, "context") orelse return error.InvalidData;
         const name = (try stringOf(ctx, isolate, alloc, object, "name")) orelse return error.InvalidData;
-        const mode = (try stringOf(ctx, isolate, alloc, object, "mode")) orelse return error.InvalidData;
-        if (object.get(ctx, binding.string(isolate, "exports"))) |given| if (given.isObject()) {
-            if (!std.mem.eql(u8, mode, "hardened")) return error.InvalidData;
-            return .{ .done = .{ .content = try linkExports(self, ctx, isolate, given.toObject(ctx).?, alloc) } };
-        };
-        return .{ .done = .{ .content = try link(self, other_id, name, std.mem.eql(u8, mode, "shared")) } };
+        return .{ .done = .{ .content = try link(self, other_id, name) } };
     }
     return error.InvalidData;
 }
@@ -1172,10 +1167,9 @@ fn idOf(ctx: v8.Context, isolate: v8.Isolate, alloc: std.mem.Allocator, value: v
 }
 
 /// The content that makes the module `name` of context `other_id` available to `self` as it is: the
-/// module itself (`shared`: live bindings, the other realm's objects; or an alias in the same
-/// context). A hardened link from another context has no such form: the creating realm hands over
-/// the exports it copied (`linkExports`). Handles stay in `self.link_*` until the next bridge call.
-fn link(self: *Context, other_id: u32, name: []const u8, shared: bool) !module_types.Content {
+/// module itself (live bindings, the other realm's objects; an alias in the same context). Nothing is
+/// copied or frozen. Handles stay in `self.link_*` until the next bridge call.
+fn link(self: *Context, other_id: u32, name: []const u8) !module_types.Content {
     const host = self.host;
     const other = host.contexts.get(other_id) orelse return error.BadHandle;
     if (other.closed or other.creator != self.creator) return error.BadHandle;
@@ -1187,13 +1181,11 @@ fn link(self: *Context, other_id: u32, name: []const u8, shared: bool) !module_t
     // that is not instantiated, and a module that is not yet instantiated would be instantiated by
     // the importer, in the wrong context.
     if (module.getStatus() != 4) return error.InvalidInput;
-    if (shared or other == self) return .{ .module = module };
-    // A hardened link brings its own exports (copied by the creating realm, see `linkExports`).
-    return error.InvalidData;
+    return .{ .module = module };
 }
 
-/// The exports of a hardened link: the own enumerable properties of `exports_object`, which the
-/// creating realm built (plain data copied, functions and other objects shared). Handles stay in
+/// The exports of a synthetic module: the own enumerable properties of `exports_object`, which the
+/// creating realm built (nothing is copied or frozen here). Handles stay in
 /// `self.link_values` until the next bridge call. Requires the creating realm's `ctx` entered.
 fn linkExports(self: *Context, ctx: v8.Context, isolate: v8.Isolate, exports_object: v8.Object, alloc: std.mem.Allocator) !module_types.Content {
     const names = exports_object.getOwnPropertyNames(ctx, .{ .OnlyEnumerable = true, .SkipSymbols = true }, .ConvertToString) orelse return error.InvalidData;

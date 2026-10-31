@@ -183,7 +183,7 @@ declare module "origine:@std/graph/import" {
     | { readonly kind: "accept" }
     | { readonly kind: "provide"; readonly source: ModuleSource; readonly recipe?: never }
     | { readonly kind: "provide"; readonly recipe: ModuleRecipe; readonly source?: never }
-    | { readonly kind: "link"; readonly reference: object; readonly mode: "hardened" | "shared" }
+    | { readonly kind: "link"; readonly reference: object }
     | { readonly kind: "reject"; readonly error: { readonly errno: number; readonly name: string; readonly message?: string } }) & import("origine:@std/graph/module").Descriptor;
 
   export const Import: {
@@ -194,16 +194,13 @@ declare module "origine:@std/graph/import" {
     /** Stop the chain with a source (the `maker` makes it a recipe) or a recipe (final; the maker is skipped). The importer gets its own module. */
     provide(target: ModuleSource | ModuleRecipe): Verdict;
     /**
-     * Stop the chain and use a module already evaluated in some context. `mode` is required when that is
-     * not the importer's own context. `'hardened'` links a synthetic module of its exports as a snapshot:
-     * plain data (primitives, arrays and objects with a plain prototype, cycles kept) is copied and the
-     * copies are frozen, so the exporting module's own objects stay as mutable as they were; a function, a
-     * class and any other object cannot be copied, so it is shared and frozen in place in its own realm
-     * together with what it reaches (a class's statics and prototype chain); an accessor property is
-     * `Unsupported`. `'shared'` links the module itself (live bindings, same objects, and it leaks the
-     * realm boundary on purpose).
+     * Stop the chain and use a module already evaluated in some context: the importer links the module
+     * itself, with live bindings and the other realm's objects (an alias when it is the importer's own
+     * context). Nothing is copied or frozen, so this crosses the realm boundary on purpose: a function or
+     * object exported that way runs in, and reaches, the exporting realm. To hand data over instead, build
+     * a module of copies with `Import.exports`.
      */
-    link(reference: object, options: { readonly mode: "hardened" | "shared" }): Verdict;
+    link(reference: object): Verdict;
     /** Stop the chain with an error. Throws `InvalidInput` for any other code. */
     reject(error: ImportErrorCode | ReturnType<typeof ImportError.other>): Verdict;
   };

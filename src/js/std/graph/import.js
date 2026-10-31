@@ -57,19 +57,14 @@ export const Import = freeze({
     if (target instanceof h.ModuleRecipe) return new h.ImportVerdict({ kind: 'provide', recipe: target });
     throw invalid('Import.provide: expected a ModuleSource or a ModuleRecipe');
   },
-  /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a
-  /// fresh copy. `mode` is required when that context is not the importer's. `'hardened'` links a
-  /// synthetic module of its exports as a snapshot: plain data (primitives, arrays and objects with a
-  /// plain prototype, cycles kept) is copied and the copies are frozen, so the exporting module's own
-  /// objects stay as mutable as they were; a function, a class and any other object cannot be copied, so
-  /// it is shared and frozen in place in its own realm with what it reaches (a class's statics and
-  /// prototype chain); an accessor property is `Unsupported`. `'shared'` links the module itself (live
-  /// bindings, same objects: it leaks the realm boundary, on purpose).
-  link(reference, options) {
+  /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a fresh
+  /// copy: the importer links the module itself, with live bindings and the other realm's objects. This
+  /// crosses the realm boundary on purpose: a function or object exported that way runs in, and reaches,
+  /// the exporting realm. Nothing is copied or frozen; use `snapshot` and `seal` with `Import.exports` to hand
+  /// over data instead. A reference of the importer's own context is an alias.
+  link(reference) {
     if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
-    const mode = own(options, 'mode');
-    if (mode !== 'hardened' && mode !== 'shared') throw invalid("Import.link: mode must be 'hardened' or 'shared'");
-    return new h.ImportVerdict({ kind: 'link', reference, mode });
+    return new h.ImportVerdict({ kind: 'link', reference });
   },
   /// Stop the chain with an error: a code of `ImportError` or the value of `ImportError.other(...)`.
   reject(error) {

@@ -833,8 +833,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  out.reject = rejected.error.name === 'NotFound' && ImportError.is(rejected.error, ImportError.NotFound) && other.error.message === 'Not allowed' && other.error.name === 'Unexpected'
         \\    && invalid(() => Import.reject(123456)) && invalid(() => Import.reject({})) && invalid(() => ImportError.other(1)) && ImportError.is(Import.reject(ImportError.PermissionDenied).error, ImportError.PermissionDenied);
         \\  const ref = Object.freeze({});
-        \\  out.link = Import.link(ref, { mode: 'hardened' }).mode === 'hardened' && Import.link(ref, { mode: 'shared' }).reference === ref
-        \\    && invalid(() => Import.link(ref)) && invalid(() => Import.link(ref, { mode: 'live' })) && invalid(() => Import.link(null, { mode: 'shared' }));
+        \\  out.link = Import.link(ref).kind === 'link' && Import.link(ref).reference === ref && Import.link(ref).mode === undefined && invalid(() => Import.link(null)) && invalid(() => Import.link());
         \\  // transformers by extension
         \\  const byExt = Transform.byExtension({ '.ts': js, '.d.ts': js });
         \\  out.byExt = byExt.entries.length === 2 && byExt.native === false && Transform.byExtension({}).native === true
@@ -1399,7 +1398,7 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
     try check(fx.scope, "report.exotic.length === 8 && report.exotic.every(n => n === 'InvalidInput') && report.closedAsync === 'InvalidInput' && report.stillSync === 'ok'");
 }
 
-test "graph: the host reads the exports of an evaluated reference with the hardened copy rules" {
+test "graph: graph.exports(ref) is the live namespace of the context: no copy, every export type, bindings follow" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
@@ -1413,38 +1412,32 @@ test "graph: the host reads the exports of an evaluated reference with the harde
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fromLoader(() => '')] });
         \\  const make = (text, name) => api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }));
         \\  const ctx = await api.context.create({ graph: api.graph, import: handler });
-        \\  const good = make("export const n = 41; export const cfg = { n: 1, list: [1, { deep: true }] }; cfg.self = cfg; export let count = 0; export function bump() { cfg.n++; count++; return cfg.n; } export class Box { static kind = 'box'; } export default 'dflt';", 'good.js');
-        \\  out.before = (() => { try { api.graph.exports(good); return 'ok'; } catch (e) { return e.name; } })();
+        \\  const good = make("export let n = 41; export function inc() { n++; return n; } export const obj = { tag: 'a', list: [1] }; export const getTag = () => obj.tag; export const m = new Map([[1, 2]]); export const t = new Uint8Array(2); export const g = { get x() { return 7; } }; export class Box { static kind = 'box'; } export default 5;", 'good.js');
+        \\  const code = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
+        \\  out.before = code(() => api.graph.exports(good));
         \\  await api.graph.evaluate(good, ctx);
-        \\  const first = api.graph.exports(good);
-        \\  out.keys = Object.keys(first).sort().join(',');
-        \\  out.proto = Object.getPrototypeOf(first) === null;
-        \\  out.values = first.n === 41 && first.default === 'dflt' && first.count === 0;
-        \\  // Plain data is a frozen copy (a cycle kept); the context's own object stays mutable and live.
-        \\  out.frozen = Object.isFrozen(first) && Object.isFrozen(first.cfg) && Object.isFrozen(first.cfg.list) && Object.isFrozen(first.cfg.list[1]);
-        \\  out.cycle = first.cfg.self === first.cfg;
-        \\  out.copyIsolated = (() => { try { first.cfg.n = 99; } catch {} return first.cfg.n; })();
-        \\  // A function is shared: it runs in the context's realm on the context's objects, and is frozen.
-        \\  out.fn = [first.bump(), first.bump()].join(',') + ':' + Object.isFrozen(first.bump) + ':' + (first.Box.kind === 'box') + ':' + Object.isFrozen(first.Box);
-        \\  // Another call copies again and reads the bindings as they are now.
-        \\  const second = api.graph.exports(good);
-        \\  out.second = second !== first && second.cfg.n === 3 && second.count === 2 && first.count === 0;
-        \\  // What cannot be copied is Unsupported, not silently shared.
-        \\  const code = async text => { const ref = make(text, 'm' + (out.n = (out.n ?? 0) + 1) + '.js'); await api.graph.evaluate(ref, ctx); try { api.graph.exports(ref); return 'ok'; } catch (e) { return e.name; } };
-        \\  out.accessor = await code("export const o = { get x() { return 1; } };");
-        \\  out.map = await code("export const m = new Map();");
-        \\  out.typed = await code("export const t = new Uint8Array(1);");
-        \\  // A reference that is not evaluated has no exports to read; neither has one of a closed context.
-        \\  out.declared = (() => { try { api.graph.exports(make('export {}', 'd.js')); return 'ok'; } catch (e) { return e.name; } })();
-        \\  const imported = await ctx.import('good.js').catch(() => null);
+        \\  const ns = api.graph.exports(good);
+        \\  // The namespace of the context itself: the same object each call, no prototype of this realm.
+        \\  out.same = ns === api.graph.exports(good) && Object.keys(ns).join(',') === 'Box,default,g,getTag,inc,m,n,obj,t';
+        \\  // Bindings are live: the module changes `n`, and the namespace shows it.
+        \\  out.live = ns.n + ',' + ns.inc() + ',' + ns.n;
+        \\  // Nothing is copied or frozen: the objects are the context's own, in another realm, and stay writable.
+        \\  out.shared = ns.obj.constructor !== Object && !Object.isFrozen(ns.obj) && !Object.isFrozen(ns.inc);
+        \\  ns.obj.tag = 'b'; ns.obj.list.push(2);
+        \\  out.mutated = ns.getTag() + ',' + ns.obj.list.length;
+        \\  // Every export type works: a Map, a typed array, an accessor, a class and the default.
+        \\  out.types = [ns.m.get(1), ns.t.length, ns.g.x, ns.Box.kind, ns.default].join(',');
+        \\  out.map = Object.prototype.toString.call(ns.m) + ':' + (ns.m instanceof Map);
+        \\  // A reference that is not evaluated has no namespace; neither has one of a closed context.
+        \\  out.declared = code(() => api.graph.exports(make('export {}', 'd.js')));
         \\  ctx.close();
-        \\  out.closed = (() => { try { api.graph.exports(good); return 'ok'; } catch (e) { return e.name; } })();
+        \\  out.closed = code(() => api.graph.exports(good));
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.before === 'InvalidInput' && report.keys === 'Box,bump,cfg,count,default,n' && report.proto && report.values && report.frozen && report.cycle && report.copyIsolated === 1");
-    try check(fx.scope, "report.fn === '2,3:true:true:true' && report.second && report.accessor === 'Unsupported' && report.map === 'Unsupported' && report.typed === 'Unsupported' && report.declared === 'InvalidInput' && report.closed === 'StaleHandle'");
+    try check(fx.scope, "report.before === 'InvalidInput' && report.same && report.live === '41,42,42' && report.shared && report.mutated === 'b,2'");
+    try check(fx.scope, "report.types === '2,2,7,box,5' && report.map === '[object Map]:false' && report.declared === 'InvalidInput' && report.closed === 'StaleHandle'");
 }
 
 test "graph: load() goes one level at a time, through dependency references, three levels deep" {
@@ -1596,7 +1589,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
     try t.expect(async_graphs >= 2);
 }
 
-test "graph: link shares or hardens the module of another context" {
+test "graph: link makes a context use the module of another context itself: live bindings, same objects" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
@@ -1610,27 +1603,27 @@ test "graph: link shares or hardens the module of another context" {
         \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
         \\  const a = await api.context.create({ graph: api.graph, import: leaf });
         \\  const source = graph.declare(ModuleRecipe({ source: ModuleSource.text('export let n = 1; export function inc() { n++; } export const obj = { tag: "a" };'), import: leaf, name: 'a-mod' }));
-        \\  out.unbound = await (async () => { try { Import.link(source, { mode: 'shared' }); return 'made'; } catch (e) { return e.name; } })();
+        \\  out.unbound = await (async () => { try { Import.link(source); return 'made'; } catch (e) { return e.name; } })();
         \\  await graph.evaluate(source, a);
         \\  const linker = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(layer),
-        \\    hooks: [async r => (r.id === 'link:hard' ? Import.link(source, { mode: 'hardened' }) : r.id === 'link:shared' ? Import.link(source, { mode: 'shared' }) : r.id === 'link:alias' ? Import.link(source, { mode: 'shared' }) : Import.next())],
+        \\    hooks: [async r => (r.id === 'link:shared' ? Import.link(source) : Import.next())],
         \\  });
         \\  const b = await api.context.create({ graph: api.graph, import: linker });
         \\  const run = (name, text) => graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name })), b).then(() => 'ok', e => e.message);
-        \\  out.shared = await run('s', "import { n, inc, obj } from 'link:shared'; inc(); globalThis.shared = [n, obj.tag];");
-        \\  out.hard = await run('h', "import { n, inc, obj } from 'link:hard'; globalThis.hard = [n, typeof inc, Object.isFrozen(obj), obj.tag];");
+        \\  out.shared = await run('s', "import { n, inc, obj } from 'link:shared'; inc(); obj.tag = 'b'; globalThis.shared = [n, obj.tag, Object.isFrozen(obj), Object.isFrozen(inc), obj.constructor === Object];");
+        \\  // The exporter sees what the importer did: the same objects, nothing copied.
+        \\  out.seen = api.graph.exports(source).obj.tag + ',' + api.graph.exports(source).n;
         \\  const stale = graph.declare(ModuleRecipe({ source: ModuleSource.text('export const z = 1;'), import: leaf, name: 'declared-only' }));
-        \\  const unbound = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [async () => Import.link(stale, { mode: 'shared' })] });
+        \\  const unbound = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [async () => Import.link(stale)] });
         \\  const c = await api.context.create({ graph: api.graph, import: unbound });
         \\  out.notBound = await graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text("import 'link:x'"), import: unbound, name: 'u' })), c).then(() => 'ok', e => e.message);
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.unbound === 'made' && report.shared === 'ok' && report.hard === 'ok' && report.notBound.includes('InvalidInput')");
-    try check(fx.rt.scopes.items[2], "shared[0] === 2 && shared[1] === 'a'");
-    try check(fx.rt.scopes.items[2], "hard[0] === 2 && hard[1] === 'function' && hard[2] === true && hard[3] === 'a'");
+    try check(fx.scope, "report.unbound === 'made' && report.shared === 'ok' && report.seen === 'b,2' && report.notBound.includes('InvalidInput')");
+    try check(fx.rt.scopes.items[2], "shared[0] === 2 && shared[1] === 'b' && shared[2] === false && shared[3] === false && shared[4] === false");
 }
 
 test "graph: link refuses a module that is still evaluating and a failed import does not break later ones" {
@@ -1651,7 +1644,7 @@ test "graph: link refuses a module that is still evaluating and a failed import 
         \\  out.status = slow.status;
         \\  const linker = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
-        \\    hooks: [async r => (r.id === 'slow' ? Import.link(slow, { mode: 'hardened' }) : Import.next())],
+        \\    hooks: [async r => (r.id === 'slow' ? Import.link(slow) : Import.next())],
         \\  });
         \\  const run = async (name, text) => api.graph.evaluate(api.graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name })), await api.context.create({ graph: api.graph, import: linker })).then(() => 'ok', e => e.message);
         \\  out.early = await run('early', "import { n } from 'slow';");
@@ -1671,55 +1664,6 @@ test "graph: link refuses a module that is still evaluating and a failed import 
     try fx.run();
     try check(fx.scope, "report.status === 'evaluating' && report.early.includes('InvalidInput') && report.late === 'ok'");
     try check(fx.scope, "report.failed.includes('NotFound') && report.after === 'ok' && report.imported === 'evaluated'");
-}
-
-test "graph: a hardened link copies plain data and leaves the exporting module's own objects alone" {
-    var fx: Fixture = undefined;
-    try fx.setup(
-        \\import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
-        \\import { ImportHandler, Import } from 'origine:@std/graph/import';
-        \\import { ImportResolver } from 'origine:@std/graph/resolve';
-        \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
-        \\async function body(api) {
-        \\  const out = globalThis.report = {};
-        \\  const graph = api.graph;
-        \\  const layer = ({ specifier }) => ({ id: specifier });
-        \\  const leaf = ImportHandler.make({ resolver: ImportResolver.layered().layer(layer), hooks: [] });
-        \\  const a = await api.context.create({ graph: api.graph, import: leaf });
-        \\  const source = graph.declare(ModuleRecipe({ source: ModuleSource.text(`
-        \\    export const obj = { tag: 'a', list: [1, 2], nested: { deep: true } };
-        \\    export const loop = {}; loop.self = loop;
-        \\    export const bare = Object.create(null); bare.k = 1;
-        \\    export const plain = 1;
-        \\    export function bump() { obj.tag = 'b'; obj.list.push(3); }
-        \\    export class K { static n = 0; static inc() { K.n++; } }
-        \\    globalThis.sourceObj = obj; globalThis.sourceK = K;`), import: leaf, name: 'a-mod' }));
-        \\  await graph.evaluate(source, a);
-        \\  const getter = graph.declare(ModuleRecipe({ source: ModuleSource.text('export const g = { get x() { return 1; } };'), import: leaf, name: 'getter-mod' }));
-        \\  await graph.evaluate(getter, a);
-        \\  const linker = ImportHandler.make({
-        \\    resolver: ImportResolver.layered().layer(layer),
-        \\    hooks: [async r => (r.id === 'link:hard' ? Import.link(source, { mode: 'hardened' }) : r.id === 'link:getter' ? Import.link(getter, { mode: 'hardened' }) : Import.next())],
-        \\  });
-        \\  const b = await api.context.create({ graph: api.graph, import: linker });
-        \\  const run = (name, text) => graph.evaluate(graph.declare(ModuleRecipe({ source: ModuleSource.text(text), import: linker, name })), b).then(() => 'ok', e => e.message);
-        \\  out.hard = await run('h', `
-        \\    import { obj, loop, bare, plain, bump, K } from 'link:hard';
-        \\    const before = obj.tag + obj.list.length;
-        \\    bump();
-        \\    let inc = 'no throw'; try { K.inc(); } catch (e) { inc = e.name; }
-        \\    globalThis.seen = { before, after: obj.tag + obj.list.length + obj.nested.deep, frozen: Object.isFrozen(obj) && Object.isFrozen(obj.list) && Object.isFrozen(obj.nested),
-        \\      cycle: loop.self === loop, bare: bare.k + ':' + (Object.getPrototypeOf(bare) === null), plain, inc, sameObject: obj === globalThis.sourceObj };`);
-        \\  out.getter = await run('g', "import { g } from 'link:getter';");
-        \\}
-    , false, &.{});
-    defer fx.deinit();
-    try fx.run();
-    try check(fx.scope, "report.hard === 'ok' && report.getter.includes('Unsupported')");
-    // B sees frozen copies that bump() in A did not change; K is shared and frozen in place.
-    try check(fx.rt.scopes.items[2], "seen.before === 'a2' && seen.after === 'a2true' && seen.frozen && seen.cycle && seen.bare === '1:true' && seen.plain === 1 && seen.inc === 'TypeError' && seen.sameObject === false");
-    // The exporting module keeps its own mutable objects: bump() changed them, nothing froze them.
-    try check(fx.rt.scopes.items[1], "sourceObj.tag === 'b' && sourceObj.list.length === 3 && !Object.isFrozen(sourceObj) && !Object.isFrozen(sourceObj.list) && Object.isFrozen(sourceK)");
 }
 
 test "graph: native plans with oxc, json, import maps and accept never enter JS" {

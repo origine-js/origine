@@ -4,7 +4,7 @@ import { PipelineResult, ResolveRequest, ResolvedImport, ProvidedSource, MakerRe
 import { freeze, own, errors } from '../util.js';
 export default g => {
   const { native, host, named } = g;
-  const { applyTransformer, byId, copyData, graphFs, loadCache, metaOf, pinned, readText, referenceState, register, sourceText } = g;
+  const { applyTransformer, byId, graphFs, loadCache, metaOf, pinned, readText, referenceState, register, sourceText } = g;
   const { InvalidInput, NotFound, InvalidData } = errors;
 
   /// The host's chain of a handler runs its host elements itself and calls `step` only for a function
@@ -55,16 +55,7 @@ export default g => {
           const state = referenceState.get(verdict.reference);
           if (state === undefined || state.context === null || state.status !== 'evaluated')
             throw named(InvalidInput, 'link needs a reference that is evaluated in a context');
-          const reply = { kind: 'link', context: state.context, name: state.name, mode: verdict.mode };
-          // A hardened link from another context brings copies of the exports, made here.
-          if (verdict.mode === 'hardened' && state.context !== ctxId) {
-            const namespace = host(native.context.namespaceOf, state.context, state.name);
-            const exports = {};
-            const seen = new Map();
-            for (const key of Object.keys(namespace)) exports[key] = copyData(namespace[key], seen);
-            reply.exports = exports;
-          }
-          return new PipelineResult(reply);
+          return new PipelineResult({ kind: 'link', context: state.context, name: state.name });
         }
         case 'reject':
           throw verdict.error;
@@ -122,9 +113,7 @@ export default g => {
 
   /// The `source` reply of `reference.load()`: `handler` is the handler object that governs the module's own imports.
   const finished = (child, source, id) =>
-    pinned(child, async () =>
-      new PipelineResult({ kind: 'source', source, handler: child.handler, meta: await metaOf(child, id) }),
-    );
+    pinned(child, async () => new PipelineResult({ kind: 'source', source, handler: child.handler, meta: await metaOf(child, id) }));
 
   /// Answers `{ kind: 'source', source, handler, meta }` or the `link` reply of a hook.
   const loadInJs = async (hid, graphId, id, attributes, specifier, referrer) => {

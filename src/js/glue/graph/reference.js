@@ -4,20 +4,7 @@ import { ModuleRequest } from './data.js';
 import { freeze, failure, errors } from '../util.js';
 export default g => {
   const { native, take, host, named, invalid } = g;
-  const {
-    cacheIds,
-    contextRefs,
-    contexts,
-    copyData,
-    graphCache,
-    loadCache,
-    metaOf,
-    pipeline,
-    referenceState,
-    refsById,
-    register,
-    sourceText,
-  } = g;
+  const { cacheIds, contextRefs, contexts, graphCache, loadCache, metaOf, pipeline, referenceState, refsById, register, sourceText } = g;
 
   // ---- references -------------------------------------------------------------------------------
 
@@ -89,24 +76,14 @@ export default g => {
   /// The imports of a loaded reference, `undefined` until it is `loaded`.
   const requestsOf = reference => referenceState.get(reference).requests;
 
-  /// A snapshot of the module's exports, for the realm that created the context (`status` must be
-  /// `evaluated`). The same copy rules as `Import.link(..., { mode: 'hardened' })`: plain data (primitives,
-  /// arrays, objects with a plain prototype, cycles kept) is copied into this realm and frozen; a function,
-  /// a class or any other object cannot be copied, so it is shared and frozen in place with what it reaches,
-  /// and keeps running in the context's realm; an accessor property is `Unsupported`. Every call copies
-  /// again and reads the bindings as they are now.
+  /// The live namespace of the module, in the context it is bound to (`status` must be `evaluated`): no copy,
+  /// no freezing, every export type, bindings that follow the module. It is the other realm's own object, so
+  /// reading it crosses the realm boundary; `snapshot` and `seal` of `origine:@std/...` hand over data instead.
   const exportsOf = reference => {
     const state = referenceState.get(reference);
     if (state.released) throw named(errors.BadHandle, 'released');
     if (state.status !== 'evaluated' || state.context === null) throw invalid('exports needs a reference that is evaluated in a context');
-    const namespace = host(native.context.namespaceOf, state.context, state.name);
-    const seen = new Map();
-    const out = Object.create(null);
-    for (const key of Object.keys(namespace)) {
-      Object.defineProperty(out, key, { value: copyData(namespace[key], seen), enumerable: true, writable: true, configurable: true });
-    }
-    host(native.context.hardenExports, out);
-    return out;
+    return host(native.context.namespaceOf, state.context, state.name);
   };
 
   /// Binds the reference to `ctx` (one context per reference) and evaluates it there. Another call

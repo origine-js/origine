@@ -121,8 +121,9 @@ and [`docs/async-host-contract.md`](../../../../docs/async-host-contract.md)) ow
 thread. Per `origine_api_poll` it calls `rt.tick(Mode::NoWait)` on every open runtime, advances
 draining runtimes, and settles finished promises from a completion queue. When it has to wait it
 does not call `Loop::run(Once)` (there may be several loops); it `poll(2)`s on each loop's
-`pollable()` fd plus a wake channel, then ticks again. So `tick(NoWait)` is the unit of progress,
-and the loops' pollable fds say when it is worth calling.
+`pollable()` fd plus a wake channel, for no longer than the earliest `next_timer()`, then ticks
+again. So `tick(NoWait)` is the unit of progress, and the loops' pollable fds and timers say when it
+is worth calling.
 
 ## Cancellation semantics
 

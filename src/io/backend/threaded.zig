@@ -82,6 +82,7 @@ const vtable: backend.VTable = .{
     .wake = wake,
     .post = post,
     .pollable = pollable,
+    .next_timer_ns = nextTimerNs,
     .caps = .{
         .nop = true,
         .file_io = true,
@@ -304,6 +305,10 @@ fn post(ctx: *anyopaque, func: backend.PostFn, ud: ?*anyopaque) anyerror!void {
 
 fn pollable(ctx: *anyopaque) isize {
     return ctxOf(ctx).pipe_r;
+}
+
+fn nextTimerNs(ctx: *anyopaque) i64 {
+    return ctxOf(ctx).timers.remainingNs(nowNs(.MONOTONIC));
 }
 
 fn destroy(ctx: *anyopaque, out: *backend.Drained) void {

@@ -74,6 +74,9 @@ pub const VTable = struct {
     post: *const fn (ctx: *anyopaque, func: PostFn, ud: ?*anyopaque) anyerror!void,
     /// Pollable OS handle for embedding in a foreign loop, or -1.
     pollable: *const fn (ctx: *anyopaque) isize,
+    /// Loop thread. Nanoseconds until a timer that `pollable` does not signal is due (0 if it
+    /// already is), or -1 when there is none.
+    next_timer_ns: *const fn (ctx: *anyopaque) i64,
     caps: Caps,
     /// Stops workers and completes everything outstanding (-ECANCELED) into `out`, then frees.
     destroy: *const fn (ctx: *anyopaque, out: *Drained) void,

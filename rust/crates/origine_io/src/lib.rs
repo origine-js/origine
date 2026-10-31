@@ -261,6 +261,14 @@ impl Loop {
         (fd >= 0).then_some(fd)
     }
 
+    /// Time until a timer that [`Loop::pollable`] does not signal is due (zero if it already is).
+    /// A foreign loop waiting on the handle must not wait longer than this.
+    pub fn next_timer(&self) -> Option<Duration> {
+        // SAFETY: the loop is alive while `self.inner` is, and `Loop` is `!Send`: this is the loop thread.
+        let ns = unsafe { sys::oio_loop_next_timer_ns(self.raw()) };
+        u64::try_from(ns).ok().map(Duration::from_nanos)
+    }
+
     pub fn active(&self) -> u32 {
         // SAFETY: the loop is alive while `self.inner` is.
         unsafe { sys::oio_loop_active(self.raw()) }

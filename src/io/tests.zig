@@ -139,6 +139,28 @@ test "independent loops do not share state" {
     try std.testing.expect(t.result >= 0);
 }
 
+test "nextTimerNs reports the earliest loop timer" {
+    for (backends) |kind| {
+        const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @backingInt(kind) });
+        defer loop.destroy();
+        try std.testing.expectEqual(@as(i64, -1), loop.nextTimerNs());
+
+        var far: Probe = .{};
+        var near: Probe = .{};
+        try loop.timeout(&far.op, 60 * std.time.ns_per_s, onDone, null);
+        try loop.timeout(&near.op, 2 * std.time.ns_per_ms, onDone, null);
+        const next = loop.nextTimerNs();
+        // io_uring (auto on Linux): the kernel owns timeouts and its ring fd signals them.
+        const kernel_timers = builtin.os.tag == .linux and kind == .auto and next == -1;
+        if (!kernel_timers) try std.testing.expect(next >= 0 and next <= 2 * std.time.ns_per_ms);
+
+        try std.testing.expect(loop.cancel(&far.op));
+        _ = loop.run(.until_idle);
+        try std.testing.expectEqual(@as(i64, 0), near.result);
+        try std.testing.expectEqual(@as(i64, -1), loop.nextTimerNs());
+    }
+}
+
 test "many timeouts fire in deadline order and cancels remove only their own" {
     for (backends) |kind| {
         const loop = try io.Loop.create(std.testing.allocator, .{ .backend = @backingInt(kind) });

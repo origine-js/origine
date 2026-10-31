@@ -138,6 +138,7 @@ const Impl = if (supported) struct {
         .wake = wake,
         .post = post,
         .pollable = pollable,
+        .next_timer_ns = nextTimerNs,
         .caps = caps,
         .destroy = destroy,
     };
@@ -909,6 +910,11 @@ const Impl = if (supported) struct {
 
     fn pollable(ctx: *anyopaque) isize {
         return st(ctx).ring.fd;
+    }
+
+    /// The kernel owns timeouts, and their completions make the ring fd readable.
+    fn nextTimerNs(_: *anyopaque) i64 {
+        return -1;
     }
 
     fn destroy(ctx: *anyopaque, out: *backend.Drained) void {

@@ -958,6 +958,10 @@ fn pollable(ctx: *anyopaque) isize {
     return kqOf(ctx).kq;
 }
 
+fn nextTimerNs(ctx: *anyopaque) i64 {
+    return kqOf(ctx).timers.remainingNs(tm.nowNs());
+}
+
 fn destroy(ctx: *anyopaque, out: *Drained) void {
     const k = kqOf(ctx);
 
@@ -1023,6 +1027,7 @@ const vtable: backend.VTable = .{
     .wake = wake,
     .post = post,
     .pollable = pollable,
+    .next_timer_ns = nextTimerNs,
     .caps = base_caps,
     .destroy = destroy,
 };
@@ -1035,6 +1040,7 @@ const vtable_futex: backend.VTable = .{
     .wake = wake,
     .post = post,
     .pollable = pollable,
+    .next_timer_ns = nextTimerNs,
     .caps = withFutex(base_caps),
     .destroy = destroy,
 };

@@ -76,7 +76,8 @@ A loop is driven by exactly one thread, whoever calls `Loop::run`.
    (see [rt.md](rt.md)).
 2. **Foreign loop.** Register `Loop::pollable()` (an fd; `None` if the backend has none) in
    another event loop (tokio `AsyncFd`, the V8 platform loop, a GUI loop, `poll(2)`), and call
-   `run(Mode::NoWait)` when it becomes readable. Futures wake whatever `Waker` the foreign
+   `run(Mode::NoWait)` when it becomes readable or `Loop::next_timer()` elapses (timers do not
+   always make the fd readable). Futures wake whatever `Waker` the foreign
    executor supplies. `origine_api` does this with `poll(2)` over every runtime's fd plus a wake
    channel ([../../origine_api/docs/README.md](../../origine_api/docs/README.md)).
 3. **Host-embedded runtime.** With a `Runtime`, the host calls `Runtime::tick(mode)` instead of

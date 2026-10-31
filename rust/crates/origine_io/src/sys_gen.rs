@@ -149,6 +149,9 @@ unsafe extern "C" {
     pub fn oio_loop_pollable(loop_: *mut oio_loop) -> isize;
 }
 unsafe extern "C" {
+    pub fn oio_loop_next_timer_ns(loop_: *mut oio_loop) -> i64;
+}
+unsafe extern "C" {
     pub fn oio_loop_active(loop_: *mut oio_loop) -> u32;
 }
 unsafe extern "C" {
@@ -402,6 +405,7 @@ macro_rules! for_each_oio_fn {
         oio_loop_wake,
         oio_loop_post,
         oio_loop_pollable,
+        oio_loop_next_timer_ns,
         oio_loop_active,
         oio_loop_caps,
         oio_nop,

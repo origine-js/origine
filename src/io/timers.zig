@@ -47,6 +47,12 @@ pub const Timers = struct {
         return if (t.items.items.len == 0) null else t.items.items[0].deadline;
     }
 
+    /// Nanoseconds from `now` to the earliest deadline (0 if already due, saturating), or -1 with no timer.
+    pub fn remainingNs(t: *const Timers, now: u64) i64 {
+        const first = t.peek() orelse return -1;
+        return std.math.cast(i64, first -| now) orelse std.math.maxInt(i64);
+    }
+
     pub fn push(t: *Timers, allocator: std.mem.Allocator, op: *Op, deadline: u64) !void {
         try t.items.append(allocator, .{ .deadline = deadline, .op = op });
         const i = t.items.items.len - 1;

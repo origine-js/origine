@@ -130,9 +130,9 @@ flowchart TD
     ST -->|yes| DONE["return"]
     ST -->|no| W{"native work or platform work?"}
     W -->|none| STALL["error.Stalled"]
-    W -->|some| POLL["origine_api_poll(block)<br/>poll(2) over every runtime's pollable fd + wake fd<br/>tick ready runtimes, settle promises"]
+    W -->|some| POLL["origine_api_poll(block)<br/>poll(2) over every runtime's pollable fd + wake fd,<br/>bounded by the earliest loop timer<br/>tick ready runtimes, settle promises"]
     POLL --> PUMP["Runtime.pump (microtasks)"]
     PUMP --> PP
 ```
 
-Several runtimes (one `Loop` + `rt::Runtime` each, created with `api.io.create`) share the isolate thread; the host waits on all of them at once through their `pollable()` fds. V8 platform tasks wake the wait through `origine_api_wake`.
+Several runtimes (one `Loop` + `rt::Runtime` each, created with `api.io.create`) share the isolate thread; the host waits on all of them at once through their `pollable()` fds, for no longer than the earliest `next_timer()`. V8 platform tasks wake the wait through `origine_api_wake`.

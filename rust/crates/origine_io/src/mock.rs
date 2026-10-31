@@ -787,6 +787,14 @@ pub unsafe extern "C" fn oio_loop_pollable(_l: *mut oio_loop) -> isize {
 
 /// # Safety
 /// `l` must be a live loop, used from the loop thread.
+pub unsafe extern "C" fn oio_loop_next_timer_ns(l: *mut oio_loop) -> i64 {
+    // SAFETY: live loop per the contract.
+    let next = unsafe { lp(l) }.with_local(|l| l.pending.iter().filter_map(|e| e.deadline).min());
+    next.map_or(-1, |t| i64::try_from(t.saturating_duration_since(Instant::now()).as_nanos()).unwrap_or(i64::MAX))
+}
+
+/// # Safety
+/// `l` must be a live loop, used from the loop thread.
 pub unsafe extern "C" fn oio_loop_active(l: *mut oio_loop) -> u32 {
     // SAFETY: live loop per the contract.
     unsafe { lp(l) }.active()

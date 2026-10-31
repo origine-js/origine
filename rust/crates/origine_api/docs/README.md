@@ -119,8 +119,8 @@ promise; `hasWork` else `Stalled`; `origine_api_poll(isolate, block=1, timeout)`
   `Runtime.Session`): one `turn`: for every open runtime `rt.tick(Mode::NoWait)`, advance draining
   runtimes (`step_draining`), take the completion queue and settle each finished promise. If
   `block` and nothing settled, wait (`poll(2)` over the wake fd and every loop's `pollable()` fd,
-  at most `timeout_ns`, forever when negative; if any loop has no pollable fd the wait is capped
-  at 1 ms), then turn again. Returns the live item count (tasks + active ops + draining runtimes
+  at most `timeout_ns` and the earliest `Loop::next_timer`, forever when negative and no timer is
+  pending; if any loop has no pollable fd the wait is capped at 1 ms), then turn again. Returns the live item count (tasks + active ops + draining runtimes
   + queued completions), or `-1` on error/panic.
 * `origine_api_has_work(isolate) -> u8`: `live_items() > 0`.
 * `origine_api_wake(isolate)`: thread-safe; writes a byte to the wake channel so a blocking poll

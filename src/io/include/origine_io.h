@@ -113,6 +113,9 @@ void oio_loop_wake(oio_loop *loop);
 int oio_loop_post(oio_loop *loop, void (*fn)(void *), void *ud);
 /* OS handle to poll from a foreign event loop, then call oio_loop_run(NOWAIT); -1 if none. */
 intptr_t oio_loop_pollable(oio_loop *loop);
+/* Nanoseconds until a timer the pollable handle does not signal is due (0 if it already is), -1 if
+   there is none. A foreign loop bounds its wait on the handle by this. Loop thread only. */
+int64_t oio_loop_next_timer_ns(oio_loop *loop);
 uint32_t oio_loop_active(oio_loop *loop);
 uint64_t oio_loop_caps(oio_loop *loop);
 

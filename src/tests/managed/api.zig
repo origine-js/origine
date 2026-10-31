@@ -4189,6 +4189,31 @@ test "api: monotonic timers, deadlines, cancellation and close (auto and threade
     }
 }
 
+const timer_wake_source =
+    \\export async function main(api) {
+    \\  const io = api.io.create({ backend: '@BACKEND@' });
+    \\  // The fastest of several, so that a loaded machine does not fail the test.
+    \\  let fastest = Infinity;
+    \\  for (let i = 0; i < 5; i++) {
+    \\    const start = io.now();
+    \\    await io.sleep(1);
+    \\    fastest = Math.min(fastest, io.now() - start);
+    \\  }
+    \\  globalThis.report = { fastest };
+    \\  await io.close();
+    \\}
+;
+
+test "api: a timer wakes the host at its deadline, not at the platform poll cap (auto and threaded backends)" {
+    inline for (.{ "auto", "threaded" }) |backend| {
+        var fx: Fixture = undefined;
+        try setupBackend(&fx, timer_wake_source, backend, .{});
+        defer fx.deinit();
+        try fx.run();
+        try check(fx.scope, "report.fastest < 50");
+    }
+}
+
 test "json modules embed the file as an escaped string literal for JSON.parse" {
     const json = m.Api.json_module;
     const source = try json.wrap(t.allocator, "{\"k\": \"a\\nb\"}");

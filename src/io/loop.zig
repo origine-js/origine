@@ -106,6 +106,12 @@ pub const Loop = struct {
         return loop.backend.vtable.pollable(loop.backend.ctx);
     }
 
+    /// Nanoseconds until a timer that `pollable` does not signal is due (0 if it already is), or
+    /// -1 when there is none. A foreign loop waiting on `pollable` bounds its wait by this.
+    pub fn nextTimerNs(loop: *Loop) i64 {
+        return loop.backend.vtable.next_timer_ns(loop.backend.ctx);
+    }
+
     pub fn caps(loop: *Loop) backend_mod.Caps {
         return loop.backend.vtable.caps;
     }

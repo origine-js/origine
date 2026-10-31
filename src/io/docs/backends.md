@@ -52,7 +52,7 @@ Wait primitive is kqueue; blocking syscalls run on the libdispatch global queue 
 - **fallocate.** See [ops.md](ops.md#fallocflags).
 - **sendfile.** `sendfile(2)` when `out` is a socket; else a pread/write loop.
 - **destroy.** Drops timers, drops socket waits, flags queued GCD ops as cancelled (they complete `-ECANCELED` when GCD gets to them), then waits on a condvar for ops that are already inside a syscall. Those cannot be interrupted, so destroy blocks until they return.
-- **pollable.** The kqueue fd itself (can be added to another kqueue or `poll`ed). Ops finished inline on the loop thread (nop, futex_wake, immediate socket results, submission errors) sit on an internal ready list that does not make the kqueue fd readable; they are collected by the next `poll`, so call `run(NOWAIT)` after submitting.
+- **pollable.** The kqueue fd itself (can be added to another kqueue or `poll`ed). Timers live in a user-space heap, so their expiry does not make it readable (`next_timer_ns`). Ops finished inline on the loop thread (nop, futex_wake, immediate socket results, submission errors) sit on an internal ready list that does not make the kqueue fd readable; they are collected by the next `poll`, so call `run(NOWAIT)` after submitting.
 - **Event batch.** `poll` fetches up to 256 kevents per call (was 64).
 - `Options.entries` is ignored. Per-fd ordering of streaming (`offset == -1`) ops is not provided.
 
@@ -99,6 +99,7 @@ pub const VTable = struct {
     wake:     *const fn (ctx: *anyopaque) void,
     post:     *const fn (ctx: *anyopaque, func: PostFn, ud: ?*anyopaque) anyerror!void,
     pollable: *const fn (ctx: *anyopaque) isize,
+    next_timer_ns: *const fn (ctx: *anyopaque) i64,
     caps: u64,
     destroy:  *const fn (ctx: *anyopaque, out: *Drained) void,
 };
@@ -106,14 +107,15 @@ pub const VTable = struct {
 
 Contract:
 
-- **Threads.** `submit`, `cancel`, `poll`, `destroy`, `pollable` run on the loop thread. `wake` and `post` run on any thread and must be safe against a concurrent `poll`.
+- **Threads.** `submit`, `cancel`, `poll`, `destroy`, `pollable`, `next_timer_ns` run on the loop thread. `wake` and `post` run on any thread and must be safe against a concurrent `poll`.
 - **submit.** Takes ownership of the op until it is reported through `poll`. Return an error only if the op was *not* accepted (the loop then does not count it and the callback never runs); otherwise always eventually report it. Failures that are properties of the op (bad fd, missing capability) should be reported as a completion with a negative result, not as a submit error. `Loop.submit` has already set `op.result = 0`.
 - **Result convention.** Write `op.result` (`>= 0` or `-errno`) before pushing the op on `out.done` (FIFO; `Drained.done` is an `op_mod.Queue`, intrusive through `priv[0]`). Do not use `priv[0]` for anything else while the op is not owned by a queue you control; the other `priv` slots are yours. Fill `op.aux`/`buf` outputs (stat, accept size, readdir cookie) before reporting.
 - **Never call `op.cb`.** Only report. The loop calls callbacks and decrements `active` per op taken from `out.done`.
 - **poll(block, out).** Collect finished ops into `out.done` and posted functions with `out.pushPost`. If `block`, sleep until a completion, `wake`, `post` or a timer deadline; if nothing was ready and not `block`, return immediately. A `wake` with nothing else must make a blocking `poll` return (the loop returns control to the caller for `run(.once)`).
 - **cancel.** Return true if the op will still be reported (with `-ECANCELED` or its real result); false if it is unknown or already reported. Never complete it synchronously inside `cancel` without pushing it on a later `poll`'s `Drained`.
 - **post nodes.** `PostNode` must be allocated by the backend with `std.heap.c_allocator`. The loop copies `func`/`ud`, destroys the node with `c_allocator`, then calls `func(ud)`. Posts pending at `destroy` must be moved into `out` so they still run. Preserve FIFO order.
-- **pollable.** Return an OS handle (fd) that becomes readable when `poll(false)` would make progress, or `-1` and leave the `pollable` cap unset.
+- **pollable.** Return an OS handle (fd) that becomes readable when `poll(false)` would make progress, or `-1` and leave the `pollable` cap unset. Timer expiry is the one exception, covered by `next_timer_ns`.
+- **next_timer_ns.** Nanoseconds until the earliest timer the handle does not signal is due (`0` if it already is), or `-1` when there is none. Backends with a user-space heap return `Timers.remainingNs`; a backend whose handle signals timeouts returns `-1`.
 - **destroy(out).** Stop workers, make every outstanding op complete with `-ECANCELED` (or its real result if it already finished) into `out.done`, move leftover posts into `out`, free all resources including `ctx`. After it returns the loop dispatches `out` and frees itself.
 - **caps.** Report only what the backend truly supports; `Caps` bits are public API (`oio_loop_caps`). Per-instance capabilities (kernel probes) can be set by copying a base vtable into the state and setting the field, as `uring.zig` does (`vt.caps.futex = probe`).
 - **Tests.** Drive the vtable directly in the backend file (see [testing.md](testing.md)) and add the backend to the `backends` list in `tests.zig`.

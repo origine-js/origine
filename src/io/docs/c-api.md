@@ -30,7 +30,7 @@ All functions that return `int` return `0` or a value `>= 0` on success and `-er
 | `oio_loop_run`, every submit function (`oio_nop`, `oio_open`, ...), `oio_cancel` | the loop thread only; never concurrently with each other |
 | `oio_loop_destroy` | the loop thread, with no other call in progress or to follow |
 | `oio_loop_wake`, `oio_loop_post` | **any thread**, while the loop is alive |
-| `oio_loop_active` | loop thread only (a plain counter, not atomic) |
+| `oio_loop_active`, `oio_loop_next_timer_ns` | loop thread only |
 | `oio_loop_pollable`, `oio_loop_caps` | constants after creation; in practice readable from any thread |
 
 `oio_loop_post(loop, void (*fn)(void *), void *ud)` queues `fn(ud)` to run on the loop thread during a later `oio_loop_run` (FIFO), and wakes a blocked run. Posts still pending at destroy are run by destroy. `oio_loop_wake` makes a blocked `ONCE` run return even if nothing completed (`wake` calls may coalesce).
@@ -82,10 +82,10 @@ What the handle is, per backend:
 | backend | handle | becomes readable when |
 |---|---|---|
 | io_uring | the ring fd | the completion queue is non-empty (including the wake eventfd read and readdir worker completions) |
-| kqueue+GCD | the kqueue fd | a kevent is pending: timer fired, socket ready, GCD worker finished, wake or post. Not for ops finished inline on the loop thread |
+| kqueue+GCD | the kqueue fd | a kevent is pending: socket ready, GCD worker finished, wake or post. Not for ops finished inline on the loop thread. **Not on timer expiry** |
 | threaded | read end of a self-pipe | a worker finished, `wake`, `post`, or an inline nop is pending; drained by `poll`. **Not on timer expiry** |
 
-Use your own timer for outstanding `timeout` ops when the handle may not signal them (threaded). The Zig host does this kind of integration with `poll(2)` over every runtime's pollable fd (see [event-loop.md](event-loop.md), section 6).
+A handle that does not signal timer expiry keeps its timers in user space, so bound every wait on it by `int64_t oio_loop_next_timer_ns(loop)`: the nanoseconds until the earliest such timer is due, `0` if it already is, `-1` if there is none (always on io_uring, whose ring fd signals timeouts). It takes no syscall other than reading the clock; call it after submitting, right before waiting, and call `oio_loop_run(loop, OIO_RUN_NOWAIT)` when the wait ends. The Rust host does this kind of integration with `poll(2)` over every runtime's pollable fd (see [event-loop.md](event-loop.md), section 6).
 
 ## ABI stability
 

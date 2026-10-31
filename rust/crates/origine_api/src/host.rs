@@ -351,20 +351,24 @@ impl HostState {
             || self.runtimes.values().any(|entry| entry.rt.as_ref().is_some_and(Runtime::has_ready))
     }
 
-    /// Blocks until a runtime's loop, the wake channel or the timeout (`None` = forever) fires.
+    /// Blocks until a runtime's loop, the wake channel, a runtime's next timer or the timeout
+    /// (`None` = forever) fires.
     pub(crate) fn wait(&mut self, timeout: Option<Duration>) {
         if self.any_ready() {
             return;
         }
         let mut fds = vec![self.wake.fd()];
         let mut unpollable = false;
+        let mut timeout = timeout;
         for entry in self.runtimes.values() {
             match entry.lp.pollable() {
                 Some(fd) => fds.push(fd as i32),
                 None => unpollable = true,
             }
+            if let Some(next) = entry.lp.next_timer() {
+                timeout = Some(timeout.map_or(next, |t| t.min(next)));
+            }
         }
-        let mut timeout = timeout;
         if unpollable {
             timeout = Some(timeout.map_or(Duration::from_millis(1), |t| t.min(Duration::from_millis(1))));
         }

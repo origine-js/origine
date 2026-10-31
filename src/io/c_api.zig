@@ -61,6 +61,10 @@ pub export fn oio_loop_pollable(loop: *Loop) isize {
     return loop.pollable();
 }
 
+pub export fn oio_loop_next_timer_ns(loop: *Loop) i64 {
+    return loop.nextTimerNs();
+}
+
 pub export fn oio_loop_active(loop: *Loop) u32 {
     return loop.active;
 }

@@ -6,7 +6,7 @@ Source: `src/lib.rs` (futures, `Loop`), `src/sys.rs` (FFI), `src/fs/at.rs` (dirf
 
 | Type | Threads | Notes |
 |---|---|---|
-| `Loop` | `!Send`, `Clone` (an `Rc<Inner>`) | owns one `oio_loop`. Submitting ops, polling their futures, `run`, `active`, `caps`, `pollable` and dropping the last clone all happen on the driving thread. |
+| `Loop` | `!Send`, `Clone` (an `Rc<Inner>`) | owns one `oio_loop`. Submitting ops, polling their futures, `run`, `active`, `caps`, `pollable`, `next_timer` and dropping the last clone all happen on the driving thread. |
 | `LoopHandle` (`Loop::handle()`) | `Send + Sync`, `Clone` | only `wake()` and `post(f)`. Both are no-ops/errors after the loop is gone. |
 | `OpFuture<T>` | `!Send` (holds an `Rc` to the loop) | |
 

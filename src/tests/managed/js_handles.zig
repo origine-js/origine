@@ -23,28 +23,75 @@ fn run(source: []const u8) !void {
     try check(scope, "handleChecks");
 }
 
-test "JS handles: private state rejects forged constructors, prototypes, proxies and getters" {
+test "JS handles: a plain grant takes any file handle and leaves the ids to the natives" {
     try run(
         \\import { Dir, File, IoError } from 'origine:@std/io';
         \\export function main(api) {
-        \\  const fs = api.fs.requestSync({ access: 'rw' });
+        \\  const fs = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const file = IoError.check(fs, fs.dirOpenFile(Dir.cwd(), 'test', 'w'));
-        \\  let constructorRejected = false, getterReads = 0, borrowedRejected = false;
-        \\  try { new file.constructor(file.id); } catch (e) { constructorRejected = e instanceof TypeError; }
-        \\  const forged = { get fs() { getterReads++; return file.fs; }, get id() { getterReads++; return file.id; }, kind: 'file' };
-        \\  fs.fileStat(forged);
-        \\  const forgedRejected = fs.errno[0] === IoError.InvalidInput;
-        \\  const stateHidden = file.constructor.unwrap === undefined && Object.getPrototypeOf(file.constructor).unwrap === undefined;
-        \\  const fake = Object.create(Object.getPrototypeOf(file));
-        \\  fs.fileStat(fake);
-        \\  const prototypeRejected = fs.errno[0] === IoError.InvalidInput && !File.is(fake);
-        \\  const proxy = new Proxy(file, {});
-        \\  fs.fileStat(proxy);
-        \\  const proxyRejected = fs.errno[0] === IoError.InvalidInput && !File.is(proxy);
-        \\  const stdFile = File.at(file.fs, file.id);
-        \\  try { stdFile.readStreaming.call(fake, fs, new Uint8Array(1)); } catch (e) { borrowedRejected = e instanceof IoError; }
-        \\  globalThis.handleChecks = constructorRejected && stateHidden && getterReads === 0 && forgedRejected && prototypeRejected && proxyRejected && borrowedRejected && Object.isFrozen(file);
+        \\  let getterReads = 0;
+        \\  const literal = { get fs() { getterReads++; return file.fs; }, get id() { getterReads++; return file.id; }, kind: 'file' };
+        \\  fs.fileStat(literal);
+        \\  const literalRejected = fs.errno[0] === IoError.InvalidInput;
+        \\  const empty = Object.create(Object.getPrototypeOf(file));
+        \\  fs.fileStat(empty);
+        \\  const emptyRejected = fs.errno[0] !== 0;
+        \\  // A handle is a value like a file descriptor: rebuilding one from its fields names the same file.
+        \\  const rebuilt = File.at(file.fs, file.id);
+        \\  fs.fileStat(rebuilt);
+        \\  const rebuiltAccepted = fs.errno[0] === 0 && File.is(rebuilt) && !File.is(literal);
+        \\  globalThis.handleChecks = literalRejected && getterReads === 0 && emptyRejected && rebuiltAccepted && Object.isFrozen(file);
         \\  IoError.check(fs, fs.fileClose(file));
+        \\}
+    );
+}
+
+test "JS handles: a hardened grant takes only the handles it issued" {
+    try run(
+        \\import { Dir, File, IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const hard = api.fs.requestSync({ handle: 'hardened', access: 'rw' });
+        \\  const plain = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const mine = IoError.check(hard, hard.dirOpenFile(Dir.cwd(), 'test', 'w'));
+        \\  const theirs = IoError.check(plain, plain.dirOpenFile(Dir.cwd(), 'other', 'w'));
+        \\  const refused = handle => { hard.fileStat(handle); return hard.errno[0] === IoError.InvalidInput; };
+        \\  hard.fileStat(mine);
+        \\  const issued = hard.errno[0] === 0;
+        \\  // Rebuilt from its fields, issued by another grant, or hand-made: none carries this grant's issuer.
+        \\  const rebuilt = refused(File.at(mine.fs, mine.id));
+        \\  const foreign = refused(theirs);
+        \\  const literal = refused({ kind: 'file', fs: mine.fs, id: mine.id });
+        \\  // The std methods rewrap a result of the grant and keep its issuer.
+        \\  const wrapped = IoError.check(hard, Dir.cwd().openFile(hard, 'test'));
+        \\  wrapped.stat(hard);
+        \\  const rewrapped = File.is(wrapped);
+        \\  // The root sentinel names no resource and works on a hardened grant.
+        \\  const entries = hard.dirRead(Dir.cwd());
+        \\  const sentinel = hard.errno[0] === 0 && Array.isArray(entries);
+        \\  const io = api.io.create({ backend: 'threaded' });
+        \\  const remote = await api.fs.requestAsync({ handle: 'hardened', io, access: 'rw' });
+        \\  const opened = await remote.dirOpenFile(Dir.cwd(), 'async', 'w');
+        \\  await remote.fileStat(opened);
+        \\  const asyncRefused = await remote.fileStat(File.at(opened.fs, opened.id)).then(() => false, e => e instanceof IoError && e.errno === IoError.InvalidInput);
+        \\  await remote.fileClose(opened);
+        \\  await io.close();
+        \\  globalThis.handleChecks = issued && rebuilt && foreign && literal && rewrapped && sentinel && asyncRefused;
+        \\}
+    );
+}
+
+test "JS handles: the handle option of a request is required" {
+    try run(
+        \\import { IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const code = f => { try { f(); return 0; } catch (e) { return e.errno; } };
+        \\  const io = api.io.create({});
+        \\  const missing = code(() => api.fs.requestSync({ access: 'r' }));
+        \\  const unknown = code(() => api.fs.requestSync({ access: 'r', handle: 'strict' }));
+        \\  const asyncMissing = await api.fs.requestAsync({ io, access: 'r' }).then(() => 0, e => e.errno);
+        \\  const ok = code(() => api.fs.requestSync({ access: 'r', handle: 'plain' }));
+        \\  await io.close();
+        \\  globalThis.handleChecks = missing === IoError.InvalidInput && unknown === IoError.InvalidInput && asyncMissing === IoError.InvalidInput && ok === 0;
         \\}
     );
 }
@@ -53,7 +100,7 @@ test "JS handles: closed references cannot name resources opened later in either
     try run(
         \\import { Dir, File, IoError } from 'origine:@std/io';
         \\export async function main(api) {
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const first = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'first', 'w'));
         \\  const alias = File.at(first.fs, first.id);
         \\  IoError.check(sync, sync.fileClose(first));
@@ -62,7 +109,7 @@ test "JS handles: closed references cannot name resources opened later in either
         \\  const syncStale = sync.errno[0] !== 0 && first.id !== second.id;
         \\  IoError.check(sync, sync.fileClose(second));
         \\  const io = api.io.create({ backend: 'threaded' });
-        \\  const asyncFs = await api.fs.requestAsync({ io, access: 'rw' });
+        \\  const asyncFs = await api.fs.requestAsync({ handle: 'plain', io, access: 'rw' });
         \\  const opened = await asyncFs.dirOpenFile(Dir.cwd(), 'async-first', 'w');
         \\  const asyncAlias = File.at(opened.fs, opened.id);
         \\  await asyncFs.fileClose(opened);

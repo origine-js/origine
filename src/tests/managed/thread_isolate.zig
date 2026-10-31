@@ -55,7 +55,7 @@ test "thread isolate: runs init and main on its own thread with copied args and 
     try fx.setup(
         \\import { Dir, IoError } from 'origine:@std/io';
         \\export function main(api) {
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'out.txt', 'w'));
         \\  const text = api.host.env.args().join(',') + '|' + api.host.env.get('HOME');
         \\  sync.fileWriteAll(f, Uint8Array.from(text, c => c.charCodeAt(0)));

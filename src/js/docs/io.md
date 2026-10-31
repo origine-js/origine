@@ -56,7 +56,7 @@ file.close(io);
 ## `Dir`
 
 `Dir.cwd()` is the sentinel each fs resolves to its own root. `Dir.at(fs, id)` builds a
-descriptor, `Dir.is(value)` tests one. Descriptors are JS `DirRef` instances with read-only kind, fs, and id fields.
+descriptor, `Dir.is(value)` tests one. Descriptors are frozen `DirHandle` instances with read-only kind, fs, and id fields; a grant requested with `handle: 'hardened'` takes only the ones it issued (and `Dir.cwd()`).
 
 | Method (after `io`) | Zig counterpart / behavior |
 | --- | --- |
@@ -75,7 +75,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are JS `DirRef` instances wit
 
 ## `File`
 
-`File.at(fs, id)`, `File.is(value)`; JS `FileRef` instances with read-only kind, fs, and id fields.
+`File.at(fs, id)`, `File.is(value)`; frozen `FileHandle` instances with read-only kind, fs, and id fields.
 
 | Method (after `io`) | Behavior |
 | --- | --- |

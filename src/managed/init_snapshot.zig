@@ -357,7 +357,7 @@ fn evaluate(rt: *Runtime, creator: *v8.SnapshotCreator, alloc: std.mem.Allocator
         defer ctx.exit();
         var timing: ?i64 = null;
         _ = try @import("bootstrap.zig").prepare(isolate, ctx, &timing);
-        try api_glue.prepare(isolate, ctx);
+        _ = try api_glue.ensure(isolate, ctx, .{ .creator = creator });
         creator.setDefaultContext(ctx);
     }
     const scope = try rt.createScope(options.scope);
@@ -365,7 +365,7 @@ fn evaluate(rt: *Runtime, creator: *v8.SnapshotCreator, alloc: std.mem.Allocator
         var session: Scope.Session = undefined;
         session.init(scope);
         defer session.deinit();
-        try api_glue.prepare(isolate, session.ctx);
+        _ = try api_glue.ensure(isolate, session.ctx, .{ .scope = scope, .creator = creator });
     }
     if (options.hooks) |hooks| try hooks.attach(hooks.data, scope);
     defer if (options.hooks) |hooks| hooks.detach(hooks.data, scope);

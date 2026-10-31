@@ -156,6 +156,7 @@ fn exposeApi(scope: *m.Scope, api: v8.Global.Of(v8.Value)) !void {
 }
 
 test "api: ES module glue imports once and retains separate module code caches" {
+    const glue_modules: usize = m.Api.glue.module_count;
     ensureV8();
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -179,7 +180,7 @@ test "api: ES module glue imports once and retains separate module code caches" 
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );
-        try t.expectEqual(@as(usize, 12), probe.loads.count());
+        try t.expectEqual(glue_modules, probe.loads.count());
         try t.expect(probe.loads.contains("origine:glue.esm.index"));
         try t.expect(host.rust_isolate == null);
         try check(scope, "api.host.env === api.host.env && Object.isFrozen(api.host.env.args) && api.host.env.args().length === 0");
@@ -187,7 +188,7 @@ test "api: ES module glue imports once and retains separate module code caches" 
         try check(scope, "api.fs === api.fs && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.fs)");
         try check(scope,
             \\(() => {
-            \\  const sync = api.fs.requestSync({ access: 'r' });
+            \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'r' });
             \\  sync.fileStat({});
             \\  const code = sync.errno[0];
             \\  return code !== 0 && api.context === api.context && Object.isFrozen(api.context.create) && sync.errno[0] === code;
@@ -197,15 +198,15 @@ test "api: ES module glue imports once and retains separate module code caches" 
         try check(scope, "api.io === api.io && Object.isFrozen(api.io.create)");
         try t.expect(host.rust_isolate != null);
         try check(scope, "api.net === api.net && Object.isFrozen(api.net.Socket.prototype) && Object.isFrozen(api.net.PullSocket.prototype)");
-        try t.expectEqual(@as(usize, 12), probe.loads.count());
+        try t.expectEqual(glue_modules, probe.loads.count());
         var counts = probe.loads.valueIterator();
         while (counts.next()) |count| try t.expectEqual(@as(usize, 1), count.*);
-        try t.expectEqual(@as(usize, if (run == 2) 12 else 0), probe.rejects);
+        try t.expectEqual(@as(usize, if (run == 2) glue_modules else 0), probe.rejects);
         host.flushGlueCache(scope);
-        try t.expectEqual(@as(usize, if (run == 0 or run == 2) 12 else 0), probe.stores);
-        try t.expectEqual(@as(usize, if (run == 0) 0 else 12), probe.hits);
+        try t.expectEqual(@as(usize, if (run == 0 or run == 2) glue_modules else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0) 0 else glue_modules), probe.hits);
         host.flushGlueCache(scope);
-        try t.expectEqual(@as(usize, if (run == 0 or run == 2) 12 else 0), probe.stores);
+        try t.expectEqual(@as(usize, if (run == 0 or run == 2) glue_modules else 0), probe.stores);
     }
 }
 
@@ -259,8 +260,8 @@ test "api: snapshot restores immutable getters and network classes without compi
         defer session.deinit();
         try t.expect(!first_net.deref().strictEquals(second_net.deref()));
     }
-    try check(a, "globalThis.sync = api.fs.requestSync({ access: 'r' }); sync.fileStat({}); sync.errno[0] !== 0");
-    try check(b, "api.fs.requestSync({ access: 'r' }).errno[0] === 0");
+    try check(a, "globalThis.sync = api.fs.requestSync({ handle: 'plain', access: 'r' }); sync.fileStat({}); sync.errno[0] !== 0");
+    try check(b, "api.fs.requestSync({ handle: 'plain', access: 'r' }).errno[0] === 0");
     try check(a, "sync.errno[0] !== 0");
     const restricted_host = try m.Api.Host.create(t.allocator, .{});
     defer restricted_host.destroy();
@@ -269,7 +270,7 @@ test "api: snapshot restores immutable getters and network classes without compi
     defer restricted_api.deinit();
     try exposeApi(restricted, restricted_api);
     try check(restricted, "Object.keys(api).join(',') === 'fs,host,graph,context' && api.io === undefined && api.net === undefined && Object.isFrozen(api)");
-    try check(restricted, "(() => { try { api.fs.requestSync({ access: 'r' }); return false; } catch (e) { return e.name === 'PermissionDenied'; } })()");
+    try check(restricted, "(() => { try { api.fs.requestSync({ handle: 'plain', access: 'r' }); return false; } catch (e) { return e.name === 'PermissionDenied'; } })()");
     try t.expect(restricted_host.rust_isolate == null);
     host.flushGlueCache(a);
     try t.expectEqual(@as(usize, 0), probe.loads.count());
@@ -345,9 +346,9 @@ test "api: main receives env and an fs with sync and async variants" {
         \\  const out = globalThis.report = {};
         \\  out.args = api.host.env.args().join(',');
         \\  out.home = api.host.env.get('HOME');
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const io = api.io.create({});
-        \\  const async = await api.fs.requestAsync({ io, access: 'rw' });
+        \\  const async = await api.fs.requestAsync({ handle: 'plain', io, access: 'rw' });
         \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'a.txt', 'w'));
         \\  sync.fileWriteAll(f, Uint8Array.from([104, 105]));
         \\  sync.fileClose(f);
@@ -388,8 +389,8 @@ test "api: errno is one native-backed array and open modes are python-style" {
         \\import { Dir } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const a = api.fs.requestSync({ access: 'rw' });
-        \\  const b = api.fs.requestSync({ access: 'rw' });
+        \\  const a = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const b = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  out.shared = a.errno === b.errno && a.errno instanceof Uint32Array && a.errno.length === 1;
         \\  try { structuredClone(a.errno.buffer, { transfer: [a.errno.buffer] }); } catch { out.pinned = true; }
         \\  const s = a, cwd = Dir.cwd();
@@ -466,8 +467,8 @@ test "api: without a host grant fs is denied" {
         \\import { IoError, HostError } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const io = api.io.create({});
-        \\  try { api.fs.requestSync({ access: 'r' }); } catch (e) { globalThis.denied = IoError.is(e, IoError.PermissionDenied); }
-        \\  await api.fs.requestAsync({ io, access: 'r' }).catch(e => { globalThis.asyncDenied = IoError.is(e, IoError.PermissionDenied); });
+        \\  try { api.fs.requestSync({ handle: 'plain', access: 'r' }); } catch (e) { globalThis.denied = IoError.is(e, IoError.PermissionDenied); }
+        \\  await api.fs.requestAsync({ handle: 'plain', io, access: 'r' }).catch(e => { globalThis.asyncDenied = IoError.is(e, IoError.PermissionDenied); });
         \\  await io.close();
         \\}
     , false, &.{});
@@ -676,7 +677,7 @@ test "api: Zig-style Dir and File methods over sync and async io" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const rt = api.io.create({});
-        \\  const io = api.fs.requestSync({ access: 'rw' }), cwd = Dir.cwd();
+        \\  const io = api.fs.requestSync({ handle: 'plain', access: 'rw' }), cwd = Dir.cwd();
         \\  cwd.writeFile(io, { sub_path: 'w.txt', data: bytes('hello world') });
         \\  out.read = text(cwd.readFile(io, 'w.txt'));
         \\  out.limited = text(cwd.readFile(io, 'w.txt', Limit.limited(5)));
@@ -703,17 +704,17 @@ test "api: Zig-style Dir and File methods over sync and async io" {
         \\  try { cwd.deleteTree(io, '.'); } catch (e) { out.rootSafe = IoError.is(e, IoError.InvalidInput); }
         \\  cwd.deleteTree(io, 'a');
         \\  try { cwd.statFile(io, 'a'); } catch (e) { out.gone = IoError.is(e, IoError.NotFound); }
-        \\  const aio = await api.fs.requestAsync({ io: rt, access: 'rw' });
+        \\  const aio = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
         \\  await cwd.writeFile(aio, { sub_path: 'async.txt', data: bytes('async!') });
         \\  out.asyncRead = text(await cwd.readFile(aio, 'async.txt'));
         \\  const af = await cwd.openFile(aio, 'async.txt');
         \\  out.asyncLen = await af.length(aio);
         \\  await af.close(aio);
         \\  await cwd.openFile(aio, 'ghost').catch(e => { out.asyncGhost = IoError.is(e, IoError.NotFound); });
-        \\  const ro = api.fs.requestSync({ access: 'r' });
+        \\  const ro = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  try { Dir.cwd().deleteFile(ro, 'async.txt'); } catch (e) { out.roDelete = IoError.is(e, IoError.PermissionDenied); }
         \\  try { Dir.cwd().rename(ro, 'async.txt', Dir.cwd(), 'z'); } catch (e) { out.roRename = IoError.is(e, IoError.PermissionDenied); }
-        \\  const aro = await api.fs.requestAsync({ io: rt, access: 'r' });
+        \\  const aro = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'r' });
         \\  await Dir.cwd().deleteFile(aro, 'async.txt').catch(e => { out.asyncRoDelete = IoError.is(e, IoError.PermissionDenied); });
         \\  await Dir.cwd().rename(aro, 'async.txt', Dir.cwd(), 'z').catch(e => { out.asyncRoRename = IoError.is(e, IoError.PermissionDenied); });
         \\  await rt.close();
@@ -800,7 +801,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\    resolver,
         \\    hooks: [origineProvider({ std: { include: ['text'] } }), json(), fsProvider({ read: 'copy' })],
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({}) }),
-        \\    cache: ImportCache.native({ retain: 'used', entries: 100 }),
+        \\    cache: ImportCache.native({ retain: 'used' }),
         \\  });
         \\  out.native = native.native === true && native.plan.every(e => e.kind === 'native') && native.plan.length === 3 + 3 + 1 + 1 + 1
         \\    && native.plan[0].stage === 'resolver' && native.plan[0].name === 'relative' && native.plan[3].name === 'origine' && Object.isFrozen(native.plan);
@@ -850,8 +851,8 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  const c = await hook({ id: 'c', attributes: {} });
         \\  out.fromLoader = a.kind === 'provide' && a.source.text === 'export default 1' && b.source.text === 'export default json' && c.kind === 'reject' && ImportError.is(c.error, ImportError.InvalidData) && invalid(() => fromLoader(1));
         \\  // caches
-        \\  out.caches = ImportCache.native({ retain: 'all' }).retain === 'all' && ImportCache.native({ retain: 'used', entries: 0 }).entries === 0 && !('entries' in ImportCache.native({ retain: 'all' }))
-        \\    && invalid(() => ImportCache.native({})) && invalid(() => ImportCache.native({ retain: 'some' })) && invalid(() => ImportCache.native({ retain: 'all', entries: -1 })) && invalid(() => ImportCache.native({ retain: 'all', entries: 1.5 }))
+        \\  out.caches = ImportCache.native({ retain: 'all' }).retain === 'all' && !('entries' in ImportCache.native({ retain: 'all' }))
+        \\    && invalid(() => ImportCache.native({})) && invalid(() => ImportCache.native({ retain: 'some' })) && invalid(() => ImportCache.native({ retain: 'all', entries: 10 })) && invalid(() => ImportCache.native({ retain: 'used', entries: 0 }))
         \\    && ResolveCache.native({ entries: 8 }).entries === 8 && ResolveCache.native().host === 'resolveCache'
         \\    && CodeCache.memory({ bytes: 1024 }).bytes === 1024 && CodeCache.dir(Object.freeze({ kind: 'async' })).fs.kind === 'async' && invalid(() => CodeCache.dir(null)) && invalid(() => CodeCache.memory({ bytes: -5 }));
         \\  const custom = CodeCache.custom({ load: () => undefined, store: () => {} });
@@ -879,7 +880,7 @@ test "graph: a native handler reads, links and evaluates modules without enterin
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }) });
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
         \\  out.native = handler.native;
         \\  const recipe = ModuleRecipe({ source: ModuleSource.file('main.js'), import: handler });
@@ -1064,7 +1065,7 @@ test "graph: a handler with functions in it runs its host elements natively and 
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }) });
         \\  const calls = [];
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(relative()).layer(({ specifier }) => { calls.push('layer:' + specifier); return specifier === 'virtual' ? { id: 'virtual' } : undefined; }),
@@ -1274,7 +1275,7 @@ test "graph: a file of the graph never serves an origine: id, not even as json" 
         \\import { fsProvider, json } from 'origine:@std/graph/providers';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
-        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }) });
+        \\  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }) });
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(origine()).layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const run = (name, text) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(graph).evaluate(ctx).then(() => 'ok', e => e.message);
@@ -1300,9 +1301,9 @@ test "graph: only a grant that api.fs made can be the authority of a graph" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create({});
-        \\  const real = api.fs.requestSync({ access: 'r' });
-        \\  const rw = api.fs.requestSync({ access: 'rw' });
-        \\  const remote = await api.fs.requestAsync({ io, access: 'r' });
+        \\  const real = api.fs.requestSync({ handle: 'plain', access: 'r' });
+        \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const remote = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
         \\  const name = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
         \\  // Every way a script can copy a grant: the copy has all of its properties and is not a grant, because
         \\  // the host's secret on the real object cannot be read, copied, cloned, spread, proxied or inherited.
@@ -1461,10 +1462,10 @@ test "graph: a source larger than the graph's limit fails the import, never cut 
         \\    ctx.close();
         \\    return answers;
         \\  };
-        \\  const sync = api.graph.derive({ fs: api.fs.requestSync({ access: 'r' }), sourceBytes: 40 });
+        \\  const sync = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', access: 'r' }), sourceBytes: 40 });
         \\  out.syncLimit = sync.sourceBytes;
         \\  out.sync = await tryImport(sync);
-        \\  out.async = await tryImport(api.graph.derive({ fs: await api.fs.requestAsync({ io, access: 'r' }), sourceBytes: 40 }));
+        \\  out.async = await tryImport(api.graph.derive({ fs: await api.fs.requestAsync({ handle: 'plain', io, access: 'r' }), sourceBytes: 40 }));
         \\  out.bad = [0, 1.5, -1, '9'].map(n => { try { api.graph.derive({ sourceBytes: n }); return 'ok'; } catch (e) { return e.name; } }).join(',');
         \\  await io.close();
         \\}
@@ -1490,7 +1491,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\async function body(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create({});
-        \\  const ro = await api.fs.requestAsync({ io, access: 'r' });
+        \\  const ro = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
         \\  const graph = api.graph.derive({ fs: ro });
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
         \\  out.native = handler.native;
@@ -1504,7 +1505,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  const run = async (g, c, text, name) => ModuleRecipe({ source: ModuleSource.text(text), import: handler, name }).create(g).evaluate(c).then(() => 'ok', e => e.message);
         \\  out.missing = await run(graph, ctx, "import './nope.js'", 'm1');
         \\  out.codecache = await run(graph, ctx, "import './__codecache__/x.js'", 'm2');
-        \\  const wo = await api.fs.requestAsync({ io, access: 'w' });
+        \\  const wo = await api.fs.requestAsync({ handle: 'plain', io, access: 'w' });
         \\  const writeOnly = api.graph.derive({ fs: wo });
         \\  // Its own handler: one that shared the cache of `handler` would take dep.js from `ctx`, which read it with more authority.
         \\  const narrower = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json(), fsProvider({ read: 'copy' })] });
@@ -1680,7 +1681,7 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const fs = api.fs.requestSync({ access: 'r' });
+        \\  const fs = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  const graph = api.graph.derive({ fs });
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(importMap({ imports: { dep: './dep.js' } })).layer(relative()),
@@ -1727,7 +1728,7 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const ro = api.fs.requestSync({ access: 'r' });
+        \\  const ro = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  // A handler per context: contexts of one handler share its modules and would compile nothing the second time.
         \\  const make = () => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
         \\  const run = async (graph, count) => {
@@ -1746,7 +1747,7 @@ test "graph: a second reference of one recipe reuses the code cache; dir and cus
         \\  const custom = CodeCache.custom({ load: () => undefined, store: (key, bytes) => { stored.push(key.id + ':' + (bytes instanceof Uint8Array) + ':' + (bytes.length > 0)); } });
         \\  out.custom = (await run(api.graph.derive({ fs: ro, codeCache: custom }))).join(':');
         \\  out.stored = stored.join(',');
-        \\  const rw = api.fs.requestSync({ access: 'rw' });
+        \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  out.dir = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
         \\  out.dirAgain = (await run(api.graph.derive({ fs: ro, codeCache: CodeCache.dir(rw) }))).join(':');
         \\}
@@ -1782,7 +1783,7 @@ test "graph: CodeCache.custom loads before a module compiles and treats anything
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const ro = api.fs.requestSync({ access: 'r' });
+        \\  const ro = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  const make = () => ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ read: 'copy' })] });
         \\  const store = new Map();
         \\  const calls = [];
@@ -1830,7 +1831,7 @@ test "graph: CodeCache.dir keeps the files of virtual and escaping module ids in
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e && e.stack || '')); } }
         \\async function body(api) {
         \\  const out = globalThis.report = {};
-        \\  const rw = api.fs.requestSync({ access: 'rw', root: 'cache' });
+        \\  const rw = api.fs.requestSync({ handle: 'plain', access: 'rw', root: 'cache' });
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(({ specifier }) => ({ id: specifier })),
         \\    hooks: [async r => Import.provide(ModuleSource.text(`export const id = ${JSON.stringify(r.id)}; export function f() { return 1; }`))],
@@ -2076,18 +2077,18 @@ test "graph: retain used frees unused modules, delete resets identity, release u
         \\  out.reimported = (two !== one) + ':' + all.size;
         \\  out.cleared = all.clear() + ':' + all.size;
         \\  out.bad = (() => { try { all.delete(1); } catch (e) { return e.name; } })();
-        \\  // a cap on the table drops the oldest unpinned modules.
-        \\  const capped = ImportCache.native({ retain: 'all', entries: 2 });
-        \\  const small = await api.context.create({ graph: api.graph, import: handlerFor(capped) });
-        \\  for (const id of ['a', 'b', 'c', 'd']) (await small.import(id)).release();
-        \\  out.capped = capped.size <= 2;
+        \\  // there is no cap: a table never evicts one module while others stay.
+        \\  const wide = ImportCache.native({ retain: 'all' });
+        \\  const many = await api.context.create({ graph: api.graph, import: handlerFor(wide) });
+        \\  for (const id of ['a', 'b', 'c', 'd']) (await many.import(id)).release();
+        \\  out.uncapped = wide.size;
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.held === '1:1' && report.same && report.released === '0:0:evaluated' && report.afterRelease === 0");
     try check(fx.scope, "report.table === 1 && report.deleted === 1 && report.afterDelete === 0 && report.reimported === 'true:1'");
-    try check(fx.scope, "report.cleared === '1:0' && report.bad === 'InvalidInput' && report.capped");
+    try check(fx.scope, "report.cleared === '1:0' && report.bad === 'InvalidInput' && report.uncapped === 4");
     // 'used': the module was evaluated again after the release; 'all': once, then again after delete.
     try check(fx.rt.scopes.items[1], "count === 2");
     try check(fx.rt.scopes.items[2], "count === 2");
@@ -2154,8 +2155,8 @@ test "api: Rust-style fs over sync and async io" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const rt = api.io.create({});
-        \\  const sio = api.fs.requestSync({ access: 'rw' });
-        \\  const aio = await api.fs.requestAsync({ io: rt, access: 'rw' });
+        \\  const sio = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const aio = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
         \\  await exercise(fs(sio), 'sync', out);
         \\  await exercise(fs(aio), 'async', out);
         \\  out.kinds = fs(sio).kind + ',' + fs(aio).kind;
@@ -2211,8 +2212,8 @@ const async_concurrent_source =
     \\  const out = globalThis.report = {};
     \\  const rt = api.io.create({ backend: '@BACKEND@' });
     \\  out.handle = rt.kind === 'io' && typeof rt.id === 'number' && typeof rt.backend === 'string' && Object.isFrozen(rt);
-    \\  const sync = api.fs.requestSync({ access: 'rw' });
-    \\  const fs = await api.fs.requestAsync({ io: rt, access: 'rw' });
+    \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+    \\  const fs = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
     \\  const cwd = Dir.cwd();
     \\  // Many writes, then many reads, all in flight together.
     \\  const names = Array.from({ length: 24 }, (_, i) => 'f' + i + '.txt');
@@ -2262,7 +2263,7 @@ const async_concurrent_source =
     \\  await file.close(fs);
     \\  out.closedFile = await file.stat(fs).then(() => false, e => e.errno === HostError.BadHandle || e.errno === HostError.StaleHandle);
     \\  // A read-only grant on the same runtime.
-    \\  const ro = await api.fs.requestAsync({ io: rt, access: 'r' });
+    \\  const ro = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'r' });
     \\  out.roRead = text(await cwd.readFile(ro, 'f5.txt')) === 'data-5';
     \\  const denied = e => IoError.is(e, IoError.PermissionDenied);
     \\  out.roDenied = [
@@ -2275,14 +2276,14 @@ const async_concurrent_source =
     \\  ].join(',');
     \\  // A sub-root grant resolves paths inside the root only.
     \\  await cwd.createDir(fs, 'inner');
-    \\  const inner = await api.fs.requestAsync({ io: rt, root: 'inner', access: 'rw' });
+    \\  const inner = await api.fs.requestAsync({ handle: 'plain', io: rt, root: 'inner', access: 'rw' });
     \\  await cwd.writeFile(inner, { sub_path: 'x.txt', data: bytes('in') });
     \\  out.inner = text(await cwd.readFile(fs, 'inner/x.txt'));
     \\  out.innerEscape = await cwd.readFile(inner, '../f0.txt').then(() => false, e => IoError.is(e, IoError.PermissionDenied));
     \\  // Closing the runtime: the handle is dead for new grants and idempotent to close again.
     \\  await rt.close();
     \\  await rt.close();
-    \\  out.afterClose = await api.fs.requestAsync({ io: rt, access: 'r' }).then(() => 'ok', e => e.errno);
+    \\  out.afterClose = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'r' }).then(() => 'ok', e => e.errno);
     \\  out.opAfterClose = await cwd.readFile(fs, 'f0.txt').then(() => 'ok', e => e.errno !== 0);
     \\}
 ;
@@ -2314,7 +2315,7 @@ test "api: closing an io runtime cancels in-flight operations and frees its slot
         \\  const second = api.io.create({});
         \\  // The embedder ceiling (max_runtimes = 2) applies to live runtimes.
         \\  try { api.io.create({}); out.third = false; } catch (e) { out.third = true; }
-        \\  const fs = await api.fs.requestAsync({ io: first, access: 'rw' });
+        \\  const fs = await api.fs.requestAsync({ handle: 'plain', io: first, access: 'rw' });
         \\  const cwd = Dir.cwd();
         \\  await cwd.writeFile(fs, { sub_path: 'big.bin', data: new Uint8Array(1 << 20).fill(97) });
         \\  const pending = [];
@@ -2328,13 +2329,13 @@ test "api: closing an io runtime cancels in-flight operations and frees its slot
         \\  out.canceledKnown = HostError.Canceled === 4 && HostError.name(4) === 'Canceled';
         \\  // The slot is free again; the other runtime is unaffected.
         \\  const third = api.io.create({});
-        \\  const other = await api.fs.requestAsync({ io: second, access: 'r' });
+        \\  const other = await api.fs.requestAsync({ handle: 'plain', io: second, access: 'r' });
         \\  out.otherWorks = (await cwd.readFile(other, 'big.bin')).length === 1 << 20;
         \\  await third.close();
         \\  await second.close();
         \\  // Left in flight: Host.destroy drains them without leaking.
         \\  const last = api.io.create({});
-        \\  const lastFs = await api.fs.requestAsync({ io: last, access: 'r' });
+        \\  const lastFs = await api.fs.requestAsync({ handle: 'plain', io: last, access: 'r' });
         \\  globalThis.dangling = [cwd.readFile(lastFs, 'big.bin'), cwd.readFile(lastFs, 'big.bin')].map(p => p.catch(() => undefined));
         \\}
     , "threaded", .{ .max_runtimes = 2 });
@@ -2353,14 +2354,14 @@ test "api: requestAsync needs a live io handle of this scope" {
         \\  const rt = api.io.create({});
         \\  const other = api.io.create({});
         \\  out.missing = await code(api.fs.requestAsync({}));
-        \\  out.notHandle = await code(api.fs.requestAsync({ io: 7, access: 'r' }));
-        \\  out.forged = await code(api.fs.requestAsync({ io: Object.freeze({ kind: 'io', id: rt.id, backend: 'auto' }) }));
-        \\  out.getter = await code(api.fs.requestAsync({ get io() { return rt; } }));
-        \\  out.badRoot = await code(api.fs.requestAsync({ io: rt, root: 42, access: 'r' }));
-        \\  out.escape = await code(api.fs.requestAsync({ io: rt, root: '../x', access: 'r' }));
+        \\  out.notHandle = await code(api.fs.requestAsync({ handle: 'plain', io: 7, access: 'r' }));
+        \\  out.forged = await code(api.fs.requestAsync({ handle: 'plain', io: Object.freeze({ kind: 'io', id: rt.id, backend: 'auto' }) }));
+        \\  out.getter = await code(api.fs.requestAsync({ handle: 'plain', get io() { return rt; } }));
+        \\  out.badRoot = await code(api.fs.requestAsync({ handle: 'plain', io: rt, root: 42, access: 'r' }));
+        \\  out.escape = await code(api.fs.requestAsync({ handle: 'plain', io: rt, root: '../x', access: 'r' }));
         \\  await other.close();
-        \\  out.closed = await code(api.fs.requestAsync({ io: other, access: 'r' }));
-        \\  out.live = await code(api.fs.requestAsync({ io: rt, access: 'r' }));
+        \\  out.closed = await code(api.fs.requestAsync({ handle: 'plain', io: other, access: 'r' }));
+        \\  out.live = await code(api.fs.requestAsync({ handle: 'plain', io: rt, access: 'r' }));
         \\  const kind = f => { try { f().close(); return 'ok'; } catch (e) { return e instanceof TypeError ? 'T' : e.errno; } };
         \\  out.badOpts = [undefined, null, 1, 'x'].map(o => kind(() => api.io.create(o))).join(',');
         \\  out.badBackend = kind(() => api.io.create({ backend: 'epoll' }));
@@ -2384,8 +2385,8 @@ test "api: without a runtime ceiling there is no api.io and no async fs" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  out.noIo = !('io' in api);
-        \\  out.asyncDenied = await api.fs.requestAsync({ io: undefined, access: 'r' }).then(() => 0, e => e.errno);
-        \\  out.syncWorks = typeof api.fs.requestSync({ access: 'r' }) === 'object';
+        \\  out.asyncDenied = await api.fs.requestAsync({ handle: 'plain', io: undefined, access: 'r' }).then(() => 0, e => e.errno);
+        \\  out.syncWorks = typeof api.fs.requestSync({ handle: 'plain', access: 'r' }) === 'object';
         \\}
     , true, null);
     defer fx.deinit();
@@ -2405,13 +2406,13 @@ test "api: import.meta natives reach only the embedded std modules" {
         \\  out.noGlobal = !('__engineText' in globalThis);
         \\  out.reserved = await import('origine:@std/unknown').then(() => false, () => true);
         \\  out.reservedPrivate = await import('origine:private/bindings').then(() => false, () => true);
-        \\  out.recordsPrivate = await import('origine:@internal/records').then(() => false, () => true);
+        \\  out.handlesPrivate = await import('origine:@internal/handles').then(() => false, () => true);
         \\}
     , false, &.{});
     defer fx.deinit();
     try fx.run();
     try check(fx.scope, "report.exports === 'decodeUtf8,encodeUtf8,tryDecodeUtf8'");
-    try check(fx.scope, "report.bareMeta && report.noGlobal && report.reserved && report.reservedPrivate && report.recordsPrivate");
+    try check(fx.scope, "report.bareMeta && report.noGlobal && report.reserved && report.reservedPrivate && report.handlesPrivate");
 }
 
 /// State a test module keeps for one scope; `torn_down` records `deinit` runs.
@@ -2845,8 +2846,8 @@ const zero_copy_source =
     \\export async function main(api) {
     \\  const out = globalThis.report = {};
     \\  const rt = api.io.create({ backend: '@BACKEND@' });
-    \\  const fs = await api.fs.requestAsync({ io: rt, access: 'rw' });
-    \\  const sync = api.fs.requestSync({ access: 'rw' });
+    \\  const fs = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
+    \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
     \\  const cwd = Dir.cwd();
     \\  const read = name => cwd.readFile(fs, name);
     \\
@@ -3049,7 +3050,7 @@ test "api: closing an io runtime with pinned reads and writes in flight is safe"
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const rt = api.io.create({ backend: '@BACKEND@' });
-        \\  const fs = await api.fs.requestAsync({ io: rt, access: 'rw' });
+        \\  const fs = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
         \\  const cwd = Dir.cwd();
         \\  await cwd.writeFile(fs, { sub_path: 'big.bin', data: new Uint8Array(4 << 20).fill(65) });
         \\  const file = await cwd.openFile(fs, 'big.bin');
@@ -3075,12 +3076,12 @@ test "api: closing an io runtime with pinned reads and writes in flight is safe"
         \\  out.deadViews = views.every(v => v.length === 0 || v.byteLength === 1 << 20);
         \\  // A new runtime still works.
         \\  const rt2 = api.io.create({});
-        \\  const fs2 = await api.fs.requestAsync({ io: rt2, access: 'r' });
+        \\  const fs2 = await api.fs.requestAsync({ handle: 'plain', io: rt2, access: 'r' });
         \\  out.after = (await cwd.readFile(fs2, 'big.bin')).length === 4 << 20;
         \\  await rt2.close();
         \\  // Left in flight at Host.destroy.
         \\  const last = api.io.create({});
-        \\  const lastFs = await api.fs.requestAsync({ io: last, access: 'r' });
+        \\  const lastFs = await api.fs.requestAsync({ handle: 'plain', io: last, access: 'r' });
         \\  const lastFile = await cwd.openFile(lastFs, 'big.bin');
         \\  globalThis.dangling = [lastFile.readInto(lastFs, new Uint8Array(1 << 20), 0), lastFile.readAlloc(lastFs, 1 << 20, 0)].map(p => p.catch(() => undefined));
         \\}
@@ -3098,7 +3099,7 @@ test "api: several BYOB reads over one ArrayBuffer settle cleanly and re-wrapped
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const rt = api.io.create({ backend: '@BACKEND@' });
-        \\  const fs = await api.fs.requestAsync({ io: rt, access: 'rw' });
+        \\  const fs = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
         \\  const cwd = Dir.cwd();
         \\  await cwd.writeFile(fs, { sub_path: 'd.txt', data: Uint8Array.from('abcdefghijklmnopqrstuvwx', c => c.charCodeAt(0)) });
         \\  const file = await cwd.openFile(fs, 'd.txt');
@@ -4097,7 +4098,7 @@ test "api: a closed graph is freed with the last context that uses it" {
     try fx.run();
     try runPhase(&fx, "phase1");
     fx.rt.pump();
-    try check(fx.scope, "report.names.split(',').every((name, i) => name === ['app:/m.js', 'StaleHandle', 'StaleHandle'][i % 3]) && report.rootClose === 'TypeError'");
+    try check(fx.scope, "report.names.split(',').every((name, i) => name === ['app:/m.js', 'InvalidInput', 'StaleHandle'][i % 3]) && report.rootClose === 'TypeError'");
     // Only the root graph (made for the contexts that took the default) is left.
     try t.expect(fx.host.graphs.count() <= 1);
     try t.expectEqual(@as(usize, 0), fx.host.contexts.count());
@@ -4151,15 +4152,15 @@ test "api: fs requests need an access and never exceed the host ceiling" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const rt = api.io.create({});
-        \\  const syncCode = hint => { try { api.fs.requestSync(hint); return 0; } catch (e) { return e.errno; } };
-        \\  const asyncCode = hint => api.fs.requestAsync({ io: rt, ...hint }).then(() => 0, e => e.errno);
+        \\  const syncCode = hint => { try { api.fs.requestSync({ handle: 'plain', ...hint }); return 0; } catch (e) { return e.errno; } };
+        \\  const asyncCode = hint => api.fs.requestAsync({ handle: 'plain', io: rt, ...hint }).then(() => 0, e => e.errno);
         \\  const hints = [{ access: 'r' }, { access: 'rw' }, { access: 'w' }, {}, { access: 'x' }, { access: 'R' }, { access: ['r'] }, { access: 1 }, { write: true }, { read: true }, { access: 'r', root: 42 }, { access: 'r', root: '../x' }];
         \\  out.sync = hints.map(syncCode).join(',');
         \\  out.async = (await Promise.all(hints.map(asyncCode))).join(',');
         \\  // A read-only grant works and cannot mutate.
-        \\  const ro = api.fs.requestSync({ access: 'r' });
+        \\  const ro = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  try { Dir.cwd().createDir(ro, 'nope'); out.roDenied = false; } catch (e) { out.roDenied = IoError.is(e, IoError.PermissionDenied); }
-        \\  const aro = await api.fs.requestAsync({ io: rt, access: 'r' });
+        \\  const aro = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'r' });
         \\  out.aroDenied = await Dir.cwd().createDir(aro, 'nope').then(() => false, e => IoError.is(e, IoError.PermissionDenied));
         \\  out.narrowGone = api.fs.narrow === undefined;
         \\  await rt.close();
@@ -4184,9 +4185,9 @@ test "api: a write-only grant denies everything that observes, sync and async" {
         \\  const out = globalThis.report = {};
         \\  const rt = api.io.create({});
         \\  const cwd = Dir.cwd();
-        \\  const sync = api.fs.requestSync({ access: 'w' });
-        \\  const async = await api.fs.requestAsync({ io: rt, access: 'w' });
-        \\  const full = api.fs.requestSync({ access: 'rw' });
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'w' });
+        \\  const async = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'w' });
+        \\  const full = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  cwd.writeFile(full, { sub_path: 'secret.txt', data: bytes('secret') });
         \\  for (const [label, io] of [['sync', sync], ['async', async]]) {
         \\    const denied = async work => { try { await work(); return false; } catch (e) { return IoError.is(e, IoError.PermissionDenied); } };
@@ -4243,7 +4244,7 @@ test "api: stat and metadata follow symlinks, symlink_metadata and try_exists ke
         \\  const rt = api.io.create({});
         \\  const cwd = Dir.cwd();
         \\  const caught = async work => { try { await work(); return 'ok'; } catch (e) { return e.name; } };
-        \\  for (const [label, io] of [['sync', api.fs.requestSync({ access: 'r' })], ['async', await api.fs.requestAsync({ io: rt, access: 'r' })]]) {
+        \\  for (const [label, io] of [['sync', api.fs.requestSync({ handle: 'plain', access: 'r' })], ['async', await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'r' })]]) {
         \\    const rs = rustFs(io);
         \\    const r = [];
         \\    r.push((await rs.metadata('link')).is_file() && (await rs.metadata('link')).len() === 5);
@@ -4304,8 +4305,8 @@ test "api: the same failures through sync and async fs give the same errno" {
         \\    locked: io => cwd.openFile(io, 'locked.txt'),
         \\  };
         \\  const attempt = async (io, work) => { try { await work(io); return 'ok'; } catch (e) { return e.name; } };
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
-        \\  const async = await api.fs.requestAsync({ io: rt, access: 'rw' });
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
+        \\  const async = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
         \\  const s = {}, a = {};
         \\  for (const [name, work] of Object.entries(cases)) {
         \\    s[name] = await attempt(sync, work);
@@ -4352,18 +4353,18 @@ test "api: graph records have private JS identity and errors share Error subclas
         \\  const layer = relative();
         \\  let forged = false, constructed = false;
         \\  try { ImportResolver.layered().layer({ host: 'relative', kind: 'layer' }); } catch (e) { forged = e instanceof IoError; }
-        \\  try { new layer.constructor({ host: 'relative', kind: 'layer' }); } catch (e) { constructed = e instanceof TypeError; }
+        \\  constructed = new layer.constructor({ host: 'relative', kind: 'layer' }) instanceof layer.constructor;
         \\  const data = { imports: { x: './x.js' } };
         \\  const map = importMap(data);
         \\  data.imports.x = './changed.js';
         \\  let runtime;
-        \\  try { api.fs.requestSync({ access: 'invalid' }); } catch (e) { runtime = e; }
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  try { api.fs.requestSync({ handle: 'plain', access: 'invalid' }); } catch (e) { runtime = e; }
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  let badRef = false;
         \\  try { sync.dirStat({ kind: 'dir', fs: 0, id: 0 }, '.'); FromIo.check(sync); } catch (e) { badRef = e instanceof IoError; }
         \\  const stat = sync.dirStat(Dir.cwd(), '.');
         \\  const io = api.io.create({ backend: 'threaded' });
-        \\  const asyncFs = await api.fs.requestAsync({ io, access: 'r' });
+        \\  const asyncFs = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
         \\  let missing = false;
         \\  try { await asyncFs.dirOpenFile(Dir.cwd(), 'missing-file', 'r'); } catch (e) { missing = e instanceof IoError && e instanceof OrigineError && typeof e.stack === 'string'; }
         \\  await io.close();
@@ -4396,14 +4397,14 @@ test "api: std factories import private JS records without native metadata" {
         \\import { origineProvider, fromLoader } from 'origine:@std/graph/providers';
         \\export async function main(api) { try { await body(api); } catch (e) { throw new Error(JSON.stringify(e) + (e?.stack || '')); } }
         \\async function body(api) {
-        \\  globalThis.privateDenied = await import('origine:@internal/records').then(() => false, () => true);
+        \\  globalThis.privateDenied = await import('origine:@internal/handles').then(() => false, () => true);
         \\  const handler = ImportHandler.make({
         \\    resolver: ImportResolver.layered().layer(relative()).layer(origine()).layer(importMap({ imports: { main: 'app:/main.js' } })),
         \\    hooks: [origineProvider({ std: { include: ['graph/resolve', 'graph/resolve/layers', 'errors', 'errno'] } }), fromLoader(() => `
         \\      import { relative } from 'origine:@std/graph/resolve/layers';
         \\      import { ImportResolver } from 'origine:@std/graph/resolve';
         \\      globalThis.sharedBrand = ImportResolver.layered().layer(relative()).layers.length === 1;
-        \\      globalThis.privateDenied = await import('origine:@internal/records').then(() => false, () => true);
+        \\      globalThis.privateDenied = await import('origine:@internal/handles').then(() => false, () => true);
         \\    `)],
         \\  });
         \\  const ctx = await api.context.create({ graph: api.graph, import: handler });

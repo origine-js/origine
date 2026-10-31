@@ -9,8 +9,13 @@
 // ceiling is denied (PermissionDenied), never silently downgraded. Native handles are readable
 // whenever they are writable, so a write-only grant ('w') is enforced by the grant itself: it denies
 // everything that observes what exists (reads, stat, directory listings, opening read-only).
-import { records, recordOf, failure, own, joinPath, ioHandles, closedIo, shared, freeze, errors, settled, settling } from './util.js';
+import { Data, FileHandle, DirHandle, FsGrant, issuerOf } from './handles.js';
+import { failure, own, joinPath, ioHandles, closedIo, shared, freeze, errors, settled, settling, seal } from './util.js';
 const { InvalidInput, BadHandle, PermissionDenied } = errors;
+class Stat extends Data {}
+class DirEntry extends Data {}
+class ReadResult extends Data {}
+seal(Stat, DirEntry, ReadResult);
 // Static open-mode mapping shared by every fs capability built in this realm.
 const OPEN_MODES = Object.freeze(
   Object.assign(Object.create(null), {
@@ -75,20 +80,26 @@ const shapeOf = value => {
 };
 
 export default (native, { errno, take }) => {
-  // Read private JS reference state without crossing into native code.
-  const handleOfKind = kind => handle => records.unwrap(handle, kind === 'dir' ? 'DirRef' : 'FileRef') ?? null;
-  const asDir = handleOfKind('dir');
-  const asFile = handleOfKind('file');
+  // How one grant reads the handles it is given, without crossing into native code. A grant requested
+  // with `handle: 'hardened'` takes only the handles it issued (and the root sentinel, which names no
+  // resource); a plain one takes any file or directory handle and leaves the ids to the natives.
+  function refsOf(hardened, issuer) {
+    const take = (Class, handle, root) => {
+      if (!(handle instanceof Class)) return null;
+      if (hardened && issuerOf(handle) !== issuer && !(root && handle.fs === 0 && handle.id === 0)) return null;
+      return handle;
+    };
+    return { asDir: handle => take(DirHandle, handle, true), asFile: handle => take(FileHandle, handle, false) };
+  }
 
-  const makeGrant = records.define('FsGrant');
-  const fileOf = (fs, id) => recordOf('FileRef', { kind: 'file', fs, id });
-  const dirOf = (fs, id) => recordOf('DirRef', { kind: 'dir', fs, id });
-  const statOf = out => recordOf('Stat', { kind: out[0], size: out[1] });
-  const syncEntriesOf = entries => freeze(entries.map(entry => recordOf('DirEntry', entry)));
+  const statOf = out => new Stat({ kind: out[0], size: out[1] });
+  const syncEntriesOf = entries => freeze(entries.map(entry => new DirEntry(entry)));
 
   // Public sync operations unwrap JS-private state and call one grant-bound native.
   // Native checks remain responsible for ownership, access, liveness, and arguments.
-  function makeSyncOps(raw) {
+  function makeSyncOps(raw, { asDir, asFile }, issuer) {
+    const fileOf = (fs, id) => new FileHandle(fs, id, issuer);
+    const dirOf = (fs, id) => new DirHandle(fs, id, issuer);
     const bad = () => {
       errno[0] = InvalidInput;
       return undefined;
@@ -145,7 +156,7 @@ export default (native, { errno, take }) => {
   // silent copy) when it cannot be detached (shared, resizable, WebAssembly memory). `fileRead`/
   // `filePread` copy too (count result; the bytes are copied into `buffer` at completion).
   // `fileReadInto`/`filePreadInto` (BYOB) and `fileReadAlloc`/`filePreadAlloc` are the zero-copy reads.
-  function makeAsyncOps(natives, fsId) {
+  function makeAsyncOps(natives, fsId, { asDir, asFile }, issuer) {
     const ops = settling(natives);
     const bad = () => Promise.reject(failure(InvalidInput));
     // Unwrap before observing any fields: forged references never invoke guest getters.
@@ -153,13 +164,13 @@ export default (native, { errno, take }) => {
       const ref = asDir(handle);
       return ref !== null && ref.fs === 0 && ref.id === 0 ? { fs: fsId, id: 0 } : ref;
     };
-    const statOf = out => recordOf('Stat', { kind: out[0], size: out[1] });
-    const fileOf = id => recordOf('FileRef', { kind: 'file', fs: fsId, id });
-    const dirOf = id => recordOf('DirRef', { kind: 'dir', fs: fsId, id });
+    const statOf = out => new Stat({ kind: out[0], size: out[1] });
+    const fileOf = id => new FileHandle(fsId, id, issuer);
+    const dirOf = id => new DirHandle(fsId, id, issuer);
     const entriesOf = flat => {
       // The native returns `[name, kind, name, kind, ...]`.
       const entries = [];
-      for (let i = 0; i < flat.length; i += 2) entries.push(recordOf('DirEntry', { name: flat[i], kind: flat[i + 1] }));
+      for (let i = 0; i < flat.length; i += 2) entries.push(new DirEntry({ name: flat[i], kind: flat[i + 1] }));
       return freeze(entries);
     };
 
@@ -231,7 +242,7 @@ export default (native, { errno, take }) => {
     // Resolves a JS ReadResult with read-only bytes and buffer fields where `buffer` is a view of the same kind, byteOffset and
     // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached
     // when the buffer was pinned; it is untouched when the host copied instead).
-    const filled = (shape, pending) => pending.then(done => recordOf('ReadResult', { bytes: done.bytes, buffer: shape.make(done.buffer) }));
+    const filled = (shape, pending) => pending.then(done => new ReadResult({ bytes: done.bytes, buffer: shape.make(done.buffer) }));
 
     const fileOps = {
       fileClose(file) {
@@ -335,8 +346,8 @@ export default (native, { errno, take }) => {
   // Access bits of the natives: 1 read, 2 write.
   const ACCESS = freeze(Object.assign(Object.create(null), { r: 1, w: 2, rw: 3 }));
 
-  // `{ root, access }` of a request hint against the cap's spec, or the errno of a bad or denied
-  // request: InvalidInput for a malformed `root` or a missing / unknown `access`, PermissionDenied
+  // `{ root, access, hardened }` of a request hint against the cap's spec, or the errno of a bad or denied
+  // request: InvalidInput for a malformed `root` or a missing / unknown `access` or `handle`, PermissionDenied
   // for a write the embedder's ceiling (`spec.write`) does not allow (never downgraded).
   function grantOf(spec, hint) {
     let root = own(hint, 'root');
@@ -345,8 +356,10 @@ export default (native, { errno, take }) => {
     const access = typeof name === 'string' ? ACCESS[name] : undefined;
     if (access === undefined) return InvalidInput;
     if (access & 2 && !spec.write) return PermissionDenied;
+    const handle = own(hint, 'handle');
+    if (handle !== 'plain' && handle !== 'hardened') return InvalidInput;
     root = joinPath(spec.root, root);
-    return { root, access };
+    return { root, access, hardened: handle === 'hardened' };
   }
 
   function makeFsCap(spec) {
@@ -363,7 +376,11 @@ export default (native, { errno, take }) => {
         // shared errno cell; the raw grant stays in private state for authority consumers.
         const granted = native.fsRequest(grant.root, grant.access);
         if (errno[0] !== 0) throw failure(take());
-        return makeGrant({ kind: granted.kind, id: granted.id, errno, ...makeSyncOps(granted) }, granted);
+        const issuer = freeze({});
+        return new FsGrant(
+          { kind: granted.kind, id: granted.id, errno, ...makeSyncOps(granted, refsOf(grant.hardened, issuer), issuer) },
+          granted,
+        );
       },
       // Genuinely asynchronous variant on `io`, an `api.io` handle of this scope (the grant
       // runs its operations on that runtime). Rejects BadHandle (missing, closed or foreign io),
@@ -381,7 +398,13 @@ export default (native, { errno, take }) => {
         return settled(
           native.fsRequestAsync(native.fsAsync.request, io.id, grant.root === undefined || grant.root === '' ? '.' : grant.root, grant.access),
         )
-          .then(granted => makeGrant({ kind: granted.kind, id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id) }, granted));
+          .then(granted => {
+            const issuer = freeze({});
+            return new FsGrant(
+              { kind: granted.kind, id: granted.id, ...makeAsyncOps(native.fsAsync, granted.id, refsOf(grant.hardened, issuer), issuer) },
+              granted,
+            );
+          });
       },
     });
   }

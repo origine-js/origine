@@ -10,7 +10,8 @@ const json_module = @import("json_module.zig");
 const host_mod = @import("host.zig");
 const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
-const records = @import("records.zig");
+const internal = @import("internal.zig");
+const glue = @import("glue.zig");
 
 /// Modules the init scope can import without touching the file system by default; a
 /// Host serves `Config.modules`, which defaults to this table.
@@ -20,10 +21,11 @@ pub const std_modules = origine_modules.all;
 /// everything else is used as written.
 pub fn resolve(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror![]const u8 {
     const spec = request.specifier;
-    if (records.requested(spec)) {
+    if (internal.requested(spec)) {
         const host: *Host = @ptrCast(@alignCast(data.?));
-        if (!records.trusted(host, request.referrer)) return error.PermissionDenied;
-        return request.allocator.dupe(u8, records.id);
+        if (!internal.trusted(host, request.referrer)) return error.PermissionDenied;
+        try internal.prepare(host, request.scope_id, request.context);
+        return request.allocator.dupe(u8, glue.handles_id);
     }
     if (!(std.mem.startsWith(u8, spec, "./") or std.mem.startsWith(u8, spec, "../"))) return request.allocator.dupe(u8, spec);
     const base = std.fs.path.dirnamePosix(request.referrer) orelse "";
@@ -49,7 +51,7 @@ pub fn resolve(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror
 
 pub fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_types.LoadResult {
     const host: *Host = @ptrCast(@alignCast(data.?));
-    if (records.requested(request.module_id)) return records.load(host, request);
+    if (internal.requested(request.module_id)) return error.NotFound;
     for (host.modules) |module| {
         if (std.mem.eql(u8, request.module_id, module.id)) return .{ .source = module.source };
     }

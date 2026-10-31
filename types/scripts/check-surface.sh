@@ -54,7 +54,7 @@ missing "fs operation" "$here/fs.d.ts" $(rg -o '^      ((dir|file)[A-Z]\w*)\(' -
 
 # The members of the net classes and the cap.
 # shellcheck disable=SC2046
-missing "net member" "$here/net.d.ts" $(awk '/Base of every handle/ {on=1} /const makeSocket/ {on=0} on' "$js/glue/net.js" | rg -o '^    (?:get |set |static )?([a-zA-Z]\w*)\(' -r '$1' | rg -v '^(constructor|if|for|while|switch|catch|return)$' | sort -u)
+missing "net member" "$here/net.d.ts" $(cat "$js/glue/net/send.js" "$js/glue/net/server.js" "$js/glue/net/socket.js" | rg -o '^    (?:get |set |static )?([a-zA-Z]\w*)\(' -r '$1' | rg -v '^(constructor|if|for|while|switch|catch|return)$' | sort -u)
 # shellcheck disable=SC2046
 missing "net cap member" "$here/net.d.ts" listen connect Handle Server PullServer EventServer Socket PullSocket EventSocket
 

@@ -24,7 +24,7 @@ const textModule = text => `export default ${JSON.stringify(text.trimEnd())};`;
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ root: 'examples/graph-transform', access: 'r' }) });
+  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-transform', access: 'r' }) });
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered().layer(relative()),
     hooks: [fsProvider({ read: 'copy' })],

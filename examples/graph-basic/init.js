@@ -22,7 +22,7 @@ import { eprintln } from 'origine:@std/debug';
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
   // 1. Authority: the graph reads files only through this read-only grant of the example directory.
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ root: 'examples/graph-basic', access: 'r' }) });
+  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-basic', access: 'r' }) });
   // 2. The pipeline for the module's own imports: './x' resolved against the importer, then read by the fs provider.
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered().layer(relative()),

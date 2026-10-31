@@ -32,7 +32,7 @@ const context = (api, handler, graph) =>
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const fs = api.fs.requestSync({ root: 'examples/graph-cache', access: 'rw' });
+  const fs = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-cache', access: 'rw' });
   const graph = api.graph.derive({ fs });
 
   // 1. retain 'all' (the default): a module lives as long as its context. Importing twice evaluates once.

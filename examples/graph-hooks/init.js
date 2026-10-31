@@ -20,7 +20,7 @@ import { eprintln } from 'origine:@std/debug';
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
   // Authority: a read-only grant of this directory. Files outside it cannot be reached by any hook.
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ root: 'examples/graph-hooks', access: 'r' }) });
+  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-hooks', access: 'r' }) });
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered()
       .layer(origine()) // recognises origine: ids

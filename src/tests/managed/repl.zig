@@ -295,3 +295,32 @@ test "REPL engine keeps pending input, history and dot-commands" {
     try engine.append(big);
     try t.expectError(error.InputTooLong, engine.append("x"));
 }
+
+test "REPL mode accepts redeclaring a top-level const or let and keeps const read-only" {
+    ensureV8();
+    const rt = try m.Runtime.create(t.allocator, .{});
+    defer rt.destroy();
+    const scope = try rt.createScope(.{});
+    const engine = try repl.Engine.init(false);
+    defer engine.deinit();
+    for ([_][]const u8{ "const value = 1", "const value = 2", "let other = 1", "let other = 'two'" }) |source| {
+        const result = try evalEntry(scope, engine, source);
+        result.deinit();
+    }
+    const same = try evalEntry(scope, engine, "value === 2 && other === 'two'");
+    defer same.deinit();
+    try expectText(scope, same, "true");
+    // The same inputs are a SyntaxError as plain scripts.
+    const plain = try scope.eval("const plainValue = 1", "<repl>", null);
+    plain.deinit();
+    try t.expectError(error.JavaScriptException, scope.eval("const plainValue = 2", "<repl>", null));
+    // const stays strict: assigning to it throws TypeError, and the value is unchanged.
+    const bound = try evalEntry(scope, engine, "const c = 1");
+    bound.deinit();
+    var info: m.ErrorInfo = .{};
+    defer info.deinit();
+    try t.expectError(error.JavaScriptException, repl.eval(scope, "c = 2", &info));
+    const unchanged = try evalEntry(scope, engine, "(() => { try { c = 2 } catch (e) { return e instanceof TypeError && c === 1 } })()");
+    defer unchanged.deinit();
+    try expectText(scope, unchanged, "true");
+}

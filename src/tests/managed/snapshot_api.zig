@@ -26,7 +26,7 @@ test "snapshot: create, save, load and start isolates from it" {
         \\  try { new Snapshot({}, 1); out.ctor = 'made'; } catch (e) { out.ctor = e.name; }
         \\  // The source changes after the snapshot: an isolate made from it still runs what was snapshotted,
         \\  // and the saved file no longer fits the sources.
-        \\  const sync = api.fs.requestSync({ access: 'rw' });
+        \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
         \\  const f = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'child.js', 'w'));
         \\  sync.fileWriteAll(f, Uint8Array.from("export function main() { throw new Error('changed'); }", c => c.charCodeAt(0)));
         \\  sync.fileClose(f);

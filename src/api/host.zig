@@ -151,7 +151,6 @@ pub const ScopeState = struct {
     host: *Host,
     scope: *Scope,
     errno_local: u32 = 0,
-    private_exports: std.ArrayList(v8.Global.Of(v8.Value)) = .empty,
     shared: ScopeCore = undefined,
     /// True once `Host.release` took the scope's resources back. `scope` dangles from then on:
     /// only `core` may be used.
@@ -547,8 +546,6 @@ pub const Host = struct {
             owned.bindings.destroy(state, owned.ptr);
         }
         state.module_states.deinit(alloc);
-        for (state.private_exports.items) |value| value.deinit();
-        state.private_exports.deinit(alloc);
         if (state.driver) |driver| driver.step.deinit();
         if (state.errno_buffer) |buffer| buffer.deinit();
         alloc.destroy(state);
@@ -615,7 +612,7 @@ pub const Host = struct {
         const ctx = session.ctx;
         const env: binding.Env = .{ .isolate = isolate, .ctx = ctx };
         startup_trace.mark(&timing, "api_attach");
-        const bundle = glue_script.restored(ctx) orelse try glue_script.initialize(isolate, ctx, try glue_script.factory(isolate, ctx, .{ .data = state, .compile = compileGlueModule }));
+        const bundle = try glue_script.ensure(isolate, ctx, .{ .scope = scope, .compiler = .{ .data = state, .compile = compileGlueModule } });
         startup_trace.mark(&timing, "api_restore_template");
         const native_value = bundle.object.getIndex(ctx, glue_script.native_index) orelse return error.BootstrapFailed;
         const native = native_value.toObject(ctx) orelse return error.BootstrapFailed;
@@ -672,7 +669,7 @@ pub const Host = struct {
         const host = state.host;
         const env = call.env();
         const part = switch (module) {
-            .common, .util, .errors, .records, .errno => return error.InvalidInput,
+            .common, .util, .errors, .handle, .handles, .errno, .@"net/event", .@"net/send", .@"net/core", .@"net/server", .@"net/socket", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
             .host => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),

@@ -4,7 +4,11 @@
 // `Config.runtime`); the glue only adds the narrowing the init asked for. A handle is frozen
 // data `{ kind: 'io', id, backend }` plus `close()`; it is not transferable across scopes
 // and `api.fs.requestAsync` takes it as `io`.
-import { recordOf, freeze, own, failure, ioHandles, closedIo, shared, errors } from './util.js';
+import { Data } from './handles.js';
+import { freeze, own, failure, ioHandles, closedIo, shared, errors, seal } from './util.js';
+class Timer extends Data {}
+class IoHandle extends Data {}
+seal(Timer, IoHandle);
 const { Unsupported, BadHandle } = errors;
 export default native => {
   const BACKENDS = freeze(['auto', 'uring', 'kqueue', 'threaded']);
@@ -58,7 +62,7 @@ export default native => {
         const token = nextTimer++;
         const promise = native.io.sleep(made.id, token, ms);
         const cancel = () => (closedIo.has(handle) ? false : native.io.cancelTimer(made.id, token));
-        return recordOf('Timer', { promise, cancel });
+        return new Timer({ promise, cancel });
       };
       const timerAt = deadline => {
         if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline < 0)
@@ -67,7 +71,7 @@ export default native => {
       };
       const sleep = ms => timer(ms).promise;
       const sleepUntil = deadline => timerAt(deadline).promise;
-      handle = recordOf('IoHandle', {
+      handle = new IoHandle({
         kind: 'io',
         id: made.id,
         backend: made.backend,

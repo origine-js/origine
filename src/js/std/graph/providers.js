@@ -3,7 +3,7 @@
 // widens nothing by itself.
 //
 //   hooks: [policy, origineProvider({ std: { include: ['text'] } }), fsProvider({ read: 'copy' })]
-import { define } from 'origine:@internal/records';
+import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError } from 'origine:@std/errors';
 import { Import, ImportError } from 'origine:@std/graph/import';
@@ -17,8 +17,7 @@ const own = (object, key) => {
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 };
 
-const makeProvider = define('Provider');
-const provider = (host, rest) => makeProvider({ host, kind: 'provider', ...rest });
+const provider = (host, rest) => new h.Provider({ host, kind: 'provider', ...rest });
 
 /// Names of std modules, without the `origine:@std/` prefix (`'text'`, `'transformer/oxc'`).
 const names = (what, list) => {

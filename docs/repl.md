@@ -79,3 +79,9 @@ the value inspector, and the lexical lookup adapter remain Origine implementatio
 
 Run `just test-repl` for the pseudo-terminal regressions, including the exact bare
 object input, suggestion acceptance, history, colors, and terminal restoration.
+
+## Redeclaring bindings
+
+Like browser consoles and Deno's REPL, an entry may declare a top-level `let`, `const` or `class` that
+an earlier entry declared: `const value = 1` then `const value = 2` leaves `value` as `2`. `const` stays
+read-only, so `const c = 1; c = 2` still throws a `TypeError`.

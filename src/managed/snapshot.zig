@@ -44,7 +44,7 @@ pub fn create(allocator: std.mem.Allocator) ![]align(16) u8 {
             if (inventory.len() == 0) return error.SnapshotFailed;
             var timing: ?i64 = null;
             _ = try @import("bootstrap.zig").prepare(isolate, context, &timing);
-            try api_glue.prepare(isolate, context);
+            _ = try api_glue.ensure(isolate, context, .{ .creator = &creator });
             creator.setDefaultContext(context);
         }
         // CreateBlob must run outside all handle scopes.

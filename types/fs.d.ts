@@ -6,6 +6,13 @@ import type { Io } from "./io.d.ts";
 export type Access = "r" | "w" | "rw";
 
 /**
+ * Whether a grant checks, before it calls a native, that a file or directory handle was issued by it.
+ * `"plain"`: it does not look (the native still validates the grant, the id and its liveness). `"hardened"`:
+ * it takes only handles it issued, plus the `Dir.cwd()` sentinel; any other is `InvalidInput`.
+ */
+export type HandleMode = "plain" | "hardened";
+
+/**
  * The kinds of directory entry and file (`FileKind` of `origine:@std/io`): `1` file, `2` directory,
  * `3` symlink, `4` other.
  */
@@ -153,6 +160,8 @@ export type Fs = SyncFs | AsyncFs;
 export interface FsRequest {
   /** What the grant may do. Required: a missing or unknown value is `InvalidInput`; above the host's ceiling it is `PermissionDenied`. */
   readonly access: Access;
+  /** Required: a missing or unknown value is `InvalidInput`. Hardened mode costs one issuer comparison per handle argument; plain mode costs nothing. */
+  readonly handle: HandleMode;
   /** A directory below the host's root to confine the grant to (lexically: no `..`, no absolute path). */
   readonly root?: string;
 }

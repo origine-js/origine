@@ -26,7 +26,8 @@ const host_mod = @import("host.zig");
 const Host = host_mod.Host;
 const ScopeState = host_mod.ScopeState;
 const init_loader = @import("init_loader.zig");
-const records = @import("records.zig");
+const internal = @import("internal.zig");
+const glue = @import("glue.zig");
 const init_cache = @import("init_cache.zig");
 const json_module = @import("json_module.zig");
 const module_types = @import("../managed/module_types.zig");
@@ -496,12 +497,13 @@ fn contextFor(state: *ScopeState, id: u32) !*Context {
 fn resolveAsync(data: ?*anyopaque, request: module_types.ResolveRequest) anyerror!module_types.ResolveOutcome {
     const self: *Context = @ptrCast(@alignCast(data.?));
     self.releaseLinks();
-    if (records.requested(request.specifier)) {
-        if (!self.served.contains(request.referrer) or !records.trusted(self.host, request.referrer)) return error.PermissionDenied;
+    if (internal.requested(request.specifier)) {
+        if (!self.served.contains(request.referrer) or !internal.trusted(self.host, request.referrer)) return error.PermissionDenied;
+        try internal.prepare(self.host, request.scope_id, request.context);
         const handler = self.handlerOf(request.allocator, request.referrer_namespace, request.referrer) orelse self.import_handler;
         const namespace = self.cacheOfHandler(handler);
-        try self.recordResolved(request.allocator, namespace, records.id, request.import_attributes, handler, request.specifier, request.referrer);
-        return .{ .id = try request.allocator.dupe(u8, records.id) };
+        try self.recordResolved(request.allocator, namespace, glue.handles_id, request.import_attributes, handler, request.specifier, request.referrer);
+        return .{ .id = try request.allocator.dupe(u8, glue.handles_id) };
     }
     if (self.root) |name| if (request.referrer.len == 0 and std.mem.eql(u8, request.specifier, name)) return .{ .id = try request.allocator.dupe(u8, name) };
     const handler_id = self.handlerOf(request.allocator, request.referrer_namespace, request.referrer) orelse self.import_handler;
@@ -636,10 +638,7 @@ fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_ty
     self.releaseLinks();
     const key = try Context.infoKey(request.allocator, request.namespace, request.module_id, request.import_attributes);
     const info = self.resolved.get(key) orelse return error.NotFound;
-    if (records.requested(request.module_id)) {
-        if (!records.requested(info.specifier) or !self.served.contains(info.referrer) or !records.trusted(self.host, info.referrer)) return error.PermissionDenied;
-        return records.load(self.host, request);
-    }
+    if (internal.requested(request.module_id)) return error.NotFound;
     // A module the host did not write can be the one another context already has: contexts that use the same
     // `ImportCache` share its modules. The first to import an id is its home.
     if (!std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) {

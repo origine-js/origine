@@ -1,18 +1,10 @@
 // `origine:@std/io`: Zig-style Io vocabulary for the init context.
 // Pure data: holding any of these values confers no authority. The errno table is
 // generated from `IoErrno` and `HostErrno` (`origine:@std/errno`), not written here.
-import { define, is as recordIs } from 'origine:@internal/records';
+import { DirHandle, FileHandle, issuerOf } from 'origine:@internal/handles';
 import { quansync } from 'origine:@std/quansync';
 
 const freeze = Object.freeze;
-const makeDir = define('DirRef');
-const makeFile = define('FileRef');
-const methods = prototype =>
-  Object.fromEntries(
-    Object.getOwnPropertyNames(prototype)
-      .filter(key => key !== 'constructor')
-      .map(key => [key, prototype[key]]),
-  );
 
 export { IoError, HostError } from 'origine:@std/errors';
 import { IoError } from 'origine:@std/errors';
@@ -47,8 +39,9 @@ const UNLIMITED = freeze({ limit: Infinity });
 const openFlags = options => (options === undefined ? 'r' : (MODES[options.mode ?? 'read_only'] ?? 'r'));
 // Zig `createFile`: exclusive -> `x`, truncate (default) -> `w`, else create-and-keep `c`.
 const createFlags = (options = {}) => (options.exclusive ? 'x' : (options.truncate ?? true) ? 'w' : 'c');
-const wrapDir = d => new DirImpl(d.fs, d.id);
-const wrapFile = f => new FileImpl(f.fs, f.id);
+// A result of the grant, wrapped with the methods; it keeps the issuer a hardened grant checks.
+const wrapDir = d => new DirImpl(d.fs, d.id, issuerOf(d));
+const wrapFile = f => new FileImpl(f.fs, f.id, issuerOf(f));
 const dropResult = () => undefined;
 const sizeOf = stat => stat.size;
 
@@ -165,13 +158,7 @@ const fileReadPositionalAll = quansync(function* (io, file, buffer, offset) {
   return total;
 });
 
-class DirImpl {
-  constructor(fs, id) {
-    this.kind = 'dir';
-    this.fs = fs;
-    this.id = id;
-    return makeDir({ ...this, ...methods(DirImpl.prototype) });
-  }
+class DirImpl extends DirHandle {
   /// Zig `Dir.openFile`. options: `{ mode: 'read_only' | 'write_only' | 'read_write' }`.
   openFile(io, path, options) {
     return dirOpenFile[io.kind](io, this, path, openFlags(options));
@@ -237,13 +224,7 @@ class DirImpl {
   }
 }
 
-class FileImpl {
-  constructor(fs, id) {
-    this.kind = 'file';
-    this.fs = fs;
-    this.id = id;
-    return makeFile({ ...this, ...methods(FileImpl.prototype) });
-  }
+class FileImpl extends FileHandle {
   close(io) {
     return fileClose[io.kind](io, this);
   }
@@ -330,12 +311,12 @@ const CWD = new DirImpl(0, 0);
 export const Dir = freeze({
   cwd: () => CWD,
   at: (fs, id) => new DirImpl(fs, id),
-  is: value => recordIs(value, 'DirRef'),
+  is: value => value instanceof DirHandle,
 });
 
 export const File = freeze({
   at: (fs, id) => new FileImpl(fs, id),
-  is: value => recordIs(value, 'FileRef'),
+  is: value => value instanceof FileHandle,
 });
 
 /// The quansync operations behind the methods, for composing in other std modules:

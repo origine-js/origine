@@ -35,6 +35,7 @@ export type { DataBlobOptions, Snapshot, SnapshotConstructor, SnapshotCreateOpti
 export type { ChannelConstructor, ChannelOptions, EventPort, HostCap, MessageEvent, Port, PortBase, PortEvents, PortMode, PullPort, SendOptions, ThreadingCap } from "./host.d.ts";
 export type {
   Access,
+  HandleMode,
   AsyncFs,
   AsyncFsOps,
   AsyncFsRequest,

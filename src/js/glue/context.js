@@ -1,7 +1,10 @@
 // `api.context`: realms whose imports run through an ImportHandler. An ES module factory used by
 // index.js. It builds on the parts the graph glue
 // publishes in shared module state (index.js prepares `graph` before `context`).
-import { recordOf, freeze, failure, own, shared, errors } from './util.js';
+import { Data } from './handles.js';
+import { freeze, failure, own, shared, errors, seal } from './util.js';
+class Context extends Data {}
+seal(Context);
 export default (native, { take }) => {
   const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
@@ -45,7 +48,7 @@ export default (native, { take }) => {
           throw error;
         }
         const refs = new Set();
-        const context = recordOf('Context', {
+        const context = new Context({
           graph,
           /// Imports `specifier` as a script's `import()` would, through this context's handler. Resolves a
           /// reference to the evaluated module.

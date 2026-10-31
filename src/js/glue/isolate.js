@@ -2,7 +2,12 @@
 // Its default export imports the per-realm native and shared helpers. Starts isolates on other threads. What the new isolate gets is
 // `data`, the second argument of its `main`; ports (`api.host.threading.Channel`) in `data` are how it
 // talks to its creator.
-import { recordOf, freeze, freezeMethods, own, shared, failure } from './util.js';
+import { Data } from './handles.js';
+import { freeze, freezeMethods, own, shared, failure, seal } from './util.js';
+class IsolateConfig extends Data {}
+class IsolateOutcome extends Data {}
+class IsolateHandle extends Data {}
+seal(IsolateConfig, IsolateOutcome, IsolateHandle);
 export default (native, { take }) => {
   const { ready } = shared.channels;
   const configs = new WeakSet();
@@ -34,7 +39,7 @@ export default (native, { take }) => {
     if (snapshot !== undefined) shared.snapshotId(snapshot);
     const transfer = own(options, 'transfer');
     if (transfer !== undefined && !Array.isArray(transfer)) throw new TypeError('transfer must be an array of ArrayBuffers and ports');
-    const config = recordOf('IsolateConfig', {
+    const config = new IsolateConfig({
       init,
       args,
       env: freeze(env),
@@ -100,10 +105,10 @@ export default (native, { take }) => {
       checked(take());
       const reason = native.isolate.failure(id);
       checked(take());
-      return recordOf('IsolateOutcome', reason === undefined ? { status } : { status, error: reason });
+      return new IsolateOutcome(reason === undefined ? { status } : { status, error: reason });
     };
     return freezeMethods(
-      recordOf('IsolateHandle', {
+      new IsolateHandle({
         id,
         terminate() {
           native.isolate.terminate(id);

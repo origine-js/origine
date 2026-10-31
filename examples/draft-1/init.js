@@ -11,10 +11,10 @@ const text = bytes => String.fromCharCode(...bytes);
 export async function main(api) {
   eprintln('args:', api.host.env.args().join(' '));
   /** @type {import('@origine/types').FsRequest} */
-  const grant = { root: 'examples/draft-1/work', access: 'rw' };
+  const grant = { root: 'examples/draft-1/work', access: 'rw', handle: 'plain' };
   const sync = api.fs.requestSync(grant);
   const io = api.io.create({});
-  const async = await api.fs.requestAsync({ io, ...grant });
+  const async = await api.fs.requestAsync({ handle: 'plain', io, ...grant });
   const file = IoError.check(sync, sync.dirOpenFile(Dir.cwd(), 'hello.txt', 'w'));
   sync.fileWriteAll(file, Uint8Array.from([104, 105, 10]));
   sync.fileClose(file);

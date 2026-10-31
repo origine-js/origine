@@ -1,40 +1,53 @@
 # JS handles and API construction
 
-Graph descriptors, filesystem references and grants, runtime handles, ports, timers,
-and result records are ordinary JS class instances. Factories hold a closure-private
-construction token. Retrieving `handle.constructor` does not reveal that token;
-`new handle.constructor(otherId)` and forged prototypes cannot create valid handles.
+Init JS is trusted, so the handles the API hands it behave like integer file descriptors: ordinary
+frozen class instances with public fields that init JS can read, rebuild and wrap as it likes. Authority
+never sits in a handle. The natives validate the grant owner, the resource type, access, liveness and
+every id; ids are issued fresh and never reused while their table lives, so a stale or rebuilt id names
+nothing it should not. A resource reference alone confers no authority; the grant supplies it.
 
-Glue imports the registry from its private `records.js` ES module. Embedded std
-wrappers use normal named imports from `origine:@internal/records`, which exposes
-that same realm's registry through the module loader. Glue hands std a value it owns
-with `publish(name, value)` (first publication wins), and std reads it with
-`internal(name)`; the cache operations of `origine:@std/graph/cache` travel this way. Guest imports are denied,
-and the registry is never placed in `import.meta.native`. Evaluated private exports
-and their class identities survive init snapshots.
+## Classes
 
-Instances use JS `#fields` for their type and prepared state. Private brand checks
-and unwrapping run in JavaScript, without calling a native validator. File and
-directory operations unwrap private reference state and cross into their grant-bound
-native operation once with scalar IDs. Native code still validates the grant owner,
-resource type, access, liveness, and arguments. A resource reference alone confers no
-authority; the grant supplies it.
+`src/js/glue/handle.js` has the two bases:
 
-Factories allocate an immutable instance and retain their prepared field state.
-JS validation copies mutable caller option dictionaries and arrays before construction.
-Raw native grants retain their V8-private authority stamp and are hidden in the JS
-grant wrapper's private state. Neither public fields nor getters can substitute for
-private state. There are no public static unwrap helpers on the instance's constructor.
+- `Handle` is a native resource (`FileHandle`, `DirHandle`, `FsGrant`). It keeps the issuer it was made
+  with in a private field, read with `issuerOf(value)`.
+- `Data` is a frozen record of public fields (`Stat`, `DirEntry`, requests and results of the graph glue,
+  the descriptors of `origine:@std/graph/*`). Checks are `instanceof`.
 
-Filesystem tables issue fresh IDs rather than reusing closed IDs. Old aliases stay
-invalid when another file or directory opens. Tables retain issued-slot metadata until
-the grant/runtime is destroyed; resource IDs are scoped to that table. Close and
-release still free the underlying resource according to the existing lifecycle.
+`FileHandle` and `DirHandle` carry `kind`, `fs` (the issuing grant's id) and `id`. `Dir.at(fs, id)` and
+`File.at(fs, id)` of `origine:@std/io` rebuild one without an issuer. An `fs` grant is a `Handle` whose
+issuer is the native grant behind it: `issuerOf` of the real object is the only way to that native, so a
+copy, a proxy or an object inheriting from a grant is not a grant (`derive({ fs })` refuses it).
 
-Existing API namespaces, option dictionaries, arrays, and network classes remain JS.
-The generic native-record constructors, native identity callbacks, and their snapshot
-external references have been removed. V8 value/object fast arguments are supported
-where an operation needs them, with native object validation inside that operation.
+Classes that more than one module makes or checks are declared in `src/js/glue/handles.js`; one module's
+own classes are declared in that module and extend `Handle` or `Data`. Embedded std modules import the same
+file as `origine:@internal/handles` (`import * as h`): the module map adopts the evaluated `handles.js` of
+the realm's glue (`ModuleMap.adopt`), so a table asked for that id links to the one instance instead of
+calling the loader, and glue and std share the same classes. Only embedded `origine:` modules may import it
+(`src/api/internal.zig`); guest imports are denied. A snapshot keeps the module as data of the context and a
+restored scope adopts it again. Glue hands std a value it owns with `provide(name, value)` (first provision
+wins) and std reads it with `provided(name)`; the cache operations of `origine:@std/graph/cache` travel this way.
+
+## Hardened grants
+
+`api.fs.requestSync` and `requestAsync` take a required option `handle: 'plain' | 'hardened'`. Every grant
+mints an issuer for the file and directory handles it issues. A plain grant does not look at it. A hardened
+grant compares the issuer of each handle argument before it calls a native and answers `InvalidInput` for a
+handle it did not issue, a rebuilt one or a hand-made one; the `Dir.cwd()` sentinel (`fs` 0, `id` 0) names no
+resource and is always accepted. The std methods rewrap a result of the grant and keep its issuer. The cost is
+one comparison per handle argument; a plain grant pays nothing.
+
+Instances are frozen and allocated by their class; a handle retains its prepared fields. Validation copies
+mutable caller option dictionaries and arrays before construction. File and directory operations pass the
+`fs` and `id` of a handle to their grant-bound native once.
+
+Filesystem tables issue fresh IDs rather than reusing closed IDs. Old aliases stay invalid when another file
+or directory opens. Tables retain issued-slot metadata until the grant/runtime is destroyed; resource IDs are
+scoped to that table. Close and release still free the underlying resource according to the existing lifecycle.
+
+Existing API namespaces, option dictionaries, arrays, and network classes remain JS. V8 value/object fast
+arguments are supported where an operation needs them, with native object validation inside that operation.
 See [fast calls](../src/api/docs/fast-calls.md) for ABI and handle-scope requirements.
 No timing speedup is claimed; tests force optimization to verify the fast entry.
 

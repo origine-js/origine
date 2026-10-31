@@ -2,5 +2,5 @@
 import "@origine/types/repl";
 import { eprintln } from "origine:@std/debug";
 
-const sync = api.fs.requestSync({ access: "r" });
+const sync = api.fs.requestSync({ handle: 'plain', access: "r" });
 eprintln(sync.kind);

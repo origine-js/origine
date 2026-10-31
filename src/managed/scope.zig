@@ -457,6 +457,17 @@ pub const Scope = struct {
     /// error_info follows ErrorInfo ownership; captures syntax errors and thrown
     /// values on JavaScriptException. Pass null to discard the exception value.
     pub fn eval(self: *Scope, source: []const u8, origin: []const u8, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
+        return self.evalMode(source, origin, false, error_info);
+    }
+
+    /// Like `eval`, in REPL mode: the script may declare a top-level `let`, `const` or `class` that
+    /// an earlier call already declared (the new binding replaces it; `const` stays read-only).
+    /// Same ownership and error contract as `eval`.
+    pub fn evalRepl(self: *Scope, source: []const u8, origin: []const u8, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
+        return self.evalMode(source, origin, true, error_info);
+    }
+
+    fn evalMode(self: *Scope, source: []const u8, origin: []const u8, repl: bool, error_info: ?*ErrorInfo) !v8.Global.Of(v8.Value) {
         if (error_info) |out| out.deinit();
         if (self.disposed) return error.ScopeDisposed;
         var session: Session = undefined;
@@ -465,7 +476,8 @@ pub const Scope = struct {
         errdefer session.retainException(error_info);
         const isolate = session.isolate();
         const script_origin = self.scriptOrigin(origin, false);
-        const script = v8.Script.compile(session.ctx, eu.v.str_utf8(isolate, source), script_origin) orelse return error.JavaScriptException;
+        const text = eu.v.str_utf8(isolate, source);
+        const script = (if (repl) v8.Script.compileRepl(session.ctx, text, script_origin) else v8.Script.compile(session.ctx, text, script_origin)) orelse return error.JavaScriptException;
         const result = script.run(session.ctx) orelse return error.JavaScriptException;
         return .new(isolate, result);
     }

@@ -137,7 +137,7 @@ declare module "origine:@std/fs" {
    * `Result` maps to **throw** (sync) / **reject** (async) with an `IoError` value.
    *
    * ```ts
-   * const rs = fs(api.fs.requestSync({ access: 'rw' }));
+   * const rs = fs(api.fs.requestSync({ handle: 'plain', access: 'rw' }));
    * rs.write('a.txt', 'hello');
    * const text = rs.read_to_string('a.txt');
    * ```

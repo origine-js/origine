@@ -10,7 +10,7 @@
 // sibling modules (run natively) or functions (run in the creating realm during the load stage).
 // `ImportHandler.make` classifies them: `handler.plan` lists them in order and `handler.native` is
 // true when no import of this handler needs the JS realm.
-import { define, is as recordIs } from 'origine:@internal/records';
+import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError, ImportError } from 'origine:@std/errors';
 import { ImportCache } from 'origine:@std/graph/cache';
@@ -23,7 +23,7 @@ const own = (object, key) => {
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 };
 
-const isTransformer = value => typeof value === 'function' || recordIs(value, 'Transformer');
+const isTransformer = value => typeof value === 'function' || value instanceof h.Transformer;
 
 const CODES = freeze({
   NotFound: ERRNO.io.NotFound,
@@ -38,13 +38,11 @@ const NAMES = new Map([...Object.entries(CODES).map(([name, code]) => [code, nam
 /// `IoError`); `other(message)` is the open case, for failures that have no better kind.
 export { ImportError };
 
-const verdict = define('ImportVerdict');
-const transformRecord = define('Transformer');
-const makerRecord = define('Maker');
-const planRecord = define('PlanEntry');
-const handlerRecord = define('ImportHandler');
-const NEXT = verdict({ kind: 'next' });
-const ACCEPT = verdict({ kind: 'accept' });
+class Maker extends h.Data {}
+class PlanEntry extends h.Data {}
+h.seal(Maker, PlanEntry);
+const NEXT = new h.ImportVerdict({ kind: 'next' });
+const ACCEPT = new h.ImportVerdict({ kind: 'accept' });
 
 /// Verdicts a hook returns. All are immutable JS class instances.
 export const Import = freeze({
@@ -55,8 +53,8 @@ export const Import = freeze({
   /// Stop the chain with `target`: a `ModuleSource` (the `maker` turns it into a recipe) or a
   /// `ModuleRecipe` (final: the maker is skipped). The importing context gets its own module.
   provide(target) {
-    if (recordIs(target, 'ModuleSource')) return verdict({ kind: 'provide', source: target });
-    if (recordIs(target, 'ModuleRecipe')) return verdict({ kind: 'provide', recipe: target });
+    if (target instanceof h.ModuleSource) return new h.ImportVerdict({ kind: 'provide', source: target });
+    if (target instanceof h.ModuleRecipe) return new h.ImportVerdict({ kind: 'provide', recipe: target });
     throw invalid('Import.provide: expected a ModuleSource or a ModuleRecipe');
   },
   /// Stop the chain and use `reference`, a module already evaluated in some context, instead of a
@@ -71,20 +69,20 @@ export const Import = freeze({
     if (reference === null || typeof reference !== 'object') throw invalid('Import.link: reference must be a ModuleReference');
     const mode = own(options, 'mode');
     if (mode !== 'hardened' && mode !== 'shared') throw invalid("Import.link: mode must be 'hardened' or 'shared'");
-    return verdict({ kind: 'link', reference, mode });
+    return new h.ImportVerdict({ kind: 'link', reference, mode });
   },
   /// Stop the chain with an error: a code of `ImportError` or the value of `ImportError.other(...)`.
   reject(error) {
     if (typeof error === 'number') {
       const name = NAMES.get(error);
       if (name === undefined || error === ERRNO.host.Unexpected) throw invalid('Import.reject: not an ImportError code');
-      return verdict({ kind: 'reject', error: new ImportError(error) });
+      return new h.ImportVerdict({ kind: 'reject', error: new ImportError(error) });
     }
     const code = own(error, 'errno');
     const message = own(error, 'message');
     if (code !== ERRNO.host.Unexpected || typeof message !== 'string')
       throw invalid('Import.reject: expected an ImportError code or ImportError.other(message)');
-    return verdict({ kind: 'reject', error: new ImportError(code, message) });
+    return new h.ImportVerdict({ kind: 'reject', error: new ImportError(code, message) });
   },
 });
 
@@ -114,14 +112,14 @@ export const Transform = freeze({
       if (typeof transformer === 'function' || transformer.native === false) native = false;
       entries.push(freeze([extension, transformer]));
     }
-    return transformRecord({ host: 'byExtension', kind: 'transformer', native, entries: freeze(entries) });
+    return new h.Transformer({ host: 'byExtension', kind: 'transformer', native, entries: freeze(entries) });
   },
 });
 
 const makerOptions = (what, options) => {
   const handler = own(options, 'import');
   const transformer = own(options, 'transformer');
-  if (handler !== undefined && !recordIs(handler, 'ImportHandler')) throw invalid(`${what}: import must be an ImportHandler`);
+  if (handler !== undefined && !(handler instanceof h.ImportHandler)) throw invalid(`${what}: import must be an ImportHandler`);
   if (transformer !== undefined && !isTransformer(transformer)) throw invalid(`${what}: transformer must be a transformer`);
   return { handler, transformer };
 };
@@ -133,7 +131,7 @@ export const MakeRecipe = freeze({
   /// the source a hook supplied.
   inherit(options = {}) {
     const { handler, transformer } = makerOptions('MakeRecipe.inherit', options);
-    return makerRecord({
+    return new Maker({
       host: 'maker',
       kind: 'maker',
       ...(handler === undefined ? {} : { import: handler }),
@@ -144,19 +142,19 @@ export const MakeRecipe = freeze({
   /// realm for every supplied source.
   fn(fn) {
     if (typeof fn !== 'function') throw invalid('MakeRecipe.fn: expected a function');
-    return makerRecord({ kind: 'maker', native: false, fn });
+    return new Maker({ kind: 'maker', native: false, fn });
   },
 });
 
 /// One element of the plan: which stage it belongs to and whether it runs natively.
 const planEntry = (stage, element) => {
   if (typeof element !== 'function' && typeof element.host === 'string' && element.native !== false)
-    return planRecord({ stage, kind: 'native', name: element.host });
-  return planRecord({ stage, kind: 'js' });
+    return new PlanEntry({ stage, kind: 'native', name: element.host });
+  return new PlanEntry({ stage, kind: 'js' });
 };
 
 const asList = value => (Array.isArray(value) ? value : [value]);
-const isHook = value => typeof value === 'function' || recordIs(value, 'Provider');
+const isHook = value => typeof value === 'function' || value instanceof h.Provider;
 
 /// A recipe's import pipeline.
 export const ImportHandler = freeze({
@@ -166,16 +164,16 @@ export const ImportHandler = freeze({
   /// `({ id }) => data`, called when a module is made; the plain-data result becomes its `import.meta`).
   make(options) {
     const resolver = own(options, 'resolver');
-    if (!recordIs(resolver, 'ImportResolver') || resolver.layers.length === 0)
+    if (!(resolver instanceof h.ImportResolver) || resolver.layers.length === 0)
       throw invalid('ImportHandler.make: resolver must be an ImportResolver with at least one layer');
     const given = own(options, 'hooks');
     if (given === undefined) throw invalid('ImportHandler.make: hooks is required (an empty array resolves nothing)');
     const hooks = asList(given);
     for (const hook of hooks) if (!isHook(hook)) throw invalid('ImportHandler.make: a hook must be a function or a provider descriptor');
     const maker = own(options, 'maker') ?? MakeRecipe.inherit();
-    if (!recordIs(maker, 'Maker')) throw invalid('ImportHandler.make: maker must come from MakeRecipe');
+    if (!(maker instanceof Maker)) throw invalid('ImportHandler.make: maker must come from MakeRecipe');
     const cache = own(options, 'cache') ?? ImportCache.native({ retain: 'all' });
-    if (!recordIs(cache, 'Cache') || cache.host !== 'importCache') throw invalid('ImportHandler.make: cache must be an ImportCache');
+    if (!(cache instanceof h.Cache) || cache.host !== 'importCache') throw invalid('ImportHandler.make: cache must be an ImportCache');
     const meta = own(options, 'meta');
     if (meta !== undefined && typeof meta !== 'function') throw invalid('ImportHandler.make: meta must be a function');
 
@@ -185,8 +183,8 @@ export const ImportHandler = freeze({
     plan.push(planEntry('maker', maker));
     if (maker.transformer !== undefined) plan.push(planEntry('transformer', maker.transformer));
     plan.push(planEntry('cache', cache));
-    if (meta !== undefined) plan.push(planRecord({ stage: 'meta', kind: 'js' }));
-    return handlerRecord({
+    if (meta !== undefined) plan.push(new PlanEntry({ stage: 'meta', kind: 'js' }));
+    return new h.ImportHandler({
       resolver,
       hooks: freeze([...hooks]),
       maker,
@@ -198,5 +196,5 @@ export const ImportHandler = freeze({
       native: plan.every(entry => entry.kind === 'native'),
     });
   },
-  is: value => recordIs(value, 'ImportHandler'),
+  is: value => value instanceof h.ImportHandler,
 });

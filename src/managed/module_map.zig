@@ -97,6 +97,9 @@ pub const ModuleMap = struct {
     preparing_depth: usize = 0,
     sweeping: bool = false,
     next_serial: u32 = 0,
+    /// Evaluated modules of this scope's own context that the host supplies (`adopt`), by id. A table that
+    /// is asked for such an id links to the module itself instead of calling the loader.
+    adopted: std.StringHashMapUnmanaged(v8.Global.Of(v8.Module)) = .empty,
 
     /// Insert/replace a resolved-specifier mapping using source or synthetic exports.
     /// Borrows key/content and all nested slices/handles only through return, on
@@ -159,6 +162,17 @@ pub const ModuleMap = struct {
         return self.get(.{ .module_id = id, .namespace = entry.namespace }, null);
     }
 
+    /// Registers `module`, an evaluated module of this scope's own context (the host's private glue),
+    /// under `id`: from then on the entry of every table for `id` links to that one instance instead of
+    /// calling the loader, so whoever imports the id shares its classes and state with the glue that
+    /// evaluated it. Entries appear when the id is first imported, like any module's. A second
+    /// adoption of an `id` is ignored. Borrows `module` through return.
+    pub fn adopt(self: *ModuleMap, id: []const u8, module: v8.Module) !void {
+        if (self.adopted.contains(id)) return;
+        try self.adopted.ensureUnusedCapacity(self.scope.runtime.allocator, 1);
+        self.adopted.putAssumeCapacity(try self.arenaAllocator().dupe(u8, id), .new(self.isolate(), module));
+    }
+
     /// Borrows scope at its stable address until deinit; owns an initially empty
     /// arena backed by the runtime allocator. Caller owns the returned map and must
     /// keep scope/runtime/allocator alive through deinit; allocates nothing yet.
@@ -185,6 +199,9 @@ pub const ModuleMap = struct {
             if (!task.settled) _ = task.resolver.deref().reject(self.ctx(), self.errorValue(error.RuntimeClosed));
             task.resolver.deinit();
         }
+        var held = self.adopted.valueIterator();
+        while (held.next()) |module| module.deinit();
+        self.adopted.deinit(self.scope.runtime.allocator);
         self.entries.deinit(self.scope.runtime.allocator);
         self.all_entries.deinit(self.scope.runtime.allocator);
         self.by_identity.deinit(self.scope.runtime.allocator);
@@ -317,6 +334,12 @@ pub const ModuleMap = struct {
     /// retains a pending numeric token. On error partial entry state remains map-owned
     /// until deinit; requires entered context/isolate and a live HandleScope.
     fn load(self: *ModuleMap, entry: *Entry) !void {
+        if (self.adopted.get(entry.id)) |module| {
+            entry.module = .new(self.isolate(), module.deref());
+            try self.indexModule(entry);
+            entry.preparing = false;
+            return;
+        }
         const loader = self.scope.options.loader orelse return error.NoLoader;
         const rt = self.scope.runtime;
         const token = rt.next_load_token;
@@ -518,7 +541,7 @@ pub const ModuleMap = struct {
 
     /// Registers every active module with `creator` as data of the current context and
     /// describes the graph. The map must be idle and hold only settled source modules
-    /// or the evaluated private records module. Failures, pending loads, other synthetic modules and unfinished imports fail with
+    /// (adopted ones included). Failures, pending loads, synthetic modules and unfinished imports fail with
     /// error.NotSnapshottable. Requires the entered context and a live HandleScope. Result
     /// slices and strings are copied into `alloc`, which the caller owns; source hashes are
     /// left for the host to fill in.
@@ -530,7 +553,7 @@ pub const ModuleMap = struct {
             if (!entry.cached) continue;
             const module = entry.module orelse return error.NotSnapshottable;
             if (entry.failure != null or entry.pending != null or entry.preparing or entry.shared) return error.NotSnapshottable;
-            if (!snapshotSafeModule(entry.id, module.deref())) return error.NotSnapshottable;
+            if (!snapshotSafeModule(module.deref())) return error.NotSnapshottable;
             try active.append(alloc, entry);
         }
         const modules = try alloc.alloc(init_snapshot.Module, active.items.len);
@@ -572,7 +595,7 @@ pub const ModuleMap = struct {
             self.entries.putAssumeCapacity(entry.*.cache_key, entry.*);
             const data = self.ctx().getDataFromSnapshotOnce(module.data_index) orelse return error.InvalidSnapshot;
             const restored = v8.Module.from_opaque(data.handle) orelse return error.InvalidSnapshot;
-            if (!snapshotSafeModule(module.id, restored)) return error.InvalidSnapshot;
+            if (!snapshotSafeModule(restored)) return error.InvalidSnapshot;
             entry.*.module = .new(self.isolate(), restored);
             try self.indexModule(entry.*);
             entry.*.preparing = false;
@@ -1163,13 +1186,8 @@ pub fn synthetic(ctx: v8.Context, module: v8.Module) callconv(.c) v8.MaybeHandle
     return resolver.getPromise().object.value.data.handle;
 }
 
-// The private records module aliases JS functions already retained by the glue
-// heap. Once evaluated, its export cells are entirely V8-managed; the callback
-// never runs after restore and needs no Zig export metadata or live authority.
-// Other synthetic modules keep the existing snapshot restriction.
-fn snapshotSafeModule(id: []const u8, module: v8.Module) bool {
-    return module.isSourceTextModule() or
-        (std.mem.eql(u8, id, "origine:@internal/records") and module.isSyntheticModule() and module.getStatus() == 4);
+fn snapshotSafeModule(module: v8.Module) bool {
+    return module.isSourceTextModule();
 }
 /// Borrows callback locals through synchronous import setup; scratch storage
 /// is released before return. Returns a local promise in the enclosing HandleScope;

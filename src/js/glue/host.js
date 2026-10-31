@@ -1,7 +1,11 @@
 // `api.host`: facts about the machine and process the program runs on. An ES module factory imported
 // by index.js. Its default export uses the per-realm native and helpers through imports.
 // `api.host.env` exposes the environment configured by the host.
-import { recordOf, freeze, freezeMethods, own, shared, failure, errors } from './util.js';
+import { Data, Registration } from './handles.js';
+import { freeze, freezeMethods, own, shared, failure, errors, seal } from './util.js';
+class EventPort extends Data {}
+class PullPort extends Data {}
+seal(EventPort, PullPort);
 export default (native, { take }) => {
   function makeEnvCap() {
     return freezeMethods({
@@ -179,7 +183,7 @@ export default (native, { take }) => {
         ready();
         state.handlers[name].push(fn);
         if (name === 'message') pump(state);
-        return recordOf('Registration', {
+        return new Registration({
           unregister() {
             const at = state.handlers[name].indexOf(fn);
             if (at < 0) return false;
@@ -216,7 +220,7 @@ export default (native, { take }) => {
   function makePort(tx, rx, mode) {
     ready();
     const state = { tx, rx, consumed: false, pending: 0, running: false };
-    const port = recordOf(mode === EVENT ? 'EventPort' : 'PullPort', mode === EVENT ? eventPort(state) : pullPort(state));
+    const port = new (mode === EVENT ? EventPort : PullPort)(mode === EVENT ? eventPort(state) : pullPort(state));
     native.channel.brand(port, tx, rx, mode);
     freezeMethods(port);
     states.set(port, state);

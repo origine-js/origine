@@ -21,9 +21,8 @@ pub fn modules() [1]mod.Module {
     };
     return .{.{ .id = "origine:@std/errors", .source = @embedFile("../../js/std/errors.js"), .bindings = bindings }};
 }
-fn build(env: binding.Env, _: *mod.ScopeState, _: *anyopaque) anyerror!v8.Object {
-    try glue.prepare(env.isolate, env.ctx);
-    const bundle = glue.restored(env.ctx).?;
+fn build(env: binding.Env, state: *mod.ScopeState, _: *anyopaque) anyerror!v8.Object {
+    const bundle = try glue.ensure(env.isolate, env.ctx, .{ .scope = state.scope });
     const classes = bundle.object.getIndex(env.ctx, glue.errors_index) orelse return error.BootstrapFailed;
     const out = @import("@util").v.object(env.isolate);
     try binding.set(env, out, "classes", classes);

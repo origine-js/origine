@@ -52,7 +52,7 @@ import { fs } from 'origine:@std/fs';
 import { eprintln } from 'origine:@std/debug';
 
 export async function main(api) {
-  const files = fs(api.fs.requestSync({ access: 'r' }));
+  const files = fs(api.fs.requestSync({ handle: 'plain', access: 'r' }));
   eprintln(files.read_to_string('README.md').length);
 }
 ```

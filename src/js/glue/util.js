@@ -1,4 +1,3 @@
-import * as recordModule from './records.js';
 import { ERRNO } from './errno.js';
 import { of } from './errors.js';
 
@@ -29,9 +28,15 @@ export const shared = {};
 export const ioHandles = new WeakSet();
 export const closedIo = new WeakSet();
 export const freeze = Object.freeze;
-export const records = recordModule;
-export const recordOf = records.make;
-export const recordIs = records.is;
+// Freezes what it is given: a class (and its prototype) from its own `static {}` block, or an
+// instance from its constructor. Returns the first argument.
+export function seal(...targets) {
+  for (const target of targets) {
+    if (typeof target === 'function') Object.freeze(target.prototype);
+    Object.freeze(target);
+  }
+  return targets[0];
+}
 
 export function freezeMethods(object) {
   for (const key of Reflect.ownKeys(object)) {

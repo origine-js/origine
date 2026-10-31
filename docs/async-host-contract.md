@@ -13,9 +13,9 @@ the zero-copy buffer rules that were added later. `api.net` and the `io` timers 
 
 ## Guest API (JS)
 ```js
-const sync = api.fs.requestSync({ root, access });          // unchanged semantics (std.Io, errno cell); returns the sync cap
+const sync = api.fs.requestSync({ handle: 'plain', root, access });          // unchanged semantics (std.Io, errno cell); returns the sync cap
 const io = api.io.create({ backend: 'auto', entries: 256 }); // JS IoHandle instance
-const async = await api.fs.requestAsync({ io, root, access }); // rejects BadHandle/PermissionDenied/Unsupported
+const async = await api.fs.requestAsync({ handle: 'plain', io, root, access }); // rejects BadHandle/PermissionDenied/Unsupported
 await io.close();                                           // Promise<void>: cancels in-flight ops, destroys the runtime
 ```
 `api.fs.request` is removed. `api.fs.narrow` was dropped for now (`Config.fs` is the ceiling, `access` is per request). `api.io.narrow({ backends, maxRuntimes })`

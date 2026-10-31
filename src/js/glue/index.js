@@ -20,7 +20,7 @@ const factories = {
 // Builds a host-independent API template for one realm from its `native` object (the errno cell
 // to start with; `native.bind` arrives at install). Snapshots prepare every JS capability here;
 // the getters bind native authority only on first access. Returns the bundle the host keeps in
-// private context embedder data: [full api, basic api, native, errno cell, initial, errors, records].
+// private context embedder data: [full api, basic api, native, errno cell, initial, errors].
 export function create(native) {
   const cell = util.errnoCell(native);
   const { freeze, freezeMethods } = util;
@@ -66,5 +66,5 @@ export function create(native) {
     access('isolate');
     return util.shared.initial();
   };
-  return [freeze(full), freeze(basic), native, cell.errno, initial, freeze({ OrigineError, IoError, HostError, ImportError }), util.records];
+  return [freeze(full), freeze(basic), native, cell.errno, initial, freeze({ OrigineError, IoError, HostError, ImportError })];
 }

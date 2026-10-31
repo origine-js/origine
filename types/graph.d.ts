@@ -59,7 +59,7 @@ export interface ModuleReference extends Disposable {
 export interface GraphOptions {
   /**
    * A grant `api.fs` made: the only authority sources are read with. A sync grant (`requestSync`) is read
-   * with the host's blocking read; an async one (`await requestAsync({ io })`) on its io runtime, without
+   * with the host's blocking read; an async one (`await requestAsync({ handle: 'plain', io })`) on its io runtime, without
    * blocking and without entering JS. Anything but a grant `api.fs` made is `InvalidInput`.
    */
   readonly fs?: SyncFs | AsyncFs;

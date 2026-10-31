@@ -7,7 +7,7 @@
 //
 // ImportCache and ResolveCache are consulted on every import and behind V8's synchronous link, so
 // they cannot call back into JS. CodeCache is off that path and may be backed by JS (`custom`).
-import { define, internal } from 'origine:@internal/records';
+import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError } from 'origine:@std/errors';
 
@@ -24,13 +24,12 @@ const capacity = (what, name, value) => {
   if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0)) throw invalid(`${what}: ${name} must be a non-negative integer`);
   return value;
 };
-const makeCache = define('Cache');
 const withCapacity = (host, kind, name, value, rest) =>
-  makeCache({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
+  new h.Cache({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
 
 /// What reaches the host: `api.graph` (or `api.context`) publishes it in the realm's records module.
 const ops = () => {
-  const found = internal('graph/cache-ops');
+  const found = h.provided('graph/cache-ops');
   if (found === undefined) throw new IoError(ERRNO.io.Unsupported, 'ImportCache needs api.graph or api.context');
   return found;
 };
@@ -52,7 +51,7 @@ export const ImportCache = freeze({
     if (own(options, 'entries') !== undefined)
       throw invalid("ImportCache.native: there is no entries cap, an identity table never evicts one module while others stay; bound it with retain: 'used' or delete/clear");
     const descriptor = withCapacity('importCache', 'cache', 'entries', undefined, { retain });
-    const cache = makeCache({
+    const cache = new h.Cache({
       ...descriptor,
       get size() {
         return ops().size(cache);
@@ -76,7 +75,7 @@ export const ResolveCache = freeze({
   },
 });
 
-const none = makeCache({ host: 'codeCacheNone', kind: 'codeCache' });
+const none = new h.Cache({ host: 'codeCacheNone', kind: 'codeCache' });
 
 export const CodeCache = freeze({
   /// No code cache: every compile parses.
@@ -110,6 +109,6 @@ export const CodeCache = freeze({
     const load = own(options, 'load');
     const store = own(options, 'store');
     if (typeof load !== 'function' || typeof store !== 'function') throw invalid('CodeCache.custom: load and store must be functions');
-    return makeCache({ kind: 'codeCache', native: false, load, store });
+    return new h.Cache({ kind: 'codeCache', native: false, load, store });
   },
 });

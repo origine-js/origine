@@ -60,7 +60,7 @@ JavaScript and skips the erase step; the editor, parsing and rewrite work in bot
 | `tty.zig` | raw mode (`tcsetattr`), `poll`/`read` of one byte, `write`, terminal width (`ioctl`), the completion callback | the device and the syscalls; this is the only place that knows there is a terminal. 80 lines, no decisions |
 | `engine.zig` | the Zig view of the C ABI (`Engine`) | an adapter: slices instead of pointer+length, enums instead of integers |
 | `session.zig` | the read-eval-print loop; what each dot-command *does* (print help, list history, run `.again`); evaluate; settle async results; install `api` | it drives the runtime and the platform, which are Zig |
-| `eval.zig` | `scope.eval` under the REPL's script name | V8 |
+| `eval.zig` | `scope.evalRepl` under the REPL's script name: V8's REPL mode, whose promise-wrapped result (`{ ".repl_result": value }`) it unwraps | V8 |
 | `helpers.zig` + `helpers.js` | `inspect`, `complete`, `track`, `_` / `_error` | they read **live objects** (descriptors, prototypes, promise state) without running guest code. That needs V8 handles and a private adapter, so it cannot move out of V8 |
 | `display.zig` | printing values and errors | V8 `toString` under a `TryCatch` |
 
@@ -89,8 +89,8 @@ line ─► engine.command(line)          source? ─► engine.append(line) ─
                                                       │
         incomplete ◄──────────────────────────────────┤  (read another line)
         error      ─► print diagnostics               │
-        script     ─► scope.eval(BUF_CODE)            │
-        async      ─► scope.eval(BUF_CODE) = promise ─► settle (pump loop until it resolves)
+        script     ─► eval(BUF_CODE) in REPL mode     │
+        async      ─► eval(BUF_CODE) = promise        ─► settle (pump loop until it resolves)
                                                       ▼
                        helpers.remember(BUF_PLAIN, result)    ← the JavaScript *before* the rewrite
                        helpers.display(result)
@@ -120,3 +120,17 @@ line ─► engine.command(line)          source? ─► engine.append(line) ─
 | the ABI and the Zig adapter | `src/tests/managed/repl.zig` (engine, pending input, TypeScript, await rewrite run in V8) |
 | the whole thing in a pseudo-terminal | `just test-repl` (`src/repl/tests/terminal_smoke.py`) |
 | header, Zig and Rust declarations agree | `just check-contracts` (surface G in [contracts.md](contracts.md)) |
+
+## Redeclaration (V8 REPL mode)
+
+Every entry is compiled as a script in V8's REPL mode, the mode the inspector's `Runtime.evaluate`
+`replMode: true` uses (Deno's REPL). A top-level `let`, `const` or `class` may then be declared again
+by a later entry and replaces the earlier binding, while `const` stays read-only
+(`const c = 1; c = 2` throws `TypeError`). Plain scripts reject the second declaration with a
+`SyntaxError`. V8 exposes the mode only through the inspector's `v8::debug::EvaluateGlobal`, which
+names no script and carries no host-defined options (the scope id that dynamic `import()` needs), so
+`lib/v8_zig/build-tools/patches/v8/0011-repl-mode.patch` lets `ScriptCompiler::Compile` take a private
+option bit that sets `ScriptDetails::repl_mode`; `v8.Script.compileRepl` passes it. A REPL-mode script
+returns a promise fulfilled with `{ ".repl_result": completion value }` (already settled when the
+entry has no top-level `await`); `eval.zig` unwraps it, and a rejected promise is the script's
+thrown value.

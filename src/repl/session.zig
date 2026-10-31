@@ -177,8 +177,8 @@ const Session = struct {
     /// Evaluates `source`; code that was rewritten for top-level `await` or static `import` is an
     /// async function call whose promise is awaited. A rejection surfaces as a thrown value.
     fn run(self: *Session, source: []const u8, asynchronous: bool, error_info: *m.ErrorInfo) !v8.Global.Of(v8.Value) {
-        if (!asynchronous) return eval_mod.eval(self.scope, source, error_info);
-        const pending = try self.scope.eval(source, eval_mod.origin, error_info);
+        const pending = try eval_mod.eval(self.scope, source, error_info);
+        if (!asynchronous) return pending;
         defer pending.deinit();
         return self.settle(pending, error_info);
     }

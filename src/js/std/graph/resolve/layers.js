@@ -1,7 +1,7 @@
 // `origine:@std/graph/resolve/layers`: resolver layers the host runs natively, so resolving an
 // import through them never enters JavaScript. Each call returns an immutable JS descriptor instance; the host
 // compiles it when the handler is registered (it holds no authority, see docs/graph-api.md).
-import { define } from 'origine:@internal/records';
+import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError } from 'origine:@std/errors';
 
@@ -13,8 +13,7 @@ const own = (object, key) => {
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 };
 
-const makeLayer = define('ResolveLayer');
-const layer = (host, rest) => makeLayer({ host, kind: 'layer', ...rest });
+const layer = (host, rest) => new h.ResolveLayer({ host, kind: 'layer', ...rest });
 
 /// `./x` and `../x` against the importer's id.
 export const relative = () => layer('relative');

@@ -1,4 +1,4 @@
-import { define } from 'origine:@internal/records';
+import * as h from 'origine:@internal/handles';
 // `origine:@std/transformer/oxc`: host transformers for the module graph (`ModuleSource#withTransformer`,
 // `Transform.byExtension`, the maker of an `ImportHandler`). `ts(options)` returns an immutable JS descriptor instance
 // `{ host: 'oxc', kind: 'transformer', transform, options }` that the host runs natively on module
@@ -45,8 +45,7 @@ const checked = options => {
   return freeze(out);
 };
 
-const makeTransformer = define('Transformer');
-const make = (transform, options) => makeTransformer({ host: 'oxc', kind: 'transformer', transform, options: checked(options) });
+const make = (transform, options) => new h.Transformer({ host: 'oxc', kind: 'transformer', transform, options: checked(options) });
 
 export const ts = options => make('ts', options);
 export const tsx = options => make('tsx', options);

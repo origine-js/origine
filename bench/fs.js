@@ -17,7 +17,7 @@ function time(name, iterations, fn) {
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const io = api.fs.requestSync({ access: 'rw' });
+  const io = api.fs.requestSync({ handle: 'plain', access: 'rw' });
   const cwd = Dir.cwd();
   cwd.createDirPath(io, 'bench/work');
   const work = cwd.openDir(io, 'bench/work');
@@ -55,7 +55,7 @@ export async function main(api) {
   time('Rust write (512 B)', N / 4, () => rs.write('w.txt', bytes(512)));
   time('Rust copy (512 B)', N / 4, () => rs.copy('small.txt', 'c.txt'));
   const runtime = api.io.create({});
-  const aio = await api.fs.requestAsync({ io: runtime, access: 'rw' });
+  const aio = await api.fs.requestAsync({ handle: 'plain', io: runtime, access: 'rw' });
   const ars = rustFs(aio, Dir.cwd());
   const start = Date.now();
   for (let i = 0; i < 2000; i++) await ars.read('bench/work/small.txt');

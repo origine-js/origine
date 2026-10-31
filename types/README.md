@@ -26,7 +26,7 @@ import { fs } from 'origine:@std/fs';
 import { eprintln } from 'origine:@std/debug';
 
 export const main: Main = async api => {
-  const rs = fs(api.fs.requestSync({ access: 'r' }));
+  const rs = fs(api.fs.requestSync({ handle: 'plain', access: 'r' }));
   eprintln(rs.read_to_string('README.md').length);
 };
 ```

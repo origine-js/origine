@@ -9,9 +9,9 @@ const assertType = <_T extends true>() => {};
 
 export async function main(api: Api): Promise<void> {
   const io = api.io.create();
-  const sync = api.fs.requestSync({ access: "rw" });
-  const readOnly = api.fs.requestSync({ access: "r", root: "data" });
-  const async = await api.fs.requestAsync({ io, access: "w" });
+  const sync = api.fs.requestSync({ handle: 'plain', access: "rw" });
+  const readOnly = api.fs.requestSync({ handle: 'plain', access: "r", root: "data" });
+  const async = await api.fs.requestAsync({ handle: 'plain', io, access: "w" });
   assertType<Equal<typeof sync, SyncFs>>();
   assertType<Equal<typeof async, AsyncFs>>();
 
@@ -92,17 +92,17 @@ export async function main(api: Api): Promise<void> {
   // @ts-expect-error `access` is required
   api.fs.requestSync({});
   // @ts-expect-error `access` is required even with a root
-  api.fs.requestSync({ root: "data" });
+  api.fs.requestSync({ handle: 'plain', root: "data" });
   // @ts-expect-error not an access
-  api.fs.requestSync({ access: "rwx" });
+  api.fs.requestSync({ handle: 'plain', access: "rwx" });
   // @ts-expect-error misspelled option key
-  api.fs.requestSync({ access: "r", rot: "data" });
+  api.fs.requestSync({ handle: 'plain', access: "r", rot: "data" });
   // @ts-expect-error no `allowWrite`: the access says it
-  api.fs.requestSync({ access: "r", allowWrite: true });
+  api.fs.requestSync({ handle: 'plain', access: "r", allowWrite: true });
   // @ts-expect-error an async request needs the `io`
-  await api.fs.requestAsync({ access: "r" });
+  await api.fs.requestAsync({ handle: 'plain', access: "r" });
   // @ts-expect-error the `io` of an async request is a runtime handle, not a grant
-  await api.fs.requestAsync({ io: sync, access: "r" });
+  await api.fs.requestAsync({ handle: 'plain', io: sync, access: "r" });
   // @ts-expect-error `entries` of api.io.create, not `entires`
   api.io.create({ entires: 8 });
   // @ts-expect-error a sync grant has no promise result

@@ -24,7 +24,7 @@ const printPreload = [{ source: '(values) => { globalThis.print = values.print; 
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
-  const graph = api.graph.derive({ fs: api.fs.requestSync({ root: 'examples/graph-cross-context', access: 'r' }) });
+  const graph = api.graph.derive({ fs: api.fs.requestSync({ handle: 'plain', root: 'examples/graph-cross-context', access: 'r' }) });
   const handlerA = ImportHandler.make({
     resolver: ImportResolver.layered().layer(relative()),
     hooks: [fsProvider({ read: 'copy' })],

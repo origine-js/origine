@@ -177,11 +177,8 @@ pub const Scope = struct {
         /// the scope's lifetime (module identity as in ESM), `used` frees a module once no pin,
         /// import in flight or held module reaches it, so a later import evaluates it again.
         retain: Retain = .all,
-        /// Cap on the table, in modules: over it, the oldest unpinned entries are dropped from the
-        /// table (and freed if nothing else holds them).
-        table_limit: ?usize = null,
-        /// Retention and cap per table, for a scope with several (`Resolver.namespace_of`): asked
-        /// when a table is swept. Without it `retain` and `table_limit` apply to every table.
+        /// Retention per table, for a scope with several (`Resolver.namespace_of`): asked when a table is
+        /// swept. Without it `retain` applies to every table.
         table_policy: ?TablePolicy = null,
         /// Called when a module this scope linked from another context (`Content.module`) is released from
         /// the map, with the key of its entry (`ModuleMap.keyOf`): the host gives back what it held for it.
@@ -195,8 +192,9 @@ pub const Scope = struct {
 
     pub const Retain = enum { all, used };
 
-    /// What a table does with a module nothing else holds, and how many it keeps.
-    pub const Policy = struct { retain: Retain = .all, limit: ?usize = null };
+    /// What a table does with a module nothing else holds. A table has no cap: evicting one module while
+    /// others stay would hand out two instances of one id.
+    pub const Policy = struct { retain: Retain = .all };
 
     pub const TablePolicy = struct {
         data: ?*anyopaque = null,
@@ -206,7 +204,7 @@ pub const Scope = struct {
     /// The policy of table `namespace`.
     pub fn policyOf(self: *const Scope, namespace: u32) Policy {
         if (self.options.table_policy) |hook| return hook.call(hook.data, namespace);
-        return .{ .retain = self.options.retain, .limit = self.options.table_limit };
+        return .{ .retain = self.options.retain };
     }
 
     pub const Disposer = struct {

@@ -702,27 +702,12 @@ pub const ModuleMap = struct {
 
     /// Frees the modules nothing holds. A module is held while the table keeps it (always with
     /// `retain: all`, never with `retain: used`), while it is pinned, while an import or load is
-    /// in flight for it, and while a held module imports it. Evicts the oldest unpinned entries
-    /// first when the table is over `Options.table_limit`. A no-op while a callback is running.
+    /// in flight for it, and while a held module imports it. A no-op while a callback is running.
     /// Requires the entered context and a live HandleScope.
     pub fn sweep(self: *ModuleMap) void {
         if (self.driving or self.preparing_depth != 0 or self.sweeping) return;
         self.sweeping = true;
         defer self.sweeping = false;
-        // Each table over its cap drops its oldest unpinned entries first.
-        for (self.all_entries.items) |first| {
-            if (!first.cached) continue;
-            const limit = self.scope.policyOf(first.namespace).limit orelse continue;
-            var cached = self.countNamespace(first.namespace);
-            for (self.all_entries.items) |entry| {
-                if (cached <= limit) break;
-                if (entry.namespace == first.namespace and entry.cached and entry.pins == 0 and !entry.preparing and entry.pending == null) {
-                    _ = self.entries.remove(entry.cache_key);
-                    entry.cached = false;
-                    cached -= 1;
-                }
-            }
-        }
         self.resetVisited();
         for (self.all_entries.items) |entry| {
             const used = self.scope.policyOf(entry.namespace).retain == .used;

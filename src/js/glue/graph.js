@@ -78,7 +78,7 @@ export default (native, { take }) => {
   const cacheId = cache => {
     const known = cacheIds.get(cache);
     if (known !== undefined && host(native.graph.cacheAlive, known)) return known;
-    const id = host(native.graph.cacheCreate, cache.retain === 'used' ? 1 : 0, cache.entries ?? -1);
+    const id = host(native.graph.cacheCreate, cache.retain === 'used' ? 1 : 0);
     cacheIds.set(cache, id);
     return id;
   };

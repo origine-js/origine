@@ -548,7 +548,7 @@ fn tablePolicy(data: ?*anyopaque, namespace: u32) Scope.Policy {
     return .{ .retain = switch (table.retain) {
         .all => .all,
         .used => .used,
-    }, .limit = table.entries };
+    } };
 }
 
 fn cancel(data: ?*anyopaque, token: module_types.LoadToken) void {

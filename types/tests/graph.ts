@@ -28,7 +28,7 @@ const handler = ImportHandler.make({
     fsProvider({ read: "copy" }),
   ],
   maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ ".ts": ts(), ".txt": (source, id) => `/* ${id} */ ${source}` }) }),
-  cache: ImportCache.native({ retain: "used", entries: 1000 }),
+  cache: ImportCache.native({ retain: "used" }),
   meta: ({ id }) => ({ url: id }),
 });
 const planned: "native" | "js" = handler.plan[0]!.kind;

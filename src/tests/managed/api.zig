@@ -1216,7 +1216,7 @@ test "graph: an origineProvider with no std serves what its creator has and cann
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const graph_api = m.Api.graph_api;
-    const cache = try graph_api.cacheCreate(stateOfContext(fx.host, fx.host.contexts.values()[0]), 0, -1);
+    const cache = try graph_api.cacheCreate(stateOfContext(fx.host, fx.host.contexts.values()[0]), 0);
     const spec = struct {
         fn of(alloc: std.mem.Allocator, filter_json: []const u8, table: u32) ![]u8 {
             return std.fmt.allocPrint(alloc, "{{\"layers\":[{{\"host\":\"origine\"}}],\"hooks\":[{{\"host\":\"origine\",\"std\":{s}}}],\"maker\":{{\"host\":\"maker\",\"import\":0,\"transformer\":null}},\"cache\":{{\"id\":{d}}},\"meta\":false}}", .{ filter_json, table });

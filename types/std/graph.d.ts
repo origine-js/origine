@@ -338,12 +338,14 @@ declare module "origine:@std/graph/cache" {
     clear(): number;
     /** `'all'`: entries live as long as the context. `'used'`: dropped once nothing holds them, so a later import evaluates the module again. Per table. */
     readonly retain: "all" | "used";
-    /** Cap on the table, in entries. */
-    readonly entries?: number;
   }) & import("origine:@std/graph/module").Descriptor;
   export const ImportCache: {
-    /** `retain` is required because it changes what re-importing does. Throws `InvalidInput`. */
-    native(options: { readonly retain: "all" | "used"; readonly entries?: number }): ImportCache;
+    /**
+     * `retain` is required because it changes what re-importing does. There is no `entries` cap: an identity
+     * table never evicts one module while others stay, so its only bounds are `retain: "used"`, `delete` and
+     * `clear`. Passing `entries` is `InvalidInput`. Throws `InvalidInput`.
+     */
+    native(options: { readonly retain: "all" | "used" }): ImportCache;
   };
 
   /** The native memo of resolver results. */

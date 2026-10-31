@@ -250,8 +250,6 @@ pub const Retain = enum { all, used };
 pub const CacheTable = struct {
     id: u32 = 0,
     retain: Retain,
-    /// Cap on the modules the table holds.
-    entries: ?usize,
 };
 
 pub const Handler = struct {
@@ -778,18 +776,19 @@ pub fn handlerUnpin(state: *ScopeState, id: u32) Error!void {
     if (found.pins > 0) found.pins -= 1;
 }
 
-/// `cacheCreate(retain, entries)`: a table for an `ImportCache` object. `retain` is 0 for `all` and 1 for
-/// `used`; `entries` is its cap (negative: none). The JS side names the table in the handlers made with it.
-pub fn cacheCreate(state: *ScopeState, retain: u32, entries: f64) Error!u32 {
-    return cacheCreateImpl(state, retain, entries) catch |err| return errno.narrow(err);
+/// `cacheCreate(retain)`: a table for an `ImportCache` object. `retain` is 0 for `all` and 1 for `used`. The
+/// JS side names the table in the handlers made with it. A table has no cap: it never evicts one module
+/// while others stay.
+pub fn cacheCreate(state: *ScopeState, retain: u32) Error!u32 {
+    return cacheCreateImpl(state, retain) catch |err| return errno.narrow(err);
 }
 
-fn cacheCreateImpl(state: *ScopeState, retain: u32, entries: f64) !u32 {
+fn cacheCreateImpl(state: *ScopeState, retain: u32) !u32 {
     const host = state.host;
     const mode = std.enums.fromInt(Retain, retain) orelse return error.InvalidInput;
     const created = try host.allocator.create(CacheTable);
     errdefer host.allocator.destroy(created);
-    created.* = .{ .id = try host.caches.issue(), .retain = mode, .entries = if (entries >= 0) @intFromFloat(entries) else null };
+    created.* = .{ .id = try host.caches.issue(), .retain = mode };
     try host.caches.put(host.allocator, created.id, created);
     return created.id;
 }

@@ -41,15 +41,17 @@ export const ImportCache = freeze({
   /// one id, also inside one context. `retain` is required because it changes what re-importing does:
   /// `'all'` keeps every entry for the context's lifetime (module identity as in ESM); `'used'` drops an
   /// entry once no handle, dependent or live reference holds it, so a later import evaluates the module
-  /// again. `entries` caps the table. `size` counts the modules it holds, `delete(id)` forgets one (and
+  /// again. There is no `entries`: an identity table never evicts one module while others stay (a partly
+  /// evicted table would hand out two instances of one id), so its only bounds are `retain: 'used'` and
+  /// `delete`/`clear`. `size` counts the modules it holds, `delete(id)` forgets one (and
   /// what imported it) so the next import makes and evaluates a new module while the old one keeps
   /// working, and `clear()` forgets all of them.
   native(options) {
     const retain = own(options, 'retain');
     if (retain !== 'all' && retain !== 'used') throw invalid("ImportCache.native: retain must be 'all' or 'used'");
-    const descriptor = withCapacity('importCache', 'cache', 'entries', capacity('ImportCache.native', 'entries', own(options, 'entries')), {
-      retain,
-    });
+    if (own(options, 'entries') !== undefined)
+      throw invalid("ImportCache.native: there is no entries cap, an identity table never evicts one module while others stay; bound it with retain: 'used' or delete/clear");
+    const descriptor = withCapacity('importCache', 'cache', 'entries', undefined, { retain });
     const cache = makeCache({
       ...descriptor,
       get size() {

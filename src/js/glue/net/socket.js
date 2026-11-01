@@ -140,9 +140,9 @@ export default (k, { Core, Handle, live, coreOf, revoke, endQueue }) => {
       return live(this).register(event, handler);
     }
     /**
-     * Stops event delivery: after this returns no `data`, `end`, `error` event is dispatched until
-     * `resume()`. What already arrived is kept in order, and reading stops once a few chunks are
-     * held, so the peer is held back through TCP.
+     * Stops event delivery: after this returns no `data`, `end`, `error`, `close` event is dispatched
+     * until `resume()`. What already arrived is kept in order, and reading stops once a few chunks are
+     * held, so the peer is held back through TCP. The write side goes on: `drain` fires, sends proceed.
      */
     pause() {
       live(this).pause();

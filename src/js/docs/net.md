@@ -107,7 +107,7 @@ await running;
 | `EventSocket` | `data` (`ev.length`, `ev.buffer()`), `end` (peer finished), `error` (`OrigineError` subclass), `drain` (the send queue became empty), `close` |
 | `EventServer` | `connection` (a socket of the server's `socketMode`), `error`, `close` |
 
-- `handle.register(event, fn)` returns `{ unregister() }` (`true` if it was registered). Handlers of one event run in registration order. The first `data` (or `connection`) handler starts reading. When the last one is unregistered the handle pauses itself, so nothing is read just to be dropped; registering one again resumes it. After `close` the handlers are dropped; `register` on a closed handle throws `BadHandle`.
+- `handle.register(event, fn)` returns `{ unregister() }` (`true` if it was registered). Handlers of one event run in registration order. The first `data` (or `connection`) handler starts reading. When the last one is unregistered the handle pauses itself, so nothing is read just to be dropped; registering one again resumes it. This pause holds only the chunks (connections), and an `end` behind them: with none held `end` fires, and `error` and `close` always do. After `close` the handlers are dropped; `register` on a closed handle throws `BadHandle`.
 - A socket that failed (`error`) is closed by the runtime, then `close` fires; a peer's FIN only fires `end` (see [Closing](#closing)). `close()` on your side fires `close` once and nothing else.
 - A handler that throws goes to the `error` handlers (the other handlers still run); with none, or if one of those throws, it becomes an unhandled rejection.
 - `ev` is valid only while its handlers run. `ev.buffer()` returns the same **lease** within one event: a `Uint8Array` over an ArrayBuffer of **exactly** the received bytes (`lease.buffer.byteLength === lease.length`, `byteOffset` 0). The bytes are received into slabs of the V8 sandbox's allocator and the buffer is carved out of the slab without a copy; no other byte of the socket's memory (earlier chunks, neighbouring chunks) is reachable through it. A handler that never calls `buffer()` costs nothing. Give a lease back with `unref()` or `using` (`Symbol.dispose`): that detaches its ArrayBuffer (a view you kept becomes empty) and frees its hold on the slab, which is freed with its last lease. A lease you never release is garbage collected like any buffer.
@@ -128,12 +128,12 @@ A socket has two write lanes that share **one order**: bytes leave in the order 
 - `socket.queued` also has `bytes` (waiting in the queue), `waiting` (sends not admitted yet), `limit` (settable; default 1 MiB, or `sendQueueLimit` at `connect`/`listen`; accepted sockets inherit it) and `drained(): Promise<void>` (the queue is empty and nothing waits). A `send` into an empty queue is always admitted, whatever its size; otherwise it is admitted when `bytes + data.byteLength <= limit`. Waiting sends are admitted in order each time the queue empties.
 - `put` and `direct.write` copy nothing they do not queue; `send` reads `data` when it is admitted (at once unless the queue is full), so leave `data` untouched until the promise settles. A `put` is copied; the buffer can be reused right after it returns.
 - The `drain` event fires every time the queue becomes empty, after the sends it settles. To wait for room with `put`, wait for `drain` (or `await queued.drained()`).
-- A write error rejects every pending `send`, throws from `put`/`direct.write`, and the socket emits `error` once and closes. `close()` discards the queue and rejects pending and waiting sends with `Canceled`.
+- A write error rejects every pending `send`, throws from `put`/`direct.write`, and the socket emits `error` once and closes. `close()` and `io.close()` discard the queue and reject pending and waiting sends and `drained()` with `Canceled`.
 - `socket.end('write')` stops sending once everything queued (and waiting) is out: the peer reads end of stream, this side keeps reading. Later writes fail with `BrokenPipe`. See [Closing](#closing) for `'read'`, `'both'` and the auto-close rule.
 
 ### Reading
 
-- `pause()` / `resume()` / `paused` (event sockets and servers; idempotent). After `pause()` returns no `data`, `end` or `error` (for a server, `connection`) event is dispatched; what already arrived is held in order and dispatched first on `resume()`. A paused socket holds at most 8 undelivered chunks (128 KiB) and then stops reading, so the peer is held back through TCP; a paused server stops accepting and connections wait in the kernel backlog. `close()` works while paused, and `io.run()` waits for a paused socket to close.
+- `pause()` / `resume()` / `paused` (event sockets and servers; idempotent). After `pause()` returns no `data`, `end`, `error` or `close` (for a server, `connection`) event is dispatched; what already arrived is held in order and dispatched first on `resume()`. Pausing is about the read side: `drain` still fires, waiting sends are still admitted, and a write error still rejects them. A paused socket holds at most 8 undelivered chunks (128 KiB) and then stops reading, so the peer is held back through TCP; a paused server stops accepting and connections wait in the kernel backlog. `close()` works while paused, and `io.run()` waits for a paused socket to close.
 - A handler that needs to do asynchronous work per chunk pauses first (see the example above): the runtime does not wait for a handler's promise.
 - While 8 chunks are undelivered the runtime stops reading anyway, so a slow handler backpressures the peer even without `pause()`.
 
@@ -144,7 +144,7 @@ Registrations never keep the program alive on their own, so a program that regis
 ## Notes
 
 - `closed` is true after `close()` or once the `io` runtime is closed; later calls reject with `BadHandle`.
-- Closing a `Socket` shuts it down, so a pending `read` resolves with an empty array. Closing a `Server` with a pending `accept` leaves that accept (and the listener) pending until the runtime closes.
+- Closing a `Socket` shuts it down, so a pending `read` resolves with an empty array. Closing a `PullServer` rejects a pending `accept` with `Canceled`, and its promise resolves once the port is free.
 - `read` allocates its result (zero-initialised `length` bytes, compacted to the bytes read when that is at most half of a 4 KiB+ buffer).
 - Backends: sockets work on `uring`, `kqueue` and `threaded` (the threaded backend waits for readiness on its workers).
 - The Rust side: [natives.md](../../../rust/crates/origine_api/docs/natives.md#net-loopback-tcp-needs--runtime).

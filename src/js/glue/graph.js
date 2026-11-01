@@ -141,9 +141,19 @@ export default (native, { take, takeError }) => {
       for (const key of Reflect.ownKeys(options)) throw invalid(`graph.create: unknown option ${String(key)}`);
     }
     const id = host(native.graph.create);
-    // The natives that read a file of an async grant a hook names; they hold no authority themselves.
-    if (shared.fsAsync !== undefined) host(native.graph.asyncOps, id, shared.fsAsync.openFile, shared.fsAsync.readAll, shared.fsAsync.close);
+    withoutAsyncOps.add(id);
+    if (shared.fsAsync !== undefined) shared.graphAsyncOps();
     return makeGraph(id, owned);
+  };
+
+  /// Gives graphs the natives that read a file of an async grant a hook names; they hold no authority
+  /// themselves. Those natives exist once `api.fs` is bound, which may be after a graph was made, and an
+  /// async grant cannot exist before `requestAsync` calls this.
+  const withoutAsyncOps = new Set();
+  shared.graphAsyncOps = () => {
+    const { openFile, readAll, close } = shared.fsAsync;
+    for (const id of withoutAsyncOps) if (!closedGraphs.has(id)) host(native.graph.asyncOps, id, openFile, readAll, close);
+    withoutAsyncOps.clear();
   };
 
   let root;

@@ -111,7 +111,7 @@ Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, boun
 | `net.start` | `id` | sync; starts the read (accept) pump task of a subscribed socket; it and its receive are not counted by `live_items`. A peer's FIN only delivers `end`: the stream stays open (writes work, `io.run` keeps waiting) until `net.close` |
 | `net.take` | `id` | sync; ArrayBuffer lease of exactly the chunk's bytes, carved out of the slab they were received into (a V8 store from the isolate's allocator, so inside the sandbox) with a refcounted deleter; no copy, nothing else of the slab reachable (only inside the `data` dispatch, once per event) |
 | `net.release` | `id, buffer` | sync; detaches a lease, dropping its hold on the slab (the slab is freed with its last lease) |
-| `net.pause` | `id` | sync; parks the socket's events (in order) instead of dispatching them; idempotent |
+| `net.pause` | `id, noHandler` | sync; parks the socket's read-side events (in order) instead of dispatching them; `noHandler` holds only chunks and connections (and an `end` behind them); `drain` and write failures always pass; idempotent |
 | `net.resume` | `id` | sync; puts the parked events back in front of the host queue; idempotent |
 | `net.directWrite` | `id, data` | sync byte count; one non-blocking write on the isolate thread, 0 when it would block or the outbox is busy; `BrokenPipe` after `net.end` |
 | `net.put` | `id, data, max` | sync byte count; idle outbox: tries the kernel first, then copies the rest (at most `max` bytes) into the outbox flushed by a writer task; busy: copies at most `max` bytes. A write error throws its errno and the socket emits `error` and closes |
@@ -120,7 +120,7 @@ Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, boun
 | `net.end` | `id` | sync; no more writes, the FIN goes out once the outbox is empty; idempotent |
 | `io.run` | `io` | Promise<void> resolving once every resumed subscription of the runtime has delivered `close` |
 
-An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. A pending `accept` keeps its listener open until the runtime closes. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
+An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. Closing a listener rejects its pending `accept`s with `Canceled`, which lets go of the descriptor. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
 
 ## Adding a native
 

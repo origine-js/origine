@@ -1,6 +1,6 @@
 // `api.net` send side: the send queue (`socket.queued`) and the direct lane (`socket.direct`). Built by net.js.
-import { failure, errors } from '../util.js';
-const { BadHandle, Canceled } = errors;
+import { failure, errors, ioClosers } from '../util.js';
+const { BadHandle } = errors;
 const DONE = Promise.resolve();
 export default ({ native, token }) => {
   let waitingOf;
@@ -32,8 +32,18 @@ export default ({ native, token }) => {
       if (this.#core.shut) throw failure(BadHandle);
       if (!this.#attached) {
         const hub = this.#core.subscribe();
+        // Three ways to end what waits here: the socket fails (even while paused), it closes, or its
+        // runtime closes, which dispatches nothing.
+        const { io } = this.#core;
+        let closers = ioClosers.get(io);
+        if (closers === undefined) ioClosers.set(io, (closers = new Set()));
+        const cancel = error => {
+          closers.delete(cancel);
+          this.#cancel(error);
+        };
+        closers.add(cancel);
         hub.drain = () => this.#admit();
-        hub.shut = () => this.#cancel();
+        hub.shut = cancel;
         this.#attached = true;
       }
       return this.#core.id;
@@ -139,11 +149,11 @@ export default ({ native, token }) => {
       }
       for (const waiter of this.#idle.splice(0)) waiter.resolve(this.#settled(id));
     }
-    // The socket closed: nothing waiting will ever be sent.
-    #cancel() {
+    // Nothing waiting will ever be sent.
+    #cancel(error) {
       const pending = this.#waiting.splice(0);
       const idle = this.#idle.splice(0);
-      for (const waiter of [...pending, ...idle]) waiter.reject(failure(Canceled));
+      for (const waiter of [...pending, ...idle]) waiter.reject(error);
     }
   }
 

@@ -10,14 +10,17 @@
 //! binds `127.0.0.1`.
 //!
 //! An operation in flight holds an `Rc<Socket>`, so `close` can never free a descriptor under a
-//! running `recv`; closing a stream shuts it down so a pending read completes with 0 bytes. A
-//! pending `accept` keeps its listener open until the runtime closes.
+//! running `recv`; closing a stream shuts it down so a pending read completes with 0 bytes. No
+//! system call wakes an `accept` on every platform, so closing a listener wakes its pending accepts
+//! directly: they cancel their op, reject `Canceled` and let go of the descriptor.
 
-use std::cell::RefCell;
-use std::future::Future;
+use std::cell::{Cell, RefCell};
+use std::future::{Future, poll_fn};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::{Poll, Waker};
 
 use origine_api_core::{NativeError, errno, pin};
 
@@ -43,6 +46,10 @@ pub struct Socket {
     owner: ScopeKey,
     runtime: u32,
     endpoint: Endpoint,
+    /// The guest closed it: what a pending `accept` looks at when `closers` wakes it.
+    closed: Cell<bool>,
+    /// The pending `accept`s of a listener.
+    closers: RefCell<Vec<Waker>>,
 }
 
 impl Socket {
@@ -82,11 +89,20 @@ impl Socket {
 
     /// A stream socket (accepted by a subscription's pump) of `owner` on `runtime`.
     pub(crate) fn accepted(owner: ScopeKey, runtime: u32, stream: TcpStream) -> Socket {
-        Socket { owner, runtime, endpoint: Endpoint::Stream(stream) }
+        Socket::new(owner, runtime, Endpoint::Stream(stream))
     }
 
-    /// Wakes pending reads (they complete with 0 bytes) when the guest closes the socket.
+    fn new(owner: ScopeKey, runtime: u32, endpoint: Endpoint) -> Socket {
+        Socket { owner, runtime, endpoint, closed: Cell::new(false), closers: RefCell::default() }
+    }
+
+    /// Wakes pending reads (they complete with 0 bytes) and accepts (they reject `Canceled`) when the
+    /// guest closes the socket.
     pub(crate) fn shutdown(&self) {
+        self.closed.set(true);
+        for waker in self.closers.borrow_mut().drain(..) {
+            waker.wake();
+        }
         if let Endpoint::Stream(stream) = &self.endpoint {
             let _ = stream.shutdown(Shutdown::Both);
         }
@@ -209,11 +225,12 @@ fn net_listen(host: &mut HostState, key: ScopeKey, io: u32, addr: String, port: 
     listener.set_nonblocking(true)?;
     let port = u32::from(listener.local_addr()?.port());
     let id = host.reserve_socket()?;
-    host.insert_socket(id, Socket { owner: key, runtime: io, endpoint: Endpoint::Listener(listener) })?;
+    host.insert_socket(id, Socket::new(key, io, Endpoint::Listener(listener)))?;
     Ok(Opened { id, port })
 }
 
 /// `native.net.accept(id)`: Promise `{ id, port }` of the next connection (`port` = the peer's).
+/// Rejects `Canceled` when the listener is closed first.
 #[native(side_effect = "any", path = "net.accept", needs = "runtime", promise)]
 fn net_accept(
     host: &mut HostState,
@@ -229,7 +246,23 @@ fn net_accept(
     let slot: Rc<RefCell<Option<TcpStream>>> = Rc::default();
     let filled = Rc::clone(&slot);
     let future = async move {
-        let (fd, _peer) = lp.accept(listener.fd(), ADDR_CAP).await?;
+        let mut accepting = pin!(lp.accept(listener.fd(), ADDR_CAP));
+        let accepted = poll_fn(|cx| {
+            // The op first: a connection it already accepted is not dropped here.
+            if let Poll::Ready(accepted) = accepting.as_mut().poll(cx) {
+                return Poll::Ready(Some(accepted));
+            }
+            if listener.closed.get() {
+                return Poll::Ready(None);
+            }
+            let mut closers = listener.closers.borrow_mut();
+            if !closers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                closers.push(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await;
+        let (fd, _peer) = accepted.ok_or(NativeError::Errno(errno::CANCELED))??;
         // SAFETY: `fd` was just returned by `accept` and nothing else owns it.
         let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd as i32) });
         prepare(&stream)?;
@@ -239,7 +272,7 @@ fn net_accept(
     };
     let hook = Box::new(move |scope: &mut v8::PinScope<'_, '_>| {
         let stream = slot.borrow_mut().take().ok_or(NativeError::Errno(errno::CANCELED))?;
-        host_mut(scope)?.insert_socket(new_id, Socket { owner: key, runtime, endpoint: Endpoint::Stream(stream) })
+        host_mut(scope)?.insert_socket(new_id, Socket::accepted(key, runtime, stream))
     });
     Ok(Op::new(runtime, future).with_hook(hook))
 }

@@ -22,6 +22,7 @@ test {
     _ = @import("tests/managed/channel.zig");
     _ = @import("tests/managed/isolate.zig");
     _ = @import("tests/managed/net_iter.zig");
+    _ = @import("tests/managed/net_lifecycle.zig");
     _ = @import("tests/managed/snapshot_api.zig");
     _ = @import("tests/managed/snapshot.zig");
     _ = @import("tests/managed/init_snapshot.zig");

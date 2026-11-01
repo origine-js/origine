@@ -31,9 +31,10 @@
 //!   writer task flushes in order. `flushed` is a promise for "everything accepted so far reached
 //!   the kernel"; the glue builds `queued.send` on it. A `Drain` event follows every time the
 //!   outbox becomes empty.
-//! * `pause` parks the socket's events (in order) instead of dispatching them; `resume` puts them
-//!   back in front of the host queue. The pump keeps its [`MAX_QUEUED`] bound, so a paused socket
-//!   holds at most that many chunks and then stops reading.
+//! * `pause` parks the socket's read-side events (in order) instead of dispatching them; `resume`
+//!   puts them back in front of the host queue. The pump keeps its [`MAX_QUEUED`] bound, so a paused
+//!   socket holds at most that many chunks and then stops reading. The write side is not paused:
+//!   `Drain` and `Failed` are always dispatched, because sends wait on them. See [`Pause`].
 //!
 //! # Lifetime
 //! Subscriptions never keep the host alive by themselves: the pump task and its in-flight
@@ -82,6 +83,30 @@ const KIND_ERROR: u32 = 2;
 const KIND_DRAIN: u32 = 3;
 const KIND_CONNECTION: u32 = 4;
 const KIND_CLOSE: u32 = 5;
+const KIND_FAILED: u32 = 6;
+
+/// What a subscription holds back.
+#[derive(Clone, Copy, PartialEq)]
+enum Pause {
+    None,
+    /// No handler wants the data (the glue's `autoPaused`): chunks and connections wait for one, and
+    /// an `End` waits behind them; anything else has nothing to wait for and is dispatched.
+    NoHandler,
+    /// The guest called `pause`: everything of the read side, in order.
+    Explicit,
+}
+
+impl Pause {
+    /// Whether `kind` is held back, given whether events already are.
+    fn parks(self, kind: &EventKind, parked: bool) -> bool {
+        match kind {
+            EventKind::Drain | EventKind::Failed(_) => false,
+            EventKind::Data { .. } | EventKind::Accept { .. } => self != Pause::None,
+            EventKind::End => self == Pause::Explicit || (self == Pause::NoHandler && parked),
+            EventKind::Error(_) | EventKind::Closed => self == Pause::Explicit,
+        }
+    }
+}
 
 pub(crate) enum EventKind {
     /// `n` bytes at `offset` of `slab`.
@@ -92,6 +117,8 @@ pub(crate) enum EventKind {
     },
     End,
     Error(u32),
+    /// The write side failed with this errno, ahead of the `Error` and `Closed` that a pause holds back.
+    Failed(u32),
     Drain,
     Accept {
         stream: TcpStream,
@@ -129,11 +156,12 @@ impl Signal {
 pub(crate) struct Idle {
     /// Resumed subscriptions that have not delivered `Close` yet (what `io.run` waits for).
     live: Cell<usize>,
+    /// The pending `io.run` calls.
+    waiters: RefCell<Vec<Waker>>,
     /// Live pump tasks (excluded from the host's live count).
     pub(crate) pumps: Cell<usize>,
     /// Pump ops in flight (excluded from the host's live count).
     pub(crate) recving: Cell<usize>,
-    waiter: Signal,
 }
 
 /// Increments a counter for as long as it lives.
@@ -238,6 +266,9 @@ impl Shared {
 
     fn fail(&self, code: u32) {
         self.fail_out(code);
+        if !self.closed.get() {
+            self.push(EventKind::Failed(code));
+        }
         self.push(EventKind::Error(code));
         self.push_closed();
     }
@@ -263,8 +294,8 @@ pub(crate) struct Sub {
     counted: bool,
     started: bool,
     current: Option<Current>,
-    /// `pause` parks events instead of dispatching them.
-    paused: bool,
+    /// What `pause` holds back; those events wait in `parked`.
+    pause: Pause,
     parked: VecDeque<Event>,
 }
 
@@ -481,7 +512,7 @@ fn net_subscribe<'s>(
             counted: false,
             started: false,
             current: None,
-            paused: false,
+            pause: Pause::None,
             parked: VecDeque::new(),
         },
     );
@@ -539,12 +570,25 @@ fn net_start(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Result
     host_mut(scope)?.spawn_pump(runtime, &shared, task)
 }
 
-/// `native.net.pause(id)`: parks the socket's events from now on (see the module docs).
-/// Idempotent; `BadHandle` for an unknown, foreign or unsubscribed socket.
+/// `native.net.pause(id, noHandler)`: holds the socket's read-side events back from now on (see
+/// [`Pause`]; `noHandler` is the milder one). Events the new state no longer holds go back in front of
+/// the queue. Idempotent; `BadHandle` for an unknown, foreign or unsubscribed socket.
 #[native(side_effect = "any", path = "net.pause", needs = "runtime")]
-fn net_pause(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+fn net_pause(host: &mut HostState, key: ScopeKey, id: u32, no_handler: bool) -> Result<(), NativeError> {
     let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    sub.paused = true;
+    sub.pause = if no_handler { Pause::NoHandler } else { Pause::Explicit };
+    let mut events = host.events.borrow_mut();
+    let mut freed = Vec::new();
+    for event in std::mem::take(&mut sub.parked) {
+        if sub.pause.parks(&event.kind, !sub.parked.is_empty()) {
+            sub.parked.push_back(event);
+        } else {
+            freed.push(event);
+        }
+    }
+    while let Some(event) = freed.pop() {
+        events.push_front(event);
+    }
     Ok(())
 }
 
@@ -553,7 +597,7 @@ fn net_pause(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeE
 #[native(side_effect = "any", path = "net.resume", needs = "runtime")]
 fn net_resume(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
     let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    sub.paused = false;
+    sub.pause = Pause::None;
     let mut events = host.events.borrow_mut();
     while let Some(event) = sub.parked.pop_back() {
         events.push_front(event);
@@ -774,11 +818,13 @@ fn io_run(
         io,
         poll_fn(move |cx| {
             if idle.live.get() == 0 {
-                Poll::Ready(Ok(()))
-            } else {
-                idle.waiter.set(cx);
-                Poll::Pending
+                return Poll::Ready(Ok(()));
             }
+            let mut waiters = idle.waiters.borrow_mut();
+            if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                waiters.push(cx.waker().clone());
+            }
+            Poll::Pending
         }),
     ))
 }
@@ -802,7 +848,7 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
     let (shared, owner, runtime) = (Rc::clone(&sub.shared), sub.owner, sub.runtime);
     // A paused socket holds its events back, in order. A socket the guest closed does not: its
     // `Close` (and nothing before it) goes through.
-    if sub.paused && !shared.stop.get() {
+    if sub.pause.parks(&event.kind, !sub.parked.is_empty()) && !shared.stop.get() {
         if let Some(sub) = host.subs.get_mut(&id) {
             sub.parked.push_back(event);
         }
@@ -819,10 +865,15 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
         }
         EventKind::End => (KIND_END, 0, 0),
         EventKind::Error(code) => (KIND_ERROR, code, 0),
+        EventKind::Failed(code) => (KIND_FAILED, code, 0),
         EventKind::Drain => (KIND_DRAIN, 0, 0),
         EventKind::Accept { stream, port } => {
             shared.queued.set(shared.queued.get() - 1);
             shared.space.wake();
+            // The guest closed the listener: nothing would take this connection. Dropping `stream` closes it.
+            if shared.stop.get() {
+                return;
+            }
             let accepted =
                 host.reserve_socket().and_then(|new| host.insert_socket(new, Socket::accepted(owner, runtime, stream)).map(|()| new));
             match accepted {
@@ -853,7 +904,9 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
     {
         let idle = &sub.shared.idle;
         idle.live.set(idle.live.get() - 1);
-        idle.waiter.wake();
+        for waker in idle.waiters.borrow_mut().drain(..) {
+            waker.wake();
+        }
     }
 }
 

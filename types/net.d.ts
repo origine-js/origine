@@ -78,8 +78,8 @@ export interface Handle extends AsyncDisposable {
   readonly closed: boolean;
   /**
    * Releases the handle and discards what is still queued; pending reads finish with end of
-   * stream and pending sends reject `Canceled`. Idempotent. Closing a server with an
-   * `accept()` pending leaves that accept pending until the runtime closes.
+   * stream, pending sends and a pending `accept()` reject `Canceled`. Idempotent. Closing a
+   * `PullServer` resolves once its port is free.
    */
   close(): Promise<void>;
 }
@@ -184,7 +184,7 @@ export interface EventSocket extends SocketBase {
    * `io.run()`. After `close` handlers are dropped; `register` on a closed handle throws `BadHandle`.
    */
   register<E extends keyof SocketEvents>(event: E, handler: (...args: SocketEvents[E]) => void): Registration;
-  /** Stops delivery: after it returns no `data`, `end` or `error` is dispatched until `resume()`. At most 8 chunks are held, then reading stops and TCP holds the peer back. Idempotent. */
+  /** Stops delivery: after it returns no `data`, `end`, `error` or `close` is dispatched until `resume()`. At most 8 chunks are held, then reading stops and TCP holds the peer back. The write side is not paused: `drain` fires and sends proceed. Idempotent. */
   pause(): void;
   /** Undoes `pause()`; held events are dispatched first, in order. Idempotent. */
   resume(): void;

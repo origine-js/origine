@@ -1,7 +1,7 @@
 // `api.net` core: the state of one native handle and the routing of its events. Built by net.js.
 import { Registration } from '../handles.js';
 import { freeze, failure, closedIo, errors } from '../util.js';
-const { Unsupported, WouldBlock } = errors;
+const { Unsupported, WouldBlock, Canceled } = errors;
 export default (k, { SendQueue, Direct, DataEvent, beginData, endData }) => {
   const { native, token } = k;
   // Bytes per read while draining a socket whose reading was ended.
@@ -13,6 +13,11 @@ export default (k, { SendQueue, Direct, DataEvent, beginData, endData }) => {
   const DRAIN = 3;
   const CONNECTION = 4;
   const CLOSE = 5;
+  const FAILED = 6;
+  // `pause` of the native: what a handle holds back, by why it is paused (see `net_pause` in sub.rs).
+  const PAUSE_NONE = 0;
+  const PAUSE_NO_HANDLER = 1;
+  const PAUSE_EXPLICIT = 2;
   const SOCKET_EVENTS = freeze(['data', 'end', 'error', 'drain', 'close']);
   const SERVER_EVENTS = freeze(['connection', 'error', 'close']);
 
@@ -34,9 +39,10 @@ export default (k, { SendQueue, Direct, DataEvent, beginData, endData }) => {
       this.flowing = 0;
       this.userPaused = false;
       this.autoPaused = false;
-      this.applied = false;
-      // Pull-mode operations in flight.
+      this.applied = PAUSE_NONE;
+      // Pull-mode operations in flight, and a server's accepts among them (closing waits for those).
       this.pending = 0;
+      this.accepts = new Set();
       // How far each direction is finished: the peer's FIN was seen / reading was ended locally, and
       // the local FIN was sent. A socket closes itself once both are true.
       this.peerEnded = false;
@@ -87,9 +93,13 @@ export default (k, { SendQueue, Direct, DataEvent, beginData, endData }) => {
     dispatch(hub, kind, a, b) {
       if (kind === CLOSE) {
         this.closed = true;
-        hub.shut?.();
+        hub.shut?.(failure(Canceled));
         this.fire(hub, 'close');
         hub.handlers.clear();
+        return;
+      }
+      if (kind === FAILED) {
+        hub.shut?.(failure(a));
         return;
       }
       if (this.closed) return;
@@ -153,11 +163,11 @@ export default (k, { SendQueue, Direct, DataEvent, beginData, endData }) => {
     }
     /** Applies the pause state (explicit or because no handler listens) to the host. */
     sync() {
-      const want = this.userPaused || this.autoPaused;
+      const want = this.userPaused ? PAUSE_EXPLICIT : this.autoPaused ? PAUSE_NO_HANDLER : PAUSE_NONE;
       if (this.hub === null || this.closed || want === this.applied) return;
       this.applied = want;
-      if (want) native.net.pause(this.id);
-      else native.net.resume(this.id);
+      if (want === PAUSE_NONE) native.net.resume(this.id);
+      else native.net.pause(this.id, want === PAUSE_NO_HANDLER);
     }
     pause() {
       this.userPaused = true;

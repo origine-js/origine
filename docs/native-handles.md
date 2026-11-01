@@ -35,7 +35,8 @@ wins) and std reads it with `provided(name)`; the cache operations of `origine:@
 mints an issuer for the file and directory handles it issues. A plain grant does not look at it. A hardened
 grant compares the issuer of each handle argument before it calls a native and answers `InvalidInput` for a
 handle it did not issue, a rebuilt one or a hand-made one; the `Dir.cwd()` sentinel (`fs` 0, `id` 0) names no
-resource and is always accepted. The std methods rewrap a result of the grant and keep its issuer. The cost is
+resource and is always accepted. Any grant, plain or hardened, refuses a handle of another grant with `BadHandle`, so
+naming a wider grant's id reaches nothing. The std methods rewrap a result of the grant and keep its issuer. The cost is
 one comparison per handle argument; a plain grant pays nothing.
 
 Instances are frozen and allocated by their class; a handle retains its prepared fields. Validation copies

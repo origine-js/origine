@@ -38,6 +38,9 @@ export const shared = {};
 // accepts only live members of the first set (the Rust natives validate the id again).
 export const ioHandles = new WeakSet();
 export const closedIo = new WeakSet();
+// Io handle -> what must run when it closes (a closed runtime dispatches nothing more, so this
+// is how state kept in JS learns of it). Entries take the `Canceled` failure.
+export const ioClosers = new WeakMap();
 export const freeze = Object.freeze;
 // Freezes what it is given: a class (and its prototype) from its own `static {}` block, or an
 // instance from its constructor. Returns the first argument.

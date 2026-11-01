@@ -49,8 +49,6 @@ declare module "origine:@std/graph/module" {
     readonly map: SourceMap;
     /** Applied in order, the last one last. */
     readonly transformers: readonly Transformer[];
-    /** True when no transformer needs the JS realm. */
-    readonly native: boolean;
     /** A new source with `transformer` chained after the existing ones; the receiver is unchanged. Throws `InvalidInput` for a non-transformer. */
     withTransformer(transformer: Transformer): ModuleSource;
   }
@@ -84,8 +82,6 @@ declare module "origine:@std/graph/module" {
     readonly name: string;
     /** `null`: the import handler's `codeCache` applies. */
     readonly codeCache: import("origine:@std/graph/cache").CodeCache | null;
-    /** True when neither the source's transformers nor the import handler need the JS realm: the recipe is then plain data. */
-    readonly native: boolean;
   }
   export const ModuleRecipe: {
     /** Throws `InvalidInput` for a missing or mistyped option. Options are read as own data properties (a getter counts as missing). */
@@ -107,7 +103,6 @@ declare module "origine:@std/graph/resolve" {
   /** What a layer returns to settle a specifier. */
   export interface Resolved {
     readonly id: string;
-    readonly attributes?: Readonly<Record<string, string>>;
   }
   /** A host layer descriptor (see `origine:@std/graph/resolve/layers`) or a function run in the creating realm. `undefined` passes to the next layer. */
   export type ResolverLayer =
@@ -291,10 +286,8 @@ declare module "origine:@std/graph/import" {
     readonly cache: ImportCache;
     readonly codeCache: CodeCache;
     readonly meta: ImportHandlerOptions["meta"] | null;
-    /** Every element in pipeline order, so the cost is visible. */
+    /** Every element in pipeline order, so the cost is visible. A chain runs natively until it reaches a JS element and goes back to native after it. */
     readonly plan: readonly PlanEntry[];
-    /** True when no import of this handler enters the JS realm. */
-    readonly native: boolean;
   }
   export const ImportHandler: {
     /** Throws `InvalidInput` for a missing or mistyped option, a resolver with no layers, or a hook that is not a function or provider. */
@@ -319,10 +312,10 @@ declare module "origine:@std/graph/providers" {
   export function origineProvider(options?: {
     readonly std?: true | { readonly include: readonly string[]; readonly exclude?: never } | { readonly exclude: readonly string[]; readonly include?: never };
   }): Provider & { readonly std: { readonly all: true } | { readonly include?: readonly string[]; readonly exclude?: readonly string[] } };
-  /** Reads source files through `fs`, a grant `api.fs` made (sync or async); an id is a path relative to its root. The whole file is read: check its size in a hook of your own if it matters. `read` is required: `'mmap'` avoids a copy for ASCII/Latin-1 text, but a file changed while mapped changes under V8. */
-  export function fsProvider(options: { readonly fs: object; readonly read: "copy" | "mmap" }): Provider & { readonly fs: object; readonly read: "copy" | "mmap" };
-  /** Serves `type: 'json'` imports as a module whose default export is the parsed value, read through `fs`, a grant `api.fs` made. */
-  export function json(options: { readonly fs: object }): Provider;
+  /** Reads source files through `fs`, a grant `api.fs` made (sync or async); an id is a path relative to its root. The whole file is read: check its size in a hook of your own if it matters. `read` is required. `'copy'` reads the file into memory. `'mmap'` is for large sources on a sync grant: a file that is all ASCII is read in place by V8, and **must not change while the module lives** (truncating it crashes the process); any other file is copied. An async grant with `'mmap'` is `Unsupported`. `missing`: `'abort'` (the default) fails the import with `NotFound` for a file that is not in this root, `'skip'` passes to the next hook, so several roots can be tried in order. */
+  export function fsProvider(options: { readonly fs: object; readonly read: "copy" | "mmap"; readonly missing?: "skip" | "abort" }): Provider & { readonly fs: object; readonly read: "copy" | "mmap"; readonly missing: "skip" | "abort" };
+  /** Serves `type: 'json'` imports as a module whose default export is the parsed value, read through `fs`, a grant `api.fs` made. `missing` is the same choice as in `fsProvider`: `'abort'` (the default) fails the import with `NotFound` for a file that is not in this root, `'skip'` passes to the next hook. */
+  export function json(options: { readonly fs: object; readonly missing?: "skip" | "abort" }): Provider & { readonly fs: object; readonly missing: "skip" | "abort" };
   /** Adapts a loader function to a hook: `loader(id, attributes)` returns source text, `{ source }`, or a promise of either. */
   export function fromLoader(
     loader: (id: string, attributes: Readonly<Record<string, string>>) => string | { readonly source: string } | Promise<string | { readonly source: string }>,
@@ -360,11 +353,6 @@ declare module "origine:@std/graph/cache" {
     native(options: { readonly retain: "all" | "used" }): ImportCache;
   };
 
-  /** The native memo of resolver results. */
-  export type ResolveCache = ({ readonly host: "resolveCache"; readonly kind: "cache"; readonly entries?: number }) & import("origine:@std/graph/module").Descriptor;
-  export const ResolveCache: {
-    native(options?: { readonly entries?: number }): ResolveCache;
-  };
 
   /** (id, source hash) -> V8 code-cache bytes. */
   export type CodeCache = (| { readonly host: "codeCacheNone" | "codeCacheMemory" | "codeCacheDir"; readonly kind: "codeCache"; readonly limits?: { readonly size?: number }; readonly fs?: object; readonly path?: string }
@@ -401,7 +389,7 @@ declare module "origine:@std/graph/cache" {
      * file; each file holds the hash of the source it was made from and is ignored for any other text. V8 trusts these
      * files: give `path` to no one who should not plant code. Touches the disk; written at `flush()`.
      */
-    dir(options: { readonly fs: object; readonly path: string; readonly limits?: { readonly size?: number } }): CodeCache;
+    dir(options: { readonly fs: object; readonly path: string }): CodeCache;
     /**
      * Your own store; both functions may be async and run in the creating realm. `store(key, blob)` runs at
      * `flush()` with an opaque blob to keep whole; `load(key, source)` runs once a module's source is

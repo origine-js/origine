@@ -608,7 +608,7 @@ pub fn decode(comptime T: type, call: *Call, index: usize) !T {
     if (T == u64) {
         if (!arg.isNumber()) return error.InvalidArgument;
         const number = arg.numberValue(call.ctx) orelse return error.InvalidArgument;
-        if (!(number >= 0) or number > 9007199254740991.0) return error.InvalidArgument;
+        if (!(number >= 0) or number > 9007199254740991.0 or number != @trunc(number)) return error.InvalidArgument;
         return @intFromFloat(number);
     }
     if (T == f64) {

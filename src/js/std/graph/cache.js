@@ -2,12 +2,11 @@
 //
 //   ImportCache    (id, attributes) -> module. One native table per context, made from the descriptor
 //                  (a V8 module belongs to a single context). `retain` says how long an entry lives.
-//   ResolveCache   (referrer, specifier, attributes, phase) -> resolved id. Native memo.
 //   CodeCache      (id, source hash) -> V8 code-cache bytes. Persistent or in memory. A handler (or a
 //                  recipe) names it; it has `flush()`.
 //
-// ImportCache and ResolveCache are consulted on every import and behind V8's synchronous link, so
-// they cannot call back into JS. CodeCache is off that path and may be backed by JS (`custom`).
+// ImportCache is consulted on every import and behind V8's synchronous link, so it cannot call back
+// into JS. CodeCache is off that path and may be backed by JS (`custom`).
 import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError } from 'origine:@std/errors';
@@ -20,13 +19,11 @@ const own = (object, key) => {
   return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 };
 
-/// A count or byte capacity: a non-negative safe integer, or `undefined` for none.
+/// A byte capacity: a non-negative safe integer, or `undefined` for none.
 const capacity = (what, name, value) => {
   if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0)) throw invalid(`${what}: ${name} must be a non-negative integer`);
   return value;
 };
-const withCapacity = (host, kind, name, value, rest) =>
-  new h.Cache({ host, kind, ...rest, ...(value === undefined ? {} : { [name]: value }) });
 
 /// What reaches the host: `api.graph` (or `api.context`) publishes it in the realm's records module.
 const ops = () => {
@@ -51,9 +48,10 @@ export const ImportCache = freeze({
     if (retain !== 'all' && retain !== 'used') throw invalid("ImportCache.native: retain must be 'all' or 'used'");
     if (own(options, 'entries') !== undefined)
       throw invalid("ImportCache.native: there is no entries cap, an identity table never evicts one module while others stay; bound it with retain: 'used' or delete/clear");
-    const descriptor = withCapacity('importCache', 'cache', 'entries', undefined, { retain });
     const cache = new h.Cache({
-      ...descriptor,
+      host: 'importCache',
+      kind: 'cache',
+      retain,
       get size() {
         return ops().size(cache);
       },
@@ -66,13 +64,6 @@ export const ImportCache = freeze({
       },
     });
     return cache;
-  },
-});
-
-export const ResolveCache = freeze({
-  /// The native memo of resolver results. `entries` caps it.
-  native(options = {}) {
-    return withCapacity('resolveCache', 'cache', 'entries', capacity('ResolveCache.native', 'entries', own(options, 'entries')), {});
   },
 });
 
@@ -95,7 +86,7 @@ const codeCache = fields => {
   return cache;
 };
 
-/// `limits.size`, the most bytes of compiled code a cache keeps (a non-negative integer, `undefined` for no cap).
+/// `limits.size`, the most bytes of compiled code a cache keeps (a non-negative integer, `undefined` for no cap, `0` keeps nothing).
 const limitsOf = (what, options) => {
   const limits = own(options, 'limits');
   if (limits !== undefined && (limits === null || typeof limits !== 'object')) throw invalid(`${what}: limits must be an object`);
@@ -121,7 +112,8 @@ export const CodeCache = freeze({
     if (fs === null || typeof fs !== 'object') throw invalid('CodeCache.dir: fs must be an fs grant made by api.fs');
     const path = own(options, 'path');
     if (typeof path !== 'string' || path === '' || path.includes('\0')) throw invalid('CodeCache.dir: path must be a non-empty string without NUL');
-    return codeCache({ host: h.CodeCacheHost.Dir, fs, path, limits: limitsOf('CodeCache.dir', options) });
+    if (own(options, 'limits') !== undefined) throw invalid('CodeCache.dir: limits applies to a memory cache');
+    return codeCache({ host: h.CodeCacheHost.Dir, fs, path });
   },
   /// Your own store, for modules made with this cache. Both functions may be async and run in the
   /// creating realm.
@@ -130,7 +122,8 @@ export const CodeCache = freeze({
   ///   BLAKE3 digest of the exact text V8 compiles, after every transformer, so a key identifies one
   ///   source text of one module.
   /// - `store(key, blob)` runs at `flush()` for each module that compiled without a usable
-  ///   cache. `blob` is an opaque `Uint8Array`: keep it whole and unchanged.
+  ///   cache. `blob` is an opaque `Uint8Array`: keep it whole and unchanged. One that throws is a miss
+  ///   for that module: the others are still stored and `flush` does not count it.
   /// - `load(key, source)` runs once the source of a module is final and before it compiles, with that
   ///   text. Return the blob kept under that same key, or `undefined`. A blob that was made for another
   ///   text, by another V8 build or with other flags, a rejection of `load`, or any other answer, is a

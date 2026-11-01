@@ -17,7 +17,7 @@ for every member (without `ok`, which is 0). Use them through
 TypeScript types are generated from them.
 
 - **`io`**: everything Rust's [`std::io::ErrorKind`](https://doc.rust-lang.org/std/io/enum.ErrorKind.html)
-  has a name for, with Rust's names (so the same failure has the same name from the sync Zig `std.Io`
+  has a name for, with Rust's names (so the same failure has the same name from the sync Zig fs layer
   and the async Rust fs), plus the two OS errors Rust leaves uncategorized (`TooManyOpenFiles`, `Io`).
   Raised by fs and net.
 - **`host`**: origine's own runtime concepts, which Rust has no name for. Any native can raise them.

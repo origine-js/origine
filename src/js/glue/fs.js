@@ -22,15 +22,10 @@ const OPEN_MODES = Object.freeze(
   Object.assign(Object.create(null), {
     r: 0,
     rw: 1,
-    'r+': 1,
     w: 7,
-    'w+': 7,
     x: 11,
-    'x+': 11,
     c: 3,
-    'c+': 3,
     t: 5,
-    't+': 5,
   }),
 );
 // `undefined` means `r`; anything unknown is -1 (rejected as InvalidInput).
@@ -184,7 +179,6 @@ export default (native, { errno, detail, takeError }) => {
 
     // One operation: unwrap the handle, check the arguments (`checks`, one predicate each; the rest are
     // dropped), call the Rust native `name` with `(fs, id, ...args)` and wrap its answer.
-    const any = () => true;
     const through =
       (unwrap, name, checks, wrap) =>
       (handle, ...args) => {
@@ -199,8 +193,8 @@ export default (native, { errno, detail, takeError }) => {
     const data = [isBytes];
 
     // Resolves a JS ReadResult with read-only bytes and buffer fields where `buffer` is a view of the same kind, byteOffset and
-    // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached
-    // when the buffer was pinned; it is untouched when the host copied instead).
+    // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached;
+    // an empty one is untouched and comes back as it is).
     const filled = (shape, pending) => pending.then(done => new ReadResult({ bytes: done.bytes, buffer: shape.make(done.buffer) }));
 
     return {
@@ -233,15 +227,15 @@ export default (native, { errno, detail, takeError }) => {
       fileReadAll(handle, options) {
         const f = unwrapFile(handle);
         if (!usable(f)) return bad(f);
-        const limit = (options === undefined ? undefined : options.limit) ?? Infinity;
+        const limit = options?.limit ?? Infinity;
         if (typeof limit !== 'number' || !(limit >= 0)) return bad();
         return ops.readAll(f.fs, f.id, limit);
       },
       fileRead: file('fileRead', data),
-      filePread: file('filePread', [isBytes, any]),
-      // Zero-copy BYOB reads: `view` is an ArrayBuffer or a view; when eligible its buffer is
-      // detached (the guest's `view` becomes empty) and the promise resolves a frozen
-      // `{ bytes, buffer }`, `buffer` being a view of the same kind over the returned memory.
+      filePread: file('filePread', [isBytes, isOffset]),
+      // Zero-copy BYOB reads: `view` is an ArrayBuffer or a view; its buffer is detached (the
+      // guest's `view` becomes empty) and the promise resolves a frozen `{ bytes, buffer }`, `buffer` being a
+      // view of the same kind over the returned memory. A buffer that cannot be detached is Unsupported.
       fileReadInto(handle, view) {
         const f = unwrapFile(handle),
           shape = shapeOf(view);
@@ -259,20 +253,20 @@ export default (native, { errno, detail, takeError }) => {
       filePreadAlloc: file('filePreadAlloc', [isOffset, isOffset]),
       fileWriteAll: file('writeAll', data),
       fileWrite: file('fileWrite', data),
-      filePwriteAll: file('filePwriteAll', [isBytes, any]),
+      filePwriteAll: file('filePwriteAll', [isBytes, isOffset]),
       fileWriteMoveAll: file('writeMoveAll', data),
       fileWriteMove: file('fileWriteMove', data),
-      filePwriteMoveAll: file('filePwriteMoveAll', [isBytes, any]),
-      fileSetLength: file('fileSetLength', [any]),
+      filePwriteMoveAll: file('filePwriteMoveAll', [isBytes, isOffset]),
+      fileSetLength: file('fileSetLength', [isOffset]),
       fileSync: file('fileSync'),
     };
   }
 
-  // Access bits of the natives: 1 read, 2 write.
+  // Access bits of the natives: 1 read, 2 write, and 4 for `symlinks: 'confined'`.
   const ACCESS = freeze(Object.assign(Object.create(null), { r: 1, w: 2, rw: 3 }));
 
   // `{ root, access, hardened }` of a request hint against the cap's spec, or the errno of a bad or denied
-  // request: InvalidInput for a malformed `root` or a missing / unknown `access` or `handle`, PermissionDenied
+  // request: InvalidInput for a malformed `root` or a missing / unknown `access`, `handle` or `symlinks`, PermissionDenied
   // for a write the embedder's ceiling (`spec.write`) does not allow (never downgraded).
   function grantOf(spec, hint) {
     let root = own(hint, 'root');
@@ -283,15 +277,17 @@ export default (native, { errno, detail, takeError }) => {
     if (access & 2 && !spec.write) return PermissionDenied;
     const handle = own(hint, 'handle');
     if (handle !== 'plain' && handle !== 'hardened') return InvalidInput;
+    const symlinks = own(hint, 'symlinks');
+    if (symlinks !== undefined && symlinks !== 'follow' && symlinks !== 'confined') return InvalidInput;
     root = joinPath(spec.root, root);
-    return { root, access, hardened: handle === 'hardened' };
+    return { root, access: symlinks === 'confined' ? access | 4 : access, hardened: handle === 'hardened' };
   }
 
   function makeFsCap(spec) {
     // The graph glue reads source files through the async grants' natives.
     Object.defineProperty(shared, 'fsAsync', { get: () => native.fsAsync });
     return freeze({
-      // Blocking variant on the isolate thread (std.Io, errno cell). Throws a frozen
+      // Blocking variant on the isolate thread (errno cell). Throws a frozen
       // OrigineError subclasses when denied.
       requestSync(hint) {
         const grant = grantOf(spec, hint);

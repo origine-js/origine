@@ -14,6 +14,7 @@
 //! id that was not served natively is `PermissionDenied`.
 const std = @import("std");
 const v8 = @import("@v8");
+const sys = @import("../managed/sys.zig");
 const eu = @import("@util");
 const binding = @import("binding.zig");
 const Call = binding.Call;
@@ -684,6 +685,7 @@ fn load(data: ?*anyopaque, request: module_types.LoadRequest) anyerror!module_ty
         .done => |completion| return switch (completion) {
             .content => |content| switch (content) {
                 .source => |text| .{ .source = text },
+                .external => |external| .{ .external = external },
                 .exports => |exports| .{ .exports = exports },
                 .module => |module| .{ .module = module },
             },
@@ -736,13 +738,45 @@ fn advanceHooks(self: *Context, scratch: std.mem.Allocator, work: Work, from: us
                 if (served) try self.markServed(work.id);
                 return supplied(self, scratch, work, text);
             },
+            .mapped => |mapped| return suppliedMapped(self, scratch, work, mapped),
             .read => |read| {
-                try startRead(self, work, read.json, read.grant);
+                try startRead(self, work, read.json, read.grant, if (read.skip_missing) @intCast(index) else no_skip);
                 return .parked;
             },
         }
     }
     return error.NotFound;
+}
+
+/// A hook's `read: 'mmap'`: the chain runs on the mapped bytes, and when they come out as the module's final
+/// text V8 gets them in place, as an external string that owns the map. Anything that made other text
+/// (a transformer) or keeps its own copy (a step in JS) is done with the map by the time this returns.
+fn suppliedMapped(self: *Context, scratch: std.mem.Allocator, work: Work, mapped: sys.File.MemoryMap) !LoadAdvance {
+    var map = mapped;
+    const advance = supplied(self, scratch, work, map.memory) catch |err| {
+        map.destroy();
+        return err;
+    };
+    const final = advance == .done and advance.done == .content and advance.done.content == .source and advance.done.content.source.ptr == map.memory.ptr;
+    if (!final) {
+        map.destroy();
+        return advance;
+    }
+    // A snapshot cannot hold an external string.
+    const rt = self.scope.runtime;
+    if (rt.in_creator) return .{ .done = .{ .content = .{ .source = try graph_api.copyMapped(&map, scratch) } } };
+    const string = v8.String.newExternalOneByte(rt.isolate, map.memory.ptr, @intCast(map.memory.len), releaseMapped) orelse {
+        map.destroy();
+        return error.OutOfMemory;
+    };
+    self.host.mapped_sources += 1;
+    return .{ .done = .{ .content = .{ .external = .{ .text = map.memory, .string = string } } } };
+}
+
+/// The finalizer of an external string made from a map.
+fn releaseMapped(data: [*c]u8, length: usize) callconv(.c) void {
+    var map: sys.File.MemoryMap = .{ .memory = @alignCast(data[0..length]), .mapped = true };
+    map.destroy();
 }
 
 /// The source of `work.id` is known: the maker decides which recipe options apply. The host's own
@@ -893,9 +927,12 @@ fn track(self: *Context, parent_ctx: v8.Context, isolate: v8.Isolate, result: v8
 // calls them itself and parks on their promises, so the read runs on the grant's io runtime and no
 // user JS is involved. `open` answers the file, `read` its bytes.
 
+/// The `hook` of a read with nothing to pass to: a missing file is the import's failure.
+const no_skip = std.math.maxInt(u32);
+
 /// Starts reading the file `work.id` of the async grant `grant`, which a hook or an accepted import
-/// named; `json` wraps it as a JSON module.
-fn startRead(self: *Context, work: Work, json: bool, grant: u32) !void {
+/// named; `json` wraps it as a JSON module. A missing file goes on after the hook numbered `hook` (`missing: 'skip'`).
+fn startRead(self: *Context, work: Work, json: bool, grant: u32, hook: u32) !void {
     const async_fs = self.graph.async_ops orelse return error.PermissionDenied;
     const creator = self.creator;
     if (creator.released) return error.ScopeDisposed;
@@ -912,7 +949,7 @@ fn startRead(self: *Context, work: Work, json: bool, grant: u32) !void {
     const undef = eu.v.undefined_value(isolate).value;
     // dir 0 is the grant's root, open bits 0 read only.
     const result = async_fs.open.deref().call(parent_ctx, undef, &.{ numValue(isolate, grant), numValue(isolate, 0), binding.string(isolate, work.id), numValue(isolate, 0) }) orelse return failureOf(parent_ctx, isolate, &tc);
-    try track(self, parent_ctx, isolate, result, .open, work, 0, 0, "", 0, json, grant);
+    try track(self, parent_ctx, isolate, result, .open, work, hook, 0, "", 0, json, grant);
 }
 
 /// The file is open: asks for all of its bytes.
@@ -1006,6 +1043,7 @@ fn errorOf(ctx: v8.Context, isolate: v8.Isolate, exception: v8.Value) anyerror {
     if (text.lenUtf8(isolate) > buffer.len) return error.ImportRejected;
     const bytes = buffer[0..text.writeUtf8(isolate, &buffer)];
     if (std.mem.eql(u8, bytes, "NotFound")) return error.NotFound;
+    if (std.mem.eql(u8, bytes, "NotADirectory")) return error.NotADirectory;
     if (std.mem.eql(u8, bytes, "PermissionDenied")) return error.PermissionDenied;
     if (std.mem.eql(u8, bytes, "InvalidInput")) return error.InvalidInput;
     if (std.mem.eql(u8, bytes, "InvalidData")) return error.InvalidData;
@@ -1122,7 +1160,7 @@ fn resumeHook(self: *Context, alloc: std.mem.Allocator, ctx: v8.Context, isolate
         const is_async = (numberOf(ctx, isolate, object, "fsAsync") orelse 0) != 0;
         switch (try graph_api.resolveSource(self.creator, .{ .named = .{ .is_async = is_async, .id = grant_id } })) {
             .async => |id| {
-                try startRead(self, work, false, id);
+                try startRead(self, work, false, id, no_skip);
                 return .parked;
             },
             .sync => |grant| {
@@ -1177,6 +1215,18 @@ fn rejected(info: v8.FunctionCallbackInfo) callconv(.c) void {
     const rt = self.scope.runtime;
     // An ImportError code keeps its kind; anything else reaches the module as an `Error` with its message.
     const known = errorOf(ctx, isolate, info.get_arg(0));
+    // `missing: 'skip'`: the file is not in this provider's root, so the next hook gets its turn.
+    if (pending.step == .open and pending.index != no_skip and graph_api.absent(known)) {
+        const advance = advanceHooks(self, alloc, workOf(pending), pending.index + 1) catch |err| {
+            rt.completeLoad(pending.token, .{ .failure = err }) catch {};
+            return;
+        };
+        switch (advance) {
+            .done => |completion| rt.completeLoad(pending.token, completion) catch {},
+            .parked => {},
+        }
+        return;
+    }
     if (known != error.ImportRejected) {
         if (pending.step == .layer) rt.completeResolve(pending.token, .{ .failure = known }) catch {} else rt.completeLoad(pending.token, .{ .failure = known }) catch {};
         return;
@@ -1353,8 +1403,7 @@ fn cacheStore(data: ?*anyopaque, request: module_types.CodeCacheRequest, bytes: 
     if (std.mem.startsWith(u8, request.module_id, module_types.origine_prefix)) return;
     const store = storeOf(self, request.module_id) orelse return;
     const hash = sourceHash(request.source);
-    store.remember(request.module_id, hash, bytes);
-    store.stored += 1;
+    if (store.remember(request.module_id, hash, bytes)) store.stored += 1;
     switch (store.kind) {
         .memory => {},
         .dir => if (store.dir_state) |*state| {
@@ -1740,7 +1789,7 @@ pub fn cachePut(state: *ScopeState, cache_id: u32, id: []const u8, hash_hex: []c
     _ = std.fmt.hexToBytes(&hash, hash_hex) catch return error.InvalidInput;
     // A blob made for another source text is a miss, not an error.
     if (bytes.len <= hash.len or !std.mem.eql(u8, bytes[0..hash.len], &hash)) return;
-    store.remember(id, hash, bytes[hash.len..]);
+    _ = store.remember(id, hash, bytes[hash.len..]);
 }
 
 /// Records that the native `origine` hook served `id` for the context `context_id` of `state`'s

@@ -291,3 +291,62 @@ test "graph: a graph made before the first async grant reads through one" {
     try p.run();
     try check(p.scope, "report.root === 1 && report.created === 1 && report.after === 1");
 }
+
+test "net: readCopy refuses an empty buffer, which could not tell end of stream" {
+    var p: Parent = undefined;
+    try p.setup("init.js",
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const server = api.net.listen(io, { mode: 'pull', socketMode: 'pull', port: 0 });
+        \\  const client = await api.net.connect(io, { mode: 'pull', port: server.port });
+        \\  const peer = await server.accept();
+        \\  out.refused = await client.readCopy(new Uint8Array(0)).then(() => false, e => e instanceof TypeError);
+        \\  await client.end('write');
+        \\  await io.sleep(50);
+        \\  out.open = !client.closed;
+        \\  await peer.queued.send(Uint8Array.of(9));
+        \\  const buffer = new Uint8Array(4);
+        \\  out.read = await client.readCopy(buffer) === 1 && buffer[0] === 9;
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.refused && report.open && report.read");
+}
+
+test "net: the send queue limit is an option, paused tells the truth, end rejects" {
+    var p: Parent = undefined;
+    try p.setup("init.js",
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const server = api.net.listen(io, { mode: 'event', socketMode: 'event', port: 0, queued: { limit: 5 } });
+        \\  out.serverPaused = server.paused;
+        \\  const accepted = new Promise(resolve => server.register('connection', resolve));
+        \\  io.run().catch(() => {});
+        \\  out.serverFlowing = !server.paused;
+        \\  const client = await api.net.connect(io, { mode: 'event', port: server.port, queued: { limit: 7 } });
+        \\  out.limits = client.queued.limit + ',' + (await accepted).queued.limit;
+        \\  out.freshPaused = client.paused;
+        \\  const registration = client.register('data', () => {});
+        \\  out.flowing = !client.paused;
+        \\  registration.unregister();
+        \\  out.unregistered = client.paused;
+        \\  client.pause();
+        \\  client.register('data', () => {});
+        \\  out.stillPaused = client.paused;
+        \\  client.resume();
+        \\  out.resumed = !client.paused;
+        \\  const rejects = async f => { const pending = f(); return pending.then(() => false, e => e instanceof TypeError); };
+        \\  out.end = await rejects(() => client.end()) && await rejects(() => client.end('send'));
+        \\  out.bad = [() => api.net.listen(io, { mode: 'pull', socketMode: 'pull', queued: 5 }), () => api.net.listen(io, { mode: 'pull', socketMode: 'pull', queued: { limit: 0 } })]
+        \\    .every(f => { try { f(); return false; } catch (e) { return e instanceof TypeError; } });
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.limits === '7,5' && report.serverPaused && report.serverFlowing && report.freshPaused && report.flowing && report.unregistered && report.stillPaused && report.resumed && report.end && report.bad");
+}

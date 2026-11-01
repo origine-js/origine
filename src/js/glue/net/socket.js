@@ -39,8 +39,8 @@ export default (k, { Core, Handle, live, coreOf, revoke, endQueue }) => {
      * `close()` releases it at any time.
      */
     end(side) {
-      if (side !== 'write' && side !== 'read' && side !== 'both') throw new TypeError("side must be 'write', 'read' or 'both'");
       try {
+        if (side !== 'write' && side !== 'read' && side !== 'both') throw new TypeError("side must be 'write', 'read' or 'both'");
         const core = live(this);
         if (side === 'read') {
           core.endRead();
@@ -90,12 +90,14 @@ export default (k, { Core, Handle, live, coreOf, revoke, endQueue }) => {
       }
     }
     /**
-     * Reads once into `buffer` by copy: resolves the byte count, 0 at end of stream. The buffer is
+     * Reads once into `buffer` (at least one byte) by copy: resolves the byte count, 0 at end of stream. The buffer is
      * not detached, so one buffer can serve every read, but the bytes are copied.
      */
     readCopy(buffer) {
       try {
         if (!(buffer instanceof ArrayBuffer) && !ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer or a view');
+        // 0 means end of stream here: an empty buffer could not tell it from nothing read.
+        if (buffer.byteLength === 0) throw new TypeError('buffer must not be empty');
         const core = live(this);
         return core.track(core.readEnded ? Promise.resolve(0) : native.net.readCopy(core.id, buffer), n => n === 0);
       } catch (e) {

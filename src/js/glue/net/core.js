@@ -179,7 +179,7 @@ export default (k, { SendQueue, Direct, DataEvent, beginData, endData }) => {
       this.sync();
     }
     get paused() {
-      return this.userPaused || this.autoPaused;
+      return this.userPaused || this.flowing === 0;
     }
     /** Leaves event mode: refused once reading started (what the pump read is held for handlers). */
     toPull() {

@@ -36,7 +36,8 @@ export const FileKind = freeze({ file: 1, directory: 2, sym_link: 3, other: 4 })
 // are read/write natively, so write_only and read_write coincide.
 const MODES = { read_only: 'r', write_only: 'rw', read_write: 'rw' };
 const UNLIMITED = freeze({ limit: Infinity });
-const openFlags = options => (options === undefined ? 'r' : (MODES[options.mode ?? 'read_only'] ?? 'r'));
+// An unknown `mode` is no flag at all, which the grant refuses with InvalidInput.
+const openFlags = options => (options === undefined ? 'r' : (MODES[options.mode ?? 'read_only'] ?? ''));
 // Zig `createFile`: exclusive -> `x`, truncate (default) -> `w`, else create-and-keep `c`.
 const createFlags = (options = {}) => (options.exclusive ? 'x' : (options.truncate ?? true) ? 'w' : 'c');
 // A result of the grant, wrapped with the methods; it keeps the issuer a hardened grant checks.
@@ -247,7 +248,7 @@ class FileImpl extends FileHandle {
   }
   /// Async only (the sync arm throws Unsupported). BYOB read into `view` (an ArrayBuffer or any view)
   /// from the current position, or from `offset` when given. Zero-copy: the guest's buffer is
-  /// detached (when eligible: not shared, not resizable) and the result is the only live handle on
+  /// detached (Unsupported, untouched, when it cannot be: shared, resizable) and the result is the only live handle on
   /// that memory. Resolves a JS ReadResult with read-only bytes and buffer fields, `buffer` being a view of the same kind,
   /// byteOffset and length as `view` over the filled memory; read it from there and not from `view`.
   readInto(io, view, offset) {
@@ -322,7 +323,7 @@ export const File = freeze({
 /// The quansync operations behind the methods, for composing in other std modules:
 /// `yield* ops.openFile(io, dir, path, flags)` inside a quansync generator, or
 /// `ops.openFile[io.kind](io, dir, path, flags)` directly. `flags` is the raw
-/// glue open mode string (`'r' | 'rw' | 'r+' | 'w' | 'w+' | 'x' | 'x+' | 'c' | 't'`).
+/// glue open mode string (`'r' | 'rw' | 'w' | 'x' | 'c' | 't'`).
 export const ops = freeze({
   openFile: dirOpenFile,
   openDir: dirOpenDir,

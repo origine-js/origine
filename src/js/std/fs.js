@@ -2,7 +2,7 @@
 // `origine:@std/io`. There is no ambient cwd, so the API is bound to an `io`
 // (the sync or async cap of `api.fs`) and a directory (default `Dir.cwd()`):
 //
-//   const rs = fs(api.fs.requestSync({ access: 'rw' }));  // or fs(await api.fs.requestAsync({ io, access: 'rw' }), someDir)
+//   const rs = fs(api.fs.requestSync({ access: 'rw', handle: 'plain' }));  // or fs(await api.fs.requestAsync({ io, access: 'rw', handle: 'plain' }), someDir)
 //   rs.write('a.txt', 'hello');                // sync: returns / throws an IoError value
 //   const text = rs.read_to_string('a.txt');   // async: the same calls return promises
 //   const f = rs.File.open('a.txt'); f.read(buf); f.close();
@@ -240,8 +240,20 @@ const removeFile = quansync(function* (ctx, path) {
 const removeDir = quansync(function* (ctx, path) {
   return yield* ops.deleteDir(ctx.io, ctx.dir, path);
 });
+// `std::fs::remove_dir_all`: a missing path is NotFound and a file is NotADirectory (`deleteTree` of
+// `origine:@std/io` accepts both); a final symlink is removed, not followed. Telling a symlink from a file
+// reads the entry, so on a write-only grant such a path is PermissionDenied.
 const removeDirAll = quansync(function* (ctx, path) {
-  return yield* ops.deleteTree(ctx.io, ctx.dir, path);
+  const { io, dir } = ctx;
+  try {
+    return yield* ops.deleteDir(io, dir, path);
+  } catch (error) {
+    if (IoError.is(error, IoError.DirectoryNotEmpty)) return yield* ops.deleteTree(io, dir, path);
+    if (!IoError.is(error, IoError.NotADirectory)) throw error;
+  }
+  const entry = yield* ops.symlinkStat(io, dir, path);
+  if (entry.kind !== FileKind.sym_link) fail(IoError.NotADirectory);
+  return yield* ops.deleteFile(io, dir, path);
 });
 const rename = quansync(function* (ctx, from, to) {
   return yield* ops.rename(ctx.io, ctx.dir, from, ctx.dir, to);

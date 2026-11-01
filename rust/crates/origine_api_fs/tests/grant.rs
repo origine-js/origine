@@ -107,7 +107,7 @@ fn file_roundtrip_through_handles() {
         assert_eq!(std::fs::read(env.root.join("a.txt")).unwrap(), b"HELLO");
 
         let id = g.open_file(0, "a.txt", R).unwrap().await.unwrap();
-        assert_eq!(id, 1, "a closed slot is reused");
+        assert_eq!(id, 2, "a closed id is not reused");
         assert_eq!(g.read_all(id, usize::MAX).unwrap().await.unwrap(), b"HELLO");
         g.close(id).unwrap().await.unwrap();
 
@@ -304,8 +304,8 @@ fn close_waits_for_operations_in_flight_and_ids_are_not_reused_meanwhile() {
         .await;
         assert_eq!(data, b"2345");
         assert_eq!(*order.borrow(), ["read", "closed"]);
-        // Now the slot is free again.
-        assert_eq!(g.open_file(0, "f", R).unwrap().await.unwrap(), f);
+        // Closed, and its id stays retired.
+        assert_ne!(g.open_file(0, "f", R).unwrap().await.unwrap(), f);
         g.close(other).unwrap().await.unwrap();
     });
     env.drain();
@@ -592,4 +592,13 @@ fn a_dropped_pinned_op_keeps_its_memory_until_the_loop_has_run_it() {
         g.close(id).unwrap().await.unwrap();
     });
     env.drain();
+}
+
+#[test]
+fn access_bits() {
+    assert_eq!(Access::from_bits(3), Some(Access::READ_WRITE));
+    assert!(Access::from_bits(5).is_some_and(|access| access.read && !access.write && access.confined));
+    assert_eq!(Access::from_bits(0), None);
+    assert_eq!(Access::from_bits(4), None);
+    assert_eq!(Access::from_bits(8), None);
 }

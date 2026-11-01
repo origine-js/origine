@@ -251,6 +251,8 @@ pub const Host = struct {
     /// How many times a context called into the JS driver of the module graph. A handler with no JS
     /// function in it never does (tests assert it).
     driver_calls: usize = 0,
+    /// Modules whose source V8 reads in place from a mapped file (`read: 'mmap'`); tests assert it.
+    mapped_sources: usize = 0,
     next_fs_id: u32 = 1,
     isolates: ?IsolateConfig = null,
     link: ?ParentLink = null,
@@ -744,8 +746,6 @@ pub const Host = struct {
                         .utf8 = func(graph_api.utf8, .{ .side_effect = .any }),
                         .sourceHash = func(graph_api.sourceHash, .{ .side_effect = .any }),
                         .jsonModule = func(graph_api.jsonModule, .{ .side_effect = .any }),
-                        .pipelineResolve = func(graph_api.pipelineResolve, .{ .side_effect = .any }),
-                        .pipelineLoad = func(graph_api.pipelineLoad, .{ .side_effect = .any }),
                         .handlerPin = func(graph_api.handlerPin, .{ .side_effect = .any }),
                         .handlerUnpin = func(graph_api.handlerUnpin, .{ .side_effect = .any }),
                         .handlersFreed = func(graph_api.handlersFreed, .{ .side_effect = .any }),

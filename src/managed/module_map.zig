@@ -367,6 +367,7 @@ pub const ModuleMap = struct {
         rt.next_load_token = std.math.add(LoadToken, token, 1) catch return error.LoadTokenExhausted;
         switch (try loader.load(loader.data, .{ .allocator = self.arenaAllocator(), .context = self.ctx(), .scope_id = self.scope.id, .module_id = entry.id, .namespace = entry.namespace, .token = token, .import_attributes = entry.attributes })) {
             .source => |source| try self.compile(entry, .{ .source = source }),
+            .external => |external| try self.compile(entry, .{ .external = external }),
             .exports => |exports| try self.compile(entry, .{ .exports = exports }),
             .module => |linked| try self.compile(entry, .{ .module = linked }),
             .pending => entry.pending = token,
@@ -397,56 +398,61 @@ pub const ModuleMap = struct {
     /// On error partial entry allocations/handles remain map-owned for teardown;
     /// temporary compiler state and host buffers are released. Requires entered
     /// context/isolate and a live HandleScope.
+    /// Compiles `text`, which the string `held` holds, and fetches what it imports.
+    fn compileSource(self: *ModuleMap, entry: *Entry, text: []const u8, held: v8.String) anyerror!void {
+        const iso = self.isolate();
+        var source: v8.ScriptCompiler.Source = undefined;
+        var origin = self.scope.scriptOrigin(entry.id, true);
+        const cache_request: CodeCacheRequest = .{ .allocator = self.arenaAllocator(), .module_id = entry.id, .source = text };
+        const cached = if (self.scope.options.code_cache) |hook| hook.load(hook.data, cache_request) else null;
+        // The Source owns the cache object it is given, so it is not released here.
+        const cache_object = if (cached) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
+        source.init(held, &origin, cache_object);
+        defer source.deinit();
+        // In a snapshot creator `origine:` modules compile eagerly: they are few and fixed, the snapshot
+        // keeps the bytecode, and their first use in `main` then compiles nothing. Everything else stays
+        // lazy: most of a large user graph never runs, and an eager compile outside a creator (a child
+        // context's `origine:` import) has nowhere to keep its work.
+        const eager = self.scope.runtime.in_creator and std.mem.startsWith(u8, entry.id, "origine:");
+        const options: u32 = if (cache_object != null) 1 else if (eager) eager_compile else 0;
+        const module = v8.ScriptCompiler.compileModule(iso, &source, options, 0) orelse return error.JavaScriptException;
+        const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
+        if (cache_object != null and !accepted) if (self.scope.options.code_cache) |hook| if (hook.rejected) |discard| discard(hook.data, cache_request);
+        if (!accepted and self.keepsCache(entry.id)) entry.cache_source = try self.scope.runtime.allocator.dupe(u8, text);
+        entry.module = .new(iso, module);
+        try self.indexModule(entry);
+        const requests = module.getModuleRequests().?;
+        try entry.dependencies.ensureTotalCapacity(self.scope.runtime.allocator, @intCast(requests.len()));
+        var index: c_int = 0;
+        while (index < requests.len()) : (index += 1) {
+            const request = v8.ModuleRequest.from_opaque(requests.get(index).?.handle).?;
+            if (request.getPhase() != .Evaluation) return error.UnsupportedImport;
+            var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
+            defer scratch.deinit();
+            const alloc = scratch.allocator();
+            const attributes = try self.readAttributes(alloc, request.getImportAttributes().?, 3);
+            const specifier = try string(alloc, iso, request.getSpecifier().?);
+            switch (try self.resolve(alloc, specifier, entry.id, entry.namespace, attributes)) {
+                .id => |id| {
+                    const dependency = try self.fetch(alloc, self.dependencyNamespace(entry.namespace, entry.id), id, attributes);
+                    entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = dependency.attributes, .entry = dependency });
+                },
+                .pending => |token| {
+                    const owned_attributes = try self.arenaAllocator().alloc(ImportAttribute, attributes.len);
+                    for (attributes, owned_attributes) |attribute, *copy| copy.* = .{ .key = try self.arenaAllocator().dupe(u8, attribute.key), .value = try self.arenaAllocator().dupe(u8, attribute.value) };
+                    try entry.unresolved.append(self.scope.runtime.allocator, .{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = owned_attributes, .token = token });
+                },
+            }
+        }
+    }
+
     fn compile(self: *ModuleMap, entry: *Entry, content: Content) anyerror!void {
         self.preparing_depth += 1;
         defer self.preparing_depth -= 1;
         const iso = self.isolate();
         switch (content) {
-            .source => |text| {
-                var source: v8.ScriptCompiler.Source = undefined;
-                var origin = self.scope.scriptOrigin(entry.id, true);
-                const cache_request: CodeCacheRequest = .{ .allocator = self.arenaAllocator(), .module_id = entry.id, .source = text };
-                const cached = if (self.scope.options.code_cache) |hook| hook.load(hook.data, cache_request) else null;
-                // The Source owns the cache object it is given, so it is not released here.
-                const cache_object = if (cached) |bytes| v8.ScriptCompiler.CachedData.init(bytes.ptr, @intCast(bytes.len)) else null;
-                source.init(eu.v.str_utf8(iso, text), &origin, cache_object);
-                defer source.deinit();
-                // In a snapshot creator `origine:` modules compile eagerly: they are few and fixed, the snapshot
-                // keeps the bytecode, and their first use in `main` then compiles nothing. Everything else stays
-                // lazy: most of a large user graph never runs, and an eager compile outside a creator (a child
-                // context's `origine:` import) has nowhere to keep its work.
-                const eager = self.scope.runtime.in_creator and std.mem.startsWith(u8, entry.id, "origine:");
-                const options: u32 = if (cache_object != null) 1 else if (eager) eager_compile else 0;
-                const module = v8.ScriptCompiler.compileModule(iso, &source, options, 0) orelse return error.JavaScriptException;
-                const accepted = cache_object != null and !v8.ScriptCompiler.CachedData.rejected(source.getCachedData().?);
-                if (cache_object != null and !accepted) if (self.scope.options.code_cache) |hook| if (hook.rejected) |discard| discard(hook.data, cache_request);
-                if (!accepted and self.keepsCache(entry.id)) entry.cache_source = try self.scope.runtime.allocator.dupe(u8, text);
-                entry.module = .new(iso, module);
-                try self.indexModule(entry);
-                const requests = module.getModuleRequests().?;
-                try entry.dependencies.ensureTotalCapacity(self.scope.runtime.allocator, @intCast(requests.len()));
-                var index: c_int = 0;
-                while (index < requests.len()) : (index += 1) {
-                    const request = v8.ModuleRequest.from_opaque(requests.get(index).?.handle).?;
-                    if (request.getPhase() != .Evaluation) return error.UnsupportedImport;
-                    var scratch = std.heap.ArenaAllocator.init(self.scope.runtime.allocator);
-                    defer scratch.deinit();
-                    const alloc = scratch.allocator();
-                    const attributes = try self.readAttributes(alloc, request.getImportAttributes().?, 3);
-                    const specifier = try string(alloc, iso, request.getSpecifier().?);
-                    switch (try self.resolve(alloc, specifier, entry.id, entry.namespace, attributes)) {
-                        .id => |id| {
-                            const dependency = try self.fetch(alloc, self.dependencyNamespace(entry.namespace, entry.id), id, attributes);
-                            entry.dependencies.appendAssumeCapacity(.{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = dependency.attributes, .entry = dependency });
-                        },
-                        .pending => |token| {
-                            const owned_attributes = try self.arenaAllocator().alloc(ImportAttribute, attributes.len);
-                            for (attributes, owned_attributes) |attribute, *copy| copy.* = .{ .key = try self.arenaAllocator().dupe(u8, attribute.key), .value = try self.arenaAllocator().dupe(u8, attribute.value) };
-                            try entry.unresolved.append(self.scope.runtime.allocator, .{ .specifier = try self.arenaAllocator().dupe(u8, specifier), .attributes = owned_attributes, .token = token });
-                        },
-                    }
-                }
-            },
+            .source => |text| try self.compileSource(entry, text, eu.v.str_utf8(iso, text)),
+            .external => |external| try self.compileSource(entry, external.text, external.string),
             .module => |linked| {
                 entry.module = .new(iso, linked);
                 entry.shared = true;

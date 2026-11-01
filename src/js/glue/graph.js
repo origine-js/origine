@@ -65,8 +65,7 @@ export default (native, { take, takeError }) => {
   const closedGraphs = new Set();
 
   /// The reference `reference` names in the graph numbered `id`: `InvalidInput` for anything that is not a
-  /// reference this graph declared (a reference belongs to one graph, a derived graph cannot use its
-  /// parent's), `StaleHandle` once the graph is closed.
+  /// reference this graph declared (a reference belongs to one graph), `StaleHandle` once the graph is closed.
   const own_ = (id, reference) => {
     if (!isReference(reference)) throw invalid('expected a ModuleReference');
     if (graphId(referenceState.get(reference).graph) !== id) throw invalid('this reference belongs to another graph');

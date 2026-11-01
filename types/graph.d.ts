@@ -2,7 +2,7 @@ import type { Context } from "./context.d.ts";
 import type { ModuleRecipe } from "origine:@std/graph/module";
 
 /** The states of a {@link ModuleReference}, those of a V8 module. */
-export type ModuleReferenceStatus = "declared" | "loaded" | "instantiated" | "evaluating" | "evaluated" | "errored";
+export type ModuleReferenceStatus = "declared" | "loaded" | "evaluating" | "evaluated" | "errored";
 
 /** One static import of a loaded module. */
 export interface ModuleRequest {

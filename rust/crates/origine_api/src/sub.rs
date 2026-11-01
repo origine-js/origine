@@ -76,7 +76,7 @@ const MAX_QUEUED: usize = 8;
 /// Fresh slabs a socket keeps ready.
 const SLAB_TARGET: usize = 2;
 
-/// `dispatch(kind, a, b)` kinds; `glue/net.js` uses the same numbers.
+/// `dispatch(kind, a, b)` kinds; `glue/net/core.js` uses the same numbers.
 const KIND_DATA: u32 = 0;
 const KIND_END: u32 = 1;
 const KIND_ERROR: u32 = 2;

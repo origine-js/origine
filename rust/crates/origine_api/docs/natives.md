@@ -78,7 +78,7 @@ synchronously, so a bad call returns a rejected promise without starting a task.
 | `fileWriteMove` | `fs, fileId, data` | as `fileWrite`, moving like `writeMoveAll`. |
 | `filePwriteAll` | `fs, fileId, data, offset: u64` | `undefined`. Copies like `writeAll`. |
 | `filePwriteMoveAll` | `fs, fileId, data, offset: u64` | as `filePwriteAll`, moving like `writeMoveAll`. |
-| `fileReadInto` | `fs, fileId, buffer` | `{ bytes, buffer: ArrayBuffer }`: one read at the position into `buffer`'s window; pinned = new ArrayBuffer over the same store (original dead), else the guest's own buffer after copy-out. |
+| `fileReadInto` | `fs, fileId, buffer` | `{ bytes, buffer: ArrayBuffer }`: one read at the position into `buffer`'s window; a new ArrayBuffer over the same store (original dead). `Unsupported`, untouched, for a buffer that cannot be detached; an empty one comes back as it is. |
 | `filePreadInto` | `fs, fileId, buffer, offset: u64` | as `fileReadInto` at `offset`. |
 | `fileReadAlloc` | `fs, fileId, len: u64` | `Uint8Array` of the bytes read (<= `len`, empty at EOF) over a V8-allocated buffer of `len` bytes (or an exact-size copy when at most half of a >= 4 KiB buffer was used); `len` > 256 MiB rejects `FileTooLarge`. |
 | `filePreadAlloc` | `fs, fileId, len: u64, offset: u64` | as `fileReadAlloc` at `offset`. |
@@ -91,7 +91,7 @@ the in-flight ones, closes the descriptor, then marks it `Closed` so the slot ma
 are `1..` per table (files and directories have separate tables); a dropped (cancelled)
 operation releases its guard.
 
-Buffer semantics (pin/detach, copy fallback, lifetime invariant): [README](README.md#buffers-pinning-and-copy-fallback).
+Buffer semantics (pin/detach, lifetime invariant): [README](README.md#buffers-pinning).
 `fileRead`/`filePread` remain copying (they allocate `buffer.length` bytes per call).
 
 ## `net.*` (loopback TCP, `needs = "runtime"`)

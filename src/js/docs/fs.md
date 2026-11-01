@@ -7,9 +7,9 @@ an `io` and a directory.
 ```js
 import { fs } from 'origine:@std/fs';
 
-const rs = fs(api.fs.requestSync({ access: 'rw' }));   // blocking, std.Io
+const rs = fs(api.fs.requestSync({ access: 'rw', handle: 'plain' }));   // blocking
 const io = api.io.create({});                          // an async runtime
-const ars = fs(await api.fs.requestAsync({ io, access: 'rw' }), someDir);   // every call returns a promise
+const ars = fs(await api.fs.requestAsync({ io, access: 'rw', handle: 'plain' }), someDir);   // every call returns a promise
 rs.write('a.txt', 'hello');
 const text = rs.read_to_string('a.txt');    // async: the same calls return promises
 const f = rs.File.open('a.txt'); f.read(buf); f.close();
@@ -54,7 +54,8 @@ or `api.fs` async ops (`fileReadInto`, `fileReadAlloc`).
 | `exists(path)` | like `Path::exists`: `false` on **any** error, including denied access; use `try_exists` to tell them apart |
 | `copy(from, to)` | bytes copied (64 KiB chunks) |
 | `create_dir`, `create_dir_all` | |
-| `remove_file`, `remove_dir`, `remove_dir_all` | |
+| `remove_file`, `remove_dir` | |
+| `remove_dir_all(path)` | like `std::fs::remove_dir_all`: a missing path is `NotFound`, a file is `NotADirectory`, a final symlink is removed and not followed. On a write-only grant a path that is not a directory is `PermissionDenied`, because telling a symlink from a file reads it. |
 | `rename(from, to)` | |
 | `kind` | the `io` kind, `'sync'` or `'async'` |
 
@@ -78,9 +79,21 @@ or `api.fs` async ops (`fileReadInto`, `fileReadAlloc`).
 
 Paths are confined to the grant's root **lexically** only (no `..`, no absolute path, no
 component named `..`: `PermissionDenied`; a NUL byte: `InvalidInput`). Symlinks are not
-resolved by that check, so `metadata`, `try_exists`, `File.open` and friends, which follow a symlink,
-can leave the root when the root contains a link that points outside it. Do not grant a root you do
-not trust the contents of until confinement of symlinks is decided.
+resolved by that check, so by default (`symlinks: 'follow'`) any operation whose path passes through a
+symlink, reads and writes alike, can leave the root when the root contains a link that points outside it.
+
+`requestSync` and `requestAsync` take `symlinks: 'follow' | 'confined'` (default `'follow'`). A `'confined'`
+grant walks every path before using it and fails `PermissionDenied` when a symlink's target is absolute or
+climbs above the directory the call names (the grant root, or the opened `Dir` it is relative to, so a link
+that climbs out of an opened `Dir` is refused even if it stays inside the root). Links that stay inside still
+work. Costs and limits:
+
+- One extra stat per path component, one `readlink` per symlink met. On an async grant the stats are async,
+  and each `readlink` is a short blocking call on the isolate thread.
+- It is a check before the operation, not part of it: a process changing links at the same moment can get past
+  it. It stops links already in the tree, not a concurrent attacker with write access to the root.
+- It covers the paths a grant is given, the requested `root`, the files the graph reads through the grant and the
+  directory of `CodeCache.dir`, but not the files inside that directory.
 
 ## Not shipped
 

@@ -2,11 +2,11 @@
 // layers; the first layer that returns a result wins and a layer that returns `undefined` passes.
 // If no layer answers the import fails `NotFound`.
 //
-//   ImportResolver.layered().layer(relative()).layer(origine()).layer(nodeModules())
+//   ImportResolver.layered().layer(relative()).layer(origine())
 //
 // A layer is a host descriptor (`relative()`, `origine()`, `importMap(...)` of
 // `origine:@std/graph/resolve/layers`, run natively) or a function
-// `({ specifier, referrer, attributes, phase }) => { id, attributes? } | undefined | Promise<...>`
+// `({ specifier, referrer, attributes, phase }) => id | { id } | undefined | Promise<...>`
 // that runs in the creating realm during the load stage.
 import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';

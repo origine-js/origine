@@ -67,6 +67,12 @@ fn denied() -> NativeError {
     NativeError::Errno(errno::PERMISSION_DENIED)
 }
 
+/// A failed write: `EBADF` on a handle this grant still holds means it was opened read-only, which
+/// is `error.NotOpenForWriting` in the sync natives.
+fn write_failed(err: std::io::Error) -> NativeError {
+    if err.raw_os_error() == Some(9) { denied() } else { err.into() }
+}
+
 /// Rejects NUL (`InvalidInput`: a malformed path) and, as policy denials (`PermissionDenied`, like
 /// the OS's own), absolute paths and `..` components. Lexical only:
 /// symlinks are not resolved here, so following one can leave the grant's root. The Zig twin is
@@ -116,6 +122,67 @@ fn sub_path(path: &str) -> Result<String, NativeError> {
     Ok(path.to_owned())
 }
 
+/// Most symlinks one path may pass through, like the OS's own limit (`FilesystemLoop` above it).
+const MAX_SYMLINK_HOPS: u32 = 40;
+
+/// `symlinks: 'confined'`: walks `path` below `parent` as the OS would and fails `PermissionDenied` when a
+/// symlink's target is absolute or climbs above `parent`, so `parent` is the limit for the directory a call
+/// names. A final symlink counts when the operation follows it (`follow_final`). The walk stops at what does
+/// not exist: there is no link further on, and the operation reports it. It is a check made before the
+/// operation, not part of it: a process that changes links at the same moment can get past it. Each component
+/// is an async stat; only a real symlink costs a short blocking `readlinkat` ([`Dir::read_link`]). The Zig
+/// twin is `confine` in `src/api/fs.zig`.
+pub async fn confine(parent: &Dir, path: &str, follow_final: bool) -> Result<(), NativeError> {
+    // A trailing slash makes the OS follow the last component whatever the operation.
+    let follow = follow_final || path.ends_with('/');
+    let mut resolved = String::new();
+    let mut pending = path.to_owned();
+    let mut hops = 0;
+    while !pending.is_empty() {
+        let (part, rest) = pending.split_once('/').unwrap_or((pending.as_str(), ""));
+        let (part, rest) = (part.to_owned(), rest.to_owned());
+        pending = rest;
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if resolved.is_empty() {
+                return Err(denied());
+            }
+            resolved.truncate(resolved.rfind('/').unwrap_or(0));
+            continue;
+        }
+        if pending.is_empty() && !follow {
+            return Ok(());
+        }
+        let kept = resolved.len();
+        if kept != 0 {
+            resolved.push('/');
+        }
+        resolved.push_str(&part);
+        let meta = match parent.symlink_metadata(&resolved).await {
+            Ok(meta) => meta,
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let target = parent.read_link(&resolved)?;
+        resolved.truncate(kept);
+        let target = target.to_str().ok_or_else(denied)?;
+        if target.starts_with('/') {
+            return Err(denied());
+        }
+        hops += 1;
+        if hops > MAX_SYMLINK_HOPS {
+            return Err(NativeError::Errno(errno::FILESYSTEM_LOOP));
+        }
+        pending = format!("{target}/{pending}");
+    }
+    Ok(())
+}
+
 /// Converts a size to the f64 JS sees, failing with `FileTooLarge` instead of rounding.
 fn exact_size(size: u64) -> Result<f64, NativeError> {
     if size > MAX_EXACT { Err(NativeError::Errno(errno::FILE_TOO_LARGE)) } else { Ok(size as f64) }
@@ -159,21 +226,21 @@ fn open_options(bits: u32) -> OpenOptions {
 pub struct Access {
     pub read: bool,
     pub write: bool,
+    /// `symlinks: 'confined'`: every path is walked first, see [`confine`].
+    pub confined: bool,
 }
 
 impl Access {
-    pub const READ: Access = Access { read: true, write: false };
-    pub const WRITE: Access = Access { read: false, write: true };
-    pub const READ_WRITE: Access = Access { read: true, write: true };
+    pub const READ: Access = Access { read: true, write: false, confined: false };
+    pub const WRITE: Access = Access { read: false, write: true, confined: false };
+    pub const READ_WRITE: Access = Access { read: true, write: true, confined: false };
 
-    /// The bits of `native.fsAsync.request`: 1 read, 2 write; `None` for anything else.
+    /// The bits of `native.fsAsync.request`: 1 read, 2 write (at least one), 4 confined; `None` for anything else.
     pub fn from_bits(bits: u32) -> Option<Access> {
-        match bits {
-            1 => Some(Access::READ),
-            2 => Some(Access::WRITE),
-            3 => Some(Access::READ_WRITE),
-            _ => None,
+        if bits > 7 || bits & 3 == 0 {
+            return None;
         }
+        Some(Access { read: bits & 1 != 0, write: bits & 2 != 0, confined: bits & 4 != 0 })
     }
 }
 
@@ -231,6 +298,11 @@ impl Grant {
         Ok(DirHandle::Entry(entry.begin()?))
     }
 
+    /// Whether operations on this grant walk their paths first ([`confine`]).
+    fn confined(&self) -> bool {
+        self.access.confined
+    }
+
     fn file(&self, id: u32) -> Result<Guard<File>, NativeError> {
         let entry = self.files.borrow().get(id)?.clone();
         Ok(entry.begin()?)
@@ -255,6 +327,9 @@ impl Grant {
         let options = open_options(bits);
         let grant = Rc::clone(self);
         Ok(async move {
+            if grant.confined() {
+                confine(&parent, &path, true).await?;
+            }
             let file = parent.open_file(&path, &options).await?;
             if bits & 0b11 == 0 {
                 // Read-only without create: like Zig's `allow_directory = false`, a directory is `IsADirectory`.
@@ -280,6 +355,9 @@ impl Grant {
         let parent = self.dir(dir)?;
         let grant = Rc::clone(self);
         Ok(async move {
+            if grant.confined() {
+                confine(&parent, &path, true).await?;
+            }
             let opened = parent.open_dir(if path.is_empty() { "." } else { &path }).await?;
             Ok(grant.dirs.borrow_mut().insert(opened))
         })
@@ -300,7 +378,11 @@ impl Grant {
         let path = any_path(path)?;
         self.readable()?;
         let parent = self.dir(dir)?;
+        let confined = self.confined();
         Ok(async move {
+            if confined {
+                confine(&parent, &path, follow).await?;
+            }
             let meta = if path.is_empty() {
                 parent.metadata(".").await?
             } else if follow {
@@ -317,7 +399,13 @@ impl Grant {
         let path = entry_path(path)?;
         self.writable()?;
         let parent = self.dir(dir)?;
-        Ok(async move { Ok(parent.create_dir(&path).await?) })
+        let confined = self.confined();
+        Ok(async move {
+            if confined {
+                confine(&parent, &path, false).await?;
+            }
+            Ok(parent.create_dir(&path).await?)
+        })
     }
 
     /// `deleteFile(dir, path)`.
@@ -325,7 +413,13 @@ impl Grant {
         let path = entry_path(path)?;
         self.writable()?;
         let parent = self.dir(dir)?;
-        Ok(async move { Ok(parent.remove_file(&path).await?) })
+        let confined = self.confined();
+        Ok(async move {
+            if confined {
+                confine(&parent, &path, false).await?;
+            }
+            Ok(parent.remove_file(&path).await?)
+        })
     }
 
     /// `readDir(dir)`: every entry of the directory (no `.`/`..`), in OS order.
@@ -362,7 +456,13 @@ impl Grant {
         let path = sub_path(path)?;
         self.writable()?;
         let parent = self.dir(dir)?;
-        Ok(async move { Ok(parent.create_dir_all(&path).await?) })
+        let confined = self.confined();
+        Ok(async move {
+            if confined {
+                confine(&parent, &path, true).await?;
+            }
+            Ok(parent.create_dir_all(&path).await?)
+        })
     }
 
     /// `deleteDir(dir, path)`: an empty directory.
@@ -370,7 +470,13 @@ impl Grant {
         let path = sub_path(path)?;
         self.writable()?;
         let parent = self.dir(dir)?;
-        Ok(async move { Ok(parent.remove_dir(&path).await?) })
+        let confined = self.confined();
+        Ok(async move {
+            if confined {
+                confine(&parent, &path, false).await?;
+            }
+            Ok(parent.remove_dir(&path).await?)
+        })
     }
 
     /// `deleteTree(dir, path)`: like Zig's `deleteTree`, a missing path is not an error, a file or
@@ -379,7 +485,11 @@ impl Grant {
         let path = sub_path(path)?;
         self.writable()?;
         let parent = self.dir(dir)?;
+        let confined = self.confined();
         Ok(async move {
+            if confined {
+                confine(&parent, &path, false).await?;
+            }
             let meta = match parent.symlink_metadata(&path).await {
                 Ok(meta) => meta,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -405,7 +515,14 @@ impl Grant {
         self.writable()?;
         let from = self.dir(dir)?;
         let to = self.dir(new_dir)?;
-        Ok(async move { Ok(from.rename(&old_path, &to, &new_path).await?) })
+        let confined = self.confined();
+        Ok(async move {
+            if confined {
+                confine(&from, &old_path, false).await?;
+                confine(&to, &new_path, false).await?;
+            }
+            Ok(from.rename(&old_path, &to, &new_path).await?)
+        })
     }
 
     // ---- files -------------------------------------------------------------------------
@@ -482,7 +599,7 @@ impl Grant {
                 return Ok(());
             }
             let (written, _) = file.write_all(data).await;
-            Ok(written?)
+            written.map_err(write_failed)
         })
     }
 
@@ -533,7 +650,7 @@ impl Grant {
                 return Ok(0);
             }
             let (written, _) = file.write(data).await;
-            Ok(written?)
+            written.map_err(write_failed)
         })
     }
 
@@ -562,7 +679,7 @@ impl Grant {
                 return Ok(());
             }
             let (written, _) = file.write_all_at(data, offset).await;
-            Ok(written?)
+            written.map_err(write_failed)
         })
     }
 

@@ -58,8 +58,10 @@ export default native => {
     return mode;
   };
   const queueLimit = options => {
-    const limit = own(options, 'sendQueueLimit') ?? QUEUE_LIMIT;
-    if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('sendQueueLimit must be a positive integer');
+    const queued = own(options, 'queued');
+    if (queued !== undefined && (queued === null || typeof queued !== 'object')) throw new TypeError('queued must be an object');
+    const limit = own(queued, 'limit') ?? QUEUE_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('queued.limit must be a positive integer');
     return limit;
   };
   return () =>

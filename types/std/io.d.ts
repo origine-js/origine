@@ -201,7 +201,7 @@ declare module "origine:@std/io" {
     readAll<F extends Fs>(io: F, limit?: Limit): Outcome<F, Uint8Array>;
     /**
      * **Async grants only** (a sync grant throws `Unsupported`). BYOB read, zero-copy: detaches
-     * `view`'s buffer (when it can: not shared, not resizable) and resolves `{ bytes, buffer }` with
+     * `view`'s buffer (`Unsupported`, untouched, when it cannot be: shared, resizable) and resolves `{ bytes, buffer }` with
      * `buffer` a view like `view` over the filled memory: use it, not `view`. Reads from `offset`
      * when given, else from the current position.
      */

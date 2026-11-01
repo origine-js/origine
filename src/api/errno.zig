@@ -86,6 +86,8 @@ const aliases = [_]struct { []const u8, Errno }{
     .{ "InvalidArgument", .InvalidInput },
     .{ "FileNotFound", .NotFound },
     .{ "AccessDenied", .PermissionDenied },
+    // A write through a handle opened read-only.
+    .{ "NotOpenForWriting", .PermissionDenied },
     .{ "NotDir", .NotADirectory },
     .{ "IsDir", .IsADirectory },
     .{ "PathAlreadyExists", .AlreadyExists },

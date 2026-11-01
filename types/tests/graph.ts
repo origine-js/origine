@@ -6,7 +6,7 @@ import type { Verdict } from "origine:@std/graph/import";
 import { ImportResolver } from "origine:@std/graph/resolve";
 import { relative, origine, importMap } from "origine:@std/graph/resolve/layers";
 import { origineProvider, fsProvider, json, fromLoader } from "origine:@std/graph/providers";
-import { ImportCache, ResolveCache, CodeCache } from "origine:@std/graph/cache";
+import { ImportCache, CodeCache } from "origine:@std/graph/cache";
 import { ts } from "origine:@std/transformer/oxc";
 import { snapshot, deepFreeze } from "origine:@std/data";
 
@@ -36,8 +36,7 @@ const handler = ImportHandler.make({
   meta: ({ id }) => ({ url: id }),
 });
 const planned: "native" | "js" = handler.plan[0]!.kind;
-const allNative: boolean = handler.native;
-void [planned, allNative, ResolveCache.native({ entries: 10 })];
+void planned;
 
 const recipe: Recipe = ModuleRecipe({
   source: ModuleSource.file("./main.ts", { fs: files }, SourceMap.None).withTransformer(ts()).withTransformer((source) => source),
@@ -46,7 +45,6 @@ const recipe: Recipe = ModuleRecipe({
   codeCache: CodeCache.none,
 });
 const inline = ModuleRecipe({ source: ModuleSource.text("export {}", SourceMap.text("{}")), import: handler, name: "inline" });
-const pure: boolean = recipe.native && inline.native;
 export async function graphUse(api: import("@origine/types").Api): Promise<void> {
   const graph = api.graph.create();
   // An async grant is read on its io runtime, without blocking; the hook or source that names it says so.
@@ -99,7 +97,7 @@ const provided: Verdict = ImportHook.recipe(recipe);
 const sourced: Verdict = ImportHook.source(ModuleSource.text("export default 1"));
 const linked: Verdict = ImportHook.link({});
 const synthetic: Verdict = ImportHook.exports({ answer: 42, default: () => 1 });
-void [pure, provided, sourced, linked, synthetic, ImportHook.accept({ fs: files }), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
+void [inline, provided, sourced, linked, synthetic, ImportHook.accept({ fs: files }), CodeCache.none, CodeCache.custom({ load: () => undefined, store: () => {} })];
 void ImportHandler.make({ resolver, hooks: fromLoader((id, attributes) => (attributes.type === "json" ? { source: "{}" } : id)) });
 void ImportHandler.make({ resolver, hooks: [], maker: MakeRecipe.fn(async ({ id, source }) => (id.endsWith(".ts") ? { transformer: ts(), import: handler } : {})) });
 const equal: boolean = ImportError.is({ errno: ImportError.NotFound }, ImportError.NotFound);

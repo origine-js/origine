@@ -21,8 +21,7 @@ export default g => {
     get name() {
       return this.#state.name;
     }
-    /// `declared`, `loaded`, `instantiated`, `evaluating`, `evaluated` or `errored` (the V8 module's
-    /// states). `instantiated` is reported while a bound module links its dependencies.
+    /// `declared`, `loaded`, `evaluating` (linking included), `evaluated` or `errored`.
     get status() {
       return this.#state.status;
     }
@@ -57,14 +56,12 @@ export default g => {
     for (const [specifier, attributes, phase] of requests) {
       const answer = await pipeline(state.handler, specifier, state.name, attributes);
       let dependency;
-      if (answer.answer !== undefined && answer.answer.kind === 'link') {
+      if (answer.answer.kind === 'link') {
         for (const candidate of refsById.get(answer.answer.context) ?? []) {
           if (candidate.name === answer.answer.name) dependency = candidate;
         }
       } else {
-        const source = answer.answer !== undefined ? answer.answer.source : answer.source;
-        const handler = answer.answer !== undefined ? answer.answer.handler : answer.handler;
-        const codeCache = answer.answer !== undefined ? (answer.answer.codeCache ?? 0) : 0;
+        const { source, handler, codeCache = 0 } = answer.answer;
         dependency = makeReference(state.graph, null, { name: answer.id, text: source, handler, status: ModuleStatus.Declared, codeCache });
       }
       out.push(new ModuleRequest({ specifier, attributes: freeze({ ...attributes }), phase, reference: dependency }));
@@ -112,7 +109,8 @@ export default g => {
         const failed = takeError();
         if (failed !== undefined) throw failed;
         await moduleSettled(evaluating);
-        state.pin = host(native.context.pin, contextId, state.name);
+        // Released while it ran: nothing will ever give a pin back.
+        if (!state.released) state.pin = host(native.context.pin, contextId, state.name);
         state.status = ModuleStatus.Evaluated;
       } catch (error) {
         state.status = ModuleStatus.Errored;
@@ -175,10 +173,17 @@ export default g => {
       const id = codeCacheIds.get(cache);
       if (id === undefined) return 0;
       const out = host(native.context.flush, id);
-      if (cache.native === false) {
-        for (let index = 1; index < out.length; index++) await cache.store(new CodeCacheKey({ id: out[index][0], hash: out[index][1] }), out[index][2]);
+      if (cache.native !== false) return out[0];
+      let stored = 0;
+      for (let index = 1; index < out.length; index++) {
+        try {
+          await cache.store(new CodeCacheKey({ id: out[index][0], hash: out[index][1] }), out[index][2]);
+          stored++;
+        } catch {
+          // A failed write is a miss: the module compiled and runs, and the others still get their turn.
+        }
       }
-      return out[0];
+      return stored;
     },
     /// `CodeCache#close`.
     close(cache) {

@@ -96,7 +96,7 @@ export interface SendQueue {
   /** Sends that wait for room (their bytes are not in the queue yet). */
   readonly waiting: number;
   /**
-   * Bytes the queue may hold. Default 1 MiB, or the `sendQueueLimit` of `connect`/`listen`
+   * Bytes the queue may hold. Default 1 MiB, or the `queued.limit` of `connect`/`listen`
    * (accepted sockets inherit it). A positive integer (`TypeError` otherwise). A `send` into an
    * empty queue is admitted whatever its size.
    */
@@ -138,7 +138,7 @@ export interface SocketBase extends Handle {
   /** The unbuffered write lane (`write`). */
   readonly direct: DirectWriter;
   /**
-   * Ends one side or both, like `shutdown(2)`; `side` is required (`TypeError` without it).
+   * Ends one side or both, like `shutdown(2)`; `side` is required (rejects `TypeError` without it).
    *
    * - `'write'`: once everything queued and waiting is out, sends the FIN and resolves; later
    *   writes fail `BrokenPipe`.
@@ -163,7 +163,7 @@ export interface PullSocket extends SocketBase {
    * detached (shared, resizable). Best for large reads.
    */
   readInto(buffer: BytesLike): Promise<{ readonly bytes: number; readonly buffer: ArrayBuffer }>;
-  /** Reads once into `buffer` **by copy** and resolves the byte count (0 at end of stream). The buffer is not detached, so one buffer serves every read. Best for small reads. */
+  /** Reads once into `buffer` (not empty) **by copy** and resolves the byte count (0 at end of stream). The buffer is not detached, so one buffer serves every read. Best for small reads. */
   readCopy(buffer: BytesLike): Promise<number>;
   /** `for await (const chunk of socket)`: the bytes as `read(65536)` returns them, until the end of the stream. */
   [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
@@ -245,8 +245,11 @@ export type Server<M extends Mode = Mode, S extends Mode = Mode> = M extends "pu
 export interface AddressOptions {
   /** `127.0.0.1`, `::1`, another loopback IP literal (used as given) or `localhost` (never resolved; `connect` tries 127.0.0.1 then ::1, `listen` binds 127.0.0.1). Default `'127.0.0.1'`. */
   readonly host?: string;
-  /** Initial `queued.limit` of every socket made through this call: a positive integer. Default 1 MiB. */
-  readonly sendQueueLimit?: number;
+  /** The send queue of every socket made through this call. */
+  readonly queued?: {
+    /** Its initial `queued.limit`: a positive integer. Default 1 MiB. */
+    readonly limit?: number;
+  };
 }
 
 /** Options of {@link NetCap.listen}. */

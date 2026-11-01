@@ -342,6 +342,11 @@ pub const Dir = struct {
         return File.statOf(try self.inner().stat());
     }
 
+    /// The target of the symlink `sub_path`, in `buffer`; `error.NotLink` for anything else.
+    pub fn readLink(self: Dir, sub_path: []const u8, buffer: []u8) fs_light.Dir.ReadLinkError![]u8 {
+        return self.inner().readLink(sub_path, buffer);
+    }
+
     pub fn statFile(self: Dir, sub_path: []const u8, options: StatFileOptions) fs_light.Dir.StatFileError!Stat {
         return File.statOf(try self.inner().statFileFollowing(sub_path, options.follow_symlinks));
     }

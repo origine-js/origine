@@ -18,6 +18,7 @@ test {
     _ = @import("c_api.zig");
     _ = @import("contract_test.zig");
     _ = @import("tests.zig");
+    _ = @import("udp_test.zig");
     _ = @import("timers.zig");
     _ = @import("backend/tests/kqueue.zig");
 }

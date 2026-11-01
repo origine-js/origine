@@ -131,3 +131,56 @@ An operation in flight holds an `Rc<Socket>`, so closing never frees a descripto
 2. Add `<module>::NATIVE_<FN_NAME>,` to `NATIVES` in `src/registry.rs` (Zig installs the registry; the
    JS glue must use the same `native.<namespace>.<name>`; `just check-contracts` verifies both).
 3. Keep V8-free logic in `origine_api_core` / `origine_api_fs` so Miri covers it.
+
+## `tls.*` (TLS, `needs = "runtime"`, feature `tls`)
+
+Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values (roots, identities, session caches, client and server configurations) live in the Host's TLS table as ids bound to the scope that made them (`BadHandle` otherwise); stream ids come from their own counter and are never reused. `connect` / `accept` take a plain stream socket **out of the socket table** and run the handshake on its runtime over a `SocketTransport` (`lp.recv` / `lp.send` on the descriptor); `close` shuts the transport down so pending operations end. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
+
+| Native | Args | Returns |
+|---|---|---|
+| `tls.rootsBundled` | | id |
+| `tls.rootsPem` / `tls.rootsDer` | PEM bundle / `[u32 LE length \| DER]*` | id; `InvalidData` when none parse |
+| `tls.identityPem` / `tls.identityDer` | cert PEM, key PEM / packed chain, key DER | id; `InvalidData` for a bad pair |
+| `tls.sessions` | `limit` | id |
+| `tls.client` | `roots, identity (0 none), alpn ("\n"-joined), sessions (0 none)` | id |
+| `tls.server` | `identities (u32 LE ids), clientRoots (0 none), alpn` | id |
+| `tls.release` | `id` | sync; forgets a value |
+| `tls.connect` | `io, client, socket, servername` | Promise `{ id, alpn, version (12/13), servername, resumed }`; consumes `socket` |
+| `tls.accept` | `io, server, socket` | Promise, same shape |
+| `tls.read` | `id, len` | Promise `Uint8Array` of 1..=`len` bytes (empty after `close_notify`) |
+| `tls.readCopy` | `id, buffer` | Promise byte count, copied into the guest's buffer |
+| `tls.write` | `id, data` | Promise; `data` copied at call time, resolves when all of it is in the transport |
+| `tls.shutdown` | `id` | Promise; sends `close_notify` |
+| `tls.peer` | `id` | `[u32 LE length \| DER]*`, leaf first |
+| `tls.close` | `id` | sync; drops the stream and shuts the transport down |
+
+## `http.*` (HTTP/2, `needs = "runtime"`, feature `http`)
+
+Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../../../../src/js/docs/http.md). A session is `origine_h2::Connection` plus the task that runs its `Driver` on the socket's runtime, over a plain stream socket or a TLS stream, either of which `http.session` takes out of its table (`SocketTransport` in [`sockstream.rs`](../src/sockstream.rs), shared with `tls.*`). Streams are `Exchange`s in the session's table by stream id; a header list crosses as one packed buffer (`name_len u16 \| value_len u32 \| name \| value`, re-validated on entry). The driver's pending read counts as work, so a session keeps the program alive until `destroy`. Errors: stream/session over `BrokenPipe`, bad field `InvalidInput`, protocol breaks `ProtocolError` (detail in `subject`), a dead transport its own errno with the message as `subject`.
+
+| Native | Args | Returns |
+|---|---|---|
+| `http.session` | `io, kind (0 socket, 1 TLS), id, role (0 client, 1 server), streams, headers, window, connection, batch` | session id; consumes the socket |
+| `http.ready` / `http.ping` | `session` | Promise (void / round trip in ms) |
+| `http.goaway` / `http.destroy` | `session` | sync; graceful close / end now |
+| `http.open` | `session, method, scheme, authority, path, fields, body (0 none, 1 stream)` | stream id |
+| `http.accept` | `session` | Promise of the next request stream id, `undefined` when over |
+| `http.next` | `session, stream` | Promise `{ kind (0 headers, 1 data, 2 end, 3 closed), head (0 request, 1 response, 2 trailers), status, method, scheme, authority, path, fields, last, endStream, data, code }`, `undefined` after the last |
+| `http.consume` | `session, stream, bytes` | sync; window credit |
+| `http.respond` | `session, stream, status, fields, body` | sync |
+| `http.send` | `session, stream, data` | Promise; `data` copied now, waits while a window's worth is queued |
+| `http.queued` | `session, stream` | sync byte count |
+| `http.finish` | `session, stream, trailers (empty for none)` | sync |
+| `http.reset` | `session, stream, code` | sync |
+| `http.release` | `session, stream` | sync; forgets the stream |
+
+## `dns.*` (address lookups, `needs = "runtime"`, feature `dns`)
+
+Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/docs/dns.md`](../../../../src/js/docs/dns.md). A resolver is an `origine_dns::Resolver` whose `Exchange` opens one socket per query on the resolver's runtime: a connected UDP socket (datagrams not carrying our id are skipped), or a stream (RFC 1035 length-prefixed, over TLS for DoT with the `origine_tls` client built from the roots at creation), all inside the per-attempt timeout. Server addresses must be loopback (canonicalised), checked at creation and again per query.
+
+| Native | Args | Returns |
+|---|---|---|
+| `dns.resolver` | `io, spec, roots (0 none), timeout (ms), tries` | resolver id. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
+| `dns.lookup` | `resolver, name, family (0 both, 4, 6)` | Promise of `[4 \| 6, octets]*` |
+| `dns.release` | `resolver` | sync; forgets the resolver, lookups in flight finish |
+

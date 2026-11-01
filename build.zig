@@ -26,6 +26,20 @@ pub fn build(b: *std.Build) void {
     // whether the oxc transformer is compiled into it.
     const typescript = b.option(bool, "typescript", "Include the oxc TypeScript/JSX transformer in the Rust library (default true)") orelse true;
     const cargo_offline = b.option(bool, "cargo-offline", "Run cargo with --offline") orelse false;
+    // Networking (docs/http-design.md). Each flag removes its API (the name is absent, not stubbed), its
+    // Rust feature and its C dependencies; a disabled flag fetches none of them.
+    const http = b.option(bool, "http", "HTTP/2 client and server (api.http; links nghttp2) (default true)") orelse true;
+    const tls = b.option(bool, "tls", "TLS (api.tls; rustls) (default true)") orelse true;
+    const dns = b.option(bool, "dns", "DNS resolver (api.dns) (default true)") orelse true;
+    const quic = b.option(bool, "quic", "QUIC and api.net.udp (default true; needs -Dtls)") orelse true;
+    if (quic and !tls) std.process.fatal("-Dquic needs -Dtls (QUIC is TLS 1.3); pass -Dquic=false or drop -Dtls=false", .{});
+    const rust_features = b.fmt("{s}{s}{s}{s}{s}", .{
+        if (typescript) "typescript," else "",
+        if (http) "http," else "",
+        if (tls) "tls," else "",
+        if (dns) "dns," else "",
+        if (quic) "quic," else "",
+    });
     // Size over startup, opt in per blob: LZ4 HC (lib/lz4) shrinks the executable or the caches on
     // disk and costs a decode (about 0.1 ms for the 0.5 MB engine snapshot) plus the expanded copy on the heap.
     const v8_icu = b.option(IcuMode, "v8_icu", "ICU data in the executable: compressed (zstd, expanded on first Intl use; default) or raw (about 7 MB larger, no expansion)") orelse .compressed;
@@ -34,16 +48,20 @@ pub fn build(b: *std.Build) void {
     const user_codecache = b.option(Embedding, "user_codecache", "Code cache files in the global cache: raw (default) or compressed (LZ4 HC)") orelse .raw;
     const config = b.addOptions();
     config.addOption(bool, "typescript", typescript);
+    config.addOption(bool, "http", http);
+    config.addOption(bool, "tls", tls);
+    config.addOption(bool, "dns", dns);
+    config.addOption(bool, "quic", quic);
     config.addOption(bool, "user_snapshot_compressed", user_snapshot == .compressed);
     config.addOption(bool, "user_codecache_compressed", user_codecache == .compressed);
     const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .v8_memory_corruption_api = v8_memory_corruption_api, .builtin_pgo = builtin_pgo, .v8_icu = v8_icu, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
     const v8 = v8Dependency(b, options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
     const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
-    const rust_lib: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, typescript, external_link, rust_v8);
+    const rust_lib: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, external_link, rust_v8);
     // Zig-linked programs (debug, tests) resolve duplicate Rust runtime symbols on their own and
     // would break on a pre-linked object (thread-locals), so they take the plain archive.
-    const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, typescript, false, rust_v8);
+    const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, false, rust_v8);
     b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, rust_v8, cargo_offline, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
     b.step("clippy", "Run clippy (-D warnings) over the Rust workspace with the V8 environment").dependOn(&cargoCommand(b, rust_v8, cargo_offline, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
     const root = b.createModule(.{
@@ -63,6 +81,8 @@ pub fn build(b: *std.Build) void {
     const lz4_dep = b.dependency("lz4", .{ .target = target, .optimize = .ReleaseSmall });
     const lz4_lib = lz4_dep.artifact("lz4");
     const icu_lib: ?*std.Build.Step.Compile = if (prebuilt == null) v8.artifact("v8_icu") else null;
+    // The Rust HTTP/2 crate binds nghttp2's C ABI; like `oio_*`, every program that links the Rust library links it.
+    const nghttp2_lib: ?*std.Build.Step.Compile = if (http) nghttp2Library(b, target) else null;
     root.addImport("@io", io_module);
     root.addImport("@lz4", lz4_dep.module("@lz4"));
     const modules = hostModules(b, v8, io_module, lz4_dep.module("@lz4"), target, optimize, config);
@@ -91,7 +111,7 @@ pub fn build(b: *std.Build) void {
         tool_module.addImport("@lz4", lz4_dep.module("@lz4"));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib, icu_lib);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib, icu_lib, nghttp2_lib);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg(tool);
         const blob = generate.addOutputFileArg(if (engine_snapshot == .compressed) "engine.snapshot.lz4" else "engine.snapshot");
@@ -100,7 +120,7 @@ pub fn build(b: *std.Build) void {
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib, icu_lib);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib, icu_lib, nghttp2_lib);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -140,6 +160,7 @@ pub fn build(b: *std.Build) void {
     test_root.addImport("@io", io_module);
     test_root.linkLibrary(io_lib);
     test_root.linkLibrary(lz4_lib);
+    if (nghttp2_lib) |lib| test_root.linkLibrary(lib);
     test_step.dependOn(&lz4_dep.builder.top_level_steps.get("test").?.step);
     for ([_][]const u8{ "@v8", "@util", "@mimalloc" }) |name| {
         test_root.addImport(name, test_v8.module(name));
@@ -215,6 +236,13 @@ fn safeModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module
     return b.createModule(.{ .root_source_file = b.path("src/safe.zig"), .target = target, .optimize = .fast });
 }
 
+/// nghttp2 (lib/nghttp2), the sans-io HTTP/2 core, built ReleaseFast. Null while the lazy dependency is
+/// still being fetched (the build runs again once it is). Borrows b through build teardown.
+fn nghttp2Library(b: *std.Build, target: std.Build.ResolvedTarget) ?*std.Build.Step.Compile {
+    const dep = b.lazyDependency("nghttp2", .{ .target = target, .optimize = .ReleaseFast }) orelse return null;
+    return dep.artifact("nghttp2");
+}
+
 /// `liborigine_io.a`: the `oio_*` C ABI the Rust runtime calls, built once with LLVM in
 /// ReleaseFast whatever `-Doptimize` says (the event loop is a hot path, and debug builds of the
 /// host should not slow it down). Safety-critical invariants use `src/safe.zig`, which keeps its
@@ -282,7 +310,7 @@ const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector
 /// a cache file so consumers depend on its content. Borrows b through build
 /// teardown. Cargo keeps its own incremental state in rust/target (gitignored), so the step
 /// always runs and is cheap when nothing changed. Unsupported targets are a build error.
-fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, typescript: bool, hide_symbols: bool, v8: ?*std.Build.Dependency) std.Build.LazyPath {
+fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, features: []const u8, hide_symbols: bool, v8: ?*std.Build.Dependency) std.Build.LazyPath {
     const result = target.result;
     const arch = switch (result.cpu.arch) {
         .aarch64 => "aarch64",
@@ -296,7 +324,7 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, t
         else => std.debug.panic("No Rust target for {s}", .{@tagName(result.os.tag)}),
     };
     const cargo = cargoCommand(b, v8, offline, &.{ "build", "--release", "--locked", "--target", triple });
-    if (!typescript) cargo.addArg("--no-default-features");
+    cargo.addArgs(&.{ "--no-default-features", "--features", features });
     cargo.addArgs(&.{ "--target-dir", (b.root.joinString(b.allocator, "rust/target") catch @panic("OOM")) });
     const file_name = if (result.os.tag == .windows and result.abi == .msvc) "origine_native.lib" else "liborigine_native.a";
     const built = b.path(b.fmt("rust/target/{s}/release/{s}", .{ triple, file_name }));
@@ -337,7 +365,7 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, t
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, nghttp2_lib: ?*std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         // The external linker does not add Zig's compiler-rt; an object that needs a soft-float helper
@@ -357,6 +385,7 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         link.addArtifactArg(v8.artifact("mimalloc"));
         link.addArtifactArg(io_lib);
         link.addArtifactArg(lz4_lib);
+        if (nghttp2_lib) |lib| link.addArtifactArg(lib);
         if (rust_lib) |lib| link.addFileArg(lib);
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
@@ -364,6 +393,7 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
     if (rust_lib) |lib| module.addObjectFile(lib);
     module.linkLibrary(io_lib);
     module.linkLibrary(lz4_lib);
+    if (nghttp2_lib) |lib| module.linkLibrary(lib);
     const exe = b.addExecutable(.{ .name = name, .root_module = module });
     if (optimize != .debug) {
         exe.use_llvm = true;

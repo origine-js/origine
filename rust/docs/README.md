@@ -16,6 +16,9 @@ runtime. The root package `origine_native` (`rust/src/lib.rs`) only re-exports t
 | `origine_api_core` | [docs](../crates/origine_api_core/docs/README.md) | no | yes | errno tables, arg rules, `NativeError`, handle tables, ceiling |
 | `origine_api_macros` | [docs](../crates/origine_api_macros/docs/README.md) | no | yes | `#[native]`, `derive(FromJs/IntoJs)` |
 | `origine_api_fs` | `crates/origine_api_fs/src/lib.rs` (crate docs) | no | yes | async fs `Grant` (handles + ops) over `origine_io::fs` |
+| `origine_transport` | [docs](../crates/origine_transport/docs/README.md) | no | yes | the `Transport` byte-stream trait (+ in-memory pipe for tests) |
+| `origine_tls` | [docs](../crates/origine_tls/docs/README.md) | no | no (aws-lc FFI) | TLS over any byte `Transport` (rustls + aws-lc-rs); `api.tls` and DoT build on it |
+| `origine_h2` | [docs](../crates/origine_h2/docs/README.md) | no | no (nghttp2 FFI) | HTTP/2: sans-io session over nghttp2, plus the async driver (`Connection`, `Exchange`) |
 | `origine_api` | [docs](../crates/origine_api/docs/README.md) | yes (`v8` fork) | no | V8 natives, Host state, C entry points |
 | `origine_oxc` | [docs](../crates/origine_oxc/docs/README.md) | no | yes | TypeScript/JSX transform C ABI |
 

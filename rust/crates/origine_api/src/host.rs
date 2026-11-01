@@ -114,6 +114,12 @@ pub struct HostState {
     next_grant: u32,
     sockets: BTreeMap<u32, Rc<Socket>>,
     next_socket: u32,
+    #[cfg(feature = "tls")]
+    pub(crate) tls: crate::tls::TlsState,
+    #[cfg(feature = "http")]
+    pub(crate) http: crate::http::HttpState,
+    #[cfg(feature = "dns")]
+    pub(crate) dns: crate::dns::DnsState,
     pub(crate) subs: BTreeMap<u32, Sub>,
     pub(crate) events: Events,
     pub(crate) refill: Rc<RefCell<Vec<u32>>>,
@@ -145,6 +151,12 @@ impl HostState {
             next_grant: 1,
             sockets: BTreeMap::new(),
             next_socket: 1,
+            #[cfg(feature = "tls")]
+            tls: crate::tls::TlsState::default(),
+            #[cfg(feature = "http")]
+            http: crate::http::HttpState::default(),
+            #[cfg(feature = "dns")]
+            dns: crate::dns::DnsState::default(),
             subs: BTreeMap::new(),
             events: Rc::default(),
             refill: Rc::default(),
@@ -496,6 +508,12 @@ impl HostState {
     /// (bounded). Idempotent. The detach function calls it before `Runtime.destroy`.
     pub fn drop_all(&mut self) {
         self.subs.clear();
+        #[cfg(feature = "http")]
+        self.http.clear();
+        #[cfg(feature = "dns")]
+        self.dns.clear();
+        #[cfg(feature = "tls")]
+        self.tls.clear();
         self.events.borrow_mut().clear();
         self.pending.clear();
         self.chan_waits.clear();

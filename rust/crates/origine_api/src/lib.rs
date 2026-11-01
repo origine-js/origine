@@ -16,19 +16,27 @@
 
 extern crate self as origine_api;
 
+mod channel;
 pub mod decode;
+#[cfg(feature = "dns")]
+mod dns;
 pub mod encode;
 mod fs;
 pub mod host;
-mod channel;
+#[cfg(feature = "http")]
+mod http;
 mod io;
 pub mod message;
 pub mod native;
 mod net;
 pub mod pinned;
 mod registry;
+#[cfg(any(feature = "tls", feature = "http", feature = "dns"))]
+mod sockstream;
 mod sub;
 mod sys;
+#[cfg(feature = "tls")]
+mod tls;
 
 // CONTRACT (docs/contracts.md, surfaces B and C): `include/origine_api.h` is the source of truth;
 // `abi_gen.rs` is generated from it (`just gen-contracts`). The structs are used as they are, and

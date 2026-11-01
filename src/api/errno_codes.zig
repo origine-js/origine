@@ -24,7 +24,7 @@
 //!
 //! | Block | Domain | Category |
 //! | --- | --- | --- |
-//! | 1-9 | host | runtime (`Unexpected` 1, handles 2-3, `Canceled` 4) |
+//! | 1-9 | host | runtime (`Unexpected` 1, handles 2-3, `Canceled` 4) and protocols (5-8) |
 //! | 10-19 | io | path and file system objects (names, kinds, links) |
 //! | 20-29 | io | permission and state (denied, read-only, busy, unsupported) |
 //! | 30-39 | io | arguments and data (`InvalidInput`, `InvalidData`) |
@@ -69,6 +69,8 @@ pub const IoErrno = enum(u32) {
     /// A malformed argument or path: a NUL byte, an empty entry name, a missing or unknown option.
     InvalidInput = 30,
     InvalidData = 31,
+    /// A stream ended before its protocol said it could (TLS without `close_notify`).
+    UnexpectedEof = 32,
     // 40-49: resources
     StorageFull = 40,
     FileTooLarge = 41,
@@ -98,6 +100,16 @@ pub const HostErrno = enum(u32) {
     StaleHandle = 3,
     /// An async operation was canceled (runtime closed, grant revoked).
     Canceled = 4,
+    /// The peer's certificate was refused (unknown issuer, expired, wrong name, ...); the reason is the detail's subject.
+    CertificateRejected = 5,
+    /// The peer sent a fatal TLS alert; the alert's name is the detail's subject.
+    TlsAlert = 6,
+    /// TLS found no ALPN protocol both sides offer.
+    NoApplicationProtocol = 7,
+    /// The peer broke a protocol (TLS, HTTP/2); what it broke is the detail's subject.
+    ProtocolError = 8,
+    /// A DNS server answered with a failure (SERVFAIL, REFUSED, ...); the response code is the detail's subject.
+    ServerFailure = 9,
 };
 
 pub const Domain = enum { io, host };

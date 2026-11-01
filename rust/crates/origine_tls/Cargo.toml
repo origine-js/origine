@@ -1,0 +1,25 @@
+[package]
+name = "origine_tls"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+# TLS 1.2/1.3 over any byte transport (docs/http-design.md): rustls on aws-lc-rs, driven sans-io
+# through a `Transport` trait, so it needs neither V8 nor the Zig-built C library and its tests run
+# anywhere. `origine_api` binds it to `api.tls`; the DNS resolver (DoT) uses it directly.
+
+[dependencies]
+origine_transport.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["alloc"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+origine_transport = { workspace = true, features = ["testing"] }
+futures-lite = "2"
+pollster = "0.4"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+
+[lints]
+workspace = true

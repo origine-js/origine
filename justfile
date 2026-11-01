@@ -27,13 +27,18 @@ patch-v8:
 test:
     zig build test
 
+# The networking crates' tests (origine_tls, origine_h2, origine_dns). origine_h2 links the Zig-built nghttp2.
+test-net:
+    cd lib/nghttp2 && zig build -Doptimize=ReleaseFast -p ../../zig-out/nghttp2
+    cd rust && ORIGINE_NGHTTP2_LIB="$PWD/../zig-out/nghttp2/lib" cargo test --offline --locked -p origine_tls -p origine_h2 -p origine_dns
+
 # Exercise the REPL in a real pseudo-terminal (Tab, suggestions, history, colors).
 test-repl:
     zig build
     uv run --no-project src/repl/tests/terminal_smoke.py
 
 # Everything CI-style: cross-language contracts, Rust lints + Miri, then formatting and JS/TS lint.
-check: check-contracts check-rust check-format check-types
+check: check-contracts check-rust check-format check-types check-size
 
 oxlint := "oxlint@1.89.0"
 oxfmt := "oxfmt@0.74.0"
@@ -49,6 +54,14 @@ check-rust:
     # Through zig: the `v8` crate's build script needs the V8_ZIG_* environment (rust/scripts/cargo-v8.sh).
     zig build clippy -Dcargo-offline=true
     cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_repl -p origine_api_core -p origine_api_fs -p origine_api_macros
+
+# The default release build stays within the binary budget (docs/http-design.md): 70 MB, stripped
+# (Bun's size). `limit` is in MB (10^6 bytes). Builds into zig-out/size-check, not the install prefix.
+check-size limit="70":
+    zig build -Doptimize=small -Dcargo-offline=true -p zig-out/size-check
+    cp zig-out/size-check/bin/origine zig-out/size-check/origine.stripped
+    strip -S -x zig-out/size-check/origine.stripped
+    size=$(wc -c < zig-out/size-check/origine.stripped); echo "origine (small, stripped): $size bytes"; test "$size" -le $(( {{limit}} * 1000000 ))
 
 # Formatting (rustfmt, zig fmt, oxfmt) and JS/TS lint (oxlint, configured in .oxlintrc.json).
 check-format:

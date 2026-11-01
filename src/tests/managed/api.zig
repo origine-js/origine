@@ -176,7 +176,7 @@ test "api: ES module glue imports once and retains separate module code caches" 
         defer api.deinit();
         try exposeApi(scope, api);
         try check(scope,
-            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,isolate,io,net' &&
+            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,isolate,io,net,tls,http,dns' &&
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );

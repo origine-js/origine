@@ -220,6 +220,8 @@ All socket ops use native types: the library does not translate addresses, flags
 - SIGPIPE: Linux callers pass `MSG_NOSIGNAL`. Darwin has no `MSG_NOSIGNAL`; set `SO_NOSIGPIPE` on the socket. The loop does not suppress SIGPIPE itself.
 - Blocking vs non-blocking descriptors: on kqueue a non-blocking fd is attempted inline and parked on a kqueue filter when it would block (no thread is held); a blocking fd runs the syscall on a GCD thread. io_uring uses native async socket operations. The threaded backend always runs plain blocking calls on workers: a non-blocking fd therefore completes immediately with `-EAGAIN` (or `-EINPROGRESS` for connect) instead of waiting.
 - `connect` on a kqueue non-blocking socket waits for writability then reads `SO_ERROR`; the result is 0 or `-error`.
+- Datagrams (`udp_test.zig`, macOS kqueue and threaded; the io_uring path is not run there): one `recvmsg` is one datagram, with the sender in `msg_name` and `MSG_TRUNC` set in `msg_flags` when the buffer was too small; an **empty datagram completes with 0**, which for a datagram socket is not an end of stream. A pending `recvmsg` is cancelable (`-ECANCELED`).
+- Several `sendmsg` / `send` in flight on one fd complete in no guaranteed order on the threaded backend and on blocking descriptors under kqueue (worker/GCD threads race); a non-blocking descriptor under kqueue kept order in the test. Callers that need datagrams out in order keep one send in flight per socket.
 
 ## What returns `-ENOSYS` where
 

@@ -1,0 +1,14 @@
+[package]
+name = "origine_transport"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+# The one trait the protocol crates (origine_tls, origine_h2, ...) read and write bytes through, with
+# no dependencies. `testing` adds an in-memory duplex pipe for their tests.
+
+[features]
+testing = []
+
+[lints]
+workspace = true

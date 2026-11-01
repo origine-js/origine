@@ -1,0 +1,13 @@
+.{
+    .name = .nghttp2,
+    .version = "1.68.1",
+    .fingerprint = 0xaa1b34995ebc73ee,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .source = .{
+            .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.68.1/nghttp2-1.68.1.tar.xz",
+            .hash = "N-V-__8AADZAvQBawS6x2z3uoJCJuKN0z2ShG8yATmF729_o",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "README.md" },
+}

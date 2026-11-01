@@ -1,0 +1,19 @@
+[package]
+name = "origine_dns"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+# DNS resolution (docs/http-design.md): hickory-proto as the wire codec only (no hickory-resolver, no
+# tokio), and resolver logic of our own over an `Exchange` trait that carries one query to one server:
+# the natives in `origine_api` implement it over UDP, TCP and TLS sockets on the io loop, the tests over
+# a table. No V8 and no Zig-built library needed.
+
+[dependencies]
+hickory-proto = { version = "=0.25.2", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[lints]
+workspace = true

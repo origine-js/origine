@@ -10,6 +10,7 @@
 //! fetched once by the glue). A failing native writes a non-zero `Errno` into element 0
 //! and returns undefined; every native clears it on entry.
 const std = @import("std");
+const origine_config = @import("origine_config");
 const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("binding.zig");
@@ -55,6 +56,13 @@ const origine_api_wake = abi.origine_api_wake;
 
 /// What the host grants to `fs.requestSync` / `fs.requestAsync`. `root` is borrowed and must
 /// outlive the Host.
+/// `-Dtls`: whether `api.tls` and its natives are built in (without it the capability is refused with `PermissionDenied`).
+pub const tls_enabled = origine_config.tls;
+/// `-Dhttp`: whether `api.http` and its natives are built in (without it the capability is refused with `PermissionDenied`).
+pub const http_enabled = origine_config.http;
+/// `-Ddns`: whether `api.dns` and its natives are built in (without it the capability is refused with `PermissionDenied`).
+pub const dns_enabled = origine_config.dns;
+
 pub const FsConfig = struct {
     root: sys.Dir,
     write: bool = true,
@@ -699,7 +707,7 @@ pub const Host = struct {
         const host = state.host;
         const env = call.env();
         const part = switch (module) {
-            .common, .util, .errors, .handle, .handles, .errno, .@"net/event", .@"net/send", .@"net/core", .@"net/server", .@"net/socket", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
+            .common, .util, .errors, .handle, .handles, .errno, .addr, .@"net/event", .@"net/send", .@"net/core", .@"net/server", .@"net/socket", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
             .host => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),
@@ -791,7 +799,7 @@ pub const Host = struct {
                     },
                 });
             },
-            .io, .net => eu.v.object(env.isolate),
+            .io, .net, .tls, .http, .dns => eu.v.object(env.isolate),
         };
         const keys: []const []const u8 = switch (module) {
             .host => &.{ "env", "threading", "snapshot" },
@@ -806,6 +814,9 @@ pub const Host = struct {
         const rust_namespace: ?[]const u8 = switch (module) {
             .fs => if (host.runtime != null and host.fs != null and host.fs.?.async) "fsAsync" else null,
             .io, .net => if (host.runtime != null) name else return error.PermissionDenied,
+            .tls => if (host.runtime != null and tls_enabled) name else return error.PermissionDenied,
+            .http => if (host.runtime != null and http_enabled) name else return error.PermissionDenied,
+            .dns => if (host.runtime != null and dns_enabled) name else return error.PermissionDenied,
             else => null,
         };
         if (rust_namespace) |namespace| {

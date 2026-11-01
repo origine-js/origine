@@ -34,6 +34,11 @@ pub const Error = error{
     BadHandle,
     StaleHandle,
     Canceled,
+    CertificateRejected,
+    TlsAlert,
+    NoApplicationProtocol,
+    ProtocolError,
+    ServerFailure,
     NotFound,
     AlreadyExists,
     NotADirectory,
@@ -48,6 +53,7 @@ pub const Error = error{
     Unsupported,
     InvalidInput,
     InvalidData,
+    UnexpectedEof,
     StorageFull,
     FileTooLarge,
     QuotaExceeded,
@@ -191,7 +197,8 @@ pub fn narrow(err: anytype) Error {
 pub fn isBinding(comptime Set: type) bool {
     if (@typeInfo(Set) != .error_set) return false;
     const names = @typeInfo(Set).error_set.error_names orelse return false;
-    @setEvalBranchQuota(20_000);
+    // The cost is |names| x |Error|: it grows with every errno, so size the quota by both.
+    @setEvalBranchQuota(@max(20_000, names.len * @typeInfo(Error).error_set.error_names.?.len * 40));
     inline for (names) |name| {
         var found = false;
         inline for (@typeInfo(Error).error_set.error_names.?) |member| {

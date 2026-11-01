@@ -77,5 +77,36 @@ export type {
   Socket,
   SocketEvents,
 } from "./net.d.ts";
+export type {
+  ClientAuth,
+  Identity,
+  RootPki,
+  TlsCap,
+  TlsClient,
+  TlsClientOptions,
+  TlsConnectOptions,
+  TlsServer,
+  TlsServerOptions,
+  TlsSessions,
+  TlsSocket,
+} from "./tls.d.ts";
+export type {
+  ClientExchange,
+  ClientSession,
+  HttpConnectOptions,
+  Exchange,
+  HeaderList,
+  HttpCap,
+  HttpServer,
+  HttpLimits,
+  RequestHead,
+  ServerExchange,
+  HttpServeOptions,
+  ServerSession,
+  Session,
+  SessionOptions,
+  StreamEvent,
+} from "./http.d.ts";
+export type { DnsCap, DnsServer, IpAddr, Resolver, ResolverOptions, SocketAddr } from "./dns.d.ts";
 export type { Context, ContextCap, ContextOptions, ContextSecurity, Preload } from "./context.d.ts";
 export type { GraphCap, ModuleGraph, OwnedGraph, ModuleReference, ModuleReferenceStatus, ModuleRequest } from "./graph.d.ts";

@@ -6,6 +6,11 @@ pub const UNEXPECTED: u32 = 1;
 pub const BAD_HANDLE: u32 = 2;
 pub const STALE_HANDLE: u32 = 3;
 pub const CANCELED: u32 = 4;
+pub const CERTIFICATE_REJECTED: u32 = 5;
+pub const TLS_ALERT: u32 = 6;
+pub const NO_APPLICATION_PROTOCOL: u32 = 7;
+pub const PROTOCOL_ERROR: u32 = 8;
+pub const SERVER_FAILURE: u32 = 9;
 
 // I/O domain: Rust's `std::io::ErrorKind` names, plus `TooManyOpenFiles` and `Io`.
 pub const NOT_FOUND: u32 = 10;
@@ -22,6 +27,7 @@ pub const RESOURCE_BUSY: u32 = 22;
 pub const UNSUPPORTED: u32 = 23;
 pub const INVALID_INPUT: u32 = 30;
 pub const INVALID_DATA: u32 = 31;
+pub const UNEXPECTED_EOF: u32 = 32;
 pub const STORAGE_FULL: u32 = 40;
 pub const FILE_TOO_LARGE: u32 = 41;
 pub const QUOTA_EXCEEDED: u32 = 42;
@@ -42,6 +48,11 @@ pub const HOST_CODES: &[(u32, &str)] = &[
     (BAD_HANDLE, "BadHandle"),
     (STALE_HANDLE, "StaleHandle"),
     (CANCELED, "Canceled"),
+    (CERTIFICATE_REJECTED, "CertificateRejected"),
+    (TLS_ALERT, "TlsAlert"),
+    (NO_APPLICATION_PROTOCOL, "NoApplicationProtocol"),
+    (PROTOCOL_ERROR, "ProtocolError"),
+    (SERVER_FAILURE, "ServerFailure"),
 ];
 
 /// The I/O domain with its guest-visible names, ascending.
@@ -60,6 +71,7 @@ pub const IO_CODES: &[(u32, &str)] = &[
     (UNSUPPORTED, "Unsupported"),
     (INVALID_INPUT, "InvalidInput"),
     (INVALID_DATA, "InvalidData"),
+    (UNEXPECTED_EOF, "UnexpectedEof"),
     (STORAGE_FULL, "StorageFull"),
     (FILE_TOO_LARGE, "FileTooLarge"),
     (QUOTA_EXCEEDED, "QuotaExceeded"),
@@ -91,7 +103,7 @@ pub const ALL: [(u32, &str); HOST_CODES.len() + IO_CODES.len()] = {
 
 /// Whether `code` is in the host domain (`false` for I/O codes and unknown ones).
 pub fn is_host(code: u32) -> bool {
-    matches!(code, UNEXPECTED | BAD_HANDLE | STALE_HANDLE | CANCELED)
+    matches!(code, UNEXPECTED | BAD_HANDLE | STALE_HANDLE | CANCELED | CERTIFICATE_REJECTED | TLS_ALERT | NO_APPLICATION_PROTOCOL | PROTOCOL_ERROR | SERVER_FAILURE)
 }
 
 /// The guest-visible name of `code` (`native.errors` / `origine:@std/errno`); unknown codes are
@@ -101,6 +113,11 @@ pub fn name_of(code: u32) -> &'static str {
         BAD_HANDLE => "BadHandle",
         STALE_HANDLE => "StaleHandle",
         CANCELED => "Canceled",
+        CERTIFICATE_REJECTED => "CertificateRejected",
+        TLS_ALERT => "TlsAlert",
+        NO_APPLICATION_PROTOCOL => "NoApplicationProtocol",
+        PROTOCOL_ERROR => "ProtocolError",
+        SERVER_FAILURE => "ServerFailure",
         NOT_FOUND => "NotFound",
         ALREADY_EXISTS => "AlreadyExists",
         NOT_A_DIRECTORY => "NotADirectory",
@@ -115,6 +132,7 @@ pub fn name_of(code: u32) -> &'static str {
         UNSUPPORTED => "Unsupported",
         INVALID_INPUT => "InvalidInput",
         INVALID_DATA => "InvalidData",
+        UNEXPECTED_EOF => "UnexpectedEof",
         STORAGE_FULL => "StorageFull",
         FILE_TOO_LARGE => "FileTooLarge",
         QUOTA_EXCEEDED => "QuotaExceeded",

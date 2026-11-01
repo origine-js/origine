@@ -56,6 +56,7 @@ wrap the same commands. `just` with no arguments lists every recipe.
 | `just check-contracts` | Regenerates cross-language files into a temp tree and fails on drift; runs `zig build test-io -Dtypescript=false` ([contracts](contracts.md)) |
 | `just check-rust` | `zig build clippy` (warnings denied; every `unsafe` needs a `// SAFETY:` comment), then Miri over the V8-free crates ([rust overview](../rust/docs/README.md)) |
 | `just check-format` | `cargo fmt --check`, `oxfmt --check` and `oxlint` over `bench examples src/js src/repl` |
+| `just check-size` | Builds `-Doptimize=small`, strips, fails above 70 MB (the binary budget). Networking flags `-Dhttp`, `-Dtls`, `-Ddns`, `-Dquic` (all default on; `-Dquic` needs `-Dtls`) select Rust features and the nghttp2 build (`lib/nghttp2`, fetched only with `-Dhttp`); see [http-design.md](http-design.md) |
 | `just format` | Applies the formatters |
 | `just gen-contracts` | Rewrites the committed generated files |
 | `just test-repl` | Drives the REPL in a pseudo-terminal ([repl](repl.md)) |

@@ -12,7 +12,13 @@ use std::ffi::{CString, c_int};
 use std::sync::OnceLock;
 
 use crate::abi_gen::{self, origine_api_native};
+#[cfg(feature = "dns")]
+use crate::dns;
+#[cfg(feature = "http")]
+use crate::http;
 use crate::native::{Needs, RawNative, SideEffect};
+#[cfg(feature = "tls")]
+use crate::tls;
 use crate::{channel, fs, io, net, sub};
 
 /// Every native, in registration order.
@@ -81,6 +87,76 @@ pub(crate) static NATIVES: &[RawNative] = &[
     sub::NATIVE_NET_FLUSHED,
     sub::NATIVE_NET_END,
     sub::NATIVE_IO_RUN,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_ROOTS_BUNDLED,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_ROOTS_PEM,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_ROOTS_DER,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_IDENTITY_PEM,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_IDENTITY_DER,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_SESSIONS,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_CLIENT,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_SERVER,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_RELEASE,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_CONNECT,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_ACCEPT,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_READ,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_READ_COPY,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_WRITE,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_SHUTDOWN,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_PEER,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_CLOSE,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_SESSION,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_READY,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_PING,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_GOAWAY,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_DESTROY,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_OPEN,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_ACCEPT,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_NEXT,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_CONSUME,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_RESPOND,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_SEND,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_QUEUED,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_FINISH,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_RESET,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_RELEASE,
+    #[cfg(feature = "dns")]
+    dns::NATIVE_DNS_RESOLVER,
+    #[cfg(feature = "dns")]
+    dns::NATIVE_DNS_LOOKUP,
+    #[cfg(feature = "dns")]
+    dns::NATIVE_DNS_RELEASE,
 ];
 
 // The Rust enums are written out in the header's numbers.
@@ -157,9 +233,19 @@ mod tests {
     fn every_native_fn_is_registered_once() {
         let registry = include_str!("registry.rs");
         let mut found = 0;
-        for (module, source) in
-            [("io", include_str!("io.rs")), ("fs", include_str!("fs.rs")), ("net", include_str!("net.rs")), ("sub", include_str!("sub.rs")), ("channel", include_str!("channel.rs"))]
-        {
+        for (module, source) in [
+            ("io", include_str!("io.rs")),
+            ("fs", include_str!("fs.rs")),
+            ("net", include_str!("net.rs")),
+            ("sub", include_str!("sub.rs")),
+            ("channel", include_str!("channel.rs")),
+            #[cfg(feature = "tls")]
+            ("tls", include_str!("tls.rs")),
+            #[cfg(feature = "http")]
+            ("http", include_str!("http.rs")),
+            #[cfg(feature = "dns")]
+            ("dns", include_str!("dns.rs")),
+        ] {
             for name in native_fns(source) {
                 let entry = format!("{module}::NATIVE_{},", name.to_uppercase());
                 assert_eq!(registry.matches(&entry).count(), 1, "{name} must be listed exactly once in NATIVES");

@@ -162,27 +162,64 @@ unsafe extern "C" {
 const AF_INET: i32 = 2;
 const AF_INET6: i32 = if cfg!(target_os = "linux") { 10 } else { 30 };
 const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
 /// Linux creates close-on-exec sockets atomically; macOS has no such flag.
 const SOCK_CLOEXEC: i32 = if cfg!(target_os = "linux") { 0x80000 } else { 0 };
 
 /// A fresh non-blocking stream socket for `addr`'s family (no SIGPIPE, no-delay), not connected.
-fn new_stream(addr: &SocketAddr) -> Result<TcpStream, NativeError> {
+pub(crate) fn new_stream(addr: &SocketAddr) -> Result<TcpStream, NativeError> {
+    new_socket(addr, SOCK_STREAM).map(TcpStream::from)
+}
+
+/// A fresh non-blocking datagram socket for `addr`'s family, not connected.
+#[cfg(feature = "dns")]
+pub(crate) fn new_datagram(addr: &SocketAddr) -> Result<OwnedFd, NativeError> {
+    let fd = new_socket(addr, SOCK_DGRAM)?;
+    set_nonblocking(&fd)?;
+    Ok(fd)
+}
+
+#[cfg(feature = "dns")]
+fn set_nonblocking(fd: &OwnedFd) -> Result<(), NativeError> {
+    unsafe extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+    const O_NONBLOCK: i32 = if cfg!(target_os = "linux") { 0x800 } else { 0x4 };
+    // SAFETY: `fd` is a live descriptor owned by the caller; F_GETFL takes no argument.
+    let flags = unsafe { fcntl(fd.as_raw_fd(), F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: as above; F_SETFL takes the new flags as an int.
+    if unsafe { fcntl(fd.as_raw_fd(), F_SETFL, flags | O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn new_socket(addr: &SocketAddr, kind: i32) -> Result<OwnedFd, NativeError> {
     let domain = if addr.is_ipv4() { AF_INET } else { AF_INET6 };
     // SAFETY: plain `socket(2)` call with constant arguments.
-    let fd = unsafe { socket(domain, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+    let fd = unsafe { socket(domain, kind | SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     // SAFETY: `fd` was just returned by `socket` and nothing else owns it.
-    let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    // `set_nodelay` fails on an unconnected socket on some systems; the option is applied after connect.
-    stream.set_nonblocking(true)?;
-    no_sigpipe(&stream);
-    Ok(stream)
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    if kind == SOCK_STREAM {
+        // `set_nodelay` fails on an unconnected socket on some systems; the option is applied after connect.
+        let stream = TcpStream::from(owned);
+        stream.set_nonblocking(true)?;
+        no_sigpipe(&stream);
+        return Ok(OwnedFd::from(stream));
+    }
+    Ok(owned)
 }
 
 /// The platform's native `sockaddr_in` / `sockaddr_in6` bytes for `addr`.
-fn sockaddr_bytes(addr: &SocketAddr) -> Vec<u8> {
+pub(crate) fn sockaddr_bytes(addr: &SocketAddr) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(28);
     let family = |bytes: &mut Vec<u8>, len: u8, family: i32| {
         if cfg!(target_os = "linux") {

@@ -7,6 +7,9 @@ import context from './context.js';
 import isolate from './isolate.js';
 import io from './io.js';
 import net from './net.js';
+import tls from './tls.js';
+import http from './http.js';
+import dns from './dns.js';
 const factories = {
   fs,
   host,
@@ -15,6 +18,9 @@ const factories = {
   isolate,
   io,
   net,
+  tls,
+  http,
+  dns,
 };
 
 // Builds a host-independent API template for one realm from its `native` object (the errno cell
@@ -34,12 +40,15 @@ export function create(native) {
     isolate: undefined,
     io: { parent: null, backends: undefined, max: Infinity, live: 0 },
     net: undefined,
+    tls: undefined,
+    http: undefined,
+    dns: undefined,
   };
   const full = {};
   const basic = {};
   // `context` is built on the parts `graph` publishes, so binding it binds `graph` first.
-  const needs = { context: 'graph', isolate: 'host' };
-  const rustNamespaces = ['fsAsync', 'io', 'net', 'channel'];
+  const needs = { context: 'graph', isolate: 'host', http: 'net' };
+  const rustNamespaces = ['fsAsync', 'io', 'net', 'tls', 'http', 'dns', 'channel'];
   const wrapped = new WeakSet();
   const access = name => {
     if (needs[name] !== undefined) access(needs[name]);
@@ -68,7 +77,8 @@ export function create(native) {
     capabilities[name] = freezeMethods(factory(native, cell)(options[name]));
     const descriptor = { get: freeze(() => access(name)), enumerable: true, configurable: false };
     Object.defineProperty(full, name, descriptor);
-    if (name !== 'io' && name !== 'net' && name !== 'isolate') Object.defineProperty(basic, name, descriptor);
+    if (name !== 'io' && name !== 'net' && name !== 'tls' && name !== 'http' && name !== 'dns' && name !== 'isolate')
+      Object.defineProperty(basic, name, descriptor);
   }
   // The second argument of `main`: what the creating isolate passed to `api.isolate.create`.
   const initial = () => {

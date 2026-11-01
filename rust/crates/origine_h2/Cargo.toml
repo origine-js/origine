@@ -1,0 +1,24 @@
+[package]
+name = "origine_h2"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+build = "build.rs"
+
+# The HTTP/2 session (docs/http-design.md): a safe, sans-io wrapper of nghttp2. It feeds received
+# bytes in, takes bytes to send out, and reports what happened as `Event`s; the async driver over a
+# transport and `api.http` sit above it. Tests outside the Zig build need the nghttp2 library:
+# set ORIGINE_NGHTTP2_LIB to the directory holding libnghttp2.a (see build.rs).
+
+[dependencies]
+origine_transport.workspace = true
+
+[dev-dependencies]
+async-executor = "1"
+futures-lite = "2"
+origine_tls = { path = "../origine_tls" }
+origine_transport = { workspace = true, features = ["testing"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+
+[lints]
+workspace = true

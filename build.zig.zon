@@ -8,13 +8,11 @@
         .lz4 = .{ .path = "lib/lz4" },
         // Only fetched and built with -Dhttp (default on); see docs/http-design.md.
         .nghttp2 = .{ .path = "lib/nghttp2", .lazy = true },
-        // AWS-LC for rustls/aws-lc-rs, only fetched and built with -Dtls (default on) or for
-        // `zig build clippy`; see docs/aws-lc.md.
+        // AWS-LC for rustls/aws-lc-rs, built only with -Dtls (default on) or for `zig build clippy`;
+        // see docs/aws-lc.md.
         .aws_lc = .{ .path = "lib/aws-lc", .lazy = true },
-        .source = .{
-            .url = "https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.0.tar.gz",
-            .hash = "N-V-__8AANuvYABi5jog-DztRky4YoOf22dg9zXIGARBUzCY",
-        },
+        // The Rust workspace (cargo owns its build); see rust/build.zig and rust/docs/README.md.
+        .origine_rs = .{ .path = "rust", .lazy = true },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "lib", "docs", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "build", "src", "lib", "docs", "README.md" },
 }

@@ -2,108 +2,89 @@
 
 rustls (`origine_tls`) uses aws-lc-rs, whose `aws-lc-sys` crate normally compiles AWS-LC in its
 build script (cc, or cmake for some configurations). origine builds AWS-LC with the Zig build
-system instead, like its other C libraries, and links that copy into the binary. aws-lc-sys's
-build script never runs, so no cmake, no C compiler driven by cargo and no second copy of
-AWS-LC.
+system instead, like its other C libraries, and links that copy into the binary. Both crates are
+vendored, so the build never fetches a crate and aws-lc-sys's cc/cmake builder never runs.
 
 | piece | where |
 | --- | --- |
-| Zig build of AWS-LC | `lib/aws-lc/build.zig` (package `aws_lc`, a lazy path dependency of the root) |
-| cargo side | `rust/scripts/cargo-aws-lc.sh` (a `links` build-script override) |
-| wiring | `build.zig`: `awsLcDependency`, `CargoAwsLc`, `cargoCommand`; `justfile`: `test-net` |
+| Zig build of AWS-LC | `lib/aws-lc/` (package: `build.zig`, hard-coded lists in `sources.zig`, module `aws_lc`) |
+| vendored crates | `rust/vendor/aws-lc-rs`, `rust/vendor/aws-lc-sys` (`[patch.crates-io]` in `rust/Cargo.toml`) |
+| cargo side | `rust/vendor/aws-lc-sys/build.rs`: emits the link/include directives, nothing else |
+| wiring | `build.zig`: the `aws_lc` dependency, `awsLcPrefix`, `CargoAwsLc`, `cargoCommand`, the `aws-lc-prefix` step; `justfile`: `test-net` |
 
-## Source: the aws-lc-sys crate itself
+## Source: the vendored aws-lc-sys crate
 
-`lib/aws-lc/build.zig.zon` fetches `aws-lc-sys-<version>.crate` from static.crates.io, the very
-version `rust/Cargo.lock` pins (its sha256 is Cargo.lock's `checksum`). Not an AWS-LC release,
-because the crate is what the Rust side was generated from:
+`rust/vendor/aws-lc-sys` is the crates.io package whose version `rust/Cargo.lock` pins (0.47.0,
+AWS-LC 5.12.0), with its AWS-LC sources kept and its cc/cmake/bindgen machinery removed. It is not
+an AWS-LC release: it is the exact tree the Rust bindings were generated from, so the symbol
+prefix headers, the pregenerated `universal` bindings and the C sources cannot skew.
 
-- `aws-lc/`: the AWS-LC tree (5.12.0 for crate 0.47.0), including the pre-generated assembly;
+- `aws-lc/`: the AWS-LC tree, trimmed to the sources origine's three targets compile;
 - `generated-include/openssl/boringssl_prefix_symbols*.h`: the symbol-prefix headers;
-- `builder/cc_builder/<platform>.rs`: the source list per target, read by `lib/aws-lc/build.zig`
-  at configure time (`universal.rs` plus `apple_aarch64.rs`, `linux_x86_64.rs`, ...);
 - `src/universal_crypto.rs`: the pregenerated bindings, whose `link_name`s carry the prefix.
 
-Everything is compiled with `BORINGSSL_PREFIX=aws_lc_0_47_0` (the crate's `links` key, read from
-its `Cargo.toml`), so the library exports `aws_lc_0_47_0_*` names and matches the bindings. The
-defines are those of aws-lc-sys's cc builder (`builder/cc_builder.rs`) with its compiler checks
-answered for Zig's clang.
+Everything is compiled with `BORINGSSL_PREFIX=aws_lc_0_47_0` (the crate's `links` key), so the
+library exports `aws_lc_0_47_0_*` names and matches the bindings. The defines are those of
+aws-lc-sys's cc builder (`builder/cc_builder.rs`) with its compiler checks answered for Zig's
+clang (the checked headers are removed with the rest of the builder).
 
-Supported targets are origine's: aarch64-macos and x86_64/aarch64-linux, all with assembly. Any
-other target (Intel macOS included) stops the build in `lib/aws-lc/build.zig` rather than
-silently building something untested. CPU
-jitter entropy is built (at `-O0`, as AWS-LC requires) except for Apple targets cross-compiled
-without an SDK (`CoreServices.h`); `-Djitter=false` turns it off. Built `ReleaseFast`;
-`-Dsmall` in `lib/aws-lc` adds `OPENSSL_SMALL`.
+The per-target source lists are hard-coded in `lib/aws-lc/sources.zig` rather than read from the
+crate's build-system files at configure time; the comment at the top of that file documents how
+they were produced (the CMake lists, minus tests/fuzzers/tools) and what to regenerate when the
+crate is bumped. A source the lists do not name is never compiled by accident.
 
-Artifacts: `aws_lc_crypto` (libcrypto, linked) and `aws_lc_ssl` (libssl, C++, built with `-Dquic`
-for QUIC's TLS API but not linked by anything yet; it needs the C++ runtime of the final link,
-which is V8's libc++, and C consumers of the headers must define `BORINGSSL_PREFIX` to the
-contents of `links`). libssl's own `SSL_*` names are not prefixed (the prefix list covers
-libcrypto); its calls into libcrypto are.
+The package also exposes a module `aws_lc` (the public C headers with `BORINGSSL_PREFIX` defined)
+for Zig consumers; the root imports it but nothing uses it yet. libssl is behind `-Dssl`, which the
+root sets from `-Dquic`.
 
-Fetched rather than vendored, like every C library here (`lib/nghttp2`, `lib/lz4`, mimalloc: a
-`build.zig.zon` URL plus hash, only `build.zig` in the tree). Checking AWS-LC in would add
-roughly 30 MB of sources for the three supported targets (the crate's `aws-lc/` is 54 MB
-unpacked; the `.crate` is 9.7 MB compressed) and would need its own update procedure. The hash
-pins the content as firmly as a checked-in copy, and cargo already downloads the same crate for
-the lockfile, so the fetch adds no new source of trust.
+## Cargo: a patched build script
 
-## Cargo: a `links` override
-
-aws-lc-sys declares `links = "aws_lc_0_47_0"`, so cargo can replace its build script with
-configuration. `rust/scripts/cargo-aws-lc.sh <prefix> <triple|host> cargo <subcommand> ...` adds,
-after the subcommand (cargo forwards those to `cargo-clippy`):
+`rust/Cargo.toml` patches both crates to their vendored paths. The vendored `aws-lc-sys` declares
+the same `links = "aws_lc_0_47_0"` and keeps a minimal `build.rs` that only:
 
 ```
---config target.<triple>.aws_lc_0_47_0.rustc-link-search=["native=<prefix>/lib"]
---config target.<triple>.aws_lc_0_47_0.rustc-link-lib=["static:-bundle=aws_lc_crypto"]
---config target.<triple>.aws_lc_0_47_0.rustc-cfg=["universal"]
---config target.<triple>.aws_lc_0_47_0.include="<prefix>/include"
+cargo:rustc-link-search=native=$ORIGINE_AWS_LC_PREFIX/lib
+cargo:rustc-link-lib=static:-bundle=aws_lc_crypto
+cargo:rustc-cfg=universal
+cargo:include=$ORIGINE_AWS_LC_PREFIX/include
 ```
 
-- `rustc-cfg universal` picks the crate's `src/universal_crypto.rs`, as its build script does
-  when the `all-bindings` feature is off (aws-lc-rs depends on aws-lc-sys with
-  `default-features = false`; nothing in the lockfile turns it on). If something enabled
-  `all-bindings`, the crate would fail to compile (missing `BIO_ctrl`) instead of linking wrongly.
-- `static:-bundle`: `liborigine_native.a` refers to libcrypto without embedding it; Zig links
-  `aws_lc_crypto` into every program that links the Rust library (`native_libs` in `build.zig`,
-  next to nghttp2). Cargo's own test executables link it from `<prefix>/lib`.
-- `include` is the metadata aws-lc-rs's build script requires (`DEP_AWS_LC_*_INCLUDE`).
+- `universal` selects the crate's cross-platform pregenerated bindings, the ones its build script
+  picked when `all-bindings` was off (aws-lc-rs depends on it with `default-features = false`).
+- `static:-bundle`: `liborigine_native.a` refers to libcrypto without embedding it; the final Zig
+  link adds `aws_lc_crypto` (as for nghttp2). Cargo's own test executables link it from the prefix.
+- `include` is the metadata aws-lc-rs's build script requires (`DEP_AWS_LC_0_47_0_INCLUDE`).
 
-`<prefix>` is the `prefix` named lazy path of `lib/aws-lc` (`lib/libaws_lc_crypto.a`, `include/`,
-`links`); `zig build` in `lib/aws-lc` installs the same layout. Its path is content-addressed, so a
-changed library changes the override and cargo relinks. The script refuses to run when `links` is
-not the aws-lc-sys version of `rust/Cargo.lock`: an override for another key would be ignored
-silently and aws-lc-sys would build its own copy again.
-
-Alternatives that were not taken: aws-lc-sys's own system-library mode
-(`AWS_LC_SYS_SYSTEM_DIR`, `_STATIC`, `_SYSTEM_BINDINGS`) still runs the build script, needs a
-bindings file without the crate's `#![allow]` prelude (`include!` rejects inner attributes) and
-links the library *bundled* into the Rust staticlib, where its symbols would be localized with the
-rest; a patched aws-lc-sys (`[patch.crates-io]`) means vendoring code. The override needs neither
-and works with `--locked --offline`.
+`ORIGINE_AWS_LC_PREFIX` is the install prefix (the directory holding `lib/`, `include/` and
+`links`), written by the `aws-lc-prefix` step. The prefix is only known in the make phase (`zig
+build -p` changes it), so `build.zig` prepends `env ORIGINE_AWS_LC_PREFIX=<prefix>` to the cargo
+command, with `<prefix>` passed as a `LazyPath` argument (no configure-time string, no wrapper). A
+cargo invocation without the variable fails in the build script with a message pointing here; it
+never falls back to compiling AWS-LC.
 
 ## Commands
 
 | command | AWS-LC |
 | --- | --- |
-| `zig build`, `zig build test` | built for the target with `-Dtls` (default); not fetched with `-Dtls=false` |
-| `zig build clippy` | built for the host (clippy checks origine_tls whatever the features); with `-Dtls=false` clippy falls back to aws-lc-sys's build script |
+| `zig build`, `zig build test` | built for the target with `-Dtls` (default) and installed to `zig-out/{lib,include,links}` |
+| `zig build aws-lc-prefix` | just that install tree (for `just test-net`) |
+| `zig build clippy` | built for the host (clippy checks origine_tls whatever the features, so `-Dtls` must stay on) |
 | `zig build test-alloc`, Miri (`just check-rust`) | not involved (no crate there depends on aws-lc-sys) |
-| `just test-net` | `lib/aws-lc` installed into `zig-out/aws-lc`, then `cargo test` through the script |
+| `just test-net` | `zig build aws-lc-prefix`, then `cargo test` with `ORIGINE_AWS_LC_PREFIX=zig-out` |
 
-A cargo command run by hand without the script builds AWS-LC through aws-lc-sys's build script as
-upstream does; that still works but is not what ships.
+`aws_lc_ssl` is libssl (C++, `-fno-exceptions -fno-rtti`), built only for QUIC's TLS API and not
+linked yet; it needs the C++ runtime of the final link, which is V8's libc++. Its own `SSL_*` names
+are not prefixed (the prefix list covers libcrypto); its calls into libcrypto are. C consumers of
+the headers must define `BORINGSSL_PREFIX` to the contents of `links`.
 
 ## Updating
 
-Bump `aws-lc-rs`/`aws-lc-sys` in `rust/Cargo.lock`, then in `lib/aws-lc/build.zig.zon` set
-`.version` to the new aws-lc-sys version and `.url` to its `.crate`, and take the hash `zig build`
-reports. The links name, prefix, source lists and libssl sources follow from the crate. Check
-`zig build clippy`, `zig build test` and `just test-net`; if the crate starts listing a new kind of
-source (a new directory with its own flags, as s2n-bignum and jitterentropy have), `lib/aws-lc/build.zig`
-panics on it rather than guessing.
+Bump `aws-lc-rs`/`aws-lc-sys` in `rust/Cargo.lock`, replace `rust/vendor/aws-lc-sys` with the new
+crate (keeping `Cargo.toml`, `build.rs`, `src/lib.rs`, `README.md` and the trimmed `aws-lc/` and
+`generated-include/`), then regenerate `lib/aws-lc/sources.zig` as its header describes and update
+`crate`/`links` if the version changed. `rust/vendor/aws-lc-rs` only pins the pair; it needs no
+changes unless aws-lc-rs itself does. Check `zig build aws-lc-prefix`, `zig build clippy`,
+`zig build test` and `just test-net`.
 
 ## Size and build time
 
@@ -112,7 +93,7 @@ panics on it rather than guessing.
 profile is `opt-level = "z"`), 44,092,784 bytes with the Zig build (`ReleaseFast`, no
 `OPENSSL_SMALL`): +41,680 bytes.
 
-Clean build on the same machine (M-series, 10 cores): libcrypto alone (`zig build crypto` in
-`lib/aws-lc`) 17.8 s wall, 60 s CPU; with libssl 23.2 s wall, 101 s CPU. aws-lc-sys's own cc build
-(`-Oz`) took 10.5 s wall, 34 s CPU, but ran once per cargo profile and target (the release
-staticlib, debug for clippy and `test-net`); the Zig build is shared by all of them and cached.
+Clean build on the same machine (M-series, 10 cores): libcrypto alone 17.8 s wall, 60 s CPU; with
+libssl 23.2 s wall, 101 s CPU. aws-lc-sys's own cc build (`-Oz`) took 10.5 s wall, 34 s CPU, but
+ran once per cargo profile and target (the release staticlib, debug for clippy and `test-net`);
+the Zig build is shared by all of them and cached.

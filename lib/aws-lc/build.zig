@@ -1,129 +1,127 @@
-//! AWS-LC, built by the Zig build system from the sources of the pinned aws-lc-sys crate, so that
+//! AWS-LC, built by the Zig build system from the vendored aws-lc-sys crate, so that
 //! rustls/aws-lc-rs link this copy and aws-lc-sys's build script (cc/cmake) never runs.
 //! docs/aws-lc.md has the whole picture.
 //!
-//! The package is the aws-lc-sys `.crate` itself (build.zig.zon), not an AWS-LC release: it is the
-//! exact source the Rust bindings were generated from, it carries the symbol-prefix headers
-//! (`generated-include/`) and it lists the sources per target (`builder/cc_builder/*.rs`), which
-//! this file reads at configure time. Everything is compiled with `BORINGSSL_PREFIX=<links>`
-//! (`aws_lc_0_47_0`), the prefix the crate's bindings link against.
+//! The sources are `rust/vendor/aws-lc-sys`, not an AWS-LC release: it is the exact tree the Rust
+//! bindings were generated from and it carries the symbol-prefix headers (`generated-include/`).
+//! The hard-coded per-target lists are in `sources.zig`. Everything is compiled with
+//! `BORINGSSL_PREFIX=<links>` (`aws_lc_0_47_0`), the prefix the crate's bindings link against.
 //!
-//! Artifacts:
-//! * `aws_lc_crypto`: libcrypto, what aws-lc-rs needs. Targets: aarch64-macos and
-//!   x86_64/aarch64-linux, with assembly; anything else (Intel macOS included) is a build error.
-//! * `aws_lc_ssl`: libssl (C++, `-fno-exceptions -fno-rtti`), for QUIC's TLS API
-//!   (`SSL_set_quic_method`). Built on request only; it needs a C++ runtime from the consumer.
-//!   Its own `SSL_*` names are not prefixed (the prefix list covers libcrypto only); its calls into
-//!   libcrypto are.
+//! Artifacts: `aws_lc_crypto` (libcrypto, linked by the root) and `aws_lc_ssl` (libssl, C++,
+//! `-fno-exceptions -fno-rtti`, QUIC's TLS API; only with `-Dssl`, nothing links it yet). `zig
+//! build` installs the tree the vendored aws-lc-sys's build script reads:
+//! `<prefix>/{lib,include,links}`. Module `aws_lc`: the C headers for Zig consumers.
 //!
-//! Named lazy paths: `prefix`, a tree (`lib/libaws_lc_crypto.a`, `include/`, `links`) for
-//! `rust/scripts/cargo-aws-lc.sh`; `include`, the headers. C consumers of the headers must
-//! define `BORINGSSL_PREFIX` to the contents of `links`.
-//!
-//! Options: `-Dtarget`, `-Doptimize`, `-Dsmall` (OPENSSL_SMALL: smaller tables, slower; default
-//! off), `-Djitter` (CPU jitter entropy as an extra seed source; default on except for Apple
-//! targets cross-compiled without an SDK, where `CoreServices.h` is missing).
-//! `zig build` installs the `prefix` layout plus `lib/libaws_lc_ssl.a`.
+//! Options: `-Dtarget`, `-Doptimize`, `-Dsmall` (OPENSSL_SMALL), `-Djitter` (CPU jitter entropy;
+//! default on), `-Dssl`.
+
 const std = @import("std");
+const sources = @import("sources.zig");
+
+/// The vendored crate, relative to this package (`lib/aws-lc`).
+const crate = "../../rust/vendor/aws-lc-sys";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const small = b.option(bool, "small", "OPENSSL_SMALL: smaller and slower code (default false)") orelse false;
     const t = target.result;
-    const jitter = b.option(bool, "jitter", "Build the CPU jitter entropy source (default: on unless Apple without SDK)") orelse
-        !(t.os.tag.isDarwin() and !target.query.isNative());
+    const small = b.option(bool, "small", "OPENSSL_SMALL: smaller and slower code (default false)") orelse false;
+    const jitter = b.option(bool, "jitter", "Build the CPU jitter entropy source (default: on)") orelse true;
+    const with_ssl = b.option(bool, "ssl", "Build libssl for QUIC's TLS API (default false)") orelse false;
 
-    const source: Crate = .{ .b = b, .dep = b.dependency("source", .{}) };
-    const arena = b.allocator;
-    const links = linksName(source);
-    const sources = sourceList(b, source, t);
+    const links = links_name(b);
+    const target_sources = source_list(t);
 
-    const crypto_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .pic = true });
-    configure(crypto_module, source, t, links, small, jitter, sources.asm_ok);
-    var c_files: std.ArrayList([]const u8) = .empty;
-    var asm_files: std.ArrayList([]const u8) = .empty;
-    var s2n_files: std.ArrayList([]const u8) = .empty;
-    var jitter_files: std.ArrayList([]const u8) = .empty;
-    for (sources.files) |file| {
-        const list = if (std.mem.startsWith(u8, file, "third_party/s2n-bignum/"))
-            &s2n_files
-        else if (std.mem.startsWith(u8, file, "third_party/jitterentropy/"))
-            (if (jitter) &jitter_files else continue)
-        else if (std.mem.endsWith(u8, file, ".S"))
-            &asm_files
-        else if (std.mem.endsWith(u8, file, ".c"))
-            &c_files
-        else
-            // `.asm` (NASM) is listed for Windows only, which `sourceList` rejects.
-            std.debug.panic("aws-lc: unexpected source {s}", .{file});
-        list.append(arena, file) catch @panic("OOM");
-    }
-    const root = source.path("aws-lc");
+    const root = b.path(crate ++ "/aws-lc");
+    const include_paths: []const std.Build.LazyPath = &.{
+        b.path(crate ++ "/aws-lc/include"),
+        b.path(crate ++ "/generated-include"),
+    };
+
+    const crypto = b.addLibrary(.{
+        .name = "aws_lc_crypto",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .pic = true }),
+        .linkage = .static,
+        .use_llvm = true,
+    });
+    crypto.link_function_sections = true;
+    crypto.link_data_sections = true;
+    crypto.link_gc_sections = true;
+    configure(crypto.root_module, b, t, links, small, jitter);
+
     const c_flags: []const []const u8 = if (t.os.tag == .windows) &.{ "-std=c11", "-Wno-unused-parameter" } else &.{ "-std=c11", "-Wno-unused-parameter", "-pthread" };
-    crypto_module.addCSourceFiles(.{ .root = root, .files = c_files.items, .flags = c_flags });
+    crypto.root_module.addCSourceFiles(.{ .root = root, .files = &sources.universal, .flags = c_flags });
     // A non-executable stack for the assembly objects (aws-lc's crypto/CMakeLists.txt does the same on ELF).
     const asm_flags: []const []const u8 = if (t.os.tag == .linux) &.{"-Wa,--noexecstack"} else &.{};
-    crypto_module.addCSourceFiles(.{ .root = root, .files = asm_files.items, .flags = asm_flags });
+    crypto.root_module.addCSourceFiles(.{ .root = root, .files = target_sources.assembly, .flags = asm_flags });
     // s2n-bignum's assembly is prefixed by a forced include (it does not include `asm_base.h`).
-    const s2n_flags: []const []const u8 = &.{ "-include", source.file("generated-include/openssl/boringssl_prefix_symbols_asm.h"), "-DS2N_BN_HIDE_SYMBOLS=1", "-Wa,--noexecstack" };
-    crypto_module.addCSourceFiles(.{ .root = root, .files = s2n_files.items, .flags = s2n_flags[0 .. s2n_flags.len - @intFromBool(t.os.tag != .linux)] });
+    const s2n_flags: []const []const u8 = &.{ "-include", crate_file(b, "generated-include/openssl/boringssl_prefix_symbols_asm.h"), "-DS2N_BN_HIDE_SYMBOLS=1", "-Wa,--noexecstack" };
+    crypto.root_module.addCSourceFiles(.{ .root = root, .files = target_sources.s2n, .flags = s2n_flags[0 .. s2n_flags.len - @intFromBool(t.os.tag != .linux)] });
     // Jitter entropy must not be optimized (aws-lc's third_party/jitterentropy/CMakeLists.txt); the
     // later -O0 wins over the module's level.
-    crypto_module.addCSourceFiles(.{ .root = root, .files = jitter_files.items, .flags = b.dupeStrings(&.{ "-std=c11", "-DAWSLC=1", "-fwrapv", "-fvisibility=hidden", "-O0", "-U_FORTIFY_SOURCE", "-include", source.file("generated-include/openssl/boringssl_prefix_symbols.h") }) });
-    const crypto = b.addLibrary(.{ .name = "aws_lc_crypto", .linkage = .static, .root_module = crypto_module, .use_llvm = true });
+    if (jitter) crypto.root_module.addCSourceFiles(.{
+        .root = root,
+        .files = &sources.jitter_sources,
+        .flags = b.graph.dupeStrings(&.{ "-std=c11", "-DAWSLC=1", "-fwrapv", "-fvisibility=hidden", "-O0", "-U_FORTIFY_SOURCE", "-include", crate_file(b, "generated-include/openssl/boringssl_prefix_symbols.h") }),
+    });
 
-    const ssl_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .pic = true });
-    configure(ssl_module, source, t, links, small, jitter, sources.asm_ok);
-    const ssl_files = sslSources(b, source);
-    ssl_module.addCSourceFiles(.{ .root = source.path("aws-lc/ssl"), .files = ssl_files.cc, .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti", "-Wno-unused-parameter" } });
-    ssl_module.addCSourceFiles(.{ .root = source.path("aws-lc/ssl"), .files = ssl_files.c, .flags = c_flags });
-    const ssl = b.addLibrary(.{ .name = "aws_lc_ssl", .linkage = .static, .root_module = ssl_module, .use_llvm = true });
+    const ssl = b.addLibrary(.{
+        .name = "aws_lc_ssl",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .pic = true }),
+        .linkage = .static,
+        .use_llvm = true,
+    });
+    ssl.link_function_sections = true;
+    ssl.link_data_sections = true;
+    ssl.link_gc_sections = true;
+    configure(ssl.root_module, b, t, links, small, jitter);
+    ssl.root_module.addCSourceFiles(.{ .root = b.path(crate ++ "/aws-lc/ssl"), .files = &sources.ssl_cc, .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti", "-Wno-unused-parameter" } });
+    ssl.root_module.addCSourceFiles(.{ .root = b.path(crate ++ "/aws-lc/ssl"), .files = &sources.ssl_c, .flags = c_flags });
 
-    const include = b.addWriteFiles();
-    _ = include.addCopyDirectory(source.path("aws-lc/include"), "", .{});
-    _ = include.addCopyDirectory(source.path("generated-include"), "", .{});
-    b.addNamedLazyPath("include", include.getDirectory());
+    // Installing the artifact also installs the headers attached to it; the whole tree is what the
+    // vendored aws-lc-sys's build script reads through `ORIGINE_AWS_LC_PREFIX`.
+    for (include_paths) |include_path| crypto.installHeadersDirectory(include_path, "", .{});
     const links_file = b.addWriteFiles().add("links", links);
 
-    // The tree rust/scripts/cargo-aws-lc.sh takes, for a consumer's cargo invocation.
-    const tree = b.addWriteFiles();
-    _ = tree.addCopyFile(crypto.getEmittedBin(), "lib/libaws_lc_crypto.a");
-    _ = tree.addCopyDirectory(include.getDirectory(), "include", .{});
-    _ = tree.addCopyFile(links_file, "links");
-    b.addNamedLazyPath("prefix", tree.getDirectory());
+    // The cargo-facing tree as a generated `LazyPath` (`<dir>/{lib,include,links}`): a consumer
+    // passes it to the Rust build without knowing about install steps, and the build dependency
+    // comes with the path. `zig build`/`zig build aws-lc-prefix` still install the same layout.
+    const include_tree = b.addWriteFiles();
+    for (include_paths) |include_path| _ = include_tree.addCopyDirectory(include_path, "", .{});
+    const prefix = b.addWriteFiles();
+    _ = prefix.addCopyFile(crypto.getEmittedBin(), "lib/libaws_lc_crypto.a");
+    _ = prefix.addCopyDirectory(include_tree.getDirectory(), "include", .{});
+    _ = prefix.addCopyFile(links_file, "links");
+    b.addNamedLazyPath("prefix", prefix.getDirectory());
 
-    // `zig build crypto` installs the same layout under the prefix (for `just test-net`); `zig build`
-    // adds libssl.
-    // (Artifacts hang off the install step directly: that is where `Dependency.artifact` looks.)
-    const install_crypto = b.addInstallArtifact(crypto, .{});
-    b.getInstallStep().dependOn(&install_crypto.step);
-    b.installArtifact(ssl);
-    const crypto_step = b.step("crypto", "Install libcrypto, the headers and `links` (no libssl)");
-    crypto_step.dependOn(&install_crypto.step);
-    crypto_step.dependOn(&b.addInstallDirectory(.{ .source_dir = include.getDirectory(), .install_dir = .header, .install_subdir = "" }).step);
-    crypto_step.dependOn(&b.addInstallFile(links_file, "links").step);
-    b.getInstallStep().dependOn(crypto_step);
+    b.installArtifact(crypto);
+    b.getInstallStep().dependOn(&b.addInstallFile(links_file, "links").step);
+    if (with_ssl) b.installArtifact(ssl);
+
+    // For Zig consumers: the public headers with the symbol prefix defined. Linking libcrypto is
+    // the artifacts' job (the root adds `aws_lc_crypto` to its native libraries).
+    const module = b.addModule("aws_lc", .{ .root_source_file = b.path("aws_lc.zig"), .link_libc = true });
+    module.addCMacro("BORINGSSL_PREFIX", links);
+    for (include_paths) |include_path| module.addIncludePath(include_path);
 }
 
 /// Defines and include paths shared by libcrypto and libssl, as aws-lc-sys's cc builder sets them
 /// (builder/cc_builder.rs: `collect_universal_build_options`, `add_includes`, `add_defines`,
 /// `run_compiler_checks`; the checks always pass with Zig's clang and libc headers).
-fn configure(module: *std.Build.Module, source: Crate, t: std.Target, links: []const u8, small: bool, jitter: bool, asm_ok: bool) void {
+fn configure(module: *std.Build.Module, b: *std.Build, t: std.Target, links: []const u8, small: bool, jitter: bool) void {
     module.addCMacro("BORINGSSL_IMPLEMENTATION", "1");
     module.addCMacro("BORINGSSL_PREFIX", links);
-    module.addIncludePath(source.path("generated-include"));
-    module.addIncludePath(source.path("include"));
-    module.addIncludePath(source.path("aws-lc/include"));
-    module.addIncludePath(source.path("aws-lc/third_party/s2n-bignum/include"));
-    module.addIncludePath(source.path("aws-lc/third_party/s2n-bignum/s2n-bignum-imported/include"));
+    module.addIncludePath(b.path(crate ++ "/generated-include"));
+    module.addIncludePath(b.path(crate ++ "/include"));
+    module.addIncludePath(b.path(crate ++ "/aws-lc/include"));
+    module.addIncludePath(b.path(crate ++ "/aws-lc/third_party/s2n-bignum/include"));
+    module.addIncludePath(b.path(crate ++ "/aws-lc/third_party/s2n-bignum/s2n-bignum-imported/include"));
     if (jitter) {
-        module.addIncludePath(source.path("aws-lc/third_party/jitterentropy/jitterentropy-library"));
-        module.addIncludePath(source.path("aws-lc/third_party/jitterentropy/jitterentropy-library/src"));
+        module.addIncludePath(b.path(crate ++ "/aws-lc/third_party/jitterentropy/jitterentropy-library"));
+        module.addIncludePath(b.path(crate ++ "/aws-lc/third_party/jitterentropy/jitterentropy-library/src"));
     } else {
         module.addCMacro("DISABLE_CPU_JITTER_ENTROPY", "1");
     }
-    if (!asm_ok) module.addCMacro("OPENSSL_NO_ASM", "1");
     if (small) module.addCMacro("OPENSSL_SMALL", "1");
     module.addCMacro("AWS_LC_STDALIGN_AVAILABLE", "1");
     module.addCMacro("AWS_LC_BUILTIN_SWAP_SUPPORTED", "1");
@@ -142,10 +140,10 @@ fn configure(module: *std.Build.Module, source: Crate, t: std.Target, links: []c
     }
 }
 
-/// The crate's `links` key (`aws_lc_0_47_0`): the symbol prefix of its bindings and the key of
-/// the cargo build-script override (rust/scripts/cargo-aws-lc.sh).
-fn linksName(source: Crate) []const u8 {
-    const manifest = source.read("Cargo.toml");
+/// The crate's `links` key (`aws_lc_0_47_0`): the symbol prefix of its bindings and the key of the
+/// `DEP_AWS_LC_*` metadata the vendored aws-lc-sys emits.
+fn links_name(b: *std.Build) []const u8 {
+    const manifest = crate_read(b, "Cargo.toml");
     var lines = std.mem.splitScalar(u8, manifest, '\n');
     while (lines.next()) |line| {
         const rest = std.mem.trim(u8, line, " \r");
@@ -155,78 +153,32 @@ fn linksName(source: Crate) []const u8 {
     std.debug.panic("aws-lc-sys Cargo.toml has no `links` key", .{});
 }
 
-const Sources = struct { files: []const []const u8, asm_ok: bool };
-
-/// The quoted paths of `builder/cc_builder/universal.rs` plus the list for the target (the same
-/// choice as `identify_sources` there). Only origine's targets are accepted: aarch64 macOS and
-/// x86_64/aarch64 Linux, all with assembly. Intel macOS and the rest are a build error.
-fn sourceList(b: *std.Build, source: Crate, t: std.Target) Sources {
-    const platform: []const u8 = switch (t.os.tag) {
+/// The assembly lists for `t`: `sources.universal` is shared, these are added on top. Only
+/// origine's targets are accepted: aarch64 macOS and x86_64/aarch64 Linux, all with assembly.
+fn source_list(t: std.Target) struct { assembly: []const []const u8, s2n: []const []const u8 } {
+    return switch (t.os.tag) {
         .macos => switch (t.cpu.arch) {
-            .aarch64 => "apple_aarch64",
+            .aarch64 => .{ .assembly = &sources.apple_aarch64_asm, .s2n = &sources.apple_aarch64_s2n },
             else => std.debug.panic("aws-lc: unsupported target {s}-macos (only aarch64-macos)", .{@tagName(t.cpu.arch)}),
         },
         .linux => switch (t.cpu.arch) {
-            .aarch64 => "linux_aarch64",
-            .x86_64 => "linux_x86_64",
+            .aarch64 => .{ .assembly = &sources.linux_aarch64_asm, .s2n = &sources.linux_aarch64_s2n },
+            .x86_64 => .{ .assembly = &sources.linux_x86_64_asm, .s2n = &sources.linux_x86_64_s2n },
             else => std.debug.panic("aws-lc: unsupported target {s}-linux (only x86_64, aarch64)", .{@tagName(t.cpu.arch)}),
         },
         else => std.debug.panic("aws-lc: unsupported OS {s} (aarch64-macos, x86_64/aarch64-linux)", .{@tagName(t.os.tag)}),
     };
-    var files: std.ArrayList([]const u8) = .empty;
-    quotedLines(b, source.read("builder/cc_builder/universal.rs"), &files);
-    quotedLines(b, source.read(b.fmt("builder/cc_builder/{s}.rs", .{platform})), &files);
-    return .{ .files = files.items, .asm_ok = true };
 }
 
-/// libssl's sources: the `.cc`/`.c` names of the `add_library(ssl ...)` call in aws-lc/ssl/CMakeLists.txt.
-fn sslSources(b: *std.Build, source: Crate) struct { cc: []const []const u8, c: []const []const u8 } {
-    const cmake = source.read("aws-lc/ssl/CMakeLists.txt");
-    const start = std.mem.indexOf(u8, cmake, "add_library(\n  ssl\n") orelse std.debug.panic("aws-lc/ssl/CMakeLists.txt: no add_library(ssl)", .{});
-    const end = std.mem.indexOfScalarPos(u8, cmake, start, ')') orelse unreachable;
-    var cc: std.ArrayList([]const u8) = .empty;
-    var c: std.ArrayList([]const u8) = .empty;
-    var words = std.mem.tokenizeAny(u8, cmake[start..end], " \n\r\t");
-    while (words.next()) |word| {
-        const list = if (std.mem.endsWith(u8, word, ".cc")) &cc else if (std.mem.endsWith(u8, word, ".c")) &c else continue;
-        list.append(b.allocator, word) catch @panic("OOM");
-    }
-    return .{ .cc = cc.items, .c = c.items };
+/// A file's path as a string for a compiler flag (`-include` takes no LazyPath): relative to the
+/// package root, which is also where the compiler runs.
+fn crate_file(b: *std.Build, sub_path: []const u8) []const u8 {
+    return b.root.joinString(b.allocator, b.fmt("{s}/{s}", .{ crate, sub_path })) catch @panic("OOM");
 }
 
-/// Appends every `"path",` line of a cc_builder list.
-fn quotedLines(b: *std.Build, text: []const u8, files: *std.ArrayList([]const u8)) void {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \r");
-        if (trimmed.len < 3 or trimmed[0] != '"' or !std.mem.endsWith(u8, trimmed, "\",")) continue;
-        files.append(b.allocator, trimmed[1 .. trimmed.len - 2]) catch @panic("OOM");
-    }
+/// Reads a file at configure time.
+fn crate_read(b: *std.Build, sub_path: []const u8) []const u8 {
+    const path = b.root.join(b.allocator, b.fmt("{s}/{s}", .{ crate, sub_path })) catch @panic("OOM");
+    return path.root_dir.handle.readFileAlloc(b.graph.io, path.sub_path, b.allocator, .limited(16 << 20)) catch |err|
+        std.debug.panic("reading {f}: {t}", .{ path, err });
 }
-
-/// The fetched `.crate`: Zig keeps its top-level `aws-lc-sys-<version>/` directory, so every path
-/// goes through here. The version is this package's (build.zig.zon), kept equal to the crate's.
-const Crate = struct {
-    b: *std.Build,
-    dep: *std.Build.Dependency,
-
-    const dir = "aws-lc-sys-" ++ @import("build.zig.zon").version ++ "/";
-
-    fn path(c: Crate, sub_path: []const u8) std.Build.LazyPath {
-        return c.dep.path(c.b.fmt(dir ++ "{s}", .{sub_path}));
-    }
-
-    /// A file's path as a string for a compiler flag (`-include` takes no LazyPath): the package
-    /// root as the build runner sees it, which is also where the compiler runs.
-    fn file(c: Crate, sub_path: []const u8) []const u8 {
-        const p = c.dep.builder.root.join(c.b.allocator, c.b.fmt(dir ++ "{s}", .{sub_path})) catch @panic("OOM");
-        return p.toString(c.b.allocator) catch @panic("OOM");
-    }
-
-    /// Reads a file at configure time (the source lists decide what to compile).
-    fn read(c: Crate, sub_path: []const u8) []const u8 {
-        const p = c.dep.builder.root.join(c.b.allocator, c.b.fmt(dir ++ "{s}", .{sub_path})) catch @panic("OOM");
-        return p.root_dir.handle.readFileAlloc(c.b.graph.io, p.sub_path, c.b.allocator, .limited(16 << 20)) catch |err|
-            std.debug.panic("reading {f}: {t}", .{ p, err });
-    }
-};

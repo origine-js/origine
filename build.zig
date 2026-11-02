@@ -1,11 +1,16 @@
 const std = @import("std");
+const v8_build = @import("build/v8.zig");
+const rust_build = @import("build/rust.zig");
 
 /// Borrows b and its configuration through build teardown; creates build-owned
 /// dependency modules, cached artifacts and install/run/test steps. Retains no runtime state.
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const external_link = target.result.os.tag == .macos and optimize != .debug;
+    // AWS-LC options (docs/aws-lc.md); read here because the build creates it for two targets.
+    const aws_lc_small = b.option(bool, "aws_lc_small", "AWS-LC OPENSSL_SMALL: smaller and slower code (default: off)") orelse false;
+    const aws_lc_jitter = b.option(bool, "aws_lc_jitter", "Build AWS-LC's CPU jitter entropy source (default: on)");
     // Release V8 by default; a debug V8 compiles faster and is for working on V8 patches.
     const v8_debug = b.option(bool, "v8_debug", "Build V8 in debug mode for quick iteration on V8 patches (default: release V8)") orelse false;
     // The V8 sandbox confines JS memory (ArrayBuffers use a mimalloc arena inside it). Off
@@ -14,18 +19,18 @@ pub fn build(b: *std.Build) void {
     // The memory corruption API (V8_ENABLE_MEMORY_CORRUPTION_API) is for sandbox testing: V8 exposes it only
     // under --sandbox-testing or --sandbox-fuzzing. Needs the sandbox; the V8 package rejects the other combination.
     const v8_memory_corruption_api = b.option(bool, "v8_memory_corruption_api", "Build V8 with the memory corruption API (default: off; requires the sandbox)") orelse false;
-    const builtin_pgo = b.option(bool, "builtin_pgo", "Use Google's exact-version builtin PGO baseline (default: release desktop V8, needs the sandbox)") orelse (!v8_debug and v8_sandbox and target.result.os.tag != .ios);
+    const v8_builtin_pgo = b.option(bool, "v8_builtin_pgo", "Use Google's exact-version builtin PGO baseline (default: release desktop V8, needs the sandbox)") orelse (!v8_debug and v8_sandbox and target.result.os.tag != .ios);
     // V8 builds from source only on the first build and for `zig build build-v8` (patches apply
     // automatically, ninja makes it incremental); other builds reuse the last archive. An
     // explicit archive skips that.
-    const prebuilt: ?[]const u8 = b.option([]const u8, "prebuilt_v8_path", "Path to a prebuilt V8 archive");
+    const v8_prebuilt: ?[]const u8 = b.option([]const u8, "v8_prebuilt_path", "Path to a prebuilt V8 archive");
     const clang_bin = b.option([]const u8, "v8_clang_dir", "Matching V8 LLVM bin directory") orelse "";
-    const cache_root = b.option([]const u8, "cache_root", "V8 checkout and toolchain cache") orelse
+    const v8_cache_root = b.option([]const u8, "v8_cache_root", "V8 checkout and toolchain cache") orelse
         (b.root.joinString(b.allocator, "lib/v8_zig/.lp-cache") catch @panic("OOM"));
     // The Rust staticlib (rust/) is part of the core and always built; `typescript` only selects
     // whether the oxc transformer is compiled into it.
     const typescript = b.option(bool, "typescript", "Include the oxc TypeScript/JSX transformer in the Rust library (default true)") orelse true;
-    const cargo_offline = b.option(bool, "cargo-offline", "Run cargo with --offline") orelse false;
+    const rust_offline = b.option(bool, "rust_cargo_offline", "Run cargo with --offline") orelse false;
     // Networking (docs/http-design.md). Each flag removes its API (the name is absent, not stubbed), its
     // Rust feature and its C dependencies; a disabled flag fetches none of them.
     const http = b.option(bool, "http", "HTTP/2 client and server (api.http; links nghttp2) (default true)") orelse true;
@@ -42,7 +47,7 @@ pub fn build(b: *std.Build) void {
     });
     // Size over startup, opt in per blob: LZ4 HC (lib/lz4) shrinks the executable or the caches on
     // disk and costs a decode (about 0.1 ms for the 0.5 MB engine snapshot) plus the expanded copy on the heap.
-    const v8_icu = b.option(IcuMode, "v8_icu", "ICU data in the executable: compressed (zstd, expanded on first Intl use; default) or raw (about 7 MB larger, no expansion)") orelse .compressed;
+    const v8_icu = b.option(v8_build.IcuMode, "v8_icu", "ICU data in the executable: compressed (zstd, expanded on first Intl use; default) or raw (about 7 MB larger, no expansion)") orelse .compressed;
     const engine_snapshot = b.option(Embedding, "engine_snapshot", "Engine snapshot embedded in the executable: raw (default) or compressed (LZ4 HC, expanded at startup)") orelse .raw;
     const user_snapshot = b.option(Embedding, "user_snapshot", "Init snapshot files in the global cache: raw (default) or compressed (LZ4 HC)") orelse .raw;
     const user_codecache = b.option(Embedding, "user_codecache", "Code cache files in the global cache: raw (default) or compressed (LZ4 HC)") orelse .raw;
@@ -54,25 +59,55 @@ pub fn build(b: *std.Build) void {
     config.addOption(bool, "quic", quic);
     config.addOption(bool, "user_snapshot_compressed", user_snapshot == .compressed);
     config.addOption(bool, "user_codecache_compressed", user_codecache == .compressed);
-    const options: V8Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .v8_memory_corruption_api = v8_memory_corruption_api, .builtin_pgo = builtin_pgo, .v8_icu = v8_icu, .prebuilt = prebuilt, .clang_bin = clang_bin, .cache_root = cache_root };
-    const v8 = v8Dependency(b, options, !external_link);
+    const v8_options: v8_build.Options = .{ .target = target, .v8_debug = v8_debug, .v8_sandbox = v8_sandbox, .v8_memory_corruption_api = v8_memory_corruption_api, .builtin_pgo = v8_builtin_pgo, .v8_icu = v8_icu, .prebuilt = v8_prebuilt, .clang_bin = clang_bin, .cache_root = v8_cache_root };
+    const v8 = v8_build.dependency(b, v8_options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
-    const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
-    // rustls/aws-lc-rs link the Zig-built AWS-LC (lib/aws-lc): cargo overrides aws-lc-sys's build
-    // script instead of compiling AWS-LC itself (docs/aws-lc.md). Null without -Dtls, or while
-    // the lazy dependency is being fetched (the build then runs again).
-    const aws_lc: ?*std.Build.Dependency = if (tls) awsLcDependency(b, target) else null;
-    const rust_aws_lc: ?CargoAwsLc = if (aws_lc) |dep| .{ .prefix = dep.namedLazyPath("prefix"), .triple = rustTriple(b, target.result) } else null;
-    const rust_lib: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, external_link, rust_v8, rust_aws_lc);
+    const v8_paths: ?v8_build.RustPaths = if (v8_prebuilt == null) .{
+        .archive = v8.namedLazyPath("v8"),
+        .mimalloc = v8.artifact("mimalloc").getEmittedBin(),
+        .icu = v8.artifact("v8_icu").getEmittedBin(),
+        .root = v8.namedLazyPath("v8_root"),
+        .compile_commands = v8.namedLazyPath("gn_compile_commands"),
+        .binding = v8.namedLazyPath("binding"),
+    } else null;
+    // rustls/aws-lc-rs link the Zig-built AWS-LC (lib/aws-lc): the vendored aws-lc-sys only emits
+    // link directives for it and never compiles AWS-LC itself (docs/aws-lc.md). Null without -Dtls,
+    // or while the lazy dependency is being fetched (the build then runs again).
+    const aws_lc: ?*std.Build.Dependency = if (tls) try b.dependencyLazy("aws_lc", .{
+        .target = target,
+        .optimize = .fast,
+        .small = aws_lc_small,
+        .jitter = aws_lc_jitter,
+        .ssl = quic,
+    }) else null;
+    // `initSnapshot`/`just test-net` point cargo at an installed tree (`zig-out` after
+    // `zig build aws-lc-prefix`); `zig build` hands the generated tree to the Rust package instead.
+    const aws_lc_prefix = b.step("aws-lc-prefix", "Install the AWS-LC tree the Rust build links against");
+    if (aws_lc) |dep| aws_lc_prefix.dependOn(dep.builder.getInstallStep());
+    // Clippy checks every crate whatever the features, origine_tls (and so aws-lc-sys) included,
+    // for the host: it gets a host AWS-LC so the vendored aws-lc-sys links a real library.
+    const host_aws_lc: ?*std.Build.Dependency = if (!tls) null else try b.dependencyLazy("aws_lc", .{
+        .target = b.graph.host,
+        .optimize = .fast,
+        .small = aws_lc_small,
+        .jitter = aws_lc_jitter,
+        .ssl = false,
+    });
+    // rust/ is its own package: it owns cargo and the pre-link step; the root owns the final link.
+    const rust = try rust_build.dependency(b, .{
+        .target = target,
+        .features = rust_features,
+        .offline = rust_offline,
+        .aws_lc_prefix = if (aws_lc) |dep| dep.namedLazyPath("prefix") else null,
+        .aws_lc_host_prefix = if (host_aws_lc) |dep| dep.namedLazyPath("prefix") else null,
+        .v8 = v8_paths,
+    });
     // Zig-linked programs (debug, tests) resolve duplicate Rust runtime symbols on their own and
     // would break on a pre-linked object (thread-locals), so they take the plain archive.
-    const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, false, rust_v8, rust_aws_lc);
-    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, rust_v8, cargo_offline, null, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
-    // Clippy checks every crate whatever the features, origine_tls (and so aws-lc-sys) included,
-    // for the host: it gets a host AWS-LC so that aws-lc-sys's build script does not run either
-    // (with -Dtls=false nothing of AWS-LC is fetched, and clippy falls back to that build script).
-    const host_aws_lc: ?CargoAwsLc = if (!tls) null else if (awsLcDependency(b, b.graph.host)) |dep| .{ .prefix = dep.namedLazyPath("prefix"), .triple = "host" } else null;
-    b.step("clippy", "Run clippy (-D warnings) over the Rust workspace with the V8 environment").dependOn(&cargoCommand(b, rust_v8, cargo_offline, host_aws_lc, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
+    const rust_archive = rust.namedLazyPath("archive");
+    const rust_program = if (external_link) rust.namedLazyPath("object") else rust_archive;
+    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(rust_build.step(rust, "test-alloc"));
+    b.step("clippy", "Run clippy (-D warnings) over the Rust workspace with the V8 environment").dependOn(rust_build.step(rust, "clippy"));
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -83,15 +118,16 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "@v8", "@util", "@diagnostics" }) |name| {
         root.addImport(name, v8.module(name));
     }
+    if (aws_lc) |dep| root.addImport("aws_lc", dep.module("aws_lc"));
     // The I/O library: the Zig host uses `Loop` and the Rust runtime calls its `oio_*` C ABI, so
     // every program that links the Rust library must compile it in (see `io_module`).
     const io_module = ioModule(b, target);
     const io_lib = ioLibrary(b, target, io_module);
-    const lz4_dep = b.dependency("lz4", .{ .target = target, .optimize = .ReleaseSmall });
+    const lz4_dep = b.dependency("lz4", .{ .target = target, .optimize = .small });
     const lz4_lib = lz4_dep.artifact("lz4");
-    const icu_lib: ?*std.Build.Step.Compile = if (prebuilt == null) v8.artifact("v8_icu") else null;
+    const icu_lib: ?*std.Build.Step.Compile = if (v8_prebuilt == null) v8.artifact("v8_icu") else null;
     // The Rust HTTP/2 crate binds nghttp2's C ABI; like `oio_*`, every program that links the Rust library links it.
-    const nghttp2_lib: ?*std.Build.Step.Compile = if (http) nghttp2Library(b, target) else null;
+    const nghttp2_lib: ?*std.Build.Step.Compile = if (http) try nghttp2Library(b, target) else null;
     // libcrypto for aws-lc-rs: the Rust library refers to it without embedding it (`-bundle`).
     const aws_lc_crypto: ?*std.Build.Step.Compile = if (aws_lc) |dep| dep.artifact("aws_lc_crypto") else null;
     // libssl is built for QUIC's TLS API (-Dquic) but nothing links it yet: it is C++ and needs
@@ -129,27 +165,35 @@ pub fn build(b: *std.Build) void {
         tool_module.addImport("@lz4", lz4_dep.module("@lz4"));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib, icu_lib, native_libs);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_program, io_lib, lz4_lib, icu_lib, native_libs);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
-        generate.addFileArg(tool);
-        const blob = generate.addOutputFileArg(if (engine_snapshot == .compressed) "engine.snapshot.lz4" else "engine.snapshot");
+        generate.addFileArg2(tool, .{});
+        const blob = generate.addOutputFileArg2(if (engine_snapshot == .compressed) "engine.snapshot.lz4" else "engine.snapshot", .{});
         // LZ4-compressed (`lib/lz4`) when asked; main.zig expands it at startup.
         if (engine_snapshot == .compressed) generate.addArg("lz4");
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib, icu_lib, native_libs);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_program, io_lib, lz4_lib, icu_lib, native_libs);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
     const run = std.Build.Step.Run.create(b, "run origine");
-    run.addFileArg(binary);
+    run.addFileArg2(binary, .{});
     run.addPassthruArgs();
     run.stdio = .inherit;
     b.step("run", "Run origine").dependOn(&run.step);
     b.step("shell", "Run the JS REPL").dependOn(&run.step);
-    const test_v8 = if (external_link) v8Dependency(b, options, true) else v8;
-    if (prebuilt == null) b.step("build-v8", "Fetch, patch and rebuild V8; ordinary builds reuse the last archive").dependOn(&v8.builder.top_level_steps.get("build-v8").?.step);
+    // One step that builds the native dependencies the Rust library and the host link against.
+    const deps = b.step("deps", "Build the native dependencies (V8, mimalloc, ICU, AWS-LC, LZ4, nghttp2) and the Rust library");
+    deps.dependOn(rust_build.step(rust, "build"));
+    deps.dependOn(&v8.artifact("mimalloc").step);
+    if (v8_prebuilt == null) deps.dependOn(&v8.artifact("v8_icu").step);
+    if (aws_lc) |dep| deps.dependOn(dep.builder.getInstallStep());
+    deps.dependOn(&lz4_lib.step);
+    if (nghttp2_lib) |lib| deps.dependOn(&lib.step);
+    const test_v8 = if (external_link) v8_build.dependency(b, v8_options, true) else v8;
+    if (v8_prebuilt == null) b.step("build-v8", "Fetch, patch and rebuild V8; ordinary builds reuse the last archive").dependOn(&v8.builder.top_level_steps.get("build-v8").?.step);
     b.step("patch-v8", "Fetch V8 and apply the patch series without building").dependOn(&v8.builder.top_level_steps.get("patch-v8").?.step);
     // The I/O library has no V8 dependency and tests on its own.
     // Debug by default so the library's safety checks run; `src/safe.zig` is tested the same way.
@@ -185,7 +229,7 @@ pub fn build(b: *std.Build) void {
     }
     test_root.addImport("@managed", test_modules.managed);
     test_root.addImport("@engine", test_modules.engine);
-    if (rust_archive) |lib| test_root.addObjectFile(lib);
+    test_root.addObjectFile(rust_archive);
     const tests = b.addTest(.{ .root_module = test_root });
     if (optimize != .debug) {
         tests.use_llvm = true;
@@ -199,46 +243,6 @@ pub fn build(b: *std.Build) void {
 
 /// How a blob is stored: as it is, or LZ4-compressed (lib/lz4).
 const Embedding = enum { raw, compressed };
-
-/// How the V8 package embeds ICU's data (lib/v8_zig/build/icu.build.zig).
-const IcuMode = enum { compressed, raw };
-
-const V8Options = struct {
-    target: std.Build.ResolvedTarget,
-    v8_debug: bool,
-    v8_sandbox: bool,
-    v8_memory_corruption_api: bool,
-    builtin_pgo: bool,
-    v8_icu: IcuMode,
-    prebuilt: ?[]const u8,
-    clang_bin: []const u8,
-    cache_root: []const u8,
-};
-
-/// Borrows b and options, including nested path strings, through build teardown.
-/// Returns a build-owned dependency valid through teardown; retains no runtime resources.
-fn v8Dependency(b: *std.Build, options: V8Options, link_native: bool) *std.Build.Dependency {
-    return if (options.prebuilt) |path| b.dependency("v8", .{
-        .target = options.target,
-        .optimize = .fast,
-        .v8_debug = options.v8_debug,
-        .v8_sandbox = options.v8_sandbox,
-        .link_native = link_native,
-        .prebuilt_v8_path = path,
-        .v8_clang_dir = options.clang_bin,
-    }) else b.dependency("v8", .{
-        .target = options.target,
-        .optimize = .fast,
-        .v8_debug = options.v8_debug,
-        .v8_sandbox = options.v8_sandbox,
-        .v8_memory_corruption_api = options.v8_memory_corruption_api,
-        .link_native = link_native,
-        .cache_root = options.cache_root,
-        .builtin_pgo = options.builtin_pgo,
-        .v8_icu = options.v8_icu,
-        .v8_clang_dir = options.clang_bin,
-    });
-}
 
 /// The I/O library's Zig API as a module (`src/io/io.zig`), always compiled in ReleaseFast. It
 /// does not export the C ABI: that lives in `liborigine_io.a` (`ioLibrary`), so a program links
@@ -254,24 +258,11 @@ fn safeModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module
     return b.createModule(.{ .root_source_file = b.path("src/safe.zig"), .target = target, .optimize = .fast });
 }
 
-/// nghttp2 (lib/nghttp2), the sans-io HTTP/2 core, built ReleaseFast. Null while the lazy dependency is
-/// still being fetched (the build runs again once it is). Borrows b through build teardown.
-fn nghttp2Library(b: *std.Build, target: std.Build.ResolvedTarget) ?*std.Build.Step.Compile {
-    const dep = b.lazyDependency("nghttp2", .{ .target = target, .optimize = .ReleaseFast }) orelse return null;
-    return dep.artifact("nghttp2");
+/// nghttp2 (lib/nghttp2), the sans-io HTTP/2 core, built ReleaseFast. Borrows b through build
+/// teardown.
+fn nghttp2Library(b: *std.Build, target: std.Build.ResolvedTarget) error{LazyDependencyNeeded}!*std.Build.Step.Compile {
+    return (try b.dependencyLazy("nghttp2", .{ .target = target, .optimize = .fast })).artifact("nghttp2");
 }
-
-/// AWS-LC (lib/aws-lc) for `target`, built ReleaseFast like the C libraries on the request path:
-/// artifacts `aws_lc_crypto` and `aws_lc_ssl`, named lazy path `prefix` (the tree
-/// rust/scripts/cargo-aws-lc.sh takes). Null while the lazy dependency is still being fetched.
-/// Borrows b through build teardown.
-fn awsLcDependency(b: *std.Build, target: std.Build.ResolvedTarget) ?*std.Build.Dependency {
-    return b.lazyDependency("aws_lc", .{ .target = target, .optimize = .ReleaseFast });
-}
-
-/// What `cargoCommand` needs to point aws-lc-sys at the Zig-built AWS-LC: the `prefix` tree and
-/// the Rust triple cargo builds for (`host` without --target).
-const CargoAwsLc = struct { prefix: std.Build.LazyPath, triple: []const u8 };
 
 /// `liborigine_io.a`: the `oio_*` C ABI the Rust runtime calls, built once with LLVM in
 /// ReleaseFast whatever `-Doptimize` says (the event loop is a hot path, and debug builds of the
@@ -302,115 +293,10 @@ fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std
     return .{ .engine = engine, .managed = managed };
 }
 
-/// A cargo invocation for rust/ with the V8_ZIG_* environment the vendored `v8` crate's build.rs
-/// needs (rust/scripts/cargo-v8.sh). `v8` is null for -Dprebuilt_v8_path, which has no GN output
-/// to run bindgen against: cargo then runs bare and the `v8` crate's build script reports the
-/// missing variables, so a prebuilt V8 cannot build the Rust workspace (a documented limitation).
-/// With `aws_lc`, rust/scripts/cargo-aws-lc.sh adds the override that replaces aws-lc-sys's build
-/// script with the Zig-built AWS-LC (docs/aws-lc.md); without it, that build script compiles
-/// AWS-LC itself.
-/// Borrows b, v8 and aws_lc through build teardown; the returned step is build-owned.
-fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, aws_lc: ?CargoAwsLc, args: []const []const u8) *std.Build.Step.Run {
-    const run = b.addSystemCommand(&.{"sh"});
-    if (v8) |dep| {
-        run.addFileArg(b.path("rust/scripts/cargo-v8.sh"));
-        run.addFileArg(dep.namedLazyPath("v8"));
-        run.addFileArg(dep.artifact("mimalloc").getEmittedBin());
-        run.addFileArg(dep.artifact("v8_icu").getEmittedBin());
-        run.addFileArg(dep.namedLazyPath("v8_root"));
-        run.addFileArg(dep.namedLazyPath("gn_compile_commands"));
-        run.addFileArg(dep.namedLazyPath("binding"));
-    } else {
-        run.addArgs(&.{ "-c", "exec \"$@\"", "sh" });
-    }
-    if (aws_lc) |lc| {
-        // Absolute: cargo-v8.sh changes into rust/ before running this.
-        run.addArg("sh");
-        run.addFileArg2(b.path("rust/scripts/cargo-aws-lc.sh"), .{ .make_absolute = true });
-        run.addDirectoryArg2(lc.prefix, .{ .make_absolute = true });
-        run.addArg(lc.triple);
-    }
-    run.addArg("cargo");
-    run.addArg(args[0]);
-    if (offline) run.addArg("--offline");
-    run.addArgs(&.{ "--manifest-path", b.root.joinString(b.allocator, "rust/Cargo.toml") catch @panic("OOM") });
-    run.addArgs(args[1..]);
-    run.has_side_effects = true;
-    return run;
-}
-
-/// CONTRACT (docs/contracts.md, surface F): the symbol prefixes the pre-linked Rust object keeps
-/// global (Zig, the V8 bindings and the C++ glue call into them). The macOS export list and the
-/// Linux objcopy patterns are both generated from this one list. Every `#[no_mangle]` item of the
-/// Rust crates must start with one of these (`just check-contracts` greps for violations); the
-/// first prefix is origine's own C ABI (`origine_oxc_*`, `origine_api_*`, `origine_api_native_*`).
-const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector__", "rusty_v8_RustObj_", "v8__ValueSerializer__Delegate__", "v8__ValueDeserializer__Delegate__" };
-
-/// The Rust target triple for a Zig target. Unsupported targets are a build error.
-fn rustTriple(b: *std.Build, result: std.Target) []const u8 {
-    const arch = switch (result.cpu.arch) {
-        .aarch64 => "aarch64",
-        .x86_64 => "x86_64",
-        else => std.debug.panic("No Rust target for {s}", .{@tagName(result.cpu.arch)}),
-    };
-    return switch (result.os.tag) {
-        .macos => b.fmt("{s}-apple-darwin", .{arch}),
-        .linux => b.fmt("{s}-unknown-linux-{s}", .{ arch, if (result.abi.isMusl()) "musl" else "gnu" }),
-        .windows => b.fmt("{s}-pc-windows-{s}", .{ arch, if (result.abi == .msvc) "msvc" else "gnu" }),
-        else => std.debug.panic("No Rust target for {s}", .{@tagName(result.os.tag)}),
-    };
-}
-
-/// Builds the Rust workspace in rust/ with cargo and returns the linkable result (see below),
-/// a cache file so consumers depend on its content. Borrows b through build
-/// teardown. Cargo keeps its own incremental state in rust/target (gitignored), so the step
-/// always runs and is cheap when nothing changed. Unsupported targets are a build error.
-fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, features: []const u8, hide_symbols: bool, v8: ?*std.Build.Dependency, aws_lc: ?CargoAwsLc) std.Build.LazyPath {
-    const result = target.result;
-    const triple = rustTriple(b, result);
-    const cargo = cargoCommand(b, v8, offline, aws_lc, &.{ "build", "--release", "--locked", "--target", triple });
-    cargo.addArgs(&.{ "--no-default-features", "--features", features });
-    cargo.addArgs(&.{ "--target-dir", (b.root.joinString(b.allocator, "rust/target") catch @panic("OOM")) });
-    const file_name = if (result.os.tag == .windows and result.abi == .msvc) "origine_native.lib" else "liborigine_native.a";
-    const built = b.path(b.fmt("rust/target/{s}/release/{s}", .{ triple, file_name }));
-    const copy = b.addWriteFiles();
-    copy.step.dependOn(&cargo.step);
-    const archive = copy.addCopyFile(built, file_name);
-    // The archive carries its own copy of Rust's std, which defines symbols (rust_eh_personality,
-    // ...) that V8's bundled Rust code defines too. Pre-link the whole archive into one object
-    // that exports only the `origine_*` C API; everything else becomes local to it, so the
-    // final link sees no duplicates. Windows links the archive as it is.
-    if (!hide_symbols) return archive;
-    switch (result.os.tag) {
-        .macos => {
-            const partial = b.addSystemCommand(&.{ "/usr/bin/clang", "-arch", if (result.cpu.arch == .aarch64) "arm64" else "x86_64", "-r", "-nostdlib" });
-            var list: std.ArrayList(u8) = .empty;
-            for (kept_symbol_prefixes) |prefix| list.print(b.allocator, "_{s}*\n", .{prefix}) catch @panic("OOM");
-            const exports = b.addWriteFiles().add("exports.macos.txt", list.items);
-            partial.addPrefixedFileArg("-Wl,-exported_symbols_list,", exports);
-            partial.addArg("-Wl,-all_load");
-            partial.addFileArg(archive);
-            partial.addArg("-o");
-            return partial.addOutputFileArg("origine_native.o");
-        },
-        .linux => {
-            const merge = b.addSystemCommand(&.{ "ld", "-r", "--whole-archive" });
-            merge.addFileArg(archive);
-            merge.addArg("-o");
-            const merged = merge.addOutputFileArg("origine_native_all.o");
-            const localize = b.addSystemCommand(&.{ "objcopy", "--wildcard" });
-            for (kept_symbol_prefixes) |prefix| localize.addArg(b.fmt("--keep-global-symbol={s}*", .{prefix}));
-            localize.addFileArg(merged);
-            return localize.addOutputFileArg("origine_native.o");
-        },
-        else => return archive,
-    }
-}
-
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, native_libs: []const *std.Build.Step.Compile) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, native_libs: []const *std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         // The external linker does not add Zig's compiler-rt; an object that needs a soft-float helper
@@ -419,23 +305,23 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         const link = b.addSystemCommand(&.{"/usr/bin/clang++"});
         // Keep the LLVM tool directory as a package-owned path.
         const linker = v8.namedLazyPath("clang_bin").path(b, "ld64.lld");
-        link.addPrefixedFileArg("--ld-path=", linker);
+        link.addFileArg2(linker, .{ .prefix = "--ld-path=" });
         link.addArgs(&.{ "-target", b.fmt("{s}-apple-macos{f}", .{ @tagName(target.result.cpu.arch), target.result.os.version_range.semver.min }), "-o" });
-        const binary = link.addOutputFileArg(name);
-        link.addArtifactArg(object);
-        link.addFileArg(v8.namedLazyPath("v8"));
+        const binary = link.addOutputFileArg2(name, .{});
+        link.addArtifactArg2(object, .{});
+        link.addFileArg2(v8.namedLazyPath("v8"), .{});
         // The ICU data provider is its own link object (the archive refers to it); a prebuilt
         // archive brings its own.
-        if (icu_lib) |lib| link.addArtifactArg(lib);
-        link.addArtifactArg(v8.artifact("mimalloc"));
-        link.addArtifactArg(io_lib);
-        link.addArtifactArg(lz4_lib);
-        for (native_libs) |lib| link.addArtifactArg(lib);
-        if (rust_lib) |lib| link.addFileArg(lib);
+        if (icu_lib) |lib| link.addArtifactArg2(lib, .{});
+        link.addArtifactArg2(v8.artifact("mimalloc"), .{});
+        link.addArtifactArg2(io_lib, .{});
+        link.addArtifactArg2(lz4_lib, .{});
+        for (native_libs) |lib| link.addArtifactArg2(lib, .{});
+        link.addFileArg2(rust_lib, .{});
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
     }
-    if (rust_lib) |lib| module.addObjectFile(lib);
+    module.addObjectFile(rust_lib);
     module.linkLibrary(io_lib);
     module.linkLibrary(lz4_lib);
     for (native_libs) |lib| module.linkLibrary(lib);

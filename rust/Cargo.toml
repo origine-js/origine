@@ -3,7 +3,14 @@
 # Add a Rust part as a crate under crates/, list it here, and re-export it in src/lib.rs.
 [workspace]
 members = ["crates/*"]
+# Vendored crates are path dependencies, not workspace members: clippy -D warnings must not run
+# over upstream code. aws-lc-sys is patched to link the Zig-built AWS-LC (docs/aws-lc.md).
+exclude = ["vendor/aws-lc-rs", "vendor/aws-lc-sys"]
 resolver = "3"
+
+[patch.crates-io]
+aws-lc-rs = { path = "vendor/aws-lc-rs" }
+aws-lc-sys = { path = "vendor/aws-lc-sys" }
 
 [workspace.package]
 edition = "2024"

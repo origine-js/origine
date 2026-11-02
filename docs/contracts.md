@@ -8,7 +8,7 @@ Commands:
 
 | command | what it does |
 |---|---|
-| `just gen-contracts` | rewrites every committed generated file (`rust/scripts/contracts.sh gen`) |
+| `just gen-contracts` | rewrites every committed generated file (`rust/scripts/contracts.py gen`) |
 | `just check-contracts` | regenerates into a temp tree and fails on any difference, compiles the Zig-generated C check with clang, checks exported-symbol prefixes, runs `zig build test-io -Dtypescript=false` (Zig vs header). Part of `just check`. |
 | `just check-rust` | clippy + Miri; the Rust-vs-header comparisons are compile-time checks and fail here |
 
@@ -25,7 +25,7 @@ maintained by hand carry a `CONTRACT (docs/contracts.md, surface X)` comment.
 | D | `Errno` Zig <-> Rust errno table <-> JS tables <-> TypeScript errno types | `src/api/errno_codes.zig` | generated + checked |
 | E | `origine_oxc.h` <-> Rust `origine_oxc` <-> Zig `oxc_abi.zig` | the header | checked (both sides) |
 | G | `origine_repl.h` <-> Rust `origine_repl` <-> Zig `repl_abi.zig` | the header | generated + checked (both sides) |
-| F | exported / kept symbol lists | `kept_symbol_prefixes` in `build.zig` | generated + checked |
+| F | exported / kept symbol lists | `kept_symbol_prefixes` in `rust/build.zig` | generated + checked |
 | H | aws-lc-sys bindings <-> Zig-built AWS-LC (`lib/aws-lc`) | the aws-lc-sys `.crate` pinned by `rust/Cargo.lock` | derived at configure time + link-checked |
 
 ## A. I/O C API (`src/io/include/origine_io.h`)
@@ -116,10 +116,10 @@ What the ABI carries and who owns what is described in [repl-architecture.md](re
 
 ## F. Exported / kept symbols
 
-`kept_symbol_prefixes` in `build.zig` (`origine_`, `crdtp__`, `v8_inspector__`, `rusty_v8_RustObj_` (the cppgc
+`kept_symbol_prefixes` in `rust/build.zig` (`origine_`, `crdtp__`, `v8_inspector__`, `rusty_v8_RustObj_` (the cppgc
 callbacks that `libv8_zig.a` calls back into Rust: drop, trace, name), ...) is the only list:
 the macOS `-exported_symbols_list` file and the Linux `objcopy --keep-global-symbol` arguments are
-generated from it (the old `rust/exports.macos.txt` is gone). `rust/scripts/check-exports.sh`
+generated from it (the old `rust/exports.macos.txt` is gone). `rust/scripts/check-exports.py`
 (part of `check-contracts`) fails when a `#[no_mangle]` function in a Rust crate does not start
 with a kept prefix. A Zig `extern fn` without a Rust definition is a link error. Not exercised
 automatically: the macOS release external-link and Linux `ld -r` paths (they need V8's `ld64.lld`
@@ -127,14 +127,14 @@ automatically: the macOS release external-link and Linux `ld -r` paths (they nee
 
 ## H. AWS-LC (aws-lc-sys bindings <-> `lib/aws-lc`)
 
-Source of truth: the aws-lc-sys crate version in `rust/Cargo.lock`. `lib/aws-lc` fetches that same
-`.crate` (`build.zig.zon`: version, url, hash) and builds its AWS-LC with the symbol prefix of its
-`links` key; cargo uses the crate's pregenerated `universal` bindings through a build-script
-override (`rust/scripts/cargo-aws-lc.sh`). The prefix, the source lists and libssl's sources are
-read from the crate, so nothing is copied by hand. A version skew between the two fails
-`cargo-aws-lc.sh` (it compares the built `links` with Cargo.lock's aws-lc-sys version; the override
-would otherwise be ignored and aws-lc-sys would build its own copy); a feature that turns on
-aws-lc-sys's `all-bindings` is a compile error. Updating and the details: [aws-lc.md](aws-lc.md).
+Source of truth: the vendored aws-lc-sys crate (`rust/vendor/aws-lc-sys`), the version
+`rust/Cargo.lock` pins. The `lib/aws-lc` package builds its AWS-LC tree with the symbol prefix of its
+`links` key, and cargo uses the same crate's pregenerated `universal` bindings: the C sources, the
+prefix headers and the bindings are one tree, so they cannot skew. The per-target source lists are
+hard-coded in `lib/aws-lc/sources.zig` (methodology and update procedure in its header); the only
+other hand-kept name is the script's `ORIGINE_AWS_LC_PREFIX` contract. A feature that turns on
+aws-lc-sys's `all-bindings` would add bindings this crate no longer ships, so it is a compile error.
+Updating and the details: [aws-lc.md](aws-lc.md).
 
 ## B. Natives registry (Rust -> Zig -> JS)
 
@@ -151,7 +151,7 @@ attribute on each Rust native (`rust/crates/origine_api/src/fs.rs`, `io.rs`).
   `native.<namespace>.<name>` with the declared callback and side effect, gated by `needs`
   (`runtime`: only with `Config.runtime`; `async_fs`: also needs async fs). There is no native
   name, symbol or side effect written on the Zig side, and no per-native C symbol any more.
-* JS: `rust/scripts/check-natives.sh` (part of `check-contracts`) fails when a registered native is
+* JS: `rust/scripts/check-natives.py` (part of `check-contracts`) fails when a registered native is
   never referenced by `src/js/glue/*.js` (as `native.ns.name`, `ops.name` or a chained `.name(`) or
   when the glue uses a `native.<registered namespace>.<name>` that is not registered. The managed
   API tests (`zig build test`) exercise the natives end to end.

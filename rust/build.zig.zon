@@ -1,0 +1,16 @@
+.{
+    .name = .origine_rs,
+    .version = "0.1.0",
+    .fingerprint = 0x2a62d7d3d7759d7d,
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates",
+        "src",
+        "scripts",
+    },
+}

@@ -4,7 +4,7 @@
 //! CONTRACT (docs/contracts.md, surface D): `IoErrno` and `HostErrno` are the single source of truth
 //! for the error codes. The guest tables (`origine:@std/errno`, the private glue `ERRNO` module), the Rust table
 //! `rust/crates/origine_api_core/src/errno_table.rs` and `types/generated/errno.d.ts` are generated
-//! from them (`rust/scripts/contracts.sh gen`; `check` fails when one is stale). Adding a member:
+//! from them (`rust/scripts/contracts.py gen`; `check` fails when one is stale). Adding a member:
 //! edit it here, add it to `Error` in errno.zig (and the std aliases in `lookup` and the Rust
 //! `ErrorKind` mapping in rust/crates/origine_api_core/src/errno.rs when a kind maps to it), then
 //! regenerate.

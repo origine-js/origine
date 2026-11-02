@@ -23,8 +23,8 @@ accounting below, with `Drained` as the future that waits for it.
 ## Errno mapping (`errno.rs`)
 
 `src/api/errno_codes.zig` (`IoErrno` and `HostErrno`) is the single source of truth; `errno_table.rs` (the constants, `HOST_CODES`, `IO_CODES`, `ALL`,
-`is_host`, `name_of`) is generated from it by `rust/scripts/contracts.sh gen` and checked by
-`contracts.sh check`. Names follow Rust's `std::io::ErrorKind` wherever the kind exists. Only the
+`is_host`, `name_of`) is generated from it by `rust/scripts/contracts.py gen` and checked by
+`contracts.py check`. Names follow Rust's `std::io::ErrorKind` wherever the kind exists. Only the
 `ErrorKind` / raw-errno policy below is hand-written; the Zig half of the same table is the std-name
 alias list in `src/api/errno.zig` (`aliases`), and `src/tests/managed/api.zig` provokes the same
 failures through the sync (Zig) and async (Rust) fs and asserts the same errno. `14..=21` are fixed by

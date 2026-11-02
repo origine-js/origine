@@ -304,7 +304,7 @@ fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, args: 
 /// Linux objcopy patterns are both generated from this one list. Every `#[no_mangle]` item of the
 /// Rust crates must start with one of these (`just check-contracts` greps for violations); the
 /// first prefix is origine's own C ABI (`origine_oxc_*`, `origine_api_*`, `origine_api_native_*`).
-const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector__", "v8__ValueSerializer__Delegate__", "v8__ValueDeserializer__Delegate__" };
+const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector__", "rusty_v8_RustObj_", "v8__ValueSerializer__Delegate__", "v8__ValueDeserializer__Delegate__" };
 
 /// Builds the Rust workspace in rust/ with cargo and returns the linkable result (see below),
 /// a cache file so consumers depend on its content. Borrows b through build

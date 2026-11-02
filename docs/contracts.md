@@ -115,7 +115,8 @@ What the ABI carries and who owns what is described in [repl-architecture.md](re
 
 ## F. Exported / kept symbols
 
-`kept_symbol_prefixes` in `build.zig` (`origine_`, `crdtp__`, `v8_inspector__`) is the only list:
+`kept_symbol_prefixes` in `build.zig` (`origine_`, `crdtp__`, `v8_inspector__`, `rusty_v8_RustObj_` (the cppgc
+callbacks that `libv8_zig.a` calls back into Rust: drop, trace, name), ...) is the only list:
 the macOS `-exported_symbols_list` file and the Linux `objcopy --keep-global-symbol` arguments are
 generated from it (the old `rust/exports.macos.txt` is gone). `rust/scripts/check-exports.sh`
 (part of `check-contracts`) fails when a `#[no_mangle]` function in a Rust crate does not start

@@ -47,7 +47,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
-use std::io::Write;
 use std::net::TcpStream;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::rc::Rc;
@@ -62,7 +61,7 @@ use crate::decode::ArrayBufferArg;
 use crate::host::Task;
 use crate::native;
 use crate::native::{ScopeKey, host_mut, host_ref};
-use crate::net::{ADDR_CAP, SEND_FLAGS, Socket, prepare, stream_of};
+use crate::net::{ADDR_CAP, Socket, prepare, stream_of};
 use crate::pinned;
 
 /// Bytes offered to one receive (the most a `data` event carries).
@@ -353,7 +352,7 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
             return;
         };
         let recving = Count::new(&idle.recving);
-        let (read, buf) = lp.recv(socket.fd(), buf, 0).await;
+        let (read, buf) = socket.recv(&lp, buf).await;
         drop(recving);
         match read {
             Ok(0) => {
@@ -422,19 +421,21 @@ async fn write_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
     loop {
         let next = shared.out.borrow_mut().queue.pop_front();
         let Some(mut chunk) = next else {
-            let mut out = shared.out.borrow_mut();
-            out.writing = false;
-            let fin = out.ended && out.failed.is_none();
-            out.wake();
-            drop(out);
+            let fin = {
+                let mut out = shared.out.borrow_mut();
+                out.writing = false;
+                let fin = out.ended && out.failed.is_none();
+                out.wake();
+                fin
+            };
             if fin {
-                socket.shutdown_write();
+                socket.finish_write().await;
             }
             shared.push(EventKind::Drain);
             return;
         };
         while !chunk.is_empty() {
-            let (result, buf) = lp.send(socket.fd(), chunk, SEND_FLAGS).await;
+            let (result, buf) = socket.send(&lp, chunk).await;
             chunk = buf;
             let sent = match result {
                 Ok(0) => Err(errno::BROKEN_PIPE),
@@ -624,7 +625,7 @@ fn net_take<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32) -> Res
 /// remembered per lease (an unreleased lease that is garbage collected has the same effect, later).
 /// `Unsupported` for a buffer that is shared or undetachable; the socket is not consulted.
 #[native(side_effect = "any", path = "net.release", needs = "runtime")]
-fn net_release<'s>(_scope:&mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
+fn net_release<'s>(_scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
     let _ = (key, id);
     let buffer = v8::Local::<v8::ArrayBuffer>::try_from(buffer).map_err(|_| NativeError::type_error("buffer must be an ArrayBuffer"))?;
     if buffer.was_detached() {
@@ -658,14 +659,6 @@ fn writer_of(host: &HostState, key: ScopeKey, id: u32) -> Result<Writer, NativeE
     Ok(Writer { socket, lp, shared: Rc::clone(&sub.shared), runtime: sub.runtime })
 }
 
-/// A write on `stream`: the bytes the kernel took, `Ok(0)` when it would block.
-fn kernel_write(stream: &TcpStream, bytes: &[u8]) -> Result<usize, std::io::Error> {
-    match (&*stream).write(bytes) {
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => Ok(0),
-        other => other,
-    }
-}
-
 /// `native.net.directWrite(id, data)`: the direct lane. A plain non-blocking write; answers the
 /// bytes the kernel took, 0 when it would block or while the outbox is busy (queued bytes go
 /// first). A write error throws its errno and the socket emits `error` and closes; `BrokenPipe`
@@ -684,8 +677,7 @@ fn net_direct_write(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBuf
         return Ok(0);
     }
     drop(out);
-    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    match data.with_bytes(|bytes| kernel_write(stream, bytes)) {
+    match data.with_bytes(|bytes| socket.try_write(bytes)) {
         Ok(n) => Ok(n),
         Err(error) => {
             let code = errno::errno_of(&error);
@@ -720,18 +712,16 @@ fn net_put(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_
         }
         return Ok(take);
     }
-    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let (kernel, rest) = match data
-        .with_bytes(|bytes| kernel_write(stream, bytes).map(|n| (n, bytes[n..bytes.len().min(n.saturating_add(max))].to_vec())))
-    {
-        Ok(pair) => pair,
-        Err(error) => {
-            drop(out);
-            let code = errno::errno_of(&error);
-            shared.fail(code);
-            return Err(NativeError::Errno(code));
-        }
-    };
+    let (kernel, rest) =
+        match data.with_bytes(|bytes| socket.try_write(bytes).map(|n| (n, bytes[n..bytes.len().min(n.saturating_add(max))].to_vec()))) {
+            Ok(pair) => pair,
+            Err(error) => {
+                drop(out);
+                let code = errno::errno_of(&error);
+                shared.fail(code);
+                return Err(NativeError::Errno(code));
+            }
+        };
     out.accepted += kernel as u64;
     out.sent += kernel as u64;
     if rest.is_empty() {
@@ -795,10 +785,20 @@ fn net_flushed(
 /// already is). Idempotent.
 #[native(side_effect = "any", path = "net.end", needs = "runtime")]
 fn net_end(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    let Writer { socket, shared, .. } = writer_of(host, key, id)?;
+    let Writer { socket, lp, shared, runtime } = writer_of(host, key, id)?;
     let mut out = shared.out.borrow_mut();
     if !std::mem::replace(&mut out.ended, true) && !out.writing && out.failed.is_none() {
-        socket.shutdown_write();
+        if !socket.is_tls() {
+            socket.shutdown_write();
+            return Ok(());
+        }
+        // `close_notify` then the FIN take the loop: the write pump does both once the outbox is empty.
+        out.writing = true;
+        drop(out);
+        if let Err(error) = host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared)))) {
+            shared.out.borrow_mut().writing = false;
+            return Err(error);
+        }
     }
     Ok(())
 }

@@ -110,17 +110,7 @@ pub(crate) static NATIVES: &[RawNative] = &[
     #[cfg(feature = "tls")]
     tls::NATIVE_TLS_ACCEPT,
     #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_READ,
-    #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_READ_COPY,
-    #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_WRITE,
-    #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_SHUTDOWN,
-    #[cfg(feature = "tls")]
     tls::NATIVE_TLS_PEER,
-    #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_CLOSE,
     #[cfg(feature = "http")]
     http::NATIVE_HTTP_SESSION,
     #[cfg(feature = "http")]

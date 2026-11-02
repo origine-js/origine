@@ -39,6 +39,16 @@ pub(crate) const ADDR_CAP: usize = 128;
 enum Endpoint {
     Listener(TcpListener),
     Stream(TcpStream),
+    /// A TLS stream over a plain stream socket (its handshake done): reads and writes carry plaintext.
+    #[cfg(feature = "tls")]
+    Tls(TlsConn),
+}
+
+/// The TLS stream of a socket and the plain socket under it (kept alive for its descriptor).
+#[cfg(feature = "tls")]
+struct TlsConn {
+    stream: origine_tls::TlsStream<crate::sockstream::SocketTransport>,
+    inner: Rc<Socket>,
 }
 
 /// A socket of the Host table.
@@ -65,6 +75,8 @@ impl Socket {
         match &self.endpoint {
             Endpoint::Listener(l) => l.as_raw_fd() as isize,
             Endpoint::Stream(s) => s.as_raw_fd() as isize,
+            #[cfg(feature = "tls")]
+            Endpoint::Tls(t) => t.inner.fd(),
         }
     }
 
@@ -72,11 +84,89 @@ impl Socket {
         matches!(self.endpoint, Endpoint::Listener(_))
     }
 
-    /// The stream of a stream socket.
-    pub(crate) fn stream(&self) -> Option<&TcpStream> {
+    /// The TLS stream and the plain socket under it, for a stream socket made by `tls.connect` / `tls.accept`.
+    #[cfg(feature = "tls")]
+    pub(crate) fn tls(&self) -> Option<(&origine_tls::TlsStream<crate::sockstream::SocketTransport>, &Rc<Socket>)> {
         match &self.endpoint {
-            Endpoint::Stream(stream) => Some(stream),
-            Endpoint::Listener(_) => None,
+            Endpoint::Tls(t) => Some((&t.stream, &t.inner)),
+            _ => None,
+        }
+    }
+
+    /// Whether reads and writes go through TLS (there is then no direct kernel lane).
+    pub(crate) fn is_tls(&self) -> bool {
+        #[cfg(feature = "tls")]
+        return matches!(self.endpoint, Endpoint::Tls(_));
+        #[cfg(not(feature = "tls"))]
+        false
+    }
+
+    /// One read into `buf`: the bytes received (0 = end of stream; for TLS, after the peer's `close_notify`).
+    pub(crate) async fn recv<B: origine_io::IoBufMut>(&self, lp: &origine_io::Loop, mut buf: B) -> (std::io::Result<usize>, B) {
+        match &self.endpoint {
+            #[cfg(feature = "tls")]
+            Endpoint::Tls(t) => {
+                let total = buf.bytes_total();
+                if total == 0 {
+                    return (Ok(0), buf);
+                }
+                let ptr = buf.stable_mut_ptr();
+                // SAFETY: `buf` owns `total` writable bytes at `ptr`.
+                unsafe { std::ptr::write_bytes(ptr, 0, total) };
+                // SAFETY: as above, now initialised; `buf` outlives the await below and nothing else touches the bytes.
+                let window = unsafe { std::slice::from_raw_parts_mut(ptr, total) };
+                match t.stream.read(window).await {
+                    Ok(n) => {
+                        // SAFETY: the first `n` bytes were just written.
+                        unsafe { buf.set_init(n.min(total)) };
+                        (Ok(n), buf)
+                    }
+                    Err(error) => (Err(error.into()), buf),
+                }
+            }
+            _ => lp.recv(self.fd(), buf, 0).await,
+        }
+    }
+
+    /// One write of (a prefix of) `buf`: the bytes taken. A TLS stream takes all of it.
+    pub(crate) async fn send<B: origine_io::IoBuf>(&self, lp: &origine_io::Loop, buf: B) -> (std::io::Result<usize>, B) {
+        match &self.endpoint {
+            #[cfg(feature = "tls")]
+            Endpoint::Tls(t) => {
+                let len = buf.bytes_init();
+                // SAFETY: `buf` owns `len` initialised bytes at `stable_ptr` for as long as it lives.
+                let bytes = unsafe { std::slice::from_raw_parts(buf.stable_ptr(), len) };
+                match t.stream.write(bytes).await {
+                    Ok(()) => (Ok(len), buf),
+                    Err(error) => (Err(error.into()), buf),
+                }
+            }
+            _ => lp.send(self.fd(), buf, SEND_FLAGS).await,
+        }
+    }
+
+    /// A non-blocking write: the bytes the kernel took, `Ok(0)` when it would block. A TLS stream has no direct
+    /// lane and always answers `Ok(0)`.
+    pub(crate) fn try_write(&self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::io::Write;
+        match &self.endpoint {
+            Endpoint::Stream(stream) => match (&*stream).write(bytes) {
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => Ok(0),
+                other => other,
+            },
+            _ => Ok(0),
+        }
+    }
+
+    /// Ends the write side: the FIN (for TLS, `close_notify` first). Reads on this side keep working.
+    pub(crate) async fn finish_write(&self) {
+        match &self.endpoint {
+            #[cfg(feature = "tls")]
+            Endpoint::Tls(t) => {
+                let _ = t.stream.shutdown().await;
+                t.inner.shutdown_write();
+            }
+            _ => self.shutdown_write(),
         }
     }
 
@@ -85,6 +175,17 @@ impl Socket {
         if let Endpoint::Stream(stream) = &self.endpoint {
             let _ = stream.shutdown(Shutdown::Write);
         }
+    }
+
+    /// A TLS socket of `owner` on `runtime` over `inner`.
+    #[cfg(feature = "tls")]
+    pub(crate) fn over_tls(
+        owner: ScopeKey,
+        runtime: u32,
+        stream: origine_tls::TlsStream<crate::sockstream::SocketTransport>,
+        inner: Rc<Socket>,
+    ) -> Socket {
+        Socket::new(owner, runtime, Endpoint::Tls(TlsConn { stream, inner }))
     }
 
     /// A stream socket (accepted by a subscription's pump) of `owner` on `runtime`.
@@ -103,8 +204,13 @@ impl Socket {
         for waker in self.closers.borrow_mut().drain(..) {
             waker.wake();
         }
-        if let Endpoint::Stream(stream) = &self.endpoint {
-            let _ = stream.shutdown(Shutdown::Both);
+        match &self.endpoint {
+            Endpoint::Stream(stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            #[cfg(feature = "tls")]
+            Endpoint::Tls(t) => t.inner.shutdown(),
+            Endpoint::Listener(_) => {}
         }
     }
 }
@@ -385,7 +491,7 @@ fn net_read(
         if len == 0 {
             return Ok(AllocRead::new(0, None));
         }
-        let (read, buf) = lp.recv(socket.fd(), buf, 0).await;
+        let (read, buf) = socket.recv(&lp, buf).await;
         Ok(AllocRead::new(read?, buf.into_store()))
     }))
 }
@@ -411,7 +517,7 @@ fn net_read_copy<'s>(
             if len == 0 {
                 return Ok(Vec::new());
             }
-            let (read, mut data) = lp.recv(socket.fd(), vec![0u8; len], 0).await;
+            let (read, mut data) = socket.recv(&lp, vec![0u8; len]).await;
             data.truncate(read?);
             Ok(data)
         },
@@ -439,7 +545,7 @@ fn net_read_into<'s>(
         return Err(NativeError::Errno(errno::UNSUPPORTED));
     }
     Ok(Op::new(runtime, async move {
-        let (read, buf) = lp.recv(socket.fd(), buf, 0).await;
+        let (read, buf) = socket.recv(&lp, buf).await;
         let bytes = read?;
         let store = buf.into_store().ok_or(NativeError::Errno(errno::UNEXPECTED))?;
         Ok(ReadInto::Pinned { bytes, store })

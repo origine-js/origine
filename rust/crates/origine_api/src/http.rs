@@ -135,8 +135,8 @@ fn fields_of(packed: &ArrayBufferArg<'_>) -> Result<FieldList, NativeError> {
 
 // ---- sessions ----
 
-/// `native.http.session(io, kind, id, role, streams, headers, window, connection, batch)`: starts an HTTP/2
-/// session over the stream socket (`kind` 0) or TLS stream (`kind` 1) `id`, which it consumes; `role` is 0 for a
+/// `native.http.session(io, id, role, streams, headers, window, connection, batch)`: starts an HTTP/2
+/// session over the stream socket `id` (plain or TLS), which it consumes; `role` is 0 for a
 /// client and 1 for a server; the rest are the `Limits`. Returns the session id.
 #[native(side_effect = "any", path = "http.session", needs = "runtime")]
 #[allow(clippy::too_many_arguments)]
@@ -144,7 +144,6 @@ fn http_session(
     host: &mut HostState,
     key: ScopeKey,
     io: u32,
-    kind: u32,
     id: u32,
     role: u32,
     streams: u32,
@@ -158,20 +157,17 @@ fn http_session(
         1 => Role::Server,
         _ => return Err(NativeError::Errno(errno::INVALID_INPUT)),
     };
-    let (transport, socket) = match kind {
-        0 => {
-            let (socket, lp) = take_socket(host, key, io, id)?;
-            (AnyTransport::Plain(SocketTransport { socket: Rc::clone(&socket), lp }), socket)
-        }
+    let (socket, lp) = take_socket(host, key, io, id)?;
+    // A TLS socket carries its stream and the plain socket under it; the session shuts the plain one down at its end.
+    #[cfg(feature = "tls")]
+    let tls = socket.tls().map(|(stream, inner)| (stream.clone(), Rc::clone(inner)));
+    #[cfg(not(feature = "tls"))]
+    let tls: Option<((), Rc<Socket>)> = None;
+    let (transport, socket) = match tls {
         #[cfg(feature = "tls")]
-        1 => {
-            let (tls, socket, runtime) = crate::tls::take_stream(host, key, id)?;
-            if runtime != io {
-                return Err(NativeError::Errno(errno::BAD_HANDLE));
-            }
-            (AnyTransport::Tls(tls), socket)
-        }
-        _ => return Err(NativeError::Errno(errno::INVALID_INPUT)),
+        Some((stream, inner)) => (AnyTransport::Tls(stream), inner),
+        #[allow(unreachable_patterns)]
+        _ => (AnyTransport::Plain(SocketTransport { socket: Rc::clone(&socket), lp }), socket),
     };
     let (handle, driver) = connect(role, Limits { streams, headers, window, connection, batch }, transport).map_err(h2_error)?;
     let session = host.http.next.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;

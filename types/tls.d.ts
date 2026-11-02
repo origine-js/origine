@@ -1,5 +1,5 @@
-import type { Mode, PullSocket } from "./net.d.ts";
-import type { BytesLike } from "./net.d.ts";
+import type { EventSocket, Mode, PullSocket, Socket } from './net.d.ts';
+import type { BytesLike } from './net.d.ts';
 
 /**
  * The authorities a peer is checked against. Built by a named constructor, which parses and validates:
@@ -61,55 +61,45 @@ export interface TlsServerOptions {
   alpn?: string[];
 }
 
-/**
- * An established TLS connection over a consumed {@link PullSocket}. Pull mode only for now: `mode: 'event'` is
- * refused with `Unsupported`. Not yet here (absent, not stubbed): the `queued` / `direct` write lanes, `readInto`,
- * `toEvent()`.
- */
-export declare class TlsSocket {
-  private constructor();
-  readonly io: unknown;
-  readonly closed: boolean;
+/** What the handshake of a socket made by {@link TlsClient.connect} / {@link TlsServer.accept} settled. */
+export interface TlsInfo {
   /** The negotiated ALPN protocol, or `undefined`. */
   readonly alpn: string | undefined;
-  readonly version: "tls1.2" | "tls1.3";
+  readonly version: 'tls1.2' | 'tls1.3';
   /** The name the client asked for (as given, or the SNI the server received). */
   readonly servername: string | undefined;
   /** The handshake resumed an earlier session. */
   readonly resumed: boolean;
   /** The peer's certificates in DER, leaf first; empty when it sent none. */
   readonly peer: Uint8Array[];
-  /** 1 to `length` plaintext bytes; empty only after the peer's `close_notify`. A connection cut without it rejects `UnexpectedEof`. */
-  read(length: number): Promise<Uint8Array>;
-  /** Reads once into `buffer` (not empty) by copy; the byte count, 0 after `close_notify`. */
-  readCopy(buffer: BytesLike): Promise<number>;
-  [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
-  /** Copies `data` now; resolves once all of it is in the transport. Sends go out in the order they were made. */
-  send(data: BytesLike): Promise<void>;
-  /** Sends `close_notify`; reading keeps working and later sends reject `BrokenPipe`. */
-  end(side: "write"): Promise<void>;
-  close(): Promise<void>;
-  [Symbol.asyncDispose](): Promise<void>;
 }
 
 export interface TlsConnectOptions<M extends Mode = Mode> {
   /** The name the certificate must be valid for (and the SNI sent). */
   servername: string;
+  /** The read mode of the socket the handshake makes. */
   mode: M;
+  /** As for `api.net.connect`. */
+  queued?: { limit?: number };
 }
 
 /** An immutable client configuration. Rejects `CertificateRejected` (reason in `subject`), `TlsAlert`, `NoApplicationProtocol`, `ProtocolError`, `UnexpectedEof`. */
 export declare class TlsClient {
   private constructor();
-  /** Handshakes over `socket`, which is consumed (a refused call leaves it usable; a failed handshake closes it). */
-  connect(socket: PullSocket, options: TlsConnectOptions<"pull">): Promise<TlsSocket>;
+  /**
+   * Handshakes over `socket`, which is consumed (a refused call leaves it usable; a failed handshake closes it), and
+   * resolves a new socket of the requested mode whose bytes are plaintext. Reads that hit a connection cut without
+   * `close_notify` fail `UnexpectedEof`; `end('write')` sends `close_notify` then the FIN. `queued.send` is the write
+   * path (`direct.write` always takes 0 bytes: there is no kernel lane under TLS).
+   */
+  connect<M extends Mode>(socket: PullSocket, options: TlsConnectOptions<M>): Promise<Socket<M>>;
   release(): void;
 }
 
 /** An immutable server configuration. */
 export declare class TlsServer {
   private constructor();
-  accept(socket: PullSocket, options: { mode: "pull" }): Promise<TlsSocket>;
+  accept<M extends Mode>(socket: PullSocket, options: { mode: M; queued?: { limit?: number } }): Promise<Socket<M>>;
   release(): void;
 }
 
@@ -121,7 +111,8 @@ export interface TlsCap {
   readonly TlsSessions: typeof TlsSessions;
   readonly TlsClient: typeof TlsClient;
   readonly TlsServer: typeof TlsServer;
-  readonly TlsSocket: typeof TlsSocket;
+  /** What the handshake of `socket` settled; `BadHandle` for a socket not made by `connect` / `accept`. */
+  info(socket: PullSocket | EventSocket): TlsInfo;
   client(options: TlsClientOptions): TlsClient;
   server(options: TlsServerOptions): TlsServer;
 }

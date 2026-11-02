@@ -1,13 +1,11 @@
 // `api.tls`: TLS 1.2/1.3 over `api.net` stream sockets (docs/http-design.md). An ES module factory used by
 // index.js, like net.js. Values that are parsed once and reused (`RootPki`, `Identity`, `ClientAuth`,
 // `TlsSessions`, `TlsClient`, `TlsServer`) are frozen classes built by named constructors; the native
-// parses and validates there, so a bad certificate fails with its own error. A `TlsSocket` is made from a
-// pull-mode `api.net` socket, which the handshake consumes. Pull mode only: `mode: 'event'` is `Unsupported`
-// until TLS sockets have a pump.
+// parses and validates there, so a bad certificate fails with its own error. A handshake consumes a pull-mode
+// `api.net` socket and makes a new one (pull or event) whose bytes are plaintext: the whole `api.net` socket
+// surface works on it, and `info(socket)` tells what the handshake settled.
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
-const { BadHandle, Unsupported } = errors;
-const MAX_READ = 1 << 28;
-const DONE = Promise.resolve();
+const { BadHandle } = errors;
 
 // `[u32 LE length | bytes]*` in one buffer: how a list of DER blobs crosses into a native.
 const pack = blobs => {
@@ -53,18 +51,30 @@ export default native => {
     return alpn.join('\n');
   };
 
-  /** A native value (an id in the Host's TLS table). `release()` forgets it; what was built from it keeps working. */
+  // A value that is garbage collected releases its table entry. Anything built from it holds its own copy in the
+  // native, so a collected `RootPki` never takes a live `TlsClient` down with it.
+  const reclaim = new FinalizationRegistry(id => {
+    try {
+      native.tls.release(id);
+    } catch {
+      // The scope is already gone, or the entry was released.
+    }
+  });
+
+  /** A native value (an id in the Host's TLS table). `release()` forgets it; what was built from it keeps working. Collecting the value does the same. */
   class Value {
     #id;
     constructor(made, id) {
       if (made !== token || new.target === Value) throw new TypeError('TLS values are made by their named constructors');
       this.#id = id;
+      reclaim.register(this, id, this);
     }
     static idOf(value, Class, name) {
       if (!(value instanceof Class)) throw new TypeError(`${name} must be a ${Class.name}`);
       return value.#id;
     }
     release() {
+      reclaim.unregister(this);
       native.tls.release(this.#id);
     }
   }
@@ -127,141 +137,37 @@ export default native => {
     }
   }
 
-  /** What a handshake settled, and the peer's certificates. */
-  class TlsSocket {
-    #id;
-    #io;
-    #info;
-    #tail = DONE;
-    #closed = false;
-    constructor(made, id, io, info) {
-      if (made !== token) throw new TypeError('TLS sockets are made by TlsClient.connect and TlsServer.accept');
-      this.#id = id;
-      this.#io = io;
-      this.#info = info;
-      Object.freeze(this.#info);
-    }
-    get io() {
-      return this.#io;
-    }
-    get closed() {
-      return this.#closed || closedIo.has(this.#io);
-    }
-    /** The negotiated ALPN protocol, or undefined. */
-    get alpn() {
-      return this.#info.alpn ?? undefined;
-    }
-    /** 'tls1.2' or 'tls1.3'. */
-    get version() {
-      return this.#info.version === 12 ? 'tls1.2' : 'tls1.3';
-    }
-    /** The name the client asked for (as given, or the SNI the server received), or undefined. */
-    get servername() {
-      return this.#info.servername ?? undefined;
-    }
-    /** Whether the handshake resumed an earlier session. */
-    get resumed() {
-      return this.#info.resumed;
-    }
-    /** The peer's certificates in DER, leaf first (empty when it sent none). */
-    get peer() {
-      return unpack(native.tls.peer(this.#id));
-    }
-    /** Reads once: a `Uint8Array` of 1 to `length` plaintext bytes, empty after the peer's `close_notify`. A connection cut without it rejects `UnexpectedEof`. */
-    read(length) {
-      try {
-        if (!Number.isSafeInteger(length) || length < 1 || length > MAX_READ) throw new TypeError('length must be an integer in 1..2**28');
-        return native.tls.read(this.#id, length);
-      } catch (e) {
-        return Promise.reject(e);
-      }
-    }
-    /** Reads once into `buffer` (at least one byte) by copy; resolves the byte count, 0 after `close_notify`. */
-    readCopy(buffer) {
-      try {
-        if (!(buffer instanceof ArrayBuffer) && !ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer or a view');
-        if (buffer.byteLength === 0) throw new TypeError('buffer must not be empty');
-        return native.tls.readCopy(this.#id, buffer);
-      } catch (e) {
-        return Promise.reject(e);
-      }
-    }
-    async *[Symbol.asyncIterator]() {
-      for (;;) {
-        const chunk = await this.read(65536);
-        if (chunk.length === 0) return;
-        yield chunk;
-      }
-    }
-    /** Sends `data` (copied now); resolves once all of it is in the transport. Sends go out in the order they were made. */
-    send(data) {
-      try {
-        if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) throw new TypeError('data must be an ArrayBuffer or a view');
-        const sent = this.#tail.then(() => native.tls.write(this.#id, data));
-        this.#tail = sent.catch(() => {});
-        return sent;
-      } catch (e) {
-        return Promise.reject(e);
-      }
-    }
-    /**
-     * Ends your side: sends `close_notify` once everything sent is out. Reading keeps working; later
-     * `send` rejects `BrokenPipe`. `side` is required and only 'write' exists here.
-     */
-    end(side) {
-      try {
-        if (side !== 'write') throw new TypeError("side must be 'write'");
-        const done = this.#tail.then(() => native.tls.shutdown(this.#id));
-        this.#tail = done.catch(() => {});
-        return done;
-      } catch (e) {
-        return Promise.reject(e);
-      }
-    }
-    /** Releases the socket and its transport; pending operations end. Idempotent. */
-    close() {
-      try {
-        if (!this.#closed) {
-          this.#closed = true;
-          native.tls.close(this.#id);
-        }
-        return DONE;
-      } catch (e) {
-        return Promise.reject(e);
-      }
-    }
-    [Symbol.asyncDispose]() {
-      return this.close();
-    }
-    static {
-      // For `api.http`: the native id of a TLS socket, or undefined for any other value.
-      shared.tlsTake = socket => {
-        if (socket === null || typeof socket !== 'object' || !(#id in socket)) return undefined;
-        if (socket.#closed || closedIo.has(socket.#io)) throw failure(BadHandle);
-        return {
-          kind: 1,
-          id: socket.#id,
-          io: socket.#io,
-          consume: () => {
-            socket.#closed = true;
-          },
-        };
-      };
-    }
-  }
+  // What each handshake settled, by the socket it made. `info(socket)` reads it.
+  const infos = new WeakMap();
 
-  const modeOf = options => {
+  // For `api.http`: what the handshake of a socket settled, or undefined.
+  shared.tlsInfo = socket => infos.get(socket);
+
+  const optionsOf = options => {
     const mode = own(options, 'mode');
     if (mode !== 'pull' && mode !== 'event') throw new TypeError("mode must be 'event' or 'pull'");
-    if (mode === 'event') throw failure(Unsupported);
+    return { mode, limit: shared.netQueueLimit(options) };
   };
-  const handshake = (config, socket, begin) => {
+  const handshake = (mode, limit, socket, begin) => {
     try {
       const taken = shared.netTake(socket);
       const done = begin(ioId(taken.io), taken.id);
       // The native took the socket: the old handle is consumed now, whatever the handshake does.
       taken.consume();
-      return done.then(info => new TlsSocket(token, info.id, taken.io, info));
+      return done.then(info => {
+        const made = shared.netMake(mode, info.id, taken.io, taken.port, limit);
+        infos.set(
+          made,
+          Object.freeze({
+            id: info.id,
+            alpn: info.alpn ?? undefined,
+            version: info.version === 12 ? 'tls1.2' : 'tls1.3',
+            servername: info.servername ?? undefined,
+            resumed: info.resumed,
+          }),
+        );
+        return made;
+      });
     } catch (e) {
       return Promise.reject(e);
     }
@@ -269,14 +175,18 @@ export default native => {
 
   /** An immutable client configuration; connections are made from it. */
   class TlsClient extends Value {
-    /** Handshakes over `socket` (a pull-mode `api.net` socket, consumed); `servername` and `mode` are required. */
+    /**
+     * Handshakes over `socket` (a pull-mode `api.net` socket, consumed) and resolves a new `api.net` socket
+     * (`mode`: 'pull' or 'event', required) whose bytes are plaintext; `servername` is required and
+     * `queued: { limit }` as for `api.net`. `tls.info(socket)` tells what the handshake settled.
+     */
     connect(socket, options) {
       try {
         const servername = own(options, 'servername');
         if (typeof servername !== 'string' || servername === '') throw new TypeError('servername must be a string');
-        modeOf(options);
+        const { mode, limit } = optionsOf(options);
         const id = idOf(this, TlsClient, 'this');
-        return handshake(this, socket, (io, sock) => native.tls.connect(io, id, sock, servername));
+        return handshake(mode, limit, socket, (io, sock) => native.tls.connect(io, id, sock, servername));
       } catch (e) {
         return Promise.reject(e);
       }
@@ -285,12 +195,12 @@ export default native => {
 
   /** An immutable server configuration; connections are accepted from it. */
   class TlsServer extends Value {
-    /** Handshakes over `socket` (a pull-mode `api.net` socket, consumed); `mode` is required. */
+    /** Handshakes over `socket` (a pull-mode `api.net` socket, consumed); `mode` is required, see `TlsClient.connect`. */
     accept(socket, options) {
       try {
-        modeOf(options);
+        const { mode, limit } = optionsOf(options);
         const id = idOf(this, TlsServer, 'this');
-        return handshake(this, socket, (io, sock) => native.tls.accept(io, id, sock));
+        return handshake(mode, limit, socket, (io, sock) => native.tls.accept(io, id, sock));
       } catch (e) {
         return Promise.reject(e);
       }
@@ -300,7 +210,7 @@ export default native => {
   // For `api.dns`: the native id of a `RootPki`.
   shared.tlsRootsId = roots => idOf(roots, RootPki, 'roots');
 
-  for (const C of [Value, RootPki, Identity, ClientAuth, TlsSessions, TlsSocket, TlsClient, TlsServer]) {
+  for (const C of [Value, RootPki, Identity, ClientAuth, TlsSessions, TlsClient, TlsServer]) {
     freezeMethods(C);
     freezeMethods(C.prototype);
     Object.freeze(C.prototype);
@@ -315,7 +225,24 @@ export default native => {
       TlsSessions,
       TlsClient,
       TlsServer,
-      TlsSocket,
+      /**
+       * What the handshake of a socket made by `connect` / `accept` settled: `{ alpn, version, servername,
+       * resumed, peer }`; `peer` is the peer's certificates in DER, leaf first (empty when it sent none).
+       * `BadHandle` for any other socket.
+       */
+      info(socket) {
+        const info = infos.get(socket);
+        if (info === undefined) throw failure(BadHandle);
+        return Object.freeze({
+          alpn: info.alpn,
+          version: info.version,
+          servername: info.servername,
+          resumed: info.resumed,
+          get peer() {
+            return unpack(native.tls.peer(shared.netId(socket)));
+          },
+        });
+      },
       /** `{ roots: RootPki (required), identity?: Identity, alpn?: string[], sessions?: TlsSessions }`. */
       client(options) {
         const roots = idOf(own(options, 'roots'), RootPki, 'roots');

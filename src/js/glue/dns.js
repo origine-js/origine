@@ -65,7 +65,16 @@ export default native => {
     }
   }
 
-  /** A resolver: lookups go through its servers in order. */
+  // A resolver that is garbage collected is released; lookups in flight hold it, so none is cut short.
+  const reclaim = new FinalizationRegistry(id => {
+    try {
+      native.dns.release(id);
+    } catch {
+      // The scope is already gone, or it was closed.
+    }
+  });
+
+  /** A resolver: lookups go through its servers in order. Closing it, or collecting it, releases it. */
   class Resolver {
     #id;
     #io;
@@ -74,6 +83,7 @@ export default native => {
       if (made !== token) throw new TypeError('resolvers are made by dns.resolver');
       this.#id = id;
       this.#io = io;
+      reclaim.register(this, id, this);
     }
     get io() {
       return this.#io;
@@ -105,6 +115,7 @@ export default native => {
     close() {
       if (!this.#closed) {
         this.#closed = true;
+        reclaim.unregister(this);
         native.dns.release(this.#id);
       }
       return DONE;

@@ -99,7 +99,7 @@ test "http: header lists, bad inputs and what ends a connection" {
         \\  const { plain, accepted } = await pair(api, io);
         \\  out.limits = throws(() => api.http.session(plain, { role: 'client', mode: 'pull', limits: { streams: 1 } }));
         \\  out.role = throws(() => api.http.session(plain, { role: 'peer', mode: 'pull', limits }));
-        \\  out.event = throws(() => api.http.session(plain, { role: 'client', mode: 'event', limits }));
+        \\  out.badMode = throws(() => api.http.session(plain, { role: 'client', mode: 'push', limits }));
         \\  out.untouched = !plain.closed;
         \\  const client = api.http.session(plain, { role: 'client', mode: 'pull', limits });
         \\  const server = api.http.session(accepted, { role: 'server', mode: 'pull', limits });
@@ -125,7 +125,7 @@ test "http: header lists, bad inputs and what ends a connection" {
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.list && report.badName === 'TypeError' && report.badValue === 'TypeError' && report.limits === 'TypeError' && report.role === 'TypeError' && report.event === 'Unsupported' && report.untouched && report.badHead === 'TypeError' && report.upper === 'TypeError' && report.reset === 8 && ['UnexpectedEof', 'ConnectionReset', 'BrokenPipe', 'NotConnected'].includes(report.aborted) && report.closedSession");
+    try check(p.scope, "report.list && report.badName === 'TypeError' && report.badValue === 'TypeError' && report.limits === 'TypeError' && report.role === 'TypeError' && report.badMode === 'TypeError' && report.untouched && report.badHead === 'TypeError' && report.upper === 'TypeError' && report.reset === 8 && ['UnexpectedEof', 'ConnectionReset', 'BrokenPipe', 'NotConnected'].includes(report.aborted) && report.closedSession");
 }
 
 test "http: h2 over TLS with ALPN" {
@@ -139,7 +139,7 @@ test "http: h2 over TLS with ALPN" {
         \\  const clientTls = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)), alpn: ['h2'] });
         \\  const serverTls = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
         \\  const { a, b } = await secure(api, io, clientTls, serverTls);
-        \\  out.alpn = a.alpn === 'h2' && b.alpn === 'h2';
+        \\  out.alpn = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2';
         \\  const client = api.http.session(a, { role: 'client', mode: 'pull', limits });
         \\  const server = api.http.session(b, { role: 'server', mode: 'pull', limits });
         \\  out.consumed = a.closed && b.closed;
@@ -184,8 +184,6 @@ test "http: connect and serve" {
         \\  // Inputs are checked before anything is dialed or bound.
         \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
         \\  out.noLimits = await outcome(api.http.connect(io, { port: server.port, mode: 'pull' }));
-        \\  out.connectEvent = await outcome(api.http.connect(io, { port: server.port, mode: 'event', limits }));
-        \\  out.serveEvent = throws(() => api.http.serve(io, { mode: 'event', limits }));
         \\  out.noPort = await outcome(api.http.connect(io, { mode: 'pull', limits }));
         \\  await server.close();
         \\  out.closed = server.closed && (await server.accept()) === undefined;
@@ -208,5 +206,72 @@ test "http: connect and serve" {
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.port && report.h2c && report.noLimits === 'TypeError' && report.connectEvent === 'Unsupported' && report.serveEvent === 'Unsupported' && report.noPort === 'TypeError' && report.closed && report.refused === 'ConnectionRefused' && report.tls && report.noAlpn === 'NoApplicationProtocol' && report.wrongName === 'CertificateRejected' && report.dropped");
+    try check(p.scope, "report.port && report.h2c && report.noLimits === 'TypeError' && report.noPort === 'TypeError' && report.closed && report.refused === 'ConnectionRefused' && report.tls && report.noAlpn === 'NoApplicationProtocol' && report.wrongName === 'CertificateRejected' && report.dropped");
+}
+
+test "http: event-mode servers, sessions and exchanges deliver in order" {
+    if (!m.Api.http_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const server = api.http.serve(io, { listen: { port: 0 }, mode: 'event', limits });
+        \\  out.classes = server instanceof api.http.EventHttpServer && !('accept' in server);
+        \\  let seen = 0;
+        \\  server.register('request', ex => {
+        \\    out.serverExchange = ex instanceof api.http.EventServerExchange;
+        \\    let path, size = 0;
+        \\    ex.register('headers', ev => { if (ev.kind === 'request') path = ev.path; });
+        \\    ex.register('data', ev => { size += ev.data.length; ex.consume(ev.data.length); });
+        \\    ex.register('end', () => {});
+        \\    ex.register('close', () => { seen++; ex.release(); });
+        \\    // The request has no body: the head ends the stream, so answer once the head came.
+        \\    ex.register('headers', ev => {
+        \\      if (!ev.endStream) return;
+        \\      ex.respond({ status: 200, headers: headersOf(api, [['x-path', path]]), body: 'stream' });
+        \\      ex.send(bytes(`event ${path}`)).then(() => ex.finish());
+        \\    });
+        \\  });
+        \\  const client = await api.http.connect(io, { port: server.port, mode: 'event', limits });
+        \\  const ex = client.open({ method: 'GET', scheme: 'http', authority: 'x', path: '/one' });
+        \\  out.clientExchange = ex instanceof api.http.EventClientExchange && !('next' in ex);
+        \\  const done = new Promise(resolve => {
+        \\    const parts = [];
+        \\    let status, path;
+        \\    ex.register('headers', ev => { if (ev.kind === 'response') { status = ev.status; path = ev.headers.get('x-path'); } });
+        \\    ex.register('data', ev => { parts.push(...ev.data); ex.consume(ev.data.length); });
+        \\    ex.register('close', ev => resolve({ status, path, body: text(parts), code: ev.code }));
+        \\  });
+        \\  const got = await done;
+        \\  out.response = got.status === 200 && got.path === '/one' && got.body === 'event /one' && got.code === 0;
+        \\  // A server with no `request` handler refuses the stream.
+        \\  const quiet = api.http.serve(io, { listen: { port: 0 }, mode: 'event', limits });
+        \\  const c2 = await api.http.connect(io, { port: quiet.port, mode: 'event', limits });
+        \\  const refused = c2.open({ method: 'GET', scheme: 'http', authority: 'x', path: '/none' });
+        \\  out.refused = await new Promise(resolve => { refused.register('close', ev => resolve(ev.code)); refused.register('error', () => resolve('error')); });
+        \\  // An event session pair, without the server wrapper.
+        \\  const { plain, accepted } = await pair(api, io);
+        \\  const s = api.http.session(accepted, { role: 'server', mode: 'event', limits });
+        \\  const c = api.http.session(plain, { role: 'client', mode: 'event', limits });
+        \\  out.sessionClasses = s instanceof api.http.EventServerSession && c instanceof api.http.ClientSession;
+        \\  const closed = new Promise(resolve => s.register('close', resolve));
+        \\  s.register('request', rx => { rx.register('headers', ev => { if (ev.endStream) { rx.respond({ status: 204 }); } }); });
+        \\  await c.ready();
+        \\  const e3 = c.open({ method: 'GET', scheme: 'http', authority: 'x', path: '/204' });
+        \\  out.status204 = await new Promise(resolve => e3.register('headers', ev => { if (ev.kind === 'response') resolve(ev.status); }));
+        \\  out.badEvent = (() => { try { e3.register('nope', () => {}); return 'no'; } catch (e) { return e.name; } })();
+        \\  await c.close();
+        \\  await s.close();
+        \\  await closed;
+        \\  await client.close();
+        \\  await c2.close();
+        \\  await server.close();
+        \\  await quiet.close();
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.classes && report.serverExchange && report.clientExchange && report.response && report.refused === 7 && report.sessionClasses && report.status204 === 204 && report.badEvent === 'TypeError'");
 }

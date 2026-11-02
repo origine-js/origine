@@ -1,6 +1,6 @@
 # HTTP/2, TLS, DNS and QUIC: design
 
-Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls`, `Resolver.lookup`; servers subject to the network ceiling; no cache, DNSSEC, DoH or DoQ). Not yet: event mode for TLS and HTTP, `api.quic`.
+Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull and event mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull and event mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls`, `Resolver.lookup`; servers subject to the network ceiling; no cache, DNSSEC, DoH or DoQ). Not yet: `api.quic`.
 
 Original status: **draft, first slice not implemented.** Scope: an HTTP/2 client and server (`api.http`) behind a build flag that is **on by default**, `api.tls`, `api.dns`, and interface-only declarations for `api.quic` and `api.net.udp`. Every public name is subject to [api-guidelines.md](api-guidelines.md); the shapes follow [`api.net`](../src/js/docs/net.md) (`mode: 'pull' | 'event'`, `queued` / `direct` write lanes, `end(side)`).
 
@@ -75,7 +75,7 @@ class HeaderList { put(name, value): void; get; getAll; has; length; [Symbol.ite
 tls.client({ roots: RootPki, identity?: Identity, alpn?: string[], sessions?: TlsSessions }): TlsClient
 tls.server({ identities: Identity[], clientAuth: ClientAuth, alpn?: string[] }): TlsServer
 TlsClient.connect(socket, { servername, mode }) / TlsServer.accept(socket, { mode })   // consume the plain socket
-// TlsSocket<M> = Socket<M> surface + alpn, version, peer. close_notify on end('write'); EOF without it is an error.
+// connect/accept resolve a plain Socket<M> (a TLS endpoint inside the socket table); tls.info(socket) = alpn, version, peer. close_notify on end('write'); EOF without it is an error.
 
 // api.http (HTTP/2)
 http.session(socket, { role: 'client' | 'server', mode, limits })                     // core: h2 over a stream you provide

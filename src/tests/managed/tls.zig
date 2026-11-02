@@ -81,12 +81,12 @@ test "tls: a handshake, data both ways, a clean close and a cut connection" {
         \\  const client = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)), alpn: ['h2', 'http/1.1'] });
         \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
         \\  const { a, b, plain } = await secure(api, io, client, server);
-        \\  out.negotiated = a.alpn === 'h2' && b.alpn === 'h2' && a.version === 'tls1.3' && a.servername === 'localhost' && b.servername === 'localhost';
-        \\  out.peer = a.peer.length === 1 && b.peer.length === 0;
+        \\  out.negotiated = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2' && tls.info(a).version === 'tls1.3' && tls.info(a).servername === 'localhost' && tls.info(b).servername === 'localhost';
+        \\  out.peer = tls.info(a).peer.length === 1 && tls.info(b).peer.length === 0;
         \\  out.consumed = plain.closed && await outcome(plain.read(1)) === 'BadHandle';
-        \\  await a.send(bytes('hello'));
+        \\  await a.queued.send(bytes('hello'));
         \\  out.up = text(await b.read(64));
-        \\  await b.send(bytes('world'));
+        \\  await b.queued.send(bytes('world'));
         \\  const buffer = new Uint8Array(16);
         \\  const n = await a.readCopy(buffer);
         \\  out.down = text(buffer.subarray(0, n));
@@ -94,12 +94,12 @@ test "tls: a handshake, data both ways, a clean close and a cut connection" {
         \\  const big = Uint8Array.from({ length: 300000 }, (_, i) => i % 251);
         \\  const drain = async (s, want) => { let got = 0, sum = 0; while (got < want) { const c = await s.read(65536); if (c.length === 0) break; got += c.length; for (const v of c) sum += v; } return [got, sum]; };
         \\  const expected = big.reduce((x, v) => x + v, 0);
-        \\  const [, , up, down] = await Promise.all([a.send(big), b.send(big), drain(b, big.length), drain(a, big.length)]);
+        \\  const [, , up, down] = await Promise.all([a.queued.send(big), b.queued.send(big), drain(b, big.length), drain(a, big.length)]);
         \\  out.bulk = up[0] === big.length && up[1] === expected && down[0] === big.length && down[1] === expected;
         \\  // A clean close: close_notify ends the read side, the other direction still works.
         \\  await a.end('write');
         \\  out.eof = (await b.read(16)).length === 0;
-        \\  out.writeAfterEnd = await outcome(a.send(bytes('x')));
+        \\  out.writeAfterEnd = await outcome(a.queued.send(bytes('x')));
         \\  await b.end('write');
         \\  out.eofBoth = (await a.read(16)).length === 0;
         \\  await a.close();
@@ -144,9 +144,8 @@ test "tls: refused certificates, bad inputs and what is not there yet" {
         \\  out.badPem = throws(() => tls.RootPki.fromPem(bytes('not a certificate')));
         \\  out.mismatch = throws(() => tls.Identity.fromPem(bytes(SERVER), bytes(ROGUE_KEY)));
         \\  out.types = throws(() => tls.client({ roots: {} })) === 'TypeError' && throws(() => new tls.RootPki()) === 'TypeError';
-        \\  // Event-mode TLS sockets and a missing mode are refused before anything is touched.
+        \\  // A missing mode is refused before anything is touched.
         \\  const { plain } = await pair(api, io);
-        \\  out.event = await outcome(client.connect(plain, { servername: 'localhost', mode: 'event' }));
         \\  out.stillUsable = !plain.closed;
         \\  out.noMode = await outcome(client.connect(plain, { servername: 'localhost' }));
         \\  await io.close();
@@ -154,5 +153,49 @@ test "tls: refused certificates, bad inputs and what is not there yet" {
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.unknownIssuer === 'CertificateRejected' && report.wrongName === 'CertificateRejected' && report.fine === 'ok,ok' && report.noClientCert && report.badPem === 'InvalidData' && report.mismatch === 'InvalidData' && report.types && report.event === 'Unsupported' && report.stillUsable && report.noMode === 'TypeError'");
+    try check(p.scope, "report.unknownIssuer === 'CertificateRejected' && report.wrongName === 'CertificateRejected' && report.fine === 'ok,ok' && report.noClientCert && report.badPem === 'InvalidData' && report.mismatch === 'InvalidData' && report.types && report.stillUsable && report.noMode === 'TypeError'");
+}
+
+test "tls: event-mode sockets deliver plaintext, send and end with close_notify" {
+    if (!tls_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { tls } = api;
+        \\  const client = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)) });
+        \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none() });
+        \\  const { plain, accepted } = await pair(api, io);
+        \\  const [a, b] = await Promise.all([client.connect(plain, { servername: 'localhost', mode: 'event' }), server.accept(accepted, { mode: 'event' })]);
+        \\  out.kinds = a instanceof api.net.EventSocket && b instanceof api.net.EventSocket;
+        \\  out.info = tls.info(a).version === 'tls1.3' && tls.info(b).servername === 'localhost';
+        \\  const big = Uint8Array.from({ length: 200000 }, (_, i) => i % 251);
+        \\  const expected = big.reduce((x, v) => x + v, 0);
+        \\  let got = 0, sum = 0, ended = false, failed = null;
+        \\  const finished = new Promise(resolve => {
+        \\    b.register('data', event => { const chunk = event.buffer(); got += chunk.length; for (const v of chunk) sum += v; event.buffer().unref(); });
+        \\    b.register('end', () => { ended = true; resolve(); });
+        \\    b.register('error', e => { failed = e.name; resolve(); });
+        \\  });
+        \\  // Handlers do not keep the program alive; a pending `io.run()` does (until every flowing handle closed).
+        \\  const running = io.run();
+        \\  await a.queued.send(big);
+        \\  await a.end('write');
+        \\  await finished;
+        \\  out.bulk = got === big.length && sum === expected && ended && failed === null;
+        \\  // The other way: b answers after the end.
+        \\  const reply = new Promise(resolve => a.register('data', event => resolve(text(event.buffer()))));
+        \\  await b.queued.send(bytes('pong'));
+        \\  out.reply = await reply;
+        \\  out.badInfo = (() => { try { tls.info(plain); return 'no'; } catch (e) { return e.name; } })();
+        \\  await a.close();
+        \\  await b.close();
+        \\  await running;
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.kinds && report.info && report.bulk && report.reply === 'pong' && report.badInfo === 'BadHandle'");
 }

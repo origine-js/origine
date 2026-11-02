@@ -40,8 +40,12 @@ export default native => {
     const core = live(socket);
     if (core.pending > 0 || core.queued.bytes > 0 || core.queued.waiting > 0) throw failure(WouldBlock);
     if (core.hub !== null || core.readEnded || core.writeEnded) throw failure(Unsupported);
-    return { kind: 0, id: core.id, io: core.io, consume: () => revoke(socket, () => {}) };
+    return { id: core.id, io: core.io, port: core.port, consume: () => revoke(socket, () => {}) };
   };
+  // For `api.tls`: a socket of the given mode over native id `id`, the native id of a live socket, and the
+  // `queued.limit` of an options object.
+  shared.netMake = (mode, id, io, port, limit) => makeSocket(mode, id, io, port, limit);
+  shared.netId = socket => live(socket).id;
 
   for (const C of [Lease, DataEvent, Handle, Server, PullServer, EventServer, SendQueue, Direct, Socket, PullSocket, EventSocket]) {
     freezeMethods(C);
@@ -74,6 +78,7 @@ export default native => {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('queued.limit must be a positive integer');
     return limit;
   };
+  shared.netQueueLimit = queueLimit;
   // Published for `api.http`'s `connect` and `serve`, which dial and listen through it.
   return () =>
     (shared.net = freeze({

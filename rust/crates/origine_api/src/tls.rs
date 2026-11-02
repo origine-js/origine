@@ -4,8 +4,8 @@
 //! configurations) live in the Host's TLS table as ids, bound to the scope that made them. A TLS
 //! stream is made from a plain `api.net` stream socket: `connect` / `accept` **consume** the socket
 //! (it leaves the socket table, so the old id is `BadHandle`) and the handshake runs on the socket's
-//! runtime. The stream then reads and writes plaintext; `close` shuts the transport down so pending
-//! operations end. Pull mode only: a TLS socket has no `subscribe` pump yet.
+//! runtime. The result is a new socket of the same table whose reads and writes carry plaintext, so
+//! every `net.*` native (pull reads, `subscribe` and the write lanes, `close`) works on it.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::future::Future;
 use std::io;
 use std::rc::Rc;
 
-use origine_api_core::{NativeError, errno, pin};
+use origine_api_core::{NativeError, errno};
 use origine_tls::{
     CertProblem, ClientAuth, ClientOptions, Identity, RootPki, ServerOptions, TlsClient, TlsError, TlsServer, TlsSessions, TlsStream,
     Version,
@@ -25,14 +25,6 @@ use crate::native;
 use crate::native::{Op, ScopeKey, host_mut};
 use crate::net::Socket;
 use crate::sockstream::{SocketTransport, take_socket};
-
-/// A TLS stream of the table.
-struct Stream {
-    owner: ScopeKey,
-    runtime: u32,
-    tls: TlsStream<SocketTransport>,
-    socket: Rc<Socket>,
-}
 
 enum Value {
     Roots(RootPki),
@@ -46,17 +38,12 @@ enum Value {
 #[derive(Default)]
 pub(crate) struct TlsState {
     next_value: u32,
-    next_stream: u32,
     values: BTreeMap<u32, (ScopeKey, Rc<Value>)>,
-    streams: BTreeMap<u32, Rc<Stream>>,
 }
 
 impl TlsState {
     pub(crate) fn clear(&mut self) {
         self.values.clear();
-        for stream in std::mem::take(&mut self.streams).values() {
-            stream.socket.shutdown();
-        }
     }
 
     fn add_value(&mut self, owner: ScopeKey, value: Value) -> Result<u32, NativeError> {
@@ -68,18 +55,6 @@ impl TlsState {
     fn value(&self, owner: ScopeKey, id: u32) -> Result<Rc<Value>, NativeError> {
         match self.values.get(&id) {
             Some((o, value)) if *o == owner => Ok(Rc::clone(value)),
-            _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-        }
-    }
-
-    fn reserve_stream(&mut self) -> Result<u32, NativeError> {
-        self.next_stream = self.next_stream.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
-        Ok(self.next_stream)
-    }
-
-    fn stream(&self, owner: ScopeKey, id: u32) -> Result<Rc<Stream>, NativeError> {
-        match self.streams.get(&id) {
-            Some(stream) if stream.owner == owner => Ok(Rc::clone(stream)),
             _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
         }
     }
@@ -248,7 +223,7 @@ fn tls_release(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), Nativ
 
 // ---- streams ----
 
-/// `{ id, alpn, version, servername, resumed }`: a new TLS stream and what its handshake settled
+/// `{ id, alpn, version, servername, resumed }`: a new TLS socket and what its handshake settled
 /// (`version` is 12 or 13; `alpn` and `servername` are absent when not negotiated).
 #[derive(crate::IntoJs)]
 pub struct Opened {
@@ -270,33 +245,18 @@ fn opened(id: u32, tls: &TlsStream<SocketTransport>) -> Opened {
     }
 }
 
-type StreamSlot = Rc<RefCell<Option<Stream>>>;
-
-/// Takes the TLS stream `id` out of the table for an HTTP/2 session: a handle on the stream, its transport
-/// socket (to shut down when the session ends) and its runtime. `BadHandle` for an unknown or foreign id.
-#[cfg(feature = "http")]
-pub(crate) fn take_stream(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-) -> Result<(TlsStream<SocketTransport>, Rc<Socket>, u32), NativeError> {
-    let stream = host.tls.stream(key, id)?;
-    host.tls.streams.remove(&id);
-    Ok((stream.tls.clone(), Rc::clone(&stream.socket), stream.runtime))
-}
+type Slot = Rc<RefCell<Option<Socket>>>;
 
 /// Registers a finished handshake: runs on the isolate thread before the promise resolves.
-fn registrar(slot: StreamSlot, id: u32) -> crate::native::Hook {
+fn registrar(slot: Slot, id: u32) -> crate::native::Hook {
     Box::new(move |scope: &mut v8::PinScope<'_, '_>| {
-        let stream = slot.borrow_mut().take().ok_or(NativeError::Errno(errno::CANCELED))?;
-        let host = host_mut(scope)?;
-        host.tls.streams.insert(id, Rc::new(stream));
-        Ok(())
+        let socket = slot.borrow_mut().take().ok_or(NativeError::Errno(errno::CANCELED))?;
+        host_mut(scope)?.insert_socket(id, socket)
     })
 }
 
 /// `native.tls.connect(io, config, socket, servername)`: Promise `Opened`. Consumes the stream socket
-/// `socket` (a failed handshake closes it). `config` is a client configuration id.
+/// `socket` (a failed handshake closes it) and answers a new socket id. `config` is a client configuration id.
 #[native(side_effect = "any", path = "tls.connect", needs = "runtime", promise)]
 fn tls_connect(
     host: &mut HostState,
@@ -311,8 +271,8 @@ fn tls_connect(
         _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
     };
     let (plain, lp) = take_socket(host, key, io, socket)?;
-    let id = host.tls.reserve_stream()?;
-    let slot: StreamSlot = Rc::default();
+    let id = host.reserve_socket()?;
+    let slot: Slot = Rc::default();
     let filled = Rc::clone(&slot);
     let future = async move {
         let transport = SocketTransport { socket: Rc::clone(&plain), lp };
@@ -324,7 +284,7 @@ fn tls_connect(
             }
         };
         let result = opened(id, &tls);
-        *filled.borrow_mut() = Some(Stream { owner: key, runtime: io, tls, socket: plain });
+        *filled.borrow_mut() = Some(Socket::over_tls(key, io, tls, plain));
         Ok(result)
     };
     Ok(Op::new(io, future).with_hook(registrar(slot, id)))
@@ -345,8 +305,8 @@ fn tls_accept(
         _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
     };
     let (plain, lp) = take_socket(host, key, io, socket)?;
-    let id = host.tls.reserve_stream()?;
-    let slot: StreamSlot = Rc::default();
+    let id = host.reserve_socket()?;
+    let slot: Slot = Rc::default();
     let filled = Rc::clone(&slot);
     let future = async move {
         let transport = SocketTransport { socket: Rc::clone(&plain), lp };
@@ -358,101 +318,22 @@ fn tls_accept(
             }
         };
         let result = opened(id, &tls);
-        *filled.borrow_mut() = Some(Stream { owner: key, runtime: io, tls, socket: plain });
+        *filled.borrow_mut() = Some(Socket::over_tls(key, io, tls, plain));
         Ok(result)
     };
     Ok(Op::new(io, future).with_hook(registrar(slot, id)))
 }
 
-/// `native.tls.read(id, len)`: Promise `Uint8Array` of 1..=`len` plaintext bytes (empty after the
-/// peer's `close_notify`). A connection cut without it rejects `UnexpectedEof`.
-#[native(side_effect = "any", path = "tls.read", needs = "runtime", promise)]
-fn tls_read(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-    len: u32,
-) -> Result<Op<'static, impl Future<Output = Result<Vec<u8>, NativeError>> + use<>>, NativeError> {
-    let len = pin::check_alloc_len(len as usize)?;
-    let stream = host.tls.stream(key, id)?;
-    Ok(Op::new(stream.runtime, async move {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let mut buf = vec![0u8; len];
-        let n = stream.tls.read(&mut buf).await.map_err(tls_error)?;
-        buf.truncate(n);
-        Ok(buf)
-    }))
-}
-
-/// `native.tls.readCopy(id, buffer)`: Promise of the byte count (0 = after `close_notify`) read once
-/// into the guest's `buffer`, which is not detached.
-#[native(side_effect = "any", path = "tls.readCopy", needs = "runtime", promise)]
-fn tls_read_copy<'s>(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-    buffer: ArrayBufferArg<'s>,
-) -> Result<Op<'s, impl Future<Output = Result<usize, NativeError>> + 'static + use<>>, NativeError> {
-    let stream = host.tls.stream(key, id)?;
-    let len = buffer.len();
-    Ok(Op::reading(
-        stream.runtime,
-        async move {
-            if len == 0 {
-                return Ok(Vec::new());
-            }
-            let mut data = vec![0u8; len];
-            let n = stream.tls.read(&mut data).await.map_err(tls_error)?;
-            data.truncate(n);
-            Ok(data)
-        },
-        buffer,
-    ))
-}
-
-/// `native.tls.write(id, data)`: Promise resolved once all of `data` (copied now) is in the transport.
-#[native(side_effect = "any", path = "tls.write", needs = "runtime", promise)]
-fn tls_write(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-    data: ArrayBufferArg<'_>,
-) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
-    let stream = host.tls.stream(key, id)?;
-    let data = data.to_vec();
-    Ok(Op::new(stream.runtime, async move { stream.tls.write(&data).await.map_err(tls_error) }))
-}
-
-/// `native.tls.shutdown(id)`: Promise resolved once `close_notify` is sent. Reading still works; later writes fail `BrokenPipe`.
-#[native(side_effect = "any", path = "tls.shutdown", needs = "runtime", promise)]
-fn tls_shutdown(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
-    let stream = host.tls.stream(key, id)?;
-    Ok(Op::new(stream.runtime, async move { stream.tls.shutdown().await.map_err(tls_error) }))
-}
-
-/// `native.tls.peer(id)`: the peer's certificates as `[u32 LE length | DER]*`, leaf first (empty if it sent none).
+/// `native.tls.peer(id)`: the peer's certificates of TLS socket `id` as `[u32 LE length | DER]*`, leaf first
+/// (empty if it sent none). `BadHandle` for a socket that is not a TLS one.
 #[native(side_effect = "any", path = "tls.peer", needs = "runtime")]
 fn tls_peer(host: &mut HostState, key: ScopeKey, id: u32) -> Result<Vec<u8>, NativeError> {
-    let stream = host.tls.stream(key, id)?;
+    let (socket, _) = host.socket(key, id)?;
+    let (tls, _) = socket.tls().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
     let mut packed = Vec::new();
-    for cert in stream.tls.info().peer {
+    for cert in tls.info().peer {
         packed.extend_from_slice(&(cert.len() as u32).to_le_bytes());
         packed.extend_from_slice(&cert);
     }
     Ok(packed)
-}
-
-/// `native.tls.close(id)`: drops the stream and shuts its transport down so pending operations end. `BadHandle` if unknown.
-#[native(side_effect = "any", path = "tls.close", needs = "runtime")]
-fn tls_close(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    let stream = host.tls.stream(key, id)?;
-    host.tls.streams.remove(&id);
-    stream.socket.shutdown();
-    Ok(())
 }

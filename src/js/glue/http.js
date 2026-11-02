@@ -2,9 +2,11 @@
 // by index.js, like net.js and tls.js. `HeaderList` is an ordered, packed sequence of fields (not a map): `put`
 // appends into one buffer and the whole list crosses into the native once. A session is made from a pull-mode
 // socket, which it consumes; streams are `ClientExchange` / `ServerExchange` objects over the session's table.
-// Pull mode only: `mode: 'event'` is `Unsupported` until sessions have a pump.
+// A session, a server and their exchanges have one of two read modes, fixed when they are made and visible in their
+// class: `Pull*` (`next()`, `accept()`) or `Event*` (`register(event, handler)`); the write side is shared. Event mode
+// is a dispatcher over the same natives, one event at a time, so handlers see events in order.
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
-const { BadHandle, Unsupported, NoApplicationProtocol } = errors;
+const { BadHandle, NoApplicationProtocol } = errors;
 const HEAD = 6;
 const DONE = Promise.resolve();
 
@@ -177,11 +179,8 @@ export default native => {
     get id() {
       return this.#id;
     }
-    /** The next event: `{ type: 'headers' | 'data' | 'end' | 'closed' }`, `undefined` after `closed`. A dead connection rejects. */
-    async next() {
-      const ev = await native.http.next(this.#sid, this.#id);
-      if (ev === undefined) return undefined;
-      return eventOf(ev);
+    static next(exchange) {
+      return native.http.next(exchange.#sid, exchange.#id).then(ev => (ev === undefined ? undefined : eventOf(ev)));
     }
     /** Gives `bytes` of received body back to the peer's window: call it when the data was used. */
     consume(bytes) {
@@ -229,6 +228,104 @@ export default native => {
       if (!Number.isInteger(status) || status < 100 || status > 599) throw new TypeError('status must be an integer in 100..599');
       const [sid, id] = ids(this);
       native.http.respond(sid, id, status, packed(own(options, 'headers')), bodyOf(options));
+    }
+  }
+
+  const rethrow = e => {
+    Promise.reject(e);
+  };
+  /**
+   * The handler table of an event-mode object. The first `register` starts `begin(hub)` (one microtask later, so
+   * handlers registered in the same turn all see the first event). A handler that throws goes to the `error`
+   * handlers; with none, or when one of those throws, it is an unhandled rejection.
+   */
+  const makeHub = (names, begin) => {
+    const handlers = new Map();
+    let started = false;
+    const hub = {
+      register(event, handler) {
+        if (!names.includes(event)) throw new TypeError(`event must be one of ${names.join(', ')}`);
+        if (typeof handler !== 'function') throw new TypeError('handler must be a function');
+        let entries = handlers.get(event);
+        if (entries === undefined) handlers.set(event, (entries = new Set()));
+        const entry = { fn: handler };
+        entries.add(entry);
+        if (!started) {
+          started = true;
+          DONE.then(() => begin(hub));
+        }
+        return freeze({
+          unregister() {
+            return entries.delete(entry);
+          },
+        });
+      },
+      /** Calls the handlers of `event`; whether there were any. */
+      emit(event, arg) {
+        const entries = handlers.get(event);
+        if (entries === undefined || entries.size === 0) return false;
+        for (const entry of Array.from(entries)) {
+          try {
+            entry.fn(arg);
+          } catch (e) {
+            if (event === 'error') rethrow(e);
+            else hub.fail(e);
+          }
+        }
+        return true;
+      },
+      fail(e) {
+        if (!hub.emit('error', e)) rethrow(e);
+      },
+    };
+    return hub;
+  };
+
+  class PullClientExchange extends ClientExchange {
+    /** The next event: `{ type: 'headers' | 'data' | 'end' | 'closed' }`, `undefined` after `closed`. A dead connection rejects. */
+    next() {
+      return Exchange.next(this);
+    }
+  }
+  class PullServerExchange extends ServerExchange {
+    /** As {@link PullClientExchange.next}. */
+    next() {
+      return Exchange.next(this);
+    }
+  }
+  const hubs = new WeakMap();
+  const pumpExchange = async (exchange, hub) => {
+    try {
+      for (;;) {
+        const ev = await Exchange.next(exchange);
+        if (ev === undefined) return;
+        if (ev.type === 'closed') hub.emit('close', ev);
+        else hub.emit(ev.type, ev);
+      }
+    } catch (e) {
+      hub.fail(e);
+    }
+  };
+  const registerOn = (exchange, event, handler) => {
+    let hub = hubs.get(exchange);
+    if (hub === undefined)
+      hubs.set(exchange, (hub = makeHub(['headers', 'data', 'end', 'close', 'error'], hub => pumpExchange(exchange, hub))));
+    return hub.register(event, handler);
+  };
+  class EventClientExchange extends ClientExchange {
+    /**
+     * Subscribes `handler` to `headers` (the head, `last` marks the end of a block), `data` (`{ data }`; give the bytes
+     * back with `consume`), `end`, `close` (`{ code }`) or `error` and returns `{ unregister() }`. Events are delivered
+     * one at a time, in order, from the first `register` on.
+     */
+    register(event, handler) {
+      return registerOn(this, event, handler);
+    }
+  }
+  class EventServerExchange extends ServerExchange {
+    /** As {@link EventClientExchange.register}. */
+    register(event, handler) {
+      return registerOn(this, event, handler);
     }
   }
 
@@ -291,6 +388,11 @@ export default native => {
     }
   }
   class ClientSession extends Session {
+    #event;
+    constructor(made, id, io, event) {
+      super(made, id, io);
+      this.#event = event;
+    }
     /** Opens a request: `head` is `{ method, scheme, authority, path }`; options `{ headers?: HeaderList, body?: 'stream' }`. */
     open(head, options) {
       const field = name => {
@@ -307,14 +409,23 @@ export default native => {
         packed(own(options, 'headers')),
         bodyOf(options),
       );
-      return new ClientExchange(token, Session.idOf(this), id);
+      return new (this.#event ? EventClientExchange : PullClientExchange)(token, Session.idOf(this), id);
     }
   }
   class ServerSession extends Session {
+    /** The next request stream of `session`, or undefined once it is over. */
+    static async take(session) {
+      const sid = Session.idOf(session);
+      const id = await native.http.accept(sid);
+      return id === undefined
+        ? undefined
+        : new (session instanceof EventServerSession ? EventServerExchange : PullServerExchange)(token, sid, id);
+    }
+  }
+  class PullServerSession extends ServerSession {
     /** The next request stream, or undefined once the session is over. */
-    async accept() {
-      const id = await native.http.accept(Session.idOf(this));
-      return id === undefined ? undefined : new ServerExchange(token, Session.idOf(this), id);
+    accept() {
+      return ServerSession.take(this);
     }
     async *[Symbol.asyncIterator]() {
       for (;;) {
@@ -322,6 +433,49 @@ export default native => {
         if (exchange === undefined) return;
         yield exchange;
       }
+    }
+  }
+  /** A request nobody listens for is refused (REFUSED_STREAM). */
+  const deliver = (hub, exchange) => {
+    if (hub.emit('request', exchange)) return;
+    exchange.reset(7);
+    exchange.release();
+  };
+  const sessionHubs = new WeakMap();
+  const closeSent = new WeakSet();
+  // `close` goes out once, whether the session ended or was closed here.
+  const sendClose = session => {
+    const hub = sessionHubs.get(session);
+    if (hub === undefined || closeSent.has(session)) return;
+    closeSent.add(session);
+    hub.emit('close');
+  };
+  const pumpRequests = async (session, hub) => {
+    try {
+      for (;;) {
+        const exchange = await ServerSession.take(session);
+        if (exchange === undefined) break;
+        deliver(hub, exchange);
+      }
+    } catch (e) {
+      if (!session.closed) hub.fail(e);
+    }
+    sendClose(session);
+  };
+  class EventServerSession extends ServerSession {
+    /**
+     * Subscribes `handler` to `request` (a new `EventServerExchange`; one nobody listens for is refused), `close` (the session
+     * is over) or `error` and returns `{ unregister() }`. Requests arrive in order from the first `register` on.
+     */
+    register(event, handler) {
+      let hub = sessionHubs.get(this);
+      if (hub === undefined) sessionHubs.set(this, (hub = makeHub(['request', 'close', 'error'], hub => pumpRequests(this, hub))));
+      return hub.register(event, handler);
+    }
+    close() {
+      const done = super.close();
+      sendClose(this);
+      return done;
     }
   }
 
@@ -338,19 +492,21 @@ export default native => {
   const modeOf = options => {
     const mode = own(options, 'mode');
     if (mode !== 'pull' && mode !== 'event') throw new TypeError("mode must be 'event' or 'pull'");
-    if (mode === 'event') throw failure(Unsupported);
+    return mode;
   };
 
-  const makeSession = (socket, role, limits) => {
-    const taken = shared.tlsTake?.(socket) ?? shared.netTake(socket);
-    const id = native.http.session(ioId(taken.io), taken.kind, taken.id, role === 'client' ? 0 : 1, ...limits);
+  const makeSession = (socket, role, limits, mode) => {
+    const taken = shared.netTake(socket);
+    const id = native.http.session(ioId(taken.io), taken.id, role === 'client' ? 0 : 1, ...limits);
     taken.consume();
-    return new (role === 'client' ? ClientSession : ServerSession)(token, id, taken.io);
+    const event = mode === 'event';
+    if (role === 'client') return new ClientSession(token, id, taken.io, event);
+    return new (event ? EventServerSession : PullServerSession)(token, id, taken.io);
   };
   // Runs a TLS handshake that must end in 'h2'; a connection that negotiated anything else is closed.
   const secured = async handshake => {
     const socket = await handshake();
-    if (socket.alpn !== 'h2') {
+    if (shared.tlsInfo(socket)?.alpn !== 'h2') {
       await socket.close();
       throw failure(NoApplicationProtocol);
     }
@@ -365,9 +521,11 @@ export default native => {
     #waiting = [];
     #closed = false;
     #dropped = 0;
-    constructor(made, listener, tls, limits) {
-      if (made !== token) throw new TypeError('servers are made by http.serve');
+    #hub = makeHub(['request', 'close', 'error'], () => {});
+    constructor(made, listener, tls, limits, mode) {
+      if (made !== token || new.target === HttpServer) throw new TypeError('servers are made by http.serve');
       this.#listener = listener;
+      const event = mode === 'event';
       const wake = () => {
         for (const resolve of this.#waiting.splice(0)) resolve();
       };
@@ -375,12 +533,20 @@ export default native => {
         let session;
         try {
           const socket = tls === undefined ? plain : await secured(() => tls.accept(plain, { mode: 'pull' }));
-          session = makeSession(socket, 'server', limits);
+          session = makeSession(socket, 'server', limits, mode);
           this.#sessions.add(session);
         } catch {
           // A client that fails its handshake, or does not speak h2, is dropped; `dropped` counts them.
           this.#dropped++;
           await plain.close().catch(() => {});
+          return;
+        }
+        if (event) {
+          session.register('request', exchange => deliver(this.#hub, exchange));
+          session.register('error', () => {
+            // The connection died; streams already handed out see it through their own events.
+          });
+          session.register('close', () => this.#sessions.delete(session));
           return;
         }
         try {
@@ -402,7 +568,20 @@ export default native => {
         }
         this.#closed = true;
         wake();
+        this.#hub.emit('close');
       })();
+    }
+    static next(server) {
+      return (async () => {
+        for (;;) {
+          if (server.#queue.length > 0) return server.#queue.shift();
+          if (server.#closed) return undefined;
+          await new Promise(resolve => server.#waiting.push(resolve));
+        }
+      })();
+    }
+    static on(server, event, handler) {
+      return server.#hub.register(event, handler);
     }
     /** The port listened on (the real one when `port: 0` was asked). */
     get port() {
@@ -415,21 +594,6 @@ export default native => {
     get dropped() {
       return this.#dropped;
     }
-    /** The next request from any connection, or undefined once the server is closed and none is left. */
-    async accept() {
-      for (;;) {
-        if (this.#queue.length > 0) return this.#queue.shift();
-        if (this.#closed) return undefined;
-        await new Promise(resolve => this.#waiting.push(resolve));
-      }
-    }
-    async *[Symbol.asyncIterator]() {
-      for (;;) {
-        const exchange = await this.accept();
-        if (exchange === undefined) return;
-        yield exchange;
-      }
-    }
     /** Stops listening and closes every session now. Idempotent. */
     async close() {
       this.#closed = true;
@@ -441,8 +605,47 @@ export default native => {
       return this.close();
     }
   }
+  class PullHttpServer extends HttpServer {
+    /** The next request from any connection, or undefined once the server is closed and none is left. */
+    accept() {
+      return HttpServer.next(this);
+    }
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        const exchange = await this.accept();
+        if (exchange === undefined) return;
+        yield exchange;
+      }
+    }
+  }
+  class EventHttpServer extends HttpServer {
+    /**
+     * Subscribes `handler` to `request` (a new `EventServerExchange` from any connection; one nobody listens for is
+     * refused), `close` (the server is over) or `error`, and returns `{ unregister() }`.
+     */
+    register(event, handler) {
+      return HttpServer.on(this, event, handler);
+    }
+  }
 
-  for (const C of [HeaderList, Exchange, ClientExchange, ServerExchange, Session, ClientSession, ServerSession, HttpServer]) {
+  for (const C of [
+    HeaderList,
+    Exchange,
+    ClientExchange,
+    ServerExchange,
+    PullClientExchange,
+    PullServerExchange,
+    EventClientExchange,
+    EventServerExchange,
+    Session,
+    ClientSession,
+    ServerSession,
+    PullServerSession,
+    EventServerSession,
+    HttpServer,
+    PullHttpServer,
+    EventHttpServer,
+  ]) {
     freezeMethods(C);
     freezeMethods(C.prototype);
     Object.freeze(C.prototype);
@@ -452,39 +655,49 @@ export default native => {
   return () =>
     freeze({
       HeaderList,
+      ClientExchange,
+      ServerExchange,
+      PullClientExchange,
+      PullServerExchange,
+      EventClientExchange,
+      EventServerExchange,
       ClientSession,
       ServerSession,
+      PullServerSession,
+      EventServerSession,
       HttpServer,
+      PullHttpServer,
+      EventHttpServer,
       /**
-       * Starts an HTTP/2 session over `socket` (a pull-mode `api.net` socket or a `TlsSocket`), which it consumes.
-       * Options: `role` ('client' | 'server'), `mode` ('pull'), `limits` ({ streams, headers, window, connection,
+       * Starts an HTTP/2 session over `socket` (a pull-mode `api.net` socket, plain or made by `api.tls`), which it consumes.
+       * Options: `role` ('client' | 'server'), `mode` ('pull' or 'event'), `limits` ({ streams, headers, window, connection,
        * batch }, all required; `connection` at least 65535). Synchronous: `await session.ready()` before opening streams.
        */
       session(socket, options) {
         const role = own(options, 'role');
         if (role !== 'client' && role !== 'server') throw new TypeError("role must be 'client' or 'server'");
-        modeOf(options);
-        return makeSession(socket, role, limitsOf(own(options, 'limits')));
+        const mode = modeOf(options);
+        return makeSession(socket, role, limitsOf(own(options, 'limits')), mode);
       },
       /**
        * Dials `{ host, port }` (loopback only for now; `host` defaults to 127.0.0.1) and resolves a `ClientSession`
        * once the peer's SETTINGS arrived. With `tls` (a `TlsClient` that offers 'h2' in its `alpn`) the connection is
        * TLS and `servername` (default: `host`) is checked; the peer must negotiate 'h2' (`NoApplicationProtocol`
-       * otherwise). Required: `port`, `mode` ('pull'), `limits`.
+       * otherwise). Required: `port`, `mode` ('pull' or 'event'), `limits`.
        */
       async connect(io, options) {
         const host = own(options, 'host') ?? '127.0.0.1';
         const port = own(options, 'port');
         if (typeof host !== 'string') throw new TypeError('host must be a string');
         if (!Number.isInteger(port) || port < 0 || port > 65535) throw new TypeError('port must be an integer in 0..65535');
-        modeOf(options);
+        const mode = modeOf(options);
         const limits = limitsOf(own(options, 'limits'));
         const tls = own(options, 'tls');
         const servername = own(options, 'servername') ?? host;
         if (typeof servername !== 'string') throw new TypeError('servername must be a string');
         let socket = await shared.net.connect(io, { host, port, mode: 'pull' });
         if (tls !== undefined) socket = await secured(() => tls.connect(socket, { servername, mode: 'pull' }));
-        const session = makeSession(socket, 'client', limits);
+        const session = makeSession(socket, 'client', limits, mode);
         try {
           await session.ready();
         } catch (e) {
@@ -496,13 +709,13 @@ export default native => {
       /**
        * Listens on `listen` (`{ host?, port? }`, loopback only for now) and serves HTTP/2 to every client. With `tls` (a
        * `TlsServer` whose `alpn` includes 'h2') connections are TLS and must negotiate 'h2'; without it the server
-       * speaks cleartext HTTP/2 (h2c), for loopback. Required: `mode` ('pull'), `limits`. The returned server keeps
+       * speaks cleartext HTTP/2 (h2c), for loopback. Required: `mode` ('pull' or 'event'), `limits`. The returned server keeps
        * the program alive until `close()`.
        */
       serve(io, options) {
         const listen = own(options, 'listen');
         if (listen !== undefined && (listen === null || typeof listen !== 'object')) throw new TypeError('listen must be an object');
-        modeOf(options);
+        const mode = modeOf(options);
         const limits = limitsOf(own(options, 'limits'));
         const tls = own(options, 'tls');
         const listener = shared.net.listen(io, {
@@ -511,7 +724,7 @@ export default native => {
           mode: 'pull',
           socketMode: 'pull',
         });
-        return new HttpServer(token, listener, tls, limits);
+        return new (mode === 'event' ? EventHttpServer : PullHttpServer)(token, listener, tls, limits, mode);
       },
     });
 };

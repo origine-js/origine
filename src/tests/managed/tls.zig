@@ -200,6 +200,43 @@ test "tls: event-mode sockets deliver plaintext, send and end with close_notify"
     try check(p.scope, "report.kinds && report.info && report.bulk && report.reply === 'pong' && report.badInfo === 'BadHandle'");
 }
 
+test "tls: the value classes are Rust-defined classes, frozen and brand-checked" {
+    if (!tls_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\import { IoError } from 'origine:@std/io';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const { tls } = api;
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
+        \\  const classes = [tls.RootPki, tls.Identity, tls.ClientAuth, tls.TlsSessions, tls.TlsClient, tls.TlsServer];
+        \\  out.names = classes.map(C => C.name).join() === 'RootPki,Identity,ClientAuth,TlsSessions,TlsClient,TlsServer';
+        \\  out.noNew = classes.every(C => throws(() => new C()) === 'TypeError') && throws(() => tls.RootPki()) === 'TypeError';
+        \\  out.frozen = classes.every(C => Object.isFrozen(C) && Object.isFrozen(C.prototype) &&
+        \\    Object.values(Object.getOwnPropertyDescriptors(C)).every(d => typeof d.value !== 'function' || Object.isFrozen(d.value)) &&
+        \\    Object.values(Object.getOwnPropertyDescriptors(C.prototype)).every(d => (typeof d.value !== 'function' || Object.isFrozen(d.value)) && !d.enumerable));
+        \\  out.statics = throws(() => { tls.RootPki.fromPem = null; }) === 'TypeError' && !Reflect.set(tls.RootPki, 'bundled', null) && typeof tls.RootPki.bundled === 'function';
+        \\  out.same = api.tls.RootPki === tls.RootPki && tls.RootPki.fromPem.name === 'fromPem' && tls.RootPki.fromPem.length === 1 && tls.TlsClient.prototype.connect.length === 2;
+        \\  const roots = tls.RootPki.bundled();
+        \\  const client = tls.client({ roots });
+        \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.require(roots) });
+        \\  out.instances = roots instanceof tls.RootPki && client instanceof tls.TlsClient && server instanceof tls.TlsServer && !(roots instanceof tls.Identity) &&
+        \\    tls.TlsSessions.create({ limit: 4 }) instanceof tls.TlsSessions && tls.ClientAuth.none() instanceof tls.ClientAuth &&
+        \\    Object.getPrototypeOf(roots) === tls.RootPki.prototype && Object.keys(roots).length === 0;
+        \\  out.receiver = throws(() => tls.RootPki.prototype.release.call(client)) === 'TypeError' && throws(() => tls.RootPki.prototype.release.call({})) === 'TypeError' &&
+        \\    throws(() => Object.create(tls.RootPki.prototype).release()) === 'TypeError';
+        \\  out.wrongConnect = await outcome(tls.TlsClient.prototype.connect.call(server, {}, { servername: 'x', mode: 'pull' }));
+        \\  out.args = throws(() => tls.RootPki.fromPem('pem')) === 'TypeError' && throws(() => tls.TlsSessions.create({ limit: 0 })) === 'TypeError' &&
+        \\    throws(() => tls.server({ identities: [], clientAuth: tls.ClientAuth.none() })) === 'TypeError' && throws(() => tls.client({ roots, alpn: [''] })) === 'TypeError' &&
+        \\    throws(() => tls.server({ identities: [roots], clientAuth: tls.ClientAuth.none() })) === 'TypeError';
+        \\  try { tls.RootPki.fromPem(bytes('nothing')); } catch (e) { out.errorClass = e instanceof IoError && e.name === 'InvalidData'; }
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.names && report.noNew && report.frozen && report.statics && report.same && report.instances && report.receiver && report.wrongConnect === 'TypeError' && report.args && report.errorClass");
+}
+
 test "tls: native values are freed with their wrappers and what was built from them survives" {
     if (!tls_enabled) return error.SkipZigTest;
     var p: Parent = undefined;

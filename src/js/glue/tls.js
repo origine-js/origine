@@ -1,28 +1,16 @@
 // `api.tls`: TLS 1.2/1.3 over `api.net` stream sockets (docs/http-design.md). An ES module factory used by
-// index.js, like net.js. Values that are parsed once and reused (`RootPki`, `Identity`, `ClientAuth`,
-// `TlsSessions`, `TlsClient`, `TlsServer`) are frozen classes built by named constructors; the native
-// parses and validates there, so a bad certificate fails with its own error. A handshake consumes a pull-mode
-// `api.net` socket and makes a new one (pull or event) whose bytes are plaintext: the whole `api.net` socket
-// surface works on it, and `info(socket)` tells what the handshake settled.
-import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
+// index.js, like net.js. The values that are parsed once and reused (`RootPki`, `Identity`, `ClientAuth`,
+// `TlsSessions`, `TlsClient`, `TlsServer`) are classes defined in Rust (rust/crates/origine_api/src/tls.rs,
+// `#[class]`): their named constructors parse and validate there, so a bad certificate fails with its own
+// error, and each instance owns its native value until it is collected. They are made per realm when the
+// capability is bound (never in a snapshot). A handshake consumes a pull-mode `api.net` socket and makes a new
+// one (pull or event) whose bytes are plaintext: the whole `api.net` socket surface works on it, and
+// `info(socket)` tells what the handshake settled. `connect` / `accept` are the only members written here:
+// they take and make the glue's `api.net` socket objects.
+import { freeze, own, failure, ioHandles, closedIo, errors, shared, hostError } from './util.js';
 const { BadHandle } = errors;
 
-// `[u32 LE length | bytes]*` in one buffer: how a list of DER blobs crosses into a native.
-const pack = blobs => {
-  const parts = Array.from(blobs, blob => {
-    if (!(blob instanceof Uint8Array)) throw new TypeError('each certificate must be a Uint8Array');
-    return blob;
-  });
-  const out = new Uint8Array(parts.reduce((n, p) => n + 4 + p.length, 0));
-  const view = new DataView(out.buffer);
-  let at = 0;
-  for (const part of parts) {
-    view.setUint32(at, part.length, true);
-    out.set(part, at + 4);
-    at += 4 + part.length;
-  }
-  return out;
-};
+// `[u32 LE length | bytes]*` in one buffer: how `tls.peer` returns a list of DER blobs.
 const unpack = bytes => {
   const out = [];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -33,102 +21,12 @@ const unpack = bytes => {
   }
   return out;
 };
-const bytesArg = (value, name) => {
-  if (!(value instanceof Uint8Array)) throw new TypeError(`${name} must be a Uint8Array`);
-  return value;
-};
 
 export default native => {
-  const token = {};
   const ioId = io => {
     if (io === null || typeof io !== 'object' || !ioHandles.has(io) || closedIo.has(io)) throw failure(BadHandle);
     return io.id;
   };
-  const alpnOf = options => {
-    const alpn = own(options, 'alpn') ?? [];
-    if (!Array.isArray(alpn) || alpn.some(name => typeof name !== 'string' || name === '' || name.includes('\n')))
-      throw new TypeError('alpn must be an array of protocol names');
-    return alpn.join('\n');
-  };
-
-  /**
-   * A native value: the object a native returned, which owns it. Nothing else holds the value, so it is freed when this
-   * object (and with it the native object) is garbage collected; `release()` lets go of it now. What was built from
-   * it holds its own copy, so neither ever breaks a live `TlsClient`.
-   */
-  class Value {
-    #handle;
-    constructor(made, handle) {
-      if (made !== token || new.target === Value) throw new TypeError('TLS values are made by their named constructors');
-      this.#handle = handle;
-    }
-    static handleOf(value, Class, name) {
-      if (!(value instanceof Class)) throw new TypeError(`${name} must be a ${Class.name}`);
-      if (value.#handle === null) throw failure(BadHandle);
-      return value.#handle;
-    }
-    release() {
-      this.#handle = null;
-    }
-  }
-  const handleOf = Value.handleOf;
-
-  /** The authorities a peer is checked against. */
-  class RootPki extends Value {
-    /** The Mozilla roots compiled into the binary. */
-    static bundled() {
-      return new RootPki(token, native.tls.rootsBundled());
-    }
-    /** Every certificate of a PEM bundle (`Uint8Array`); at least one. */
-    static fromPem(pem) {
-      return new RootPki(token, native.tls.rootsPem(bytesArg(pem, 'pem')));
-    }
-    /** An array of DER certificates (`Uint8Array`); at least one. */
-    static fromDer(certs) {
-      return new RootPki(token, native.tls.rootsDer(pack(certs)));
-    }
-  }
-
-  /** A certificate chain with the private key of its leaf, checked against each other. */
-  class Identity extends Value {
-    /** PEM chain (leaf first) and PEM private key. */
-    static fromPem(cert, key) {
-      return new Identity(token, native.tls.identityPem(bytesArg(cert, 'cert'), bytesArg(key, 'key')));
-    }
-    /** `{ cert: Uint8Array[] (DER, leaf first), key: Uint8Array (DER) }`. */
-    static fromDer(options) {
-      return new Identity(token, native.tls.identityDer(pack(own(options, 'cert') ?? []), bytesArg(own(options, 'key'), 'key')));
-    }
-  }
-
-  /** Whether a server asks the client for a certificate. */
-  class ClientAuth {
-    #roots;
-    constructor(made, roots) {
-      if (made !== token) throw new TypeError('use ClientAuth.none() or ClientAuth.require(roots)');
-      this.#roots = roots;
-    }
-    static none() {
-      return new ClientAuth(token, undefined);
-    }
-    static require(roots) {
-      if (!(roots instanceof RootPki)) throw new TypeError('roots must be a RootPki');
-      return new ClientAuth(token, roots);
-    }
-    static rootsOf(auth) {
-      if (!(auth instanceof ClientAuth)) throw new TypeError('clientAuth must be a ClientAuth');
-      return auth.#roots === undefined ? undefined : handleOf(auth.#roots, RootPki, 'roots');
-    }
-  }
-
-  /** A client-side resumption cache. Passing one to `client()` is what turns resumption on. */
-  class TlsSessions extends Value {
-    static create(options) {
-      const limit = own(options, 'limit');
-      if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('limit must be a positive integer');
-      return new TlsSessions(token, native.tls.sessions(limit));
-    }
-  }
 
   // What each handshake settled, by the socket it made. `info(socket)` reads it.
   const infos = new WeakMap();
@@ -166,8 +64,9 @@ export default native => {
     }
   };
 
-  /** An immutable client configuration; connections are made from it. */
-  class TlsClient extends Value {
+  // Defined on `TlsClient.prototype` / `TlsServer.prototype` by their installers, before they are frozen. The
+  // native checks `this` (a `TypeError` for anything but an instance) before it touches the socket.
+  const clientMembers = {
     /**
      * Handshakes over `socket` (a pull-mode `api.net` socket, consumed) and resolves a new `api.net` socket
      * (`mode`: 'pull' or 'event', required) whose bytes are plaintext; `servername` is required and
@@ -178,46 +77,33 @@ export default native => {
         const servername = own(options, 'servername');
         if (typeof servername !== 'string' || servername === '') throw new TypeError('servername must be a string');
         const { mode, limit } = optionsOf(options);
-        const id = handleOf(this, TlsClient, 'this');
-        return handshake(mode, limit, socket, (io, sock) => native.tls.connect(io, id, sock, servername));
+        return handshake(mode, limit, socket, (io, sock) => native.tls.connect(io, this, sock, servername));
       } catch (e) {
         return Promise.reject(e);
       }
-    }
-  }
-
-  /** An immutable server configuration; connections are accepted from it. */
-  class TlsServer extends Value {
+    },
+  };
+  const serverMembers = {
     /** Handshakes over `socket` (a pull-mode `api.net` socket, consumed); `mode` is required, see `TlsClient.connect`. */
     accept(socket, options) {
       try {
         const { mode, limit } = optionsOf(options);
-        const id = handleOf(this, TlsServer, 'this');
-        return handshake(mode, limit, socket, (io, sock) => native.tls.accept(io, id, sock));
+        return handshake(mode, limit, socket, (io, sock) => native.tls.accept(io, this, sock));
       } catch (e) {
         return Promise.reject(e);
       }
-    }
-  }
+    },
+  };
 
-  // For `api.dns`: the native id of a `RootPki`.
-  shared.tlsRootsHandle = roots => handleOf(roots, RootPki, 'roots');
-
-  for (const C of [Value, RootPki, Identity, ClientAuth, TlsSessions, TlsClient, TlsServer]) {
-    freezeMethods(C);
-    freezeMethods(C.prototype);
-    Object.freeze(C.prototype);
-    Object.freeze(C);
-  }
-
+  // Called when the capability is bound (index.js `late`): the installers exist only then.
   return () =>
     freeze({
-      RootPki,
-      Identity,
-      ClientAuth,
-      TlsSessions,
-      TlsClient,
-      TlsServer,
+      RootPki: native.tls.RootPki(hostError),
+      Identity: native.tls.Identity(hostError),
+      ClientAuth: native.tls.ClientAuth(hostError),
+      TlsSessions: native.tls.TlsSessions(hostError),
+      TlsClient: native.tls.TlsClient(hostError, clientMembers),
+      TlsServer: native.tls.TlsServer(hostError, serverMembers),
       /**
        * What the handshake of a socket made by `connect` / `accept` settled: `{ alpn, version, servername,
        * resumed, peer }`; `peer` is the peer's certificates in DER, leaf first (empty when it sent none).
@@ -238,25 +124,11 @@ export default native => {
       },
       /** `{ roots: RootPki (required), identity?: Identity, alpn?: string[], sessions?: TlsSessions }`. */
       client(options) {
-        const roots = handleOf(own(options, 'roots'), RootPki, 'roots');
-        const identity = own(options, 'identity');
-        const sessions = own(options, 'sessions');
-        return new TlsClient(
-          token,
-          native.tls.client(
-            roots,
-            identity === undefined ? undefined : handleOf(identity, Identity, 'identity'),
-            alpnOf(options),
-            sessions === undefined ? undefined : handleOf(sessions, TlsSessions, 'sessions'),
-          ),
-        );
+        return native.tls.client(options);
       },
       /** `{ identities: Identity[] (at least one), clientAuth: ClientAuth (required), alpn?: string[] }`. */
       server(options) {
-        const identities = own(options, 'identities');
-        if (!Array.isArray(identities) || identities.length === 0) throw new TypeError('identities must be a non-empty array of Identity');
-        const handles = identities.map(identity => handleOf(identity, Identity, 'identity'));
-        return new TlsServer(token, native.tls.server(handles, ClientAuth.rootsOf(own(options, 'clientAuth')), alpnOf(options)));
+        return native.tls.server(options);
       },
     });
 };

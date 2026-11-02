@@ -70,3 +70,24 @@ Risks:
 - Any wrapper reachable at snapshot time crashes snapshot creation (see 3).
 - `Object::wrap` needs a JS API object (template instance); plain `Object::new` objects cannot hold it.
 Not verified: whether CppHeap termination at isolate dispose runs every pending finalizer.
+
+## 5. Why a JS wrapper class over the cppgc object? (It is gone.)
+The first cut (`d284d3b`) made every native value an instance of one shared empty `FunctionTemplate` and wrapped
+that opaque object in a JS class (`class RootPki { #handle }`) in `src/js/glue/tls.js` / `dns.js`.
+- What the JS class bought: a class name and prototype, named static constructors, a brand check (`#handle`),
+  `new X()` refused, frozen statics and prototype, docs next to the code, and errors converted to the realm's
+  `IoError` by the glue's `settling` wrapper of every `native.*` function.
+- What it cost: two objects per value (the JS instance and the native one), a second brand check (the `TypeId`)
+  under the first, a `release()` that only dropped the JS reference, and every surface written twice (a JS
+  method calling a native that repeats the argument checks).
+- Everything on the first list is a property of a `FunctionTemplate`, which is what Deno does for its cppgc
+  objects (`#[op2] impl` with `#[constructor]`, `#[static_method]`, `#[getter]`, `libs/core/runtime/bindings.rs`):
+  a class name (`SetClassName`), a throwing constructor, statics on the template, methods and accessors on the
+  prototype template, instances from the instance template (`instanceof` works), the `TypeId` unwrap as the only
+  brand check. Freezing and the error class are per realm, so the installer native does both once per realm
+  (`class.rs`). So the class is now defined whole in Rust (`#[class]`, `rust/crates/origine_api/docs/natives.md`).
+- What stays in JS: members that need the glue's own objects (`TlsClient.connect` takes and makes `api.net`
+  sockets; `Resolver.lookup` returns `IpAddr`s and `Resolver.io` the `api.io` handle) are passed to the installer,
+  which defines them on the Rust prototype before freezing it. Symbol-keyed members (`Symbol.asyncDispose`) are
+  glue members too: the binding has no `v8::Symbol::GetAsyncDispose`, and reading `Symbol.asyncDispose` from a
+  realm's global at template time would let one realm poison an isolate-wide template.

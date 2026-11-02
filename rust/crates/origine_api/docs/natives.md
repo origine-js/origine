@@ -132,30 +132,62 @@ An operation in flight holds an `Rc<Socket>`, so closing never frees a descripto
    JS glue must use the same `native.<namespace>.<name>`; `just check-contracts` verifies both).
 3. Keep V8-free logic in `origine_api_core` / `origine_api_fs` so Miri covers it.
 
-## Native values owned by the garbage collector
+## Errors are enums
 
-Values a guest holds for a long time and that are not tied to a handle's lifetime (TLS roots, identities, session
-caches, configurations; DNS resolvers) are returned as **wrapper objects**: [`gc.rs`](../src/gc.rs) allocates the Rust
-value in the isolate's cppgc heap and wraps it with `Object::wrap` (one tag, a `TypeId` inside tells the types apart).
-`Gc<T>` is the `IntoJs` / `FromJs` type: on the way in it clones the `T` out of the wrapper (`ArgError` for anything
-else), so what a native builds from a value holds its own copy. The value is dropped when the wrapper is collected.
-Rules for a `T`: `Clone`, `'static`, self-contained. Its `Drop` runs inside a collection, so it must not touch
-`HostState`, V8 or a scope table. A wrapper must not be reachable when a snapshot is built; natives only make them at
-run time. Handles that keep the program alive (sockets, servers, sessions) stay in the Host tables and are closed
-explicitly. See [`docs/cppgc-research.md`](../../../../docs/cppgc-research.md) for why this needs no heap setup.
+A Rust failure is a value of an enum with one variant per cause, never a `String` built where it happens. Reuse the
+enums of the crates underneath (`io::ErrorKind`, `rustls::Error` through `origine_tls::TlsError`, `hickory_proto`'s
+errors through `origine_dns::DnsError`) and box large payloads so `Result` stays small. The text is written once, in
+the enum's `fmt::Display` (plus `std::error::Error::source` when it wraps another error), and the enum converts into
+`NativeError` with one `match` (`From<ClassError> for NativeError` in [`class.rs`](../src/class.rs), `tls_error` in
+`tls.rs`, `dns_error` in `dns.rs`). A bad argument is an `ArgError` (`argument N: expected X`, `X` a constant).
+
+## Rust-defined classes (`#[class]`)
+
+Values a guest holds for a long time and that are not tied to a handle's lifetime (TLS roots, identities, client
+authentication, session caches, configurations; DNS resolvers) are **instances of classes defined in Rust**. A
+`#[class(path = "ns.Name", side_effect = "..", needs = "..")]` impl block ([macro reference](../../origine_api_macros/docs/README.md#class))
+gives the type its own `FunctionTemplate` per isolate ([`class.rs`](../src/class.rs), made on first use, never in a
+snapshot): the class name, a constructor that throws (`new Name()` is a `TypeError`), `#[static_method]`s on the
+constructor, `&self` methods and `#[getter]`s on the prototype (non-enumerable). An instance is made from the
+template's instance template, so `instanceof` works, and owns its Rust value in the isolate's cppgc heap
+([`gc.rs`](../src/gc.rs), `Object::wrap`, one tag, a `TypeId` inside): the value is dropped when the instance is
+collected. The brand check is the unwrap: a member called on anything else throws `ClassError::Receiver` (a
+`TypeError`), and a `&Name` argument rejects anything but a `Name` (`argument N: expected a Name`).
+
+* **Arguments and results.** A `#[class]` type is `IntoJs` (a new instance in the current realm) and `&T` is
+  `FromJs` for any class `T` (also inside `Option`, `Vec` and `derive(FromJs)` structs with a lifetime, such as
+  `struct ClientConfig<'s> { roots: &'s RootPki }`). The borrow lasts for the call: a `promise` native or member clones
+  what it keeps (the values are `Arc`-backed), which is what holds a value alive across an `await`.
+* **Installation.** `#[class]` registers an installer native at its path (`CLASS_<NAME>` in `NATIVES`). The glue
+  calls `native.ns.Name(hostError, members?)` once per realm when the capability is bound (index.js `late`): it
+  returns the constructor after freezing it like `freezeMethods` (every member, the prototype, the constructor).
+  `hostError` is kept for the realm, so members, which the guest calls directly, throw and reject the realm's
+  `IoError` / `HostError` instances like the glue-wrapped natives. `members` are the few JS members that need the
+  glue's own objects (`TlsClient.connect` takes and makes `api.net` sockets); they are defined on the prototype
+  before it is frozen.
+* **Releasing.** `class::Releasable<T>` holds a value that `release()` can drop before the instance is collected
+  (`BadHandle` afterwards); what was built from it keeps its own copy.
+* **Rules for a class type:** `'static`, self-contained. Its `Drop` runs inside a collection, so it must not touch
+  `HostState`, V8 or a scope table. Members take `&self` (shared with the collector; mutation goes through a
+  `Cell`/`RefCell`) and cannot take a `ScopeKey` (a member is not bound to a scope; keep the owner in the value).
+  Handles that keep the program alive (sockets, servers, sessions) stay in the Host tables and are closed
+  explicitly.
+
+See [`docs/cppgc-research.md`](../../../../docs/cppgc-research.md) for the heap and why there is no JS wrapper class.
 
 ## `tls.*` (TLS, `needs = "runtime"`, feature `tls`)
 
-Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values (roots, identities, session caches, client and server configurations) live in the Host's TLS table as ids bound to the scope that made them (`BadHandle` otherwise); stream ids come from their own counter and are never reused. `connect` / `accept` take a plain stream socket **out of the socket table** and run the handshake on its runtime over a `SocketTransport` (`lp.recv` / `lp.send` on the descriptor); `close` shuts the transport down so pending operations end. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
+Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values are the classes `RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient` and `TlsServer` (see above; installed as `native.tls.<Class>`); stream ids come from their own counter and are never reused. `connect` / `accept` take a plain stream socket **out of the socket table** and run the handshake on its runtime over a `SocketTransport` (`lp.recv` / `lp.send` on the descriptor); `close` shuts the transport down so pending operations end. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
 
 | Native | Args | Returns |
 |---|---|---|
-| `tls.rootsBundled` | | wrapper object |
-| `tls.rootsPem` / `tls.rootsDer` | PEM bundle / `[u32 LE length \| DER]*` | wrapper object; `InvalidData` when none parse |
-| `tls.identityPem` / `tls.identityDer` | cert PEM, key PEM / packed chain, key DER | wrapper object; `InvalidData` for a bad pair |
-| `tls.sessions` | `limit` | wrapper object |
-| `tls.client` | `roots, identity (undefined none), alpn ("\n"-joined), sessions (undefined none)` | wrapper object |
-| `tls.server` | `identities (array of wrappers), clientRoots (undefined none), alpn` | wrapper object |
+| `tls.RootPki` | installer | class: `bundled()`, `fromPem(pem)`, `fromDer(certs[])` (`InvalidData` when none parse), `release()` |
+| `tls.Identity` | installer | class: `fromPem(cert, key)`, `fromDer({ cert[], key })` (`InvalidData` for a bad pair), `release()` |
+| `tls.ClientAuth` | installer | class: `none()`, `require(roots)` |
+| `tls.TlsSessions` | installer | class: `create({ limit })` (a positive integer), `release()` |
+| `tls.TlsClient` / `tls.TlsServer` | installer, glue members | classes: `release()`; `connect` / `accept` come from the glue |
+| `tls.client` | `{ roots, identity?, alpn?: string[], sessions? }` | a `TlsClient` |
+| `tls.server` | `{ identities (at least one), clientAuth, alpn?: string[] }` | a `TlsServer` |
 | `tls.connect` | `io, client, socket, servername` | Promise `{ id (a new api.net socket), alpn, version (12/13), servername, resumed }`; consumes `socket` |
 | `tls.accept` | `io, server, socket` | Promise, same shape |
 | `tls.peer` | `socket` | `[u32 LE length \| DER]*`, leaf first |
@@ -186,6 +218,7 @@ Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/doc
 
 | Native | Args | Returns |
 |---|---|---|
-| `dns.resolver` | `io, spec, roots (undefined none), timeout (ms), tries` | resolver wrapper object. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
-| `dns.lookup` | `resolver, name, family (0 both, 4, 6)` | Promise of `[4 \| 6, octets]*` |
+| `dns.Resolver` | installer, glue members | class (`ResolverHandle`): `closed` getter, `close()`; `lookup`, `io` and `Symbol.asyncDispose` come from the glue |
+| `dns.resolver` | `io, spec, roots (a RootPki, undefined none), timeout (ms), tries` | a `Resolver`. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
+| `dns.lookup` | `resolver, name, family (0 both, 4, 6)` | Promise of `[4 \| 6, octets]*`; `BadHandle` for a closed resolver or another scope's |
 

@@ -4,7 +4,9 @@ import type { BytesLike } from './net.d.ts';
 /**
  * The authorities a peer is checked against. Built by a named constructor, which parses and validates:
  * a bad certificate fails there with `InvalidData`. Frozen; `release()` forgets the native value
- * (configurations built from it keep working).
+ * (configurations built from it keep working). Like every `api.tls` value class it is defined natively: `new`
+ * throws a `TypeError`, and a method called on another object, or an instance of another class passed where
+ * this one is expected, is a `TypeError`.
  */
 export declare class RootPki {
   private constructor();

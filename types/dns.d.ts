@@ -74,6 +74,7 @@ export interface ResolverOptions {
   tries: number;
 }
 
+/** Made by {@link DnsCap.resolver}; defined natively (`new` throws a `TypeError`), frozen. */
 export declare class Resolver {
   private constructor();
   readonly io: Io;

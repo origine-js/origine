@@ -275,3 +275,172 @@ test "http: event-mode servers, sessions and exchanges deliver in order" {
     try p.run();
     try check(p.scope, "report.classes && report.serverExchange && report.clientExchange && report.response && report.refused === 7 && report.sessionClasses && report.status204 === 204 && report.badEvent === 'TypeError'");
 }
+
+// A server for the pool and fetch tests: `/echo` answers `<method> <path> auth=<authorization> body=<request body>`, `/rNNN`
+// redirects to /echo (`/xorigin` to `localhost`, `/loop` to itself), `/slow` answers after 100 ms, `/big` sends 300000 bytes.
+const client_prelude = prelude ++
+    \\const app = (api, io) => {
+    \\  const handle = async (ex, port) => {
+    \\    let path, method, auth = '', size = 0; const body = [];
+    \\    for (let ev; (ev = await ex.next()); ) {
+    \\      if (ev.type === 'headers' && ev.kind === 'request') { path = ev.path; method = ev.method; auth = ev.headers.get('authorization') ?? ''; }
+    \\      if (ev.type === 'data') { body.push(...ev.data); ex.consume(ev.data.length); }
+    \\      if ((ev.type === 'headers' && ev.endStream) || ev.type === 'end' || ev.type === 'closed') break;
+    \\    }
+    \\    const reply = async (status, fields, content) => {
+    \\      ex.respond({ status, headers: headersOf(api, fields), body: 'stream' });
+    \\      for (let at = 0; at < content.length; at += 16384) await ex.send(content.subarray(at, at + 16384));
+    \\      ex.finish(headersOf(api, [['x-done', 'yes']]));
+    \\    };
+    \\    const redirect = (status, to) => reply(status, [['location', to]], new Uint8Array(0));
+    \\    if (path === '/slow') await io.sleep(100);
+    \\    if (path === '/big') return reply(200, [], new Uint8Array(300000).fill(1));
+    \\    if (path === '/xorigin') return redirect(302, `http://localhost:${port}/echo`);
+    \\    if (path === '/loop') return redirect(302, '/loop');
+    \\    if (path === '/same') return redirect(302, '../echo?x=1');
+    \\    const m = /^\/r(\d\d\d)$/.exec(path);
+    \\    if (m) return redirect(Number(m[1]), '/echo');
+    \\    return reply(200, [], bytes(`${method} ${path} auth=${auth} body=${text(body)}`));
+    \\  };
+    \\  return { handle };
+    \\};
+    \\const listen = async (api, io, limitsOf = limits) => {
+    \\  const listener = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    \\  const sessions = [];
+    \\  const { handle } = app(api, io);
+    \\  (async () => { try { for (;;) {
+    \\    const session = api.http.session(await listener.accept(), { role: 'server', mode: 'pull', limits: limitsOf });
+    \\    sessions.push(session);
+    \\    (async () => { try { for await (const ex of session) handle(ex, listener.port).catch(() => {}); } catch {} })();
+    \\  } } catch {} })();
+    \\  return { port: listener.port, sessions, close: () => listener.close() };
+    \\};
+    \\const readAll = async response => { let n = 0; const parts = []; for await (const chunk of response.body) { n += chunk.length; if (parts.length < 200) parts.push(...chunk.subarray(0, 64)); } return { n, text: text(parts) }; };
+    \\
+;
+
+test "http: pool reuses sessions, opens another at the peer's stream limit, drops dead ones" {
+    if (!m.Api.http_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", client_prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const clock = api.io.create();
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
+        \\  const policy = { limit: 4, perKey: 4, idle: 30000, queue: 8 };
+        \\  out.checks = [throws(() => api.http.pool(io, { mode: 'pull', limits })), throws(() => api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 1 } })), throws(() => api.http.pool(io, { mode: 'x', limits, sessions: policy })), throws(() => api.http.pool(io, { mode: 'pull', sessions: policy }))].join();
+        \\  // Server streams limit 2: the peer's SETTINGS decide when the pool dials again.
+        \\  const server = await listen(api, io, { ...limits, streams: 2 });
+        \\  const target = { scheme: 'http', host: '127.0.0.1', port: server.port };
+        \\  const head = path => ({ method: 'GET', authority: 'x', path });
+        \\  const pool = api.http.pool(io, { mode: 'pull', limits, sessions: policy });
+        \\  out.policy = pool.sessions.limit === 4 && pool.sessions.idle === 30000 && Object.isFrozen(pool.sessions) && pool instanceof api.http.ClientPool;
+        \\  out.mode = pool.mode;
+        \\  for (let i = 0; i < 3; i++) await collect(await pool.open(target, head('/echo')));
+        \\  out.reused = pool.size === 1 && server.sessions.length === 1;
+        \\  let most = 0;
+        \\  const all = await Promise.all(Array.from({ length: 5 }, async () => { const ex = await pool.open(target, head('/slow')); most = Math.max(most, pool.size); return collect(ex); }));
+        \\  out.concurrent = all.every(r => r.status === 200) && most === 3 && server.sessions.length === 3;
+        \\  // A graceful close from the peer (GOAWAY) and a closed connection are noticed; the next request dials a new session.
+        \\  const before = server.sessions.length;
+        \\  for (const s of server.sessions) await s.end();
+        \\  await clock.sleep(100);
+        \\  const after = await collect(await pool.open(target, head('/echo')));
+        \\  out.goaway = after.status === 200 && server.sessions.length === before + 1;
+        \\  await server.sessions.at(-1).close();
+        \\  await clock.sleep(100);
+        \\  const again = await collect(await pool.open(target, head('/echo')));
+        \\  out.dead = again.status === 200 && server.sessions.length === before + 2;
+        \\  // Another origin (a different servername) is another key.
+        \\  await collect(await pool.open({ ...target, servername: 'other' }, head('/echo')));
+        \\  out.keyed = server.sessions.length === before + 3;
+        \\  // A name needs a lookup.
+        \\  out.name = await outcome(pool.open({ ...target, host: 'localhost' }, head('/echo')));
+        \\  // Idle sessions are closed after `idle` ms; an idle one makes room for another origin.
+        \\  const brief = api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 1, perKey: 1, idle: 40, queue: 0 } });
+        \\  await collect(await brief.open(target, head('/echo')));
+        \\  out.held = brief.size === 1;
+        \\  await clock.sleep(250);
+        \\  out.idle = brief.size === 0;
+        \\  const tight = api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 1, perKey: 1, idle: 30000, queue: 0 } });
+        \\  await collect(await tight.open(target, head('/echo')));
+        \\  await collect(await tight.open({ ...target, servername: 'evict' }, head('/echo')));
+        \\  out.evicted = tight.size === 1;
+        \\  // A full queue fails loudly.
+        \\  const slow = tight.open({ ...target, servername: 'evict' }, head('/slow')).then(collect, e => e.name);
+        \\  const full = await outcome(tight.open({ ...target, servername: 'evict2' }, head('/slow')));
+        \\  out.queue = full === 'WouldBlock' && (await slow).status === 200;
+        \\  await pool.close();
+        \\  out.closed = pool.closed && (await outcome(pool.open(target, head('/echo')))) === 'BadHandle';
+        \\  await brief.close();
+        \\  await tight.close();
+        \\  await server.close();
+        \\  await io.close();
+        \\  await clock.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.checks === 'TypeError,TypeError,TypeError,TypeError' && report.policy && report.mode === 'pull' && report.reused && report.concurrent && report.goaway && report.dead && report.keyed && report.name === 'InvalidInput' && report.held && report.idle && report.evicted && report.queue && report.closed");
+}
+
+test "http: fetch follows redirects with explicit rules and streams bodies" {
+    if (!m.Api.http_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", client_prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const server = await listen(api, io);
+        \\  const pool = api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 4, perKey: 2, idle: 30000, queue: 8 }, lookup: host => host === 'localhost' ? '127.0.0.1' : Promise.reject(new Error('unknown host')) });
+        \\  const base = `http://127.0.0.1:${server.port}`;
+        \\  const follow = { limit: 3, strip: ['authorization', 'cookie'] };
+        \\  const get = (path, extra = {}) => api.http.fetch(pool, { method: 'GET', url: base + path, redirect: follow, ...extra });
+        \\  const auth = headersOf(api, [['authorization', 'secret'], ['x-keep', '1']]);
+        \\  // Head and body of a plain response; trailers after the body.
+        \\  const plain = await get('/echo?q=1');
+        \\  const first = await readAll(plain);
+        \\  out.plain = plain.status === 200 && plain.url === `${base}/echo?q=1` && !plain.redirected && first.text === 'GET /echo?q=1 auth= body=' && plain.trailers.get('x-done') === 'yes';
+        \\  out.frozen = plain.headers instanceof api.http.HeaderList && Object.isFrozen(plain) && plain instanceof api.http.FetchResponse;
+        \\  out.once = (() => { try { plain.body[Symbol.asyncIterator](); return 'no'; } catch (e) { return e.name; } })();
+        \\  // Flow control: 300000 bytes through a 65535 byte window arrive in full because each chunk is given back on the next pull.
+        \\  const big = await get('/big');
+        \\  out.big = (await readAll(big)).n === 300000;
+        \\  // Stopping early cancels the stream and frees its slot.
+        \\  for (let i = 0; i < 5; i++) { const r = await get('/big'); for await (const chunk of r.body) break; }
+        \\  const closed = await get('/big'); closed.close();
+        \\  out.early = (await readAll(await get('/echo'))).text.startsWith('GET /echo');
+        \\  // Method rules of RFC 9110 section 15.4.
+        \\  const send = (status, method, body) => api.http.fetch(pool, { method, url: `${base}/r${status}`, headers: auth, body, redirect: follow }).then(r => readAll(r).then(b => b.text), e => e.name);
+        \\  out.r301 = await send(301, 'POST', bytes('hi'));
+        \\  out.r302 = await send(302, 'PUT', bytes('hi'));
+        \\  out.r303 = await send(303, 'PUT', bytes('hi'));
+        \\  out.r307 = await send(307, 'POST', bytes('hi'));
+        \\  out.r308 = await send(308, 'PUT', bytes('yo'));
+        \\  out.stream = await send(307, 'POST', (async function* () { yield bytes('a'); })());
+        \\  // A request body stream, sent while the response is read.
+        \\  const posted = await api.http.fetch(pool, { method: 'POST', url: `${base}/echo`, redirect: follow, body: (async function* () { yield bytes('abc'); yield bytes('def'); })() });
+        \\  out.upload = (await readAll(posted)).text;
+        \\  // Sensitive headers survive a redirect inside the origin and are dropped across origins.
+        \\  const same = await get('/same', { headers: auth });
+        \\  out.same = (await readAll(same)).text === 'GET /echo?x=1 auth=secret body=' && same.redirected;
+        \\  const cross = await get('/xorigin', { headers: auth });
+        \\  out.cross = (await readAll(cross)).text === 'GET /echo auth= body=' && cross.url === `http://localhost:${server.port}/echo` && cross.redirected;
+        \\  // Hop limit, no following.
+        \\  out.loop = await get('/loop').then(() => 'no', e => e.name);
+        \\  const manual = await get('/r302', { redirect: { limit: 0, strip: [] } });
+        \\  out.manual = manual.status === 302 && manual.headers.get('location') === '/echo';
+        \\  manual.close();
+        \\  // Bad inputs.
+        \\  const bad = f => f().then(() => 'no', e => e.name);
+        \\  out.bad = [await bad(() => api.http.fetch(pool, { method: 'GET', url: base })), await bad(() => api.http.fetch(pool, { method: 'GET', url: 'ftp://x/', redirect: follow })), await bad(() => api.http.fetch(pool, { method: 'GET', url: 'https://x/', redirect: follow })), await bad(() => api.http.fetch(pool, { method: 'GET', url: 'http://u@x/', redirect: follow }))].join();
+        \\  await pool.close();
+        \\  await server.close();
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.plain && report.frozen && report.once === 'TypeError' && report.big && report.early && report.r301 === 'GET /echo auth=secret body=' && report.r302 === 'PUT /echo auth=secret body=hi' && report.r303 === 'GET /echo auth=secret body=' && report.r307 === 'POST /echo auth=secret body=hi' && report.r308 === 'PUT /echo auth=secret body=yo' && report.stream === 'Unsupported' && report.upload === 'POST /echo auth= body=abcdef' && report.same && report.cross && report.loop === 'QuotaExceeded' && report.manual && report.bad === 'TypeError,TypeError,TypeError,TypeError'");
+}

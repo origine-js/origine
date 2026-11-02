@@ -118,6 +118,8 @@ pub(crate) static NATIVES: &[RawNative] = &[
     #[cfg(feature = "http")]
     http::NATIVE_HTTP_PING,
     #[cfg(feature = "http")]
+    http::NATIVE_HTTP_PEER,
+    #[cfg(feature = "http")]
     http::NATIVE_HTTP_GOAWAY,
     #[cfg(feature = "http")]
     http::NATIVE_HTTP_DESTROY,

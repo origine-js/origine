@@ -335,6 +335,12 @@ impl Session {
         ok(unsafe { sys::nghttp2_submit_rst_stream(self.raw, 0, stream as i32, code) })
     }
 
+    /// The peer's SETTINGS_MAX_CONCURRENT_STREAMS as last received; `u32::MAX` while the peer set none.
+    pub fn peer_streams(&self) -> u32 {
+        // SAFETY: `self.raw` is live.
+        unsafe { sys::nghttp2_session_get_remote_settings(self.raw, sys::SETTINGS_MAX_CONCURRENT_STREAMS) }
+    }
+
     /// Starts closing the connection: queues GOAWAY with `code`; streams already processed finish.
     pub fn goaway(&mut self, code: u32) -> Result<(), H2Error> {
         // SAFETY: `self.raw` is live.

@@ -1,5 +1,14 @@
 // Positive cases and `@ts-expect-error` negatives for api.http. Type-checked only, never run.
-import type { Api, ClientSession, PullServerSession, ServerExchange, StreamEvent } from '@origine/types';
+import type {
+  Api,
+  ClientPool,
+  ClientSession,
+  FetchResponse,
+  PullClientExchange,
+  PullServerSession,
+  ServerExchange,
+  StreamEvent,
+} from '@origine/types';
 
 export async function main(api: Api): Promise<void> {
   const io = api.io.create();
@@ -65,4 +74,41 @@ export async function main(api: Api): Promise<void> {
   exchange.respond({ status: 200 });
   // @ts-expect-error a session is made by http.session
   new api.http.ClientSession();
+
+  // Pool and fetch: every size is required; fetch needs a pull pool and an explicit redirect policy.
+  const pool: ClientPool<'pull'> = api.http.pool(io, {
+    mode: 'pull',
+    limits,
+    sessions: { limit: 8, perKey: 2, idle: 30000, queue: 16 },
+    lookup: async () => '127.0.0.1',
+  });
+  const pooled: PullClientExchange = await pool.open(
+    { scheme: 'http', host: 'example.test', port: 80 },
+    { method: 'GET', authority: 'example.test', path: '/' },
+  );
+  void pooled;
+  const response: FetchResponse = await api.http.fetch(pool, {
+    method: 'POST',
+    url: 'http://example.test/',
+    body: new Uint8Array(1),
+    redirect: { limit: 5, strip: ['authorization'] },
+  });
+  for await (const chunk of response.body) {
+    const size: number = chunk.length;
+    void size;
+  }
+  const trailer: string | undefined = response.trailers?.get('x-done');
+  void trailer;
+  // @ts-expect-error a redirect policy is required
+  await api.http.fetch(pool, { method: 'GET', url: 'http://example.test/' });
+  // @ts-expect-error fetch reads in pull mode
+  await api.http.fetch(api.http.pool(io, { mode: 'event', limits, sessions: { limit: 1, perKey: 1, idle: 0, queue: 0 } }), {
+    method: 'GET',
+    url: 'x',
+    redirect: { limit: 0, strip: [] },
+  });
+  // @ts-expect-error the session policy has no defaults
+  api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 1 } });
+  // @ts-expect-error a pool is made by http.pool
+  new api.http.ClientPool();
 }

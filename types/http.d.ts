@@ -222,6 +222,122 @@ export declare class EventHttpServer extends HttpServer {
 /** The server class of read mode `M`. */
 export type HttpServerOf<M extends Mode> = M extends 'pull' ? PullHttpServer : M extends 'event' ? EventHttpServer : never;
 
+/** The origin a pool request goes to; the pool keys its sessions on all of it. */
+export interface PoolTarget {
+  scheme: 'http' | 'https';
+  /** A name or an IP literal (lowercased for the key). A name needs the pool's `lookup`; `InvalidInput` otherwise. */
+  host: string;
+  port: number;
+  /** Required for `https`, forbidden for `http`. Sessions made with different configuration objects are never shared. */
+  tls?: TlsClient;
+  /** The name the certificate must be valid for; defaults to `host`. */
+  servername?: string;
+}
+
+/** The request head of {@link ClientPool.open}; the scheme is the target's. */
+export interface PoolRequestHead {
+  method: string;
+  authority: string;
+  path: string;
+}
+
+/** Sizes and times of a pool; all required, no defaults. */
+export interface PoolSessions {
+  /** Most sessions open (or being dialed) at once, over all origins. At the limit an idle session of another origin is closed to make room. */
+  limit: number;
+  /** Most sessions per origin. */
+  perKey: number;
+  /** Milliseconds a session with no stream open is kept. `0` closes it as soon as its last stream ends. */
+  idle: number;
+  /** Most requests waiting for a stream or session; one more rejects `WouldBlock`. */
+  queue: number;
+}
+
+export interface PoolOptions<M extends Mode = Mode> {
+  mode: M;
+  /** Limits of every session the pool dials. */
+  limits: HttpLimits;
+  sessions: PoolSessions;
+  /** Resolves a host name to an IP address (`api.dns` is the caller's job). Without it only IP literals are accepted. */
+  lookup?: (host: string) => string | Promise<string>;
+}
+
+/**
+ * HTTP/2 client sessions shared by the requests of a program. A request uses a session of its origin whose open streams are
+ * below the peer's `SETTINGS_MAX_CONCURRENT_STREAMS`; else the pool dials another session (one dial per origin at a time) if
+ * `sessions.perKey` and `sessions.limit` allow, else it waits. A session the peer closed or sent GOAWAY on is dropped (streams
+ * in flight finish) and not used again. Sessions keep the program alive until closed: `idle` or `close()`.
+ */
+export declare class ClientPool<M extends Mode = Mode> {
+  private constructor();
+  readonly mode: M;
+  /** The policy the pool was made with. */
+  readonly sessions: Readonly<PoolSessions>;
+  /** Sessions open or being dialed. */
+  readonly size: number;
+  /** Requests waiting. */
+  readonly waiting: number;
+  readonly closed: boolean;
+  /**
+   * Opens a request on a pooled session. The exchange holds a stream slot until its `closed` event is read (pull) or
+   * delivered (event), the connection dies, or `release()`: read it to the end or release it. Rejects `WouldBlock` when
+   * `sessions.queue` is full, `BadHandle` once the pool is closed, `InvalidInput` for a name without `lookup`.
+   */
+  open(target: PoolTarget, head: PoolRequestHead, options?: { headers?: HeaderList; body?: 'stream' }): Promise<ClientExchangeOf<M>>;
+  /** Closes every session now (streams in flight end) and rejects the requests waiting. Idempotent. */
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** Redirect rules; both fields required. */
+export interface RedirectRules {
+  /** Redirects followed before `QuotaExceeded`. `0` follows none: the 3xx response is returned. */
+  limit: number;
+  /** Lowercase header names dropped when a redirect changes the origin (scheme, host or port), e.g. `['authorization', 'cookie']`. */
+  strip: string[];
+}
+
+export interface FetchRequest {
+  method: string;
+  /** Absolute `http:` or `https:` URL without userinfo. The host is resolved by the pool's `lookup`. */
+  url: string;
+  headers?: HeaderList;
+  /**
+   * Bytes (sent again after a 307 or 308) or an async iterable of bytes (consumed once: a 307 or 308 then rejects
+   * `Unsupported`). Sent while the response is read; an error in the iterable resets the stream.
+   */
+  body?: BytesLike | AsyncIterable<BytesLike>;
+  /** The configuration of every `https` hop; an `https` URL without it is a `TypeError`. */
+  tls?: TlsClient;
+  redirect: RedirectRules;
+}
+
+/** The body of a {@link FetchResponse}: iterate it once with `for await`. */
+export declare class ResponseBody implements AsyncIterable<Uint8Array> {
+  private constructor();
+  /**
+   * Yields chunks. A chunk counts as used, and its bytes go back to the peer's window, when the next one is asked for:
+   * a slow reader slows the peer. Stopping early cancels the stream. A reset stream rejects.
+   */
+  [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
+}
+
+/** The final response of {@link HttpCap.fetch}. */
+export declare class FetchResponse {
+  private constructor();
+  readonly status: number;
+  readonly headers: HeaderList;
+  /** The URL of the last hop. */
+  readonly url: string;
+  readonly redirected: boolean;
+  readonly body: ResponseBody;
+  /** Trailing fields, once the body was read to its end. */
+  readonly trailers: HeaderList | undefined;
+  /** Cancels the stream if the body is not finished and gives its slot back. Idempotent. */
+  close(): void;
+  [Symbol.dispose](): void;
+}
+
 /** `api.http` (needs an `io`; built with `-Dhttp`, on by default). */
 export interface HttpCap {
   readonly HeaderList: typeof HeaderList;
@@ -238,6 +354,8 @@ export interface HttpCap {
   readonly HttpServer: typeof HttpServer;
   readonly PullHttpServer: typeof PullHttpServer;
   readonly EventHttpServer: typeof EventHttpServer;
+  readonly ClientPool: typeof ClientPool;
+  readonly FetchResponse: typeof FetchResponse;
   /**
    * Starts an HTTP/2 session over `socket` (a pull-mode `api.net` socket: plain for cleartext h2c, or one made by `api.tls` for h2), which it consumes. Synchronous. A session keeps the program alive until it is closed or its connection ends.
    */
@@ -247,4 +365,14 @@ export interface HttpCap {
   connect<M extends Mode>(io: Io, options: HttpConnectOptions<M>): Promise<ClientSession<M>>;
   /** Binds, listens and serves HTTP/2 to every client. */
   serve<M extends Mode>(io: Io, options: HttpServeOptions<M>): HttpServerOf<M>;
+  /** A pool of client sessions (see {@link ClientPool}). */
+  pool<M extends Mode>(io: Io, options: PoolOptions<M>): ClientPool<M>;
+  /**
+   * Sends `request` through `pool` and resolves once the final response head arrived (1xx blocks are skipped). Redirects
+   * follow `request.redirect`: 301 and 302 turn POST into GET, 303 turns every method but GET and HEAD into GET (the body and
+   * its content headers are dropped), 307 and 308 keep method and body. A redirect from https to http rejects
+   * `PermissionDenied`, one past `limit` `QuotaExceeded`, an unusable `Location` `ProtocolError`. The pool must be in pull mode.
+   * The response holds a stream slot until its body ends, its iteration stops or `close()`.
+   */
+  fetch(pool: ClientPool<'pull'>, request: FetchRequest): Promise<FetchResponse>;
 }

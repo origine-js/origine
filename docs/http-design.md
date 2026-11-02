@@ -1,6 +1,6 @@
 # HTTP/2, TLS, DNS and QUIC: design
 
-Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull and event mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull and event mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls/https`, `Resolver.lookup`; servers subject to the network ceiling; an opt-in resolver cache with TTL clamps; DoH over `origine_h2`; the `origine:@std/dns/presets` module; no DNSSEC or DoQ). Not yet: `api.quic`.
+Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull and event mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull and event mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls/https`, `Resolver.lookup`; servers subject to the network ceiling; an opt-in resolver cache with TTL clamps; DoH over `origine_h2`; the `origine:@std/dns/presets` module; no DNSSEC or DoQ). `api.http` client layer (phase 3): `http.pool` (sessions keyed by origin, peer stream limit via `native.http.peer`, explicit `limit`/`perKey`/`idle`/`queue`), redirect following and `http.fetch` (pull mode; `lookup` supplied by the caller, no DNS inside). Not yet: `api.quic`.
 
 Original status: **draft, first slice not implemented.** Scope: an HTTP/2 client and server (`api.http`) behind a build flag that is **on by default**, `api.tls`, `api.dns`, and interface-only declarations for `api.quic` and `api.net.udp`. Every public name is subject to [api-guidelines.md](api-guidelines.md); the shapes follow [`api.net`](../src/js/docs/net.md) (`mode: 'pull' | 'event'`, `queued` / `direct` write lanes, `end(side)`).
 
@@ -118,7 +118,7 @@ Built: the embedder's **network ceiling** ([net-grant.md](net-grant.md)): `conne
 | 0 | aws-lc + rustls cross-compile for every `build.zig` target with size delta; nghttp2 Zig build; `oio` UDP `sendmsg` / `recvmsg` smoke test | builds everywhere; default release <= 70 MB |
 | 1 | `origine:@std/net` addresses; `origine_tls`, `api.tls`; `origine_h2`, `api.http` on loopback (h2c and TLS) | `curl --http2-prior-knowledge`, `h2spec`, self-test client <-> server |
 | 2 | `origine_dns`, `api.dns` (system, udp, tcp, tls), presets, `api.net.udp` | lookups against local fixture servers; presets table test |
-| 3 | net grant (done), pool, redirects, DoH (done: one connection per query, no pooling) | SSRF suite |
+| 3 | net grant (done), pool (done), redirects and `fetch` (done), DoH (done: one connection per query, no pooling) | SSRF suite |
 | 4 | `api.quic` (ngtcp2 + nghttp3), DoQ, DNSSEC validation | `quic-interop-runner` subset, `curl --http3` |
 
 ## Open questions

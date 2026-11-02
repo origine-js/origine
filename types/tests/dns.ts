@@ -30,12 +30,12 @@ export async function main(api: Api, pem: Uint8Array): Promise<void> {
   await resolver.lookup('example.test', {});
   // @ts-expect-error addresses are made by named constructors
   new dns.IpAddr();
-  // @ts-expect-error every number of the cache is required
   dns.resolver(io, {
     servers: [],
     dnssec: 'off',
     timeout: 1,
     tries: 1,
+    // @ts-expect-error every number of the cache is required
     cache: { limit: 1, ttl: { min: 0 }, negative: { min: 0, max: 0 } },
   });
   // @ts-expect-error a URL is a string

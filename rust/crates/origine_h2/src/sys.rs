@@ -181,6 +181,7 @@ unsafe extern "C" {
     pub fn nghttp2_session_consume(session: *mut nghttp2_session, stream_id: i32, size: usize) -> c_int;
     pub fn nghttp2_session_consume_connection(session: *mut nghttp2_session, size: usize) -> c_int;
     pub fn nghttp2_session_set_local_window_size(session: *mut nghttp2_session, flags: u8, stream_id: i32, window: i32) -> c_int;
+    pub fn nghttp2_session_get_remote_settings(session: *const nghttp2_session, id: c_int) -> u32;
     pub fn nghttp2_session_terminate_session(session: *mut nghttp2_session, error_code: u32) -> c_int;
 
     pub fn nghttp2_submit_settings(session: *mut nghttp2_session, flags: u8, iv: *const SettingsEntry, niv: usize) -> c_int;

@@ -1,7 +1,7 @@
 // `@origine/types`: declarations for origine programs. See README.md.
 //
 // Importing this file (or listing the package in `types`) also declares the ambient modules
-// `origine:@std/errno|errors|io|fs|text|data|debug|quansync|transformer/oxc|graph/*`.
+// `origine:@std/errno|errors|io|fs|text|data|dns/presets|debug|quansync|transformer/oxc|graph/*`.
 /// <reference path="./globals.d.ts" />
 /// <reference path="./std/errno.d.ts" />
 /// <reference path="./std/io.d.ts" />
@@ -9,6 +9,7 @@
 /// <reference path="./std/fs.d.ts" />
 /// <reference path="./std/text.d.ts" />
 /// <reference path="./std/data.d.ts" />
+/// <reference path="./std/dns-presets.d.ts" />
 /// <reference path="./std/debug.d.ts" />
 /// <reference path="./std/quansync.d.ts" />
 /// <reference path="./std/transformer-oxc.d.ts" />

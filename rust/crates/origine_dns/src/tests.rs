@@ -70,13 +70,14 @@ fn queried(r: &Resolver<Fake>) -> Vec<String> {
                     Transport::Udp => "udp",
                     Transport::Tcp => "tcp",
                     Transport::Tls { .. } => "tls",
+                    Transport::Https { .. } => "https",
                 }
             )
         })
         .collect()
 }
 
-fn one() -> Vec<Server> {
+pub(super) fn one() -> Vec<Server> {
     vec![server(Transport::Udp, &["127.0.0.1:53"])]
 }
 
@@ -239,3 +240,5 @@ fn resolv_conf_and_hosts_parse() {
     assert_eq!(hosts.get("A"), [a("127.0.0.1"), a("::1")]);
     let _ = (Ipv4Addr::LOCALHOST, Ipv6Addr::LOCALHOST);
 }
+
+mod cache_tests;

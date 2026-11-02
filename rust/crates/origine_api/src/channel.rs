@@ -299,7 +299,13 @@ fn channel_create(host: &mut HostState, capacity: u32) -> Result<Ends, NativeErr
 /// `native.channel.brand(object, tx, rx, mode)`: marks `object` as a port over the two handles (see
 /// `message::BRAND`); only a marked object can be listed in a transfer list.
 #[native(side_effect = "any", path = "channel.brand")]
-fn channel_brand<'s>(scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::Object>, tx: u32, rx: u32, mode: u32) -> Result<(), NativeError> {
+fn channel_brand<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    tx: u32,
+    rx: u32,
+    mode: u32,
+) -> Result<(), NativeError> {
     message::brand(scope, object, tx, rx, mode)
 }
 
@@ -320,7 +326,10 @@ fn channel_identify(host: &mut HostState, identity: u32) -> Result<(), NativeErr
     Ok(())
 }
 
-fn transfer_list<'s>(scope: &mut v8::PinScope<'s, '_>, transfer: Option<v8::Local<'s, v8::Array>>) -> Result<Vec<v8::Local<'s, v8::Value>>, NativeError> {
+fn transfer_list<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    transfer: Option<v8::Local<'s, v8::Array>>,
+) -> Result<Vec<v8::Local<'s, v8::Value>>, NativeError> {
     let mut items = Vec::new();
     if let Some(list) = transfer {
         for index in 0..list.length() {
@@ -350,7 +359,9 @@ fn channel_stash<'s>(
 }
 
 fn take_stash(id: f64) -> Option<Message> {
-    (id >= 1.0 && id.fract() == 0.0).then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64)))).flatten()
+    (id >= 1.0 && id.fract() == 0.0)
+        .then(|| STASH.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|(_, map)| map.remove(&(id as u64))))
+        .flatten()
 }
 
 /// `native.channel.unstash(id)`: the stashed value, rebuilt in this isolate (its ports are taken

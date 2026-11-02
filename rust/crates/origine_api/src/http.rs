@@ -208,6 +208,17 @@ fn http_ping(
     Ok(Op::new(conn.runtime, async move { conn.connection.ping().await.map(|d| d.as_secs_f64() * 1000.0).map_err(conn_error) }))
 }
 
+/// `native.http.peer(session)`: the number of streams the peer allows at once (`2**32 - 1` while it set no limit; valid
+/// after `ready`), or -1 when no new stream can be opened (the peer sent GOAWAY or the connection ended).
+#[native(side_effect = "none", path = "http.peer", needs = "runtime")]
+fn http_peer(host: &mut HostState, key: ScopeKey, session: u32) -> Result<f64, NativeError> {
+    let conn = host.http.conn(key, session)?;
+    if conn.connection.going_away() || conn.connection.error().is_some() {
+        return Ok(-1.0);
+    }
+    Ok(f64::from(conn.connection.peer_streams()))
+}
+
 /// `native.http.goaway(session)`: starts a graceful close (GOAWAY); streams in flight finish.
 #[native(side_effect = "any", path = "http.goaway", needs = "runtime")]
 fn http_goaway(host: &mut HostState, key: ScopeKey, session: u32) -> Result<(), NativeError> {

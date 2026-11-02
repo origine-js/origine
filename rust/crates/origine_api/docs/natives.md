@@ -169,6 +169,7 @@ Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../.
 | `http.session` | `io, id (plain or TLS socket), role (0 client, 1 server), streams, headers, window, connection, batch` | session id; consumes the socket |
 | `http.ready` / `http.ping` | `session` | Promise (void / round trip in ms) |
 | `http.goaway` / `http.destroy` | `session` | sync; graceful close / end now |
+| `http.peer` | `session` | the peer's concurrent-stream limit (`2**32 - 1` when unset; valid after `ready`), or -1 when no new stream can be opened (GOAWAY received or connection ended) |
 | `http.open` | `session, method, scheme, authority, path, fields, body (0 none, 1 stream)` | stream id |
 | `http.accept` | `session` | Promise of the next request stream id, `undefined` when over |
 | `http.next` | `session, stream` | Promise `{ kind (0 headers, 1 data, 2 end, 3 closed), head (0 request, 1 response, 2 trailers), status, method, scheme, authority, path, fields, last, endStream, data, code }`, `undefined` after the last |

@@ -220,6 +220,16 @@ impl Connection {
         self.shared.kick();
     }
 
+    /// The peer's limit on concurrent streams (`u32::MAX` while it set none; known after [`Connection::ready`]).
+    pub fn peer_streams(&self) -> u32 {
+        self.shared.session.borrow().peer_streams()
+    }
+
+    /// Whether the peer sent GOAWAY: no new stream can be opened.
+    pub fn going_away(&self) -> bool {
+        self.shared.inner.borrow().goaway.is_some()
+    }
+
     /// How the connection ended, once it has: `None` while it runs or after a clean end.
     pub fn error(&self) -> Option<ConnError> {
         self.shared.inner.borrow().done.clone().and_then(Result::err)

@@ -38,7 +38,7 @@ await client.close();
 
 ## Sessions and streams
 
-`http.session(socket, { role, mode, limits })` is synchronous and **consumes** the socket (same rules as `tls.connect`: `WouldBlock` for a read pending or bytes queued, `Unsupported` for a subscribed socket; a refused call leaves the socket usable). `mode` is required and only `'pull'` exists. `limits` has no defaults. Until `ready()` resolves the peer's limits are unknown, so open streams after it.
+`http.session(socket, { role, mode, limits })` is synchronous and **consumes** the socket (same rules as `tls.connect`: `WouldBlock` for a read pending or bytes queued, `Unsupported` for a subscribed socket; a refused call leaves the socket usable). `mode` is required (`'pull'` or `'event'`, see Event mode). `limits` has no defaults. Until `ready()` resolves the peer's limits are unknown, so open streams after it.
 
 - `ClientSession.open(head, { headers?, body? })` queues a request head: `head` is `{ method, scheme, authority, path }`; `body: 'stream'` follows with `send` and `finish`. `ServerSession.accept()` (or `for await`) yields the request streams; `respond({ status, headers?, body? })` queues the response head.
 - `exchange.next()` yields `headers`, `data`, `end` and `closed` events in order, then `undefined`. A connection that died with the stream open rejects with the cause (`UnexpectedEof`, `ConnectionReset`, `ProtocolError`, ...).

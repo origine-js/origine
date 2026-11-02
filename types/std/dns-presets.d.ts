@@ -1,6 +1,7 @@
 // `origine:@std/dns/presets`: well-known public resolvers as data, not part of `DnsServer`.
 declare module 'origine:@std/dns/presets' {
-  import type { DnsServer, IpAddr } from '@origine/types';
+  import type { IpAddr } from 'origine:@std/net';
+  import type { DnsServer } from '@origine/types';
 
   /**
    * One provider. `udp` and `tcp` use port 53, `tls` port 853 and `https` port 443; each call makes a new

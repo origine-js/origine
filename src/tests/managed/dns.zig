@@ -8,6 +8,7 @@ const t = std.testing;
 
 // A DNS zone, a framed (TCP and DoT) server for it written in JS, and a datagram server in Zig on a thread.
 const prelude = tls_prelude ++
+    \\import { IpAddr, SocketAddr } from 'origine:@std/net';
     \\const u16 = (b, at) => (b[at] << 8) | b[at + 1];
     \\const question = q => {
     \\  let at = 12; const labels = [];
@@ -53,7 +54,7 @@ const prelude = tls_prelude ++
     \\  (async () => { for (;;) { let s; try { s = await listener.accept(); } catch { return; } handle(s); } })();
     \\  return listener;
     \\};
-    \\const local = (api, port) => api.dns.SocketAddr.new(api.dns.IpAddr.v4(127, 0, 0, 1), port);
+    \\const local = (api, port) => SocketAddr.new(IpAddr.v4(127, 0, 0, 1), port);
     \\const options = { dnssec: 'off', timeout: 2000, tries: 1 };
     \\const show = ips => ips.map(String).join();
     \\
@@ -152,40 +153,6 @@ const Udp = struct {
     }
 };
 
-test "dns: addresses parse, print and classify like Rust's" {
-    if (!m.Api.dns_enabled) return error.SkipZigTest;
-    var p: Parent = undefined;
-    try p.setup("init.js", prelude ++
-        \\export async function main(api) {
-        \\  const out = globalThis.report = {};
-        \\  const { IpAddr, SocketAddr } = api.dns;
-        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
-        \\  const rt = s => IpAddr.parse(s).toString();
-        \\  out.v4 = rt('1.2.3.4') === '1.2.3.4' && IpAddr.parse('1.2.3.4').family === 4 && IpAddr.v4(10, 0, 0, 1).toString() === '10.0.0.1';
-        \\  out.v6 = rt('::1') === '::1' && rt('2001:0db8:0:0:0:0:0:1') === '2001:db8::1' && rt('::') === '::' && rt('fe80::1:0:0:1') === 'fe80::1:0:0:1'
-        \\    && rt('1:0:0:2:0:0:0:3') === '1:0:0:2::3' && rt('::ffff:1.2.3.4') === '::ffff:1.2.3.4' && rt('1:2:3:4:5:6:7:8') === '1:2:3:4:5:6:7:8'
-        \\    && rt('ABCD::EF') === 'abcd::ef' && rt('::1.2.3.4') === '::102:304' && IpAddr.v6(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).toString() === '2001:db8::1';
-        \\  out.bad = ['', '1.2.3', '1.2.3.4.5', '256.1.1.1', '01.2.3.4', '1.2.3.-4', ':::', '1::2::3', '12345::', 'g::1', '1:2:3:4:5:6:7', '1:2:3:4:5:6:7:8:9', '::1%en0', '[::1]', '1.2.3.4:5', ' 1.2.3.4'].map(s => throws(() => IpAddr.parse(s))).every(n => n === 'TypeError');
-        \\  out.octets = IpAddr.parse('1.2.3.4').octets().join() === '1,2,3,4' && IpAddr.parse('::1').octets().length === 16 && IpAddr.fromOctets(Uint8Array.of(9, 8, 7, 6)).toString() === '9.8.7.6'
-        \\    && throws(() => IpAddr.fromOctets(new Uint8Array(5))) === 'TypeError' && throws(() => new IpAddr()) === 'TypeError';
-        \\  const c = s => { const a = IpAddr.parse(s); return [a.isLoopback(), a.isUnspecified(), a.isMulticast(), a.isPrivate(), a.isLinkLocal(), a.isDocumentation()].map(Number).join(''); };
-        \\  out.classes = c('127.0.0.1') === '100000' && c('::1') === '100000' && c('0.0.0.0') === '010000' && c('::') === '010000' && c('224.0.0.1') === '001000' && c('ff02::1') === '001000'
-        \\    && c('10.1.1.1') === '000100' && c('172.16.0.1') === '000100' && c('172.32.0.1') === '000000' && c('192.168.1.1') === '000100' && c('fc00::1') === '000100' && c('fd12::1') === '000100'
-        \\    && c('169.254.1.1') === '000010' && c('fe80::1') === '000010' && c('192.0.2.1') === '000001' && c('2001:db8::1') === '000001' && c('8.8.8.8') === '000000' && c('2606:4700::1') === '000000';
-        \\  const mapped = IpAddr.parse('::ffff:127.0.0.1');
-        \\  out.canonical = !mapped.isLoopback() && mapped.toCanonical().isLoopback() && mapped.toCanonical().toString() === '127.0.0.1' && IpAddr.parse('::1').toCanonical().toString() === '::1' && IpAddr.parse('::1.2.3.4').toCanonical().isV6();
-        \\  out.equals = IpAddr.parse('1.2.3.4').equals(IpAddr.v4(1, 2, 3, 4)) && !IpAddr.parse('::1').equals(IpAddr.parse('1.2.3.4')) && !IpAddr.parse('1.2.3.4').equals('1.2.3.4');
-        \\  const s = SocketAddr.parse('[::1]:853');
-        \\  out.socket = s.toString() === '[::1]:853' && s.port === 853 && s.ip.isV6() && SocketAddr.parse('1.2.3.4:53').toString() === '1.2.3.4:53' && SocketAddr.new(IpAddr.v4(1, 2, 3, 4), 0).port === 0 && s.equals(SocketAddr.new(IpAddr.parse('::1'), 853));
-        \\  out.socketBad = ['1.2.3.4', '[1.2.3.4]:53', '::1:53', '1.2.3.4:65536', '1.2.3.4:', ':53', '[::1]'].map(x => throws(() => SocketAddr.parse(x))).every(n => n === 'TypeError') && throws(() => SocketAddr.new(IpAddr.v4(1, 1, 1, 1), 70000)) === 'TypeError' && throws(() => SocketAddr.new('1.1.1.1', 1)) === 'TypeError';
-        \\  out.frozen = Object.isFrozen(IpAddr.parse('1.2.3.4')) && Object.isFrozen(IpAddr) && Object.isFrozen(IpAddr.prototype);
-        \\}
-    );
-    defer p.deinit();
-    try p.run();
-    try check(p.scope, "report.v4 && report.v6 && report.bad && report.octets && report.classes && report.canonical && report.equals && report.socket && report.socketBad && report.frozen");
-}
-
 test "dns: lookups over TCP, failover, timeouts and inputs" {
     if (!m.Api.dns_enabled) return error.SkipZigTest;
     var p: Parent = undefined;
@@ -193,7 +160,7 @@ test "dns: lookups over TCP, failover, timeouts and inputs" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create();
-        \\  const { DnsServer, IpAddr } = api.dns;
+        \\  const { DnsServer } = api.dns;
         \\  const tcp = listen(api, io, framed);
         \\  const resolver = api.dns.resolver(io, { servers: [DnsServer.tcp([local(api, tcp.port)])], ...options });
         \\  out.both = show(await resolver.lookup('web.test', { family: 'any' })) === '2001:db8::7,192.0.2.7';
@@ -412,7 +379,7 @@ test "dns: DNS over HTTPS" {
         \\  const roots = tls.RootPki.fromPem(bytes(CA));
         \\  const serverTls = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
         \\  const server = doh(api, io, serverTls);
-        \\  const loopback = dns.IpAddr.v4(127, 0, 0, 1);
+        \\  const loopback = IpAddr.v4(127, 0, 0, 1);
         \\  const url = path => `https://localhost:${server.port}${path}`;
         \\  const via = (path, extra = {}) => dns.resolver(io, { servers: [dns.DnsServer.https(url(path), [loopback])], roots, ...options, ...extra });
         \\  const resolver = via('/dns-query');
@@ -439,7 +406,7 @@ test "dns: DNS over HTTPS" {
         \\  out.urls = ['http://dns.test/q', 'https://', 'https://u@dns.test/q', 'https://dns.test:0/q', 'https://dns.test:65536/q', 'https://dns.test/q#frag', 'https://[::1]/q', 'https://dns .test/q', 'ftp://dns.test', '', 42, undefined].every(u => throws(() => DnsServer.https(u, [loopback])) === 'TypeError');
         \\  out.good = ['https://dns.test', 'https://DNS.test:8443/a/b?x=1', 'https://1.1.1.1/dns-query'].every(u => throws(() => DnsServer.https(u, [loopback])) === 'no');
         \\  out.needsRoots = throws(() => dns.resolver(io, { servers: [DnsServer.https(url('/dns-query'), [loopback])], ...options }));
-        \\  out.ceiling = throws(() => dns.resolver(io, { servers: [DnsServer.https('https://dns.test/dns-query', [dns.IpAddr.parse('192.0.2.1')])], roots, ...options }));
+        \\  out.ceiling = throws(() => dns.resolver(io, { servers: [DnsServer.https('https://dns.test/dns-query', [IpAddr.parse('192.0.2.1')])], roots, ...options }));
         \\  await io.close();
         \\}
     );
@@ -466,7 +433,7 @@ test "dns: presets are pinned data over the public constructors" {
         \\  out.keys = Object.keys(presets).join() === Object.keys(table).join();
         \\  out.table = Object.entries(table).every(([key, [name, ips]]) => presets[key].name === name && show(presets[key].servers) === ips);
         \\  out.frozen = Object.isFrozen(presets) && Object.isFrozen(presets.google) && Object.isFrozen(presets.google.servers);
-        \\  out.servers = presets.google.servers.every(ip => ip instanceof api.dns.IpAddr);
+        \\  out.servers = presets.google.servers.every(ip => ip instanceof IpAddr);
         \\  out.made = Object.values(presets).every(p => ['udp', 'tcp', 'tls', 'https'].every(k => p[k]() instanceof api.dns.DnsServer)) && presets.google.udp() !== presets.google.udp();
         \\  out.noQuic = presets.google.quic === undefined;
         \\  // They are public addresses: the network ceiling refuses them unless the embedder allows them.

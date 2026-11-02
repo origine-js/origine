@@ -8,6 +8,7 @@
 // block resolve to nothing or to a block page address. Addresses and TLS names are the providers' published ones
 // and are pinned by a test.
 import { provided } from 'origine:@internal/handles';
+import { IpAddr } from 'origine:@std/net';
 
 const freeze = Object.freeze;
 
@@ -15,7 +16,7 @@ const classes = () => provided('dns/classes');
 
 const preset = (name, { v4, v6, tls, https }) => {
   let servers;
-  const list = () => (servers ??= freeze([...v4, ...v6].map(text => classes().IpAddr.parse(text))));
+  const list = () => (servers ??= freeze([...v4, ...v6].map(text => IpAddr.parse(text))));
   const made = { name };
   Object.defineProperty(made, 'servers', { get: list, enumerable: true });
   // A fresh server each call: servers are frozen values, not shared state.

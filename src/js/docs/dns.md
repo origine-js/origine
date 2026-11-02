@@ -3,9 +3,11 @@
 `api.dns` exists wherever `api.net` does and is built with `-Ddns` (on by default; without it the getter throws `PermissionDenied`). It resolves a name to addresses (A and AAAA) through servers you name, over UDP, TCP, TLS (DoT) or HTTPS (DoH). The wire codec is hickory-proto; the resolver logic is ours ([`origine_dns`](../../../rust/crates/origine_dns/docs/README.md)); natives in [natives.md](../../../rust/crates/origine_api/docs/natives.md#dns-needs--runtime). Design: [docs/http-design.md](../../../docs/http-design.md).
 
 ```js
+import { SocketAddr } from 'origine:@std/net';
+
 const { dns } = api;
 const resolver = dns.resolver(io, {
-  servers: [dns.DnsServer.udp([dns.SocketAddr.parse('127.0.0.1:5353')])],
+  servers: [dns.DnsServer.udp([SocketAddr.parse('127.0.0.1:5353')])],
   dnssec: 'off', timeout: 2000, tries: 2,
 });
 const addresses = await resolver.lookup('example.test', { family: 'any' });   // IpAddr[], IPv6 first
@@ -15,7 +17,7 @@ await resolver.close();
 
 ## Addresses
 
-`IpAddr` is one class for both families (v4 = 4 octets, v6 = 16), in Rust's vocabulary: `IpAddr.v4(a,b,c,d)`, `v6(...8 segments)`, `fromOctets`, `parse`, `family`, `octets()`, `isV4`, `isV6`, `isUnspecified`, `isLoopback`, `isMulticast`, `isPrivate`, `isLinkLocal`, `isDocumentation`, `toCanonical()` (`::ffff:a.b.c.d` becomes `a.b.c.d`; **permission checks must use it**, an IPv4-mapped address is not loopback until then), `equals`, `toString` (RFC 5952 for v6). `parse` takes `1.2.3.4` or `::1` only (no port, brackets, zone, leading zeros). `SocketAddr` is an `IpAddr` and a port: `new`, `parse` (`1.2.3.4:53`, `[::1]:853`), `ip`, `port`. Both are frozen and made by named constructors (`TypeError` for bad input). For now they live on `api.dns`; they are meant to be shared with `api.net` and `api.tls`.
+`IpAddr` and `SocketAddr` are not part of `api.dns`: they are plain value types, so they live in `origine:@std/net` ([addr.md](addr.md)) and `api.dns` neither re-exports them nor has a second spelling (one obvious way). `Resolver.lookup` returns that module's `IpAddr` instances and `DnsServer` takes them.
 
 ## Servers and resolvers
 

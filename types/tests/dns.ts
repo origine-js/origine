@@ -1,14 +1,15 @@
 // Positive cases and `@ts-expect-error` negatives for api.dns. Type-checked only, never run.
-import type { Api, IpAddr } from '@origine/types';
+import type { Api } from '@origine/types';
+import { IpAddr, SocketAddr } from 'origine:@std/net';
 
 export async function main(api: Api, pem: Uint8Array): Promise<void> {
   const { dns } = api;
   const io = api.io.create();
-  const server = dns.SocketAddr.new(dns.IpAddr.v4(127, 0, 0, 1), 5353);
+  const server = SocketAddr.new(IpAddr.v4(127, 0, 0, 1), 5353);
   const resolver = dns.resolver(io, {
     servers: [
       dns.DnsServer.udp([server]),
-      dns.DnsServer.tcp([dns.IpAddr.parse('::1')]),
+      dns.DnsServer.tcp([IpAddr.parse('::1')]),
       dns.DnsServer.tls('dns.test', [server]),
       dns.DnsServer.https('https://dns.test/dns-query', [server]),
       dns.DnsServer.system(),
@@ -29,7 +30,9 @@ export async function main(api: Api, pem: Uint8Array): Promise<void> {
   // @ts-expect-error a family is required
   await resolver.lookup('example.test', {});
   // @ts-expect-error addresses are made by named constructors
-  new dns.IpAddr();
+  new IpAddr();
+  // @ts-expect-error api.dns does not re-export the address types: one place, origine:@std/net
+  dns.IpAddr;
   dns.resolver(io, {
     servers: [],
     dnssec: 'off',

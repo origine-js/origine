@@ -46,4 +46,33 @@ await client.close();
 - **Lifetime.** A session keeps the program alive until `close()` (immediate: the transport is shut down, every stream ends) or its connection ends; `end()` starts a graceful close (GOAWAY) and streams in flight finish. Dropping an `Exchange` with `release()` cancels it if its own side is still being written, and lets it finish quietly if its side is complete (so a response just queued is not cut off); to abandon a request call `reset(8)`.
 - **Errors.** `BrokenPipe` (the stream or session is over), `InvalidInput` (bad head or field), `ProtocolError` (`subject` says what), plus the transport's own. A header block over `limits.headers` resets the stream with code 11 (`ENHANCE_YOUR_CALM`).
 - **Event mode.** `mode: 'event'` gives `EventServerSession`, `EventHttpServer` and `EventClientExchange` / `EventServerExchange` in place of the `Pull*` classes (the mode is visible in the class; `ClientSession` serves both). `server.register('request', exchange => ...)` (on a server or a server session) delivers each request, one nobody listens for is refused with `REFUSED_STREAM`; `exchange.register('headers' | 'data' | 'end' | 'close' | 'error', handler)` delivers a stream's events one at a time, in order, from the turn after the first `register`, so register everything at once. `register` returns `{ unregister() }`; a throwing handler goes to the `error` handlers, or is an unhandled rejection. Flow control is unchanged: call `consume(bytes)` when the data was used. Event servers, sessions and exchanges keep the program alive until closed or released, as in pull mode.
-- **Not yet:** a connection pool, redirects, DNS lookups inside `connect` (look the name up with `api.dns` and pass the address), WebSocket (extended CONNECT), server push (off).
+- **Not yet:** DNS lookups inside `connect` (pass the address, or give the pool a `lookup`), WebSocket (extended CONNECT), server push (off), HTTP/1.x, cookies, caching, response decompression.
+
+## Pool, redirects and `fetch`
+
+Built on `connect` and the sessions above; source `src/js/glue/http/client.js`. Host resolution stays yours: the pool dials what `lookup` returns (or an IP literal), and everything is subject to the [network ceiling](../../../docs/net-grant.md).
+
+```js
+const pool = http.pool(io, {
+  mode: 'pull', limits,                                   // as http.connect
+  sessions: { limit: 8, perKey: 2, idle: 30_000, queue: 64 },
+  lookup: async name => (await resolver.lookup(name, { family: 'ipv4' }))[0].toString(),   // optional
+});
+const res = await http.fetch(pool, { method: 'GET', url: 'https://example.test/a', tls, redirect: { limit: 5, strip: ['authorization', 'cookie'] } });
+for await (const chunk of res.body) use(chunk);          // reading to the end frees the stream
+```
+
+**`http.pool(io, { mode, limits, sessions, lookup? })`** returns a `ClientPool`. `sessions` has no defaults: `limit` (sessions over all origins, open or being dialed), `perKey` (per origin), `idle` (ms a session without streams is kept; `0` closes it with its last stream) and `queue` (requests allowed to wait; one more rejects `WouldBlock`). They are readable as `pool.sessions`; `pool.size`, `pool.waiting` and `pool.closed` are live.
+
+- **Key.** `(scheme, host lowercased, port, TLS configuration object, servername)`. Two `TlsClient` objects are two keys even with equal contents.
+- **`pool.open(target, head, options?)`** with `target = { scheme, host, port, tls?, servername? }` (`https` needs `tls`, `http` forbids it) and `head = { method, authority, path }` resolves the exchange of the pool's mode. It picks a session of the key whose open streams are below the peer's `SETTINGS_MAX_CONCURRENT_STREAMS` (`native.http.peer`); with none it dials another session, **one dial per key at a time**, if `perKey` and `limit` allow (at `limit` the idle session used longest ago, of any key, is closed first); else it waits. A host that is not an IP literal is passed to `lookup`; without one `open` rejects `InvalidInput`.
+- **Dead sessions.** A session the peer sent GOAWAY on, that ended, or that was closed is not used for new streams; one with streams in flight drains and then closes. A reused session that turns out dead when the stream is opened is dropped and another is taken (a session dialed for this very request that fails throws).
+- **What holds a slot.** An exchange from the pool holds a stream slot until its `closed` event is read (pull) or delivered (event), its connection dies, or you call `release()`. Read it to the end or release it. Sessions keep the program alive until `idle` expires or `pool.close()` (closes every session now, rejects the waiting requests with `BadHandle`).
+- Costs, as the guidelines ask: `open` may dial (a socket, a TLS handshake, a timer per idle session); nothing is copied or buffered.
+
+**`http.fetch(pool, request)`** needs a pool in `'pull'` mode and resolves a `FetchResponse` when the final head arrived (1xx blocks are skipped). `request` is `{ method, url, headers?, body?, tls?, redirect }`:
+
+- `url` is an absolute `http:` or `https:` URL without userinfo (`TypeError` otherwise); `tls` is used for every `https` hop.
+- `body` is bytes (copied as it is sent, and sent again after a 307/308) or an async iterable of bytes (consumed once, flow-controlled by `send`). It is sent while the response is read; an error in the iterable resets the stream (`CANCEL`) and fails the response body with that error.
+- **`redirect: { limit, strip }` is required.** `limit: 0` follows nothing and returns the 3xx response. Followed statuses are 301, 302, 303, 307, 308 with a `Location` (resolved per RFC 3986, fragment dropped). Method rules (RFC 9110 15.4): 301 and 302 turn `POST` into `GET`; 303 turns everything but `GET` and `HEAD` into `GET`; 307 and 308 keep method and body. A rewrite to `GET` drops the body and `content-length`, `content-type`, `content-encoding`, `content-language`, `content-location`. When the origin changes, the lowercase names in `strip` are dropped (put `authorization`, `cookie` and `proxy-authorization` there). Errors: past `limit` `QuotaExceeded`; a `Location` that is not an http(s) URL `ProtocolError`; https to http `PermissionDenied`; http to https without `tls` `Unsupported`; a 307/308 with a stream body `Unsupported`. Redirect responses are cancelled (`reset(8)`), not drained.
+- **`FetchResponse`** has `status`, `headers` (a frozen `HeaderList`), `url` (last hop), `redirected`, `body`, `trailers` (set once the body was read) and `close()` / `dispose`. `body` is an async iterable of `Uint8Array`, readable once. **Flow control:** a chunk counts as used, and its bytes are given back to the peer's window with `consume`, when the next chunk is asked for; stopping the loop early cancels the stream. The response holds a stream slot until the body ends, the iteration stops or `close()`; a response whose head ended the stream (HEAD, 204) frees it at once.

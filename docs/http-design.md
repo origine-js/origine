@@ -1,130 +1,116 @@
-# HTTP/2, TLS, DNS and QUIC: design
+# TLS, HTTP/2 and DNS: design
 
-Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull and event mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull and event mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls/https`, `Resolver.lookup`; servers subject to the network ceiling; an opt-in resolver cache with TTL clamps; DoH over `origine_h2`; the `origine:@std/dns/presets` module; no DNSSEC or DoQ). `api.http` client layer (phase 3): `http.pool` (sessions keyed by origin, peer stream limit via `native.http.peer`, explicit `limit`/`perKey`/`idle`/`queue`), redirect following and `http.fetch` (pull mode; `lookup` supplied by the caller, no DNS inside). Not yet: `api.quic`.
+Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, and what is still planned. The reference for each API is its doc: [tls.md](../src/js/docs/tls.md), [http.md](../src/js/docs/http.md), [dns.md](../src/js/docs/dns.md), [addr.md](../src/js/docs/addr.md) (`origine:@std/net`) and [net-grant.md](net-grant.md); this file keeps the decisions and the reasons, and does not repeat the call-by-call behaviour. Every public name follows [api-guidelines.md](api-guidelines.md); the shapes follow [`api.net`](../src/js/docs/net.md) (`mode: 'pull' | 'event'`, `queued` write lane, `end(side)`).
 
-Original status: **draft, first slice not implemented.** Scope: an HTTP/2 client and server (`api.http`) behind a build flag that is **on by default**, `api.tls`, `api.dns`, and interface-only declarations for `api.quic` and `api.net.udp`. Every public name is subject to [api-guidelines.md](api-guidelines.md); the shapes follow [`api.net`](../src/js/docs/net.md) (`mode: 'pull' | 'event'`, `queued` / `direct` write lanes, `end(side)`).
+## Status
+
+| Area | State |
+| --- | --- |
+| `api.tls` | Built: TLS 1.2/1.3 over `api.net` sockets, pull and event mode, Rust-defined value classes |
+| `api.http` | Built: HTTP/2 sessions, `connect` / `serve`, pull and event mode, client pool, redirects, `fetch` |
+| `api.dns` | Built: `system`, `udp`, `tcp`, DoT, DoH, resolver cache, presets (`origine:@std/dns/presets`) |
+| `origine:@std/net` | Built: `IpAddr`, `SocketAddr` |
+| Network ceiling | Built, see [net-grant.md](net-grant.md) |
+| QUIC, HTTP/3, DoQ, `api.net.udp` | Planned: [quic-design.md](quic-design.md) |
+| DNSSEC, HTTP/1.x, WebSocket, cookies, caching, decompression, `RootPki.system()`, `URL` | Not built (see [Not built](#not-built)) |
 
 ## Decisions
 
 | Area | Decision | Why |
-|---|---|---|
-| HTTP versions | **HTTP/2 only** (h2 over TLS by ALPN; h2c prior-knowledge on loopback). HTTP/1.x is out for now | one framing layer to get right; h2c covers certificate-free loopback tests |
-| h2 core | **nghttp2** (sans-io C, Zig recipe in `lt-zcurl/build/nghttp2.zig`) | header callbacks per field; no socket or loop of its own |
-| TCP TLS | **rustls on aws-lc-rs** | Rust is core to the build; sans-io `read_tls` / `write_tls` |
-| QUIC / h3 (later) | **ngtcp2 + nghttp3** | ngtcp2 1.22.1 backends are BoringSSL / aws-lc >= 1.39, OpenSSL, quictls, GnuTLS, wolfSSL, picotls: **no rustls**. QUIC therefore links a C aws-lc (Zig-built) beside the one inside aws-lc-rs: two copies, accepted for now (see open questions) |
-| DNS | **hickory-proto** as wire codec only; our own thin resolver | c-ares 1.34.6 has no DoT/DoH/DNSSEC (its docs say the schemes exist but are "not yet implemented"); hickory-resolver needs tokio and `Send` futures |
-| Loop risk | `oio` is unproven, so engines are sans-io behind a `Transport` trait and tested over in-memory pipes separately from loop tests | protocol bugs and loop bugs stay separable |
-| uSockets / uWS | rejected for now | readiness-only (epoll/kqueue/libuv backends, own loop-wide recv buffer); would need an `oio` poll op, a second socket world, and loses zero-copy receives |
-| Size | default release build <= 70 MB, CI-enforced | measured baseline `zig build -Doptimize=small`: **40.1 MB** (the 82 MB `zig-out` binary is a debug-app build) |
-
-## Reference runtimes (checked against local clones)
-
-- **Deno** (`e7b39ebd55`): `hyper` 1.x in `ext/http`; `reqwest` / `hyper-rustls` in `ext/fetch`; `rustls` on `aws-lc-rs`; `quinn` (tokio) in `ext/net/quic.rs` for the unstable QUIC API, no h3 in HTTP or fetch; `hickory-resolver` 0.25.2 with only `tokio` + `serde` features (no DoT/DoH/DNSSEC). All on tokio.
-- **Bun** (`3f3a9ff8`): BoringSSL + vendored uSockets/uWS (`packages/bun-usockets`, `packages/bun-uws`, Apache-2.0); `Bun.serve` h1 plus experimental `http2` and `http3` (lsquic with 16 local patches in `patches/lsquic/`); the client in `src/http` has `H2Client.rs` (lshpack) and `H3Client.rs` (lsquic + lsqpack); picohttpparser; c-ares for DNS.
-- Neither has a low-level layer (TLS socket, QUIC stream, exchange with explicit head/body). That is the gap here.
+| --- | --- | --- |
+| HTTP versions | **HTTP/2 only**: h2 over TLS by ALPN, cleartext h2c for loopback and tests. No HTTP/1.x | one framing layer to get right; h2c gives certificate-free tests. Cost: a server that only speaks HTTP/1 is unreachable (`NoApplicationProtocol`) |
+| h2 core | **nghttp2** (sans-io C, built by Zig in `lib/nghttp2`), wrapped in `origine_h2` | header callbacks per field; no socket or loop of its own |
+| TLS | **rustls on aws-lc-rs** (`origine_tls`) | Rust is core to the build; sans-io `read_tls` / `write_tls` |
+| DNS | **hickory-proto as the wire codec only**; the resolver logic is ours (`origine_dns`) | c-ares has no DoT/DoH/DNSSEC; hickory-resolver needs tokio and `Send` futures, we have a single-threaded `oio` loop |
+| Engines vs loop | every protocol engine is sans-io behind the `Transport` trait of `origine_transport` (owned buffers, `!Send` futures) | protocol bugs and loop bugs stay separable: engines are tested over in-memory pipes, then over sockets |
+| uSockets / uWS | rejected | readiness-only; would need a second socket world beside `oio` and loses zero-copy receives |
+| Rust-defined classes | values with native state are classes defined in Rust (`#[class]`), owned by V8's cppgc heap | see [Values](#values-and-ownership) |
+| Names | the network ceiling is about **addresses**; `api.net` and `api.http.connect` take IP literals, `api.dns` turns names into addresses | a name could resolve anywhere, so a check on names proves nothing |
+| Size | default release build at most 70 MB stripped (`just check-size`) | a runtime that is a single download. A local `-Doptimize=small` run on 2026-11-02 measured 43,852,304 bytes with every flag on, against 40.1 MB before the networking crates; no CI job runs it yet |
 
 ## Architecture
 
 ```
-  origine:@std/net   IpAddr · SocketAddr          origine:@std/dns/presets   presets.*  (static data, own module)
-  api.dns   Resolver ── DnsServer(udp | tcp | tls | https | quic)       origine_dns   (hickory-proto codec + resolver logic)
-  api.http  session · connect · serve   (h2)                          origine_h2    (nghttp2 + session state machine)
-  api.tls   client · server             (rustls)                      origine_tls   (rustls over a Transport trait)
-  api.quic  (types only)  api.net.udp (types, then natives)           origine_quic  (later: ngtcp2 + nghttp3)
-  api.net   TCP (exists)   ──────────────  oio loop (io_uring · kqueue · threaded)
+  origine:@std/net   IpAddr · SocketAddr        origine:@std/dns/presets   presets.*  (data)
+  api.dns   Resolver · DnsServer                origine_dns   (hickory-proto codec + resolver logic)
+  api.http  session · connect · serve · pool · fetch   origine_h2    (nghttp2 + session state machine + async driver)
+  api.tls   client · server                     origine_tls   (rustls over a Transport)
+  api.net   TCP                                 origine_transport   (the Transport trait)
+                       oio loop (io_uring · kqueue · threaded)
 ```
 
-Each protocol is an internal Rust crate; the JS natives and the DNS resolver sit on the same crates, so a lookup over DoT never goes through JS. Engines talk to the world only through `Transport` (read bytes, write bytes), implemented over `origine_io` op futures in production and over in-memory pipes in tests.
+Each protocol is an internal Rust crate; the natives (`rust/crates/origine_api`) and the DNS resolver sit on the same crates, so a lookup over DoT or DoH never goes through JS: `origine_api` implements the resolver's `Exchange` over UDP, TCP, `origine_tls` and `origine_h2` directly, and `api.http` is not involved in DoH. `api.tls` and `api.http` take an `api.net` socket, so the same code paths serve TCP, TLS and h2. TLS values and sockets of `api.tls` are `api.net` sockets (a TLS endpoint lives in the socket table), which is why everything `api.net` offers works on a TLS socket.
 
 ### Build flags
 
-Plumbed like `-Dtypescript`. C dependencies are Zig `lazyDependency` packages, so a disabled flag fetches none of them.
-
 | Flag | Default | Effect |
-|---|---|---|
-| `-Dhttp` | `true` | `api.http`, nghttp2. Implies `tls` for `https:` |
-| `-Dtls` | `true` | `api.tls`, rustls + aws-lc-rs |
+| --- | --- | --- |
+| `-Dhttp` | `true` | `api.http`; builds and links nghttp2 (`lib/nghttp2`, a lazy dependency: a disabled flag fetches nothing) |
+| `-Dtls` | `true` | `api.tls`; rustls and aws-lc |
 | `-Ddns` | `true` | `api.dns` |
-| `-Dquic` | `true` while <= 70 MB holds, else `false` | `api.quic`, `api.net.udp`, ngtcp2 + nghttp3 (not in the first slice) |
+| `-Dquic` | `true`, needs `-Dtls` | reserved; gates nothing yet (see [quic-design.md](quic-design.md)) |
 
-With a flag off the natives are not registered and the API name is **absent** (`api.http === undefined`); nothing returns a weaker object. CI builds the default and an all-off configuration and fails above 70 MB.
+A flag selects a Rust feature of `origine_native` and what Zig builds. With a flag off the natives are not registered and the getter throws `PermissionDenied` (`api.http` is not `undefined`: the capability objects are fixed, so an absent feature fails when reached, never returns a weaker object). DoH needs both `-Dhttp` and `-Dtls` and is `Unsupported` at `dns.resolver` otherwise.
 
-## Interface (first slice)
+## Values and ownership
 
-Values are frozen classes with named constructors; parsing and validation happen in the factory, so a bad certificate or address fails there with its own error.
+`RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient`, `TlsServer` and `Resolver` hold native state. They are **classes defined in Rust** (`#[class]`, `origine_api/src/class.rs`) and **owned by the cppgc heap** (`gc.rs`):
 
-```ts
-// origine:@std/net, Rust vocabulary in camelCase
-class IpAddr {                                   // one class: v4 = [u8; 4], v6 = [u8; 16]
-  static v4(a, b, c, d): IpAddr;  static v6(...segments /* 8 x u16 */): IpAddr;
-  static fromOctets(octets: Uint8Array /* 4 or 16 bytes */): IpAddr;  static parse(text: string): IpAddr;
-  readonly family: 4 | 6;  octets(): Uint8Array /* fresh copy */;
-  isV4(); isV6(); isUnspecified(); isLoopback(); isMulticast(); isPrivate(); isLinkLocal(); isDocumentation();
-  toCanonical(): IpAddr;   // ::ffff:a.b.c.d -> a.b.c.d; permission checks must use it
-  equals(other): boolean;  toString(): string;
-}
-class SocketAddr { static new(ip: IpAddr, port: number): SocketAddr; static parse(text: string): SocketAddr; readonly ip: IpAddr; readonly port: number; toString(): string }
+- The JS object is the owner; there is no JS wrapper around an integer id. When it is collected the Rust value is dropped. Anything built from it takes its own `Clone` (the values are `Arc`-backed immutable data), so collecting a `RootPki` never breaks a live `TlsClient`. This replaced a `FinalizationRegistry` over numeric ids ([cppgc-research.md](cppgc-research.md) has the V8 and Deno findings behind it).
+- A class is one `FunctionTemplate` per isolate, made on first use, never in a snapshot (a wrapped object reachable from a snapshot has no serializer). Hence `tls` and `dns` are built when the capability is bound, not at snapshot time (`late` in `glue/index.js`).
+- Construction is by **named constructor only** (`RootPki.fromPem`): `new RootPki()` is a `TypeError`, so parsing and validation happen where the value is made and a bad certificate fails there with its own error. Classes and prototypes are frozen; a member called on anything but an instance (or an argument of the wrong class) is a `TypeError`: the brand check is the cppgc unwrap.
+- `Drop` runs inside a collection, possibly while a native holds the host state, so the values are plain self-contained data and never touch V8 or a table.
+- Early release is explicit and visible: `release()` on the TLS values, `close()` / `await using` on a `Resolver` (lookups in flight finish). Sockets, servers and sessions are not GC-owned: they are handles that keep the program alive and are closed explicitly.
+- Not every class is Rust-defined: `HeaderList`, `DnsServer`, `IpAddr` and `SocketAddr` are plain JS values with no native state.
 
-class RootPki    { static bundled();  static fromPem(pem: Uint8Array);  static fromDer(certs: Uint8Array[]) }
-class Identity   { static fromPem(cert: Uint8Array, key: Uint8Array);  static fromDer(o: { cert: Uint8Array[]; key: Uint8Array }) }
-class ClientAuth { static none();  static require(roots: RootPki) }
-class TlsSessions{ static create(o: { limit: number }) }                 // resumption cache is explicit
-class HeaderList { put(name, value): void; get; getAll; has; length; [Symbol.iterator] }   // ordered fields, not a map
+## `api.tls`
 
-// api.tls
-tls.client({ roots: RootPki, identity?: Identity, alpn?: string[], sessions?: TlsSessions }): TlsClient
-tls.server({ identities: Identity[], clientAuth: ClientAuth, alpn?: string[] }): TlsServer
-TlsClient.connect(socket, { servername, mode }) / TlsServer.accept(socket, { mode })   // consume the plain socket
-// connect/accept resolve a plain Socket<M> (a TLS endpoint inside the socket table); tls.info(socket) = alpn, version, peer. close_notify on end('write'); EOF without it is an error.
+- **Explicit trust and sessions.** `roots` is required (no default trust; `RootPki.bundled()` is the Mozilla set compiled in), resumption exists only with a `TlsSessions` the caller passes, a server needs `clientAuth` (`none()` or `require(roots)`). A server presents the first identity valid for the client's SNI name, else its first; the client then refuses it (`NotValidForName`), so a wrong name fails on the client, not silently.
+- **`connect` / `accept` consume the plain socket** and return a new `api.net` socket of the requested `mode`. Consuming makes the transfer of ownership visible and rules out two readers on one stream; a socket with a read pending, bytes queued, or a subscription is refused before it is touched. There is no kernel lane under TLS, so `direct.write` always takes 0 and `queued` is the way to send.
+- **Truncation is an error.** `read` is empty only after `close_notify`; a connection cut earlier is `UnexpectedEof`, also during the handshake. `end('write')` sends `close_notify` and is a half close.
+- **Errors keep one meaning each**: `CertificateRejected` (with the reason as `subject`), `TlsAlert`, `NoApplicationProtocol`, `ProtocolError`, `UnexpectedEof`, `InvalidData` (bad certificate or key), `InvalidInput` (bad server name).
+- Backpressure comes from rustls' bounded buffers (16 KiB plaintext, 64 KiB output); a cancelled write that already handed a record to the transport poisons the stream.
 
-// api.http (HTTP/2)
-http.session(socket, { role: 'client' | 'server', mode, limits })                     // core: h2 over a stream you provide
-http.connect(io, { host, port, tls?, resolver, mode, limits }): Promise<ClientSession> // dial + TLS(ALPN h2), or h2c without tls
-http.serve(io, { listen, tls?, mode, limits })                                        // tls present: all TLS; absent: cleartext h2c
-limits: { streams, headers, window, batch }                                            // bytes, all required
-```
+## `api.http`
 
-**Headers are a stream of fields, not a map.** Sending: `put` packs into one JS buffer and the whole list crosses once at `open` / `start` / `respond` (nghttp2's HPACK encoder wants the full list, so on the wire it is one HEADERS block; the stream is the API shape). Receiving: nghttp2 calls back per decoded field into a packed buffer, delivered as `HeaderList` batches when the block ends or `limits.batch` bytes accumulate: `await ex.headers.read()` gives the next batch (`undefined` at the end), `ex.headers.collect()` waits and returns one list bounded by `limits.headers`. `headers: 'whole'` on `serve` delivers the exchange with the full list (one crossing per request); `'stream'` delivers it at the first batch. Pseudo-headers are separate fields on the exchange. Flow control is the backpressure: reading a body returns window credit.
+- **Sessions are the core; the rest is built on them.** `http.session(socket, { role, mode, limits })` is HTTP/2 over a socket you provide (it consumes it). `connect` and `serve` add dialing, TLS with ALPN `h2` and listening; `pool` and `fetch` add reuse and redirects. There is no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c, so a server never mixes the two.
+- **Headers are a stream of fields, not a map.** `HeaderList` is one packed buffer, ordered, duplicates kept; the whole list crosses into the native once, because nghttp2's HPACK encoder wants it complete. Received blocks arrive as `headers` events in batches of about `limits.batch`, so a huge block never sits in memory as one value; `limits.headers` bounds it (a block over it resets the stream with `ENHANCE_YOUR_CALM`). Connection-specific fields are refused.
+- **Flow control is the backpressure.** nghttp2 runs with automatic window updates off: received data stays unacknowledged until the caller says `consume(bytes)`, so a slow reader slows the peer. `send` waits while a stream already has `limits.window` bytes queued. `fetch` does this for you per chunk.
+- **Limits have no defaults** (`streams`, `headers`, `window`, `connection`, `batch`), and so do the pool's (`limit`, `perKey`, `idle`, `queue`) and the redirect rules: a hidden default is a footgun at a trust boundary.
+- **Modes are types.** `mode: 'pull'` gives `Pull*` classes (`next()`, `accept()`), `'event'` gives `Event*` classes (`register`). Events of one object are delivered one at a time, in order. A `ClientSession` serves both; the write side is shared.
+- **Lifetime.** Sessions and servers keep the program alive until closed; `end()` is a graceful GOAWAY, `close()` is immediate. Dropping an exchange whose own side is complete lets it finish quietly (a response just queued is not cut off); abandoning a request is an explicit `reset(code)`. Server push is off.
+- **Wait for SETTINGS.** The peer's limits are unknown until `ready()`; `connect` resolves only after them, and the pool reads the peer's `SETTINGS_MAX_CONCURRENT_STREAMS` (`native.http.peer`) before reusing a session.
+- **The pool** keys sessions by `(scheme, host, port, TLS configuration object, servername)`: two `TlsClient` objects are two keys, because equal contents are not equal trust. One dial per key at a time; at `limit` the longest-idle session of any key is closed. Host resolution stays the caller's (`lookup`, or an IP literal): the pool dials what the network ceiling then checks, and no DNS hides inside.
+- **Redirects are a required decision** (`redirect: { limit, strip }`, `limit: 0` follows nothing). `strip` names the fields dropped when the origin changes (put `authorization`, `cookie`, `proxy-authorization` there), because only the caller knows which fields are credentials. https to http is `PermissionDenied`; every hop is dialed through `api.net`, so the ceiling applies to each one. A redirect response is cancelled, not drained.
 
-Exchanges: `ClientSession.open` / `request`, `ClientExchange` (`status`, `headers`, `body` as PullSocket-like, `upload` for streamed request bodies, `trailers`, `reset(code)`), `ServerExchange` (`respond` = whole response in one write, `start` = streamed, `reset(code)`). The exact surface is written in `src/js/docs/http.md` with the implementation.
+## `api.dns`
 
-### DNS
+- **A resolver is explicit.** `servers` (never a default; presets are data, not a fallback), `timeout`, `tries` and `dnssec` are required; `cache` is absent for no caching and, when present, has all its numbers (`limit`, TTL clamps, negative clamps). `dnssec: 'validate'` is `Unsupported` until it exists: answers are unauthenticated input and the option says so.
+- **Servers carry their own addresses** (`IpAddr` for the transport's default port, `SocketAddr` for another), so DoT and DoH never need DNS to find the server, and the server list is part of the network ceiling: each address is checked when the resolver is made and before every query. `system()` reads `resolv.conf` and the hosts file when the resolver is made and still passes the ceiling, so a LAN resolver needs a `connect` rule.
+- **Transports:** UDP (an answer that does not fit is asked again over TCP), TCP, DoT, and DoH (RFC 8484: one HTTP/2 POST per query, id 0, `h2` required, redirects not followed). A DoT or DoH query opens its connection and closes it after the answer: no pooling yet, so an idle resolver keeps nothing alive; the cache spares connections.
+- **Cache semantics** follow the RFCs: a positive answer lives for its shortest record TTL clamped by `ttl`, a negative one for the SOA's TTL and MINIMUM (RFC 2308) clamped by `negative` (no SOA, not kept); SERVFAIL and transport errors are never kept. When full, the entry nearest to expiry makes room, so `limit` bounds memory.
+- **Order and literals.** An IP literal is itself, `localhost` is loopback (RFC 6761, never asked of a server), then the hosts file, then the servers; IPv6 comes first for `family: 'any'`. `family` is required. Names must be ASCII (no IDNA).
+- **A response must be about our question** (id, QR bit, the single question) or the next server is tried; query ids are a hashed counter with a process-random key.
+- **Presets** are data in their own module, pinned by a test, and each method calls the public `DnsServer` constructors, so a preset is nothing a program could not write by hand. The filtering providers change answers on purpose and the docs say so. The table must be re-checked against the providers' docs before a release.
+- **Addresses are not part of `api.dns`.** `IpAddr` and `SocketAddr` are plain value types (parsing one opens nothing), so they are the std module `origine:@std/net`; `api.dns` takes and returns those instances and has no second spelling of them. `IpAddr` is one class for both families with Rust's names and `toCanonical()` (`::ffff:a.b.c.d` is `a.b.c.d`): permission decisions must use the canonical address, and the ceiling does.
 
-```ts
-class DnsServer {        // one transport each; Resolver takes an ordered list
-  static system();
-  // servers: (IpAddr | SocketAddr)[]: an IpAddr means the transport's default port (udp/tcp 53, tls 853, https 443, quic 853)
-  static udp(servers);  static tcp(servers);
-  static tls(name: string, servers);        // first slice
-  static https(url: string, servers);       // https://host[:port]/path; origine_h2 + origine_tls directly, not api.http
-  static quic(name: string, servers);       // with api.quic
-}
-dns.resolver(io, { servers: DnsServer[], roots?: RootPki, dnssec: 'off' | 'validate', timeout, tries, cache?: { limit, ttl: { min, max }, negative: { min, max } } })   // 'validate' is Unsupported until built
-Resolver.lookup(name, { family: 'ipv4' | 'ipv6' | 'any' }): Promise<IpAddr[]>
-```
+## Permissions and errors
 
-Servers carry their own IPs, so DoH and DoQ never need DNS to find the server. DNS answers are unauthenticated input unless `dnssec: 'validate'` (hickory-proto gives verification primitives; chain walking and denial of existence are ours to write, later). The resolver opens its own sockets, so the server list is part of the embedder's permission ceiling.
+The **network ceiling** ([net-grant.md](net-grant.md)) is the only authority over the network: `connect` and `listen` rules over CIDR ranges and ports, loopback only by default, checked on the canonicalised address a program is about to use. It covers `api.net`, everything on it (`api.tls`, `api.http`, the pool and every redirect hop) and the servers of `api.dns` resolvers. Rules are about addresses, not names; the file also says what is not done (narrowing for a child scope or isolate, rate limits).
 
-**Presets** are data in their own module, not part of `DnsServer`: `import { presets } from 'origine:@std/dns/presets'` gives `presets.cloudflare`, `cloudflareMalware`, `cloudflareFamily`, `adguard`, `google`, `quad9`, each with `.name`, `.servers` and one method per transport it offers (`presets.cloudflare.tls()`); a method for a transport a preset lacks is absent (`presets.google.quic === undefined`). Each method calls the public `DnsServer` constructors. The address and name table is pinned in a test and must be verified against each provider's published docs when written; the filtering ones change answers and the docs say so. Presets are never a default: `servers` is always explicit. **Built:** the table is in [dns.md](../src/js/docs/dns.md#presets) and pinned in `src/tests/managed/dns.zig`; it was written from the providers' well-known published addresses and names and should be re-checked against their docs before a release (the module is pure data in `src/js/std/dns/presets.js`, reaching `DnsServer` through `origine:@internal/handles`).
+Errors are the realm's `IoError` / `HostError` classes, one meaning per code with the offending thing as `subject` (the denied address, the TLS alert, the DNS response code). The Rust crates use enums with `Display` and a variant per meaning (`TlsError`, `DnsError`, `H2Error`, `ConnError`), mapped to codes at the native boundary, so a new failure cannot hide in a string.
 
-## Permission model
+## Not built
 
-Built: the embedder's **network ceiling** ([net-grant.md](net-grant.md)): `connect` and `listen` rules over CIDR ranges and ports, checked on the canonicalised address a program is about to use, loopback only by default. It covers `api.net`, everything built on it (`api.tls`, `api.http`) and the servers of `api.dns` resolvers (at creation and per query). Decisions that differ from the first sketch: rules are about **addresses, not names** (a name could resolve anywhere, so `api.net` takes literals and `api.dns` results), and there is no per-request narrowing yet (that would be `api.net.narrow` for a child scope or isolate). `localhost` stays unresolved (RFC 6761). Still to do: redirects re-checking each hop (there are none yet) and a connection or rate limit.
-
-## Phasing
-
-| Phase | Deliverable | Exit test |
-|---|---|---|
-| 0 | aws-lc + rustls cross-compile for every `build.zig` target with size delta; nghttp2 Zig build; `oio` UDP `sendmsg` / `recvmsg` smoke test | builds everywhere; default release <= 70 MB |
-| 1 | `origine:@std/net` addresses; `origine_tls`, `api.tls`; `origine_h2`, `api.http` on loopback (h2c and TLS) | `curl --http2-prior-knowledge`, `h2spec`, self-test client <-> server |
-| 2 | `origine_dns`, `api.dns` (system, udp, tcp, tls), presets, `api.net.udp` | lookups against local fixture servers; presets table test |
-| 3 | net grant (done), pool (done), redirects and `fetch` (done), DoH (done: one connection per query, no pooling) | SSRF suite |
-| 4 | `api.quic` (ngtcp2 + nghttp3), DoQ, DNSSEC validation | `quic-interop-runner` subset, `curl --http3` |
+- **QUIC, HTTP/3, DoQ and `api.net.udp`:** [quic-design.md](quic-design.md). The datagram layer on `oio` is tested (`src/io/udp_test.zig`) but not exposed to JS.
+- **DNSSEC** (hickory-proto has the primitives; chain walking and denial of existence would be ours), EDNS, record types other than A and AAAA, IDNA, DoT/DoH connection reuse.
+- **HTTP/1.x, WebSocket** (extended CONNECT), server push, cookies, caching, response decompression.
+- **Interop testing** against external tools (`curl --http2-prior-knowledge`, `h2spec`); today the h2 engine is tested against itself over pipes and TLS, and the APIs by `src/tests/managed/{tls,http,dns,netgrant}.zig`.
+- **DNS inside `connect` and `fetch`:** deliberately absent; pass an address or give the pool a `lookup`.
 
 ## Open questions
 
-1. **Unify aws-lc.** QUIC needs a C aws-lc (ngtcp2 helper); rustls brings its own. Options after Phase 0: accept two copies; use the C libssl for TCP TLS too; or write ngtcp2 crypto callbacks over rustls. Check whether `aws-lc-sys` can expose libssl.
-2. **`URL`.** No URL class exists in origine: `DnsServer.https` takes a string and parses `https://host[:port][/path][?query]` itself (a host name or IPv4 address; no userinfo, fragment or IPv6 brackets). Revisit when a `URL` exists.
-3. **System roots.** `RootPki.system()` waits on per-OS loading (Security.framework etc.); `bundled()` first.
-4. **UDP on `oio`.** Tested in `src/io/udp_test.zig` (macOS: kqueue and threaded backends; IPv4 and IPv6 loopback): datagram boundaries, sender address, truncation flag, cancel and in-order delivery all hold. Findings the UDP layer must respect: an empty datagram completes with 0 (not an end of stream), and concurrent sends on one socket are unordered on the threaded backend and on blocking descriptors, so `api.net.udp` keeps one send in flight per socket. Still untested: the io_uring path (needs a Linux run of `zig build test-io`).
-5. **`system()` on macOS** (VPN / scoped resolvers): verify what the resolv.conf view misses.
+1. **System roots.** `RootPki.system()` waits on per-OS loading (Security.framework and the like); only `bundled()`, `fromPem` and `fromDer` exist.
+2. **`URL`.** No URL class exists: `DnsServer.https` and `fetch` parse `https://host[:port][/path][?query]` and absolute URLs themselves (no userinfo, fragment or IPv6 brackets for DoH). Revisit when a `URL` exists.
+3. **`system()` on macOS** (VPN and scoped resolvers): verify what the `resolv.conf` view misses.
+4. **Size budget in CI.** `just check-size` exists; nothing runs it automatically.

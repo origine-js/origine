@@ -4,7 +4,7 @@ HTTP/2 as a sans-io state machine over [nghttp2](../../../../lib/nghttp2/README.
 driver that runs it over any [`Transport`](../../origine_transport/docs/README.md). A `Session` never
 touches a socket: feed it received bytes with `recv`, take bytes to send with `send`, read what
 happened with `next_event`. `connect(role, limits, transport)` returns a `Connection` handle and a
-`Driver` future; `api.http` on top is separate work. Design and decisions: [docs/http-design.md](../../../../docs/http-design.md).
+`Driver` future; `api.http` (in `origine_api`) sits on it. Design and decisions: [docs/http-design.md](../../../../docs/http-design.md).
 
 ```
 src/lib.rs      exports

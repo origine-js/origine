@@ -199,3 +199,36 @@ test "tls: event-mode sockets deliver plaintext, send and end with close_notify"
     try p.run();
     try check(p.scope, "report.kinds && report.info && report.bulk && report.reply === 'pong' && report.badInfo === 'BadHandle'");
 }
+
+test "tls: native values are freed with their wrappers and what was built from them survives" {
+    if (!tls_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { tls } = api;
+        \\  // The client is built from roots and an identity that are then dropped and collected.
+        \\  let roots = tls.RootPki.fromPem(bytes(CA));
+        \\  const client = tls.client({ roots, alpn: ['h2'] });
+        \\  let identity = tls.Identity.fromPem(bytes(SERVER), bytes(KEY));
+        \\  const server = tls.server({ identities: [identity], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
+        \\  roots = identity = undefined;
+        \\  // A burst of throwaway values, then collections that free them.
+        \\  for (let i = 0; i < 300; i++) tls.RootPki.bundled();
+        \\  for (let i = 0; i < 3; i++) { %CollectGarbage(null); await Promise.resolve(); }
+        \\  const { plain, accepted } = await pair(api, io);
+        \\  const [a, b] = await Promise.all([client.connect(plain, { servername: 'localhost', mode: 'pull' }), server.accept(accepted, { mode: 'pull' })]);
+        \\  out.survives = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2';
+        \\  // Releasing by hand makes the value unusable but not what was built from it.
+        \\  const spare = tls.RootPki.bundled();
+        \\  spare.release();
+        \\  out.released = (() => { try { tls.client({ roots: spare }); return 'no'; } catch (e) { return e.name; } })();
+        \\  out.wrongKind = (() => { try { tls.client({ roots: client }); return 'no'; } catch (e) { return e.name; } })();
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.survives && report.released === 'BadHandle' && report.wrongKind === 'TypeError'");
+}

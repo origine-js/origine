@@ -51,34 +51,27 @@ export default native => {
     return alpn.join('\n');
   };
 
-  // A value that is garbage collected releases its table entry. Anything built from it holds its own copy in the
-  // native, so a collected `RootPki` never takes a live `TlsClient` down with it.
-  const reclaim = new FinalizationRegistry(id => {
-    try {
-      native.tls.release(id);
-    } catch {
-      // The scope is already gone, or the entry was released.
-    }
-  });
-
-  /** A native value (an id in the Host's TLS table). `release()` forgets it; what was built from it keeps working. Collecting the value does the same. */
+  /**
+   * A native value: the object a native returned, which owns it. Nothing else holds the value, so it is freed when this
+   * object (and with it the native object) is garbage collected; `release()` lets go of it now. What was built from
+   * it holds its own copy, so neither ever breaks a live `TlsClient`.
+   */
   class Value {
-    #id;
-    constructor(made, id) {
+    #handle;
+    constructor(made, handle) {
       if (made !== token || new.target === Value) throw new TypeError('TLS values are made by their named constructors');
-      this.#id = id;
-      reclaim.register(this, id, this);
+      this.#handle = handle;
     }
-    static idOf(value, Class, name) {
+    static handleOf(value, Class, name) {
       if (!(value instanceof Class)) throw new TypeError(`${name} must be a ${Class.name}`);
-      return value.#id;
+      if (value.#handle === null) throw failure(BadHandle);
+      return value.#handle;
     }
     release() {
-      reclaim.unregister(this);
-      native.tls.release(this.#id);
+      this.#handle = null;
     }
   }
-  const idOf = Value.idOf;
+  const handleOf = Value.handleOf;
 
   /** The authorities a peer is checked against. */
   class RootPki extends Value {
@@ -124,7 +117,7 @@ export default native => {
     }
     static rootsOf(auth) {
       if (!(auth instanceof ClientAuth)) throw new TypeError('clientAuth must be a ClientAuth');
-      return auth.#roots === undefined ? 0 : idOf(auth.#roots, RootPki, 'roots');
+      return auth.#roots === undefined ? undefined : handleOf(auth.#roots, RootPki, 'roots');
     }
   }
 
@@ -185,7 +178,7 @@ export default native => {
         const servername = own(options, 'servername');
         if (typeof servername !== 'string' || servername === '') throw new TypeError('servername must be a string');
         const { mode, limit } = optionsOf(options);
-        const id = idOf(this, TlsClient, 'this');
+        const id = handleOf(this, TlsClient, 'this');
         return handshake(mode, limit, socket, (io, sock) => native.tls.connect(io, id, sock, servername));
       } catch (e) {
         return Promise.reject(e);
@@ -199,7 +192,7 @@ export default native => {
     accept(socket, options) {
       try {
         const { mode, limit } = optionsOf(options);
-        const id = idOf(this, TlsServer, 'this');
+        const id = handleOf(this, TlsServer, 'this');
         return handshake(mode, limit, socket, (io, sock) => native.tls.accept(io, id, sock));
       } catch (e) {
         return Promise.reject(e);
@@ -208,7 +201,7 @@ export default native => {
   }
 
   // For `api.dns`: the native id of a `RootPki`.
-  shared.tlsRootsId = roots => idOf(roots, RootPki, 'roots');
+  shared.tlsRootsHandle = roots => handleOf(roots, RootPki, 'roots');
 
   for (const C of [Value, RootPki, Identity, ClientAuth, TlsSessions, TlsClient, TlsServer]) {
     freezeMethods(C);
@@ -245,16 +238,16 @@ export default native => {
       },
       /** `{ roots: RootPki (required), identity?: Identity, alpn?: string[], sessions?: TlsSessions }`. */
       client(options) {
-        const roots = idOf(own(options, 'roots'), RootPki, 'roots');
+        const roots = handleOf(own(options, 'roots'), RootPki, 'roots');
         const identity = own(options, 'identity');
         const sessions = own(options, 'sessions');
         return new TlsClient(
           token,
           native.tls.client(
             roots,
-            identity === undefined ? 0 : idOf(identity, Identity, 'identity'),
+            identity === undefined ? undefined : handleOf(identity, Identity, 'identity'),
             alpnOf(options),
-            sessions === undefined ? 0 : idOf(sessions, TlsSessions, 'sessions'),
+            sessions === undefined ? undefined : handleOf(sessions, TlsSessions, 'sessions'),
           ),
         );
       },
@@ -262,8 +255,8 @@ export default native => {
       server(options) {
         const identities = own(options, 'identities');
         if (!Array.isArray(identities) || identities.length === 0) throw new TypeError('identities must be a non-empty array of Identity');
-        const ids = new Uint32Array(identities.map(identity => idOf(identity, Identity, 'identity')));
-        return new TlsServer(token, native.tls.server(ids, ClientAuth.rootsOf(own(options, 'clientAuth')), alpnOf(options)));
+        const handles = identities.map(identity => handleOf(identity, Identity, 'identity'));
+        return new TlsServer(token, native.tls.server(handles, ClientAuth.rootsOf(own(options, 'clientAuth')), alpnOf(options)));
       },
     });
 };

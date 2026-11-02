@@ -7,7 +7,6 @@
 //! network ceiling (`connect` rules; `PermissionDenied` otherwise, with the address as the detail) when the
 //! resolver is made and again before every query: a resolver must not be a way around the ceiling.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -22,6 +21,7 @@ use origine_io::rt::Handle;
 use origine_transport::Transport;
 
 use crate::HostState;
+use crate::gc::Gc;
 use crate::native;
 use crate::native::{Op, ScopeKey};
 use crate::net::{SEND_FLAGS, Socket, new_datagram, new_stream, sockaddr_bytes};
@@ -117,23 +117,14 @@ impl Exchange for NetExchange {
     }
 }
 
-struct Entry {
+/// What a resolver object wraps (a native value owned by the garbage collector, see `gc`): the resolver, the scope
+/// that made it and the runtime its queries run on. Dropping it, when the object is collected, only lets go of
+/// shared data; a lookup in flight holds its own copy of the resolver.
+#[derive(Clone)]
+pub(crate) struct ResolverHandle {
     owner: ScopeKey,
     runtime: u32,
     resolver: Rc<Resolver<NetExchange>>,
-}
-
-/// The Host's resolvers. Ids are never reused while the table lives.
-#[derive(Default)]
-pub(crate) struct DnsState {
-    next: u32,
-    resolvers: BTreeMap<u32, Entry>,
-}
-
-impl DnsState {
-    pub(crate) fn clear(&mut self) {
-        self.resolvers.clear();
-    }
 }
 
 fn dns_error(e: DnsError, name: &str) -> NativeError {
@@ -177,18 +168,18 @@ fn addrs_of(list: &str, net: &NetRules) -> Result<Vec<SocketAddr>, NativeError> 
 
 /// `native.dns.resolver(io, spec, roots, timeout, tries)`: a resolver over the servers in `spec`, one per line:
 /// `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>` (`addrs` are `ip:port`, comma-separated) or `system` (the
-/// nameservers, search list and hosts file of this machine, read now). `roots` is the id of the roots TLS
-/// servers are checked against (0 if there are none); `timeout` is milliseconds per attempt. Returns the id.
+/// nameservers, search list and hosts file of this machine, read now). `roots` is the roots TLS
+/// servers are checked against (undefined if there are none); `timeout` is milliseconds per attempt. Returns the resolver.
 #[native(side_effect = "any", path = "dns.resolver", needs = "runtime")]
 fn dns_resolver(
     host: &mut HostState,
     key: ScopeKey,
     io: u32,
     spec: String,
-    roots: u32,
+    roots: Option<Gc<origine_tls::RootPki>>,
     timeout: u32,
     tries: u32,
-) -> Result<u32, NativeError> {
+) -> Result<Gc<ResolverHandle>, NativeError> {
     let lp = host.loop_of(key, io)?;
     let net = host.net.clone();
     let mut servers = Vec::new();
@@ -220,9 +211,8 @@ fn dns_resolver(
     }
     #[cfg(feature = "tls")]
     let tls = if wants_tls {
-        let roots = match roots {
-            0 => return Err(NativeError::Errno(errno::INVALID_INPUT).with_subject("TLS servers need roots".to_owned())),
-            id => crate::tls::roots_of(host, key, id)?,
+        let Some(Gc(roots)) = roots else {
+            return Err(NativeError::Errno(errno::INVALID_INPUT).with_subject("TLS servers need roots".to_owned()));
         };
         Some(
             origine_tls::TlsClient::new(origine_tls::ClientOptions { roots, identity: None, alpn: Vec::new(), sessions: None })
@@ -232,7 +222,7 @@ fn dns_resolver(
         None
     };
     #[cfg(not(feature = "tls"))]
-    if wants_tls || roots != 0 {
+    if wants_tls || roots.is_some() {
         return Err(NativeError::Errno(errno::UNSUPPORTED));
     }
     let mut config = Config::new(servers, Duration::from_millis(u64::from(timeout.max(1))), tries.max(1));
@@ -247,10 +237,7 @@ fn dns_resolver(
         #[cfg(feature = "tls")]
         tls,
     };
-    host.dns.next = host.dns.next.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
-    let id = host.dns.next;
-    host.dns.resolvers.insert(id, Entry { owner: key, runtime: io, resolver: Rc::new(Resolver::new(config, exchange)) });
-    Ok(id)
+    Ok(Gc(ResolverHandle { owner: key, runtime: io, resolver: Rc::new(Resolver::new(config, exchange)) }))
 }
 
 /// `native.dns.lookup(resolver, name, family)`: Promise of the addresses, packed as `[4 | 6, octets]*`; `family` is
@@ -259,14 +246,14 @@ fn dns_resolver(
 fn dns_lookup(
     host: &mut HostState,
     key: ScopeKey,
-    id: u32,
+    resolver: Gc<ResolverHandle>,
     name: String,
     family: u32,
 ) -> Result<Op<'static, impl Future<Output = Result<Vec<u8>, NativeError>> + use<>>, NativeError> {
-    let (resolver, runtime) = match host.dns.resolvers.get(&id) {
-        Some(entry) if entry.owner == key => (Rc::clone(&entry.resolver), entry.runtime),
-        _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
-    };
+    let ResolverHandle { owner, runtime, resolver } = resolver.0;
+    if owner != key {
+        return Err(NativeError::Errno(errno::BAD_HANDLE));
+    }
     let family = match family {
         0 => Family::Any,
         4 => Family::V4,
@@ -291,16 +278,4 @@ fn dns_lookup(
         }
         Ok(packed)
     }))
-}
-
-/// `native.dns.release(resolver)`: forgets a resolver; lookups in flight finish. `BadHandle` if unknown.
-#[native(side_effect = "any", path = "dns.release", needs = "runtime")]
-fn dns_release(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    match host.dns.resolvers.get(&id) {
-        Some(entry) if entry.owner == key => {
-            host.dns.resolvers.remove(&id);
-            Ok(())
-        }
-        _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-    }
 }

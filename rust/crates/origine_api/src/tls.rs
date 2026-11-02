@@ -8,7 +8,6 @@
 //! every `net.*` native (pull reads, `subscribe` and the write lanes, `close`) works on it.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::rc::Rc;
@@ -21,58 +20,11 @@ use origine_tls::{
 
 use crate::HostState;
 use crate::decode::ArrayBufferArg;
+use crate::gc::Gc;
 use crate::native;
 use crate::native::{Op, ScopeKey, host_mut};
 use crate::net::Socket;
 use crate::sockstream::{SocketTransport, take_socket};
-
-enum Value {
-    Roots(RootPki),
-    Identity(Identity),
-    Sessions(TlsSessions),
-    Client(TlsClient),
-    Server(TlsServer),
-}
-
-/// The Host's TLS tables. Ids are never reused while the table lives.
-#[derive(Default)]
-pub(crate) struct TlsState {
-    next_value: u32,
-    values: BTreeMap<u32, (ScopeKey, Rc<Value>)>,
-}
-
-impl TlsState {
-    pub(crate) fn clear(&mut self) {
-        self.values.clear();
-    }
-
-    fn add_value(&mut self, owner: ScopeKey, value: Value) -> Result<u32, NativeError> {
-        self.next_value = self.next_value.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
-        self.values.insert(self.next_value, (owner, Rc::new(value)));
-        Ok(self.next_value)
-    }
-
-    fn value(&self, owner: ScopeKey, id: u32) -> Result<Rc<Value>, NativeError> {
-        match self.values.get(&id) {
-            Some((o, value)) if *o == owner => Ok(Rc::clone(value)),
-            _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-        }
-    }
-}
-
-pub(crate) fn roots_of(host: &HostState, key: ScopeKey, id: u32) -> Result<RootPki, NativeError> {
-    match &*host.tls.value(key, id)? {
-        Value::Roots(roots) => Ok(roots.clone()),
-        _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-    }
-}
-
-fn identity_of(host: &HostState, key: ScopeKey, id: u32) -> Result<Identity, NativeError> {
-    match &*host.tls.value(key, id)? {
-        Value::Identity(identity) => Ok(identity.clone()),
-        _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-    }
-}
 
 /// How `origine_tls` failures reach the guest: one errno per meaning, the detail in `subject`.
 pub(crate) fn tls_error(e: TlsError) -> NativeError {
@@ -127,98 +79,71 @@ fn alpn_list(text: &str) -> Vec<String> {
 }
 
 // ---- values ----
+//
+// Roots, identities, session caches and configurations are native values owned by the garbage collector
+// (see `gc`): each native returns an object that wraps one, and the value is dropped when that object is
+// collected. What is built from a value holds its own copy.
 
-/// `native.tls.rootsBundled()`: id of the Mozilla roots compiled into the binary.
+/// `native.tls.rootsBundled()`: the Mozilla roots compiled into the binary.
 #[native(side_effect = "any", path = "tls.rootsBundled", needs = "runtime")]
-fn tls_roots_bundled(host: &mut HostState, key: ScopeKey) -> Result<u32, NativeError> {
-    host.tls.add_value(key, Value::Roots(RootPki::bundled()))
+fn tls_roots_bundled() -> Gc<RootPki> {
+    Gc(RootPki::bundled())
 }
 
-/// `native.tls.rootsPem(pem)`: id of the certificates of a PEM bundle. `InvalidData` when none parse.
+/// `native.tls.rootsPem(pem)`: the certificates of a PEM bundle. `InvalidData` when none parse.
 #[native(side_effect = "any", path = "tls.rootsPem", needs = "runtime")]
-fn tls_roots_pem(host: &mut HostState, key: ScopeKey, pem: ArrayBufferArg<'_>) -> Result<u32, NativeError> {
-    let roots = pem.with_bytes(RootPki::from_pem).map_err(tls_error)?;
-    host.tls.add_value(key, Value::Roots(roots))
+fn tls_roots_pem(pem: ArrayBufferArg<'_>) -> Result<Gc<RootPki>, NativeError> {
+    pem.with_bytes(RootPki::from_pem).map(Gc).map_err(tls_error)
 }
 
 /// `native.tls.rootsDer(packed)`: `packed` is `[u32 LE length | DER certificate]*`.
 #[native(side_effect = "any", path = "tls.rootsDer", needs = "runtime")]
-fn tls_roots_der(host: &mut HostState, key: ScopeKey, packed: ArrayBufferArg<'_>) -> Result<u32, NativeError> {
-    let roots = packed.with_bytes(|bytes| unpack(bytes).and_then(|certs| RootPki::from_der(&certs).map_err(tls_error)))?;
-    host.tls.add_value(key, Value::Roots(roots))
+fn tls_roots_der(packed: ArrayBufferArg<'_>) -> Result<Gc<RootPki>, NativeError> {
+    packed.with_bytes(|bytes| unpack(bytes).and_then(|certs| RootPki::from_der(&certs).map_err(tls_error))).map(Gc)
 }
 
 /// `native.tls.identityPem(cert, key)`: a certificate chain (PEM, leaf first) and its private key (PEM).
 #[native(side_effect = "any", path = "tls.identityPem", needs = "runtime")]
-fn tls_identity_pem(
-    host: &mut HostState,
-    key: ScopeKey,
-    cert: ArrayBufferArg<'_>,
-    private_key: ArrayBufferArg<'_>,
-) -> Result<u32, NativeError> {
-    let identity =
-        cert.with_bytes(|cert| private_key.with_bytes(|private_key| Identity::from_pem(cert, private_key))).map_err(tls_error)?;
-    host.tls.add_value(key, Value::Identity(identity))
+fn tls_identity_pem(cert: ArrayBufferArg<'_>, private_key: ArrayBufferArg<'_>) -> Result<Gc<Identity>, NativeError> {
+    cert.with_bytes(|cert| private_key.with_bytes(|private_key| Identity::from_pem(cert, private_key))).map(Gc).map_err(tls_error)
 }
 
 /// `native.tls.identityDer(chain, key)`: `chain` is `[u32 LE length | DER certificate]*`, leaf first; `key` a DER private key.
 #[native(side_effect = "any", path = "tls.identityDer", needs = "runtime")]
-fn tls_identity_der(
-    host: &mut HostState,
-    key: ScopeKey,
-    chain: ArrayBufferArg<'_>,
-    private_key: ArrayBufferArg<'_>,
-) -> Result<u32, NativeError> {
-    let identity = chain.with_bytes(|chain| {
-        unpack(chain).and_then(|certs| private_key.with_bytes(|private_key| Identity::from_der(&certs, private_key)).map_err(tls_error))
-    })?;
-    host.tls.add_value(key, Value::Identity(identity))
+fn tls_identity_der(chain: ArrayBufferArg<'_>, private_key: ArrayBufferArg<'_>) -> Result<Gc<Identity>, NativeError> {
+    chain
+        .with_bytes(|chain| {
+            unpack(chain).and_then(|certs| private_key.with_bytes(|private_key| Identity::from_der(&certs, private_key)).map_err(tls_error))
+        })
+        .map(Gc)
 }
 
 /// `native.tls.sessions(limit)`: a client-side resumption cache for at most `limit` server names.
 #[native(side_effect = "any", path = "tls.sessions", needs = "runtime")]
-fn tls_sessions(host: &mut HostState, key: ScopeKey, limit: u32) -> Result<u32, NativeError> {
-    host.tls.add_value(key, Value::Sessions(TlsSessions::create(limit as usize)))
+fn tls_sessions(limit: u32) -> Gc<TlsSessions> {
+    Gc(TlsSessions::create(limit as usize))
 }
 
-/// `native.tls.client(roots, identity, alpn, sessions)`: ids (0 = none for identity and sessions); `alpn` is names joined by `\n`.
+/// `native.tls.client(roots, identity, alpn, sessions)`: `identity` and `sessions` may be undefined; `alpn` is names joined by `\n`.
 #[native(side_effect = "any", path = "tls.client", needs = "runtime")]
-fn tls_client(host: &mut HostState, key: ScopeKey, roots: u32, identity: u32, alpn: String, sessions: u32) -> Result<u32, NativeError> {
-    let roots = roots_of(host, key, roots)?;
-    let identity = (identity != 0).then(|| identity_of(host, key, identity)).transpose()?;
-    let sessions = (sessions != 0)
-        .then(|| match &*host.tls.value(key, sessions)? {
-            Value::Sessions(sessions) => Ok(sessions.clone()),
-            _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-        })
-        .transpose()?;
-    let client = TlsClient::new(ClientOptions { roots, identity, alpn: alpn_list(&alpn), sessions }).map_err(tls_error)?;
-    host.tls.add_value(key, Value::Client(client))
-}
-
-/// `native.tls.server(identities, clientRoots, alpn)`: `identities` is `u32 LE` identity ids (at least one);
-/// `clientRoots` is a roots id that requires client certificates, 0 for none; `alpn` is names joined by `\n`.
-#[native(side_effect = "any", path = "tls.server", needs = "runtime")]
-fn tls_server(
-    host: &mut HostState,
-    key: ScopeKey,
-    identities: ArrayBufferArg<'_>,
-    client_roots: u32,
+fn tls_client(
+    roots: Gc<RootPki>,
+    identity: Option<Gc<Identity>>,
     alpn: String,
-) -> Result<u32, NativeError> {
-    let ids: Vec<u32> = identities.with_bytes(|bytes| bytes.as_chunks::<4>().0.iter().map(|chunk| u32::from_le_bytes(*chunk)).collect());
-    let identities = ids.into_iter().map(|id| identity_of(host, key, id)).collect::<Result<Vec<_>, _>>()?;
-    let client_auth = if client_roots == 0 { ClientAuth::none() } else { ClientAuth::require(roots_of(host, key, client_roots)?) };
-    let server = TlsServer::new(ServerOptions { identities, client_auth, alpn: alpn_list(&alpn) }).map_err(tls_error)?;
-    host.tls.add_value(key, Value::Server(server))
+    sessions: Option<Gc<TlsSessions>>,
+) -> Result<Gc<TlsClient>, NativeError> {
+    let options =
+        ClientOptions { roots: roots.0, identity: identity.map(|i| i.0), alpn: alpn_list(&alpn), sessions: sessions.map(|s| s.0) };
+    TlsClient::new(options).map(Gc).map_err(tls_error)
 }
 
-/// `native.tls.release(id)`: forgets a value. Streams made from it keep working. `BadHandle` if unknown.
-#[native(side_effect = "any", path = "tls.release", needs = "runtime")]
-fn tls_release(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    host.tls.value(key, id)?;
-    host.tls.values.remove(&id);
-    Ok(())
+/// `native.tls.server(identities, clientRoots, alpn)`: `identities` is an array of identities (at least one);
+/// `clientRoots` is roots that require client certificates, undefined for none; `alpn` is names joined by `\n`.
+#[native(side_effect = "any", path = "tls.server", needs = "runtime")]
+fn tls_server(identities: Vec<Gc<Identity>>, client_roots: Option<Gc<RootPki>>, alpn: String) -> Result<Gc<TlsServer>, NativeError> {
+    let identities = identities.into_iter().map(|i| i.0).collect();
+    let client_auth = client_roots.map_or_else(ClientAuth::none, |roots| ClientAuth::require(roots.0));
+    TlsServer::new(ServerOptions { identities, client_auth, alpn: alpn_list(&alpn) }).map(Gc).map_err(tls_error)
 }
 
 // ---- streams ----
@@ -262,14 +187,11 @@ fn tls_connect(
     host: &mut HostState,
     key: ScopeKey,
     io: u32,
-    config: u32,
+    config: Gc<TlsClient>,
     socket: u32,
     servername: String,
 ) -> Result<Op<'static, impl Future<Output = Result<Opened, NativeError>> + use<>>, NativeError> {
-    let client = match &*host.tls.value(key, config)? {
-        Value::Client(client) => client.clone(),
-        _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
-    };
+    let client = config.0;
     let (plain, lp) = take_socket(host, key, io, socket)?;
     let id = host.reserve_socket()?;
     let slot: Slot = Rc::default();
@@ -297,13 +219,10 @@ fn tls_accept(
     host: &mut HostState,
     key: ScopeKey,
     io: u32,
-    config: u32,
+    config: Gc<TlsServer>,
     socket: u32,
 ) -> Result<Op<'static, impl Future<Output = Result<Opened, NativeError>> + use<>>, NativeError> {
-    let server = match &*host.tls.value(key, config)? {
-        Value::Server(server) => server.clone(),
-        _ => return Err(NativeError::Errno(errno::BAD_HANDLE)),
-    };
+    let server = config.0;
     let (plain, lp) = take_socket(host, key, io, socket)?;
     let id = host.reserve_socket()?;
     let slot: Slot = Rc::default();

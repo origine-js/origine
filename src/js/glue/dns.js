@@ -65,25 +65,15 @@ export default native => {
     }
   }
 
-  // A resolver that is garbage collected is released; lookups in flight hold it, so none is cut short.
-  const reclaim = new FinalizationRegistry(id => {
-    try {
-      native.dns.release(id);
-    } catch {
-      // The scope is already gone, or it was closed.
-    }
-  });
-
-  /** A resolver: lookups go through its servers in order. Closing it, or collecting it, releases it. */
+  /** A resolver: lookups go through its servers in order. Closing it, or collecting it, releases it: the native resolver is owned by the garbage collector. */
   class Resolver {
-    #id;
+    #handle;
     #io;
     #closed = false;
     constructor(made, id, io) {
       if (made !== token) throw new TypeError('resolvers are made by dns.resolver');
-      this.#id = id;
+      this.#handle = id;
       this.#io = io;
-      reclaim.register(this, id, this);
     }
     get io() {
       return this.#io;
@@ -102,7 +92,8 @@ export default native => {
       const family = { ipv4: 4, ipv6: 6, any: 0 }[own(options, 'family')];
       if (family === undefined) throw new TypeError("family must be 'ipv4', 'ipv6' or 'any'");
       if (this.#closed || closedIo.has(this.#io)) throw failure(BadHandle);
-      const packed = await native.dns.lookup(this.#id, name, family);
+      if (this.#handle === null) throw failure(BadHandle);
+      const packed = await native.dns.lookup(this.#handle, name, family);
       const out = [];
       for (let at = 0; at < packed.length;) {
         const length = packed[at] === 4 ? 4 : 16;
@@ -115,8 +106,7 @@ export default native => {
     close() {
       if (!this.#closed) {
         this.#closed = true;
-        reclaim.unregister(this);
-        native.dns.release(this.#id);
+        this.#handle = null;
       }
       return DONE;
     }
@@ -160,8 +150,8 @@ export default native => {
         const roots = own(options, 'roots');
         const needsRoots = servers.some(DnsServer.isTls);
         if (needsRoots && roots === undefined) throw new TypeError('roots is required with DnsServer.tls');
-        const rootsId = roots === undefined ? 0 : shared.tlsRootsId(roots);
-        return new Resolver(token, native.dns.resolver(ioId(io), spec, rootsId, timeout, tries), io);
+        const rootsHandle = roots === undefined ? undefined : shared.tlsRootsHandle(roots);
+        return new Resolver(token, native.dns.resolver(ioId(io), spec, rootsHandle, timeout, tries), io);
       },
     });
 };

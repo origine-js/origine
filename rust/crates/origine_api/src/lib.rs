@@ -22,6 +22,7 @@ pub mod decode;
 mod dns;
 pub mod encode;
 mod fs;
+mod gc;
 pub mod host;
 #[cfg(feature = "http")]
 mod http;

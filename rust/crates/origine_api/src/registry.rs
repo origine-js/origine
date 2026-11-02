@@ -104,8 +104,6 @@ pub(crate) static NATIVES: &[RawNative] = &[
     #[cfg(feature = "tls")]
     tls::NATIVE_TLS_SERVER,
     #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_RELEASE,
-    #[cfg(feature = "tls")]
     tls::NATIVE_TLS_CONNECT,
     #[cfg(feature = "tls")]
     tls::NATIVE_TLS_ACCEPT,
@@ -145,8 +143,6 @@ pub(crate) static NATIVES: &[RawNative] = &[
     dns::NATIVE_DNS_RESOLVER,
     #[cfg(feature = "dns")]
     dns::NATIVE_DNS_LOOKUP,
-    #[cfg(feature = "dns")]
-    dns::NATIVE_DNS_RELEASE,
 ];
 
 // The Rust enums are written out in the header's numbers.

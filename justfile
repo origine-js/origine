@@ -27,10 +27,12 @@ patch-v8:
 test:
     zig build test
 
-# The networking crates' tests (origine_tls, origine_h2, origine_dns). origine_h2 links the Zig-built nghttp2.
+# The networking crates' tests (origine_tls, origine_h2, origine_dns). origine_h2 links the Zig-built nghttp2;
+# rustls links the Zig-built AWS-LC (rust/scripts/cargo-aws-lc.sh, docs/aws-lc.md).
 test-net:
     cd lib/nghttp2 && zig build -Doptimize=ReleaseFast -p ../../zig-out/nghttp2
-    cd rust && ORIGINE_NGHTTP2_LIB="$PWD/../zig-out/nghttp2/lib" cargo test --offline --locked -p origine_tls -p origine_h2 -p origine_dns
+    cd lib/aws-lc && zig build crypto -Doptimize=ReleaseFast -p ../../zig-out/aws-lc
+    cd rust && ORIGINE_NGHTTP2_LIB="$PWD/../zig-out/nghttp2/lib" sh scripts/cargo-aws-lc.sh ../zig-out/aws-lc host cargo test --offline --locked -p origine_tls -p origine_h2 -p origine_dns
 
 # Exercise the REPL in a real pseudo-terminal (Tab, suggestions, history, colors).
 test-repl:

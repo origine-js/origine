@@ -58,12 +58,21 @@ pub fn build(b: *std.Build) void {
     const v8 = v8Dependency(b, options, !external_link);
     // The Rust crates that use the `v8` crate build against this V8 (headers, GN defines, archive path).
     const rust_v8: ?*std.Build.Dependency = if (prebuilt == null) v8 else null;
-    const rust_lib: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, external_link, rust_v8);
+    // rustls/aws-lc-rs link the Zig-built AWS-LC (lib/aws-lc): cargo overrides aws-lc-sys's build
+    // script instead of compiling AWS-LC itself (docs/aws-lc.md). Null without -Dtls, or while
+    // the lazy dependency is being fetched (the build then runs again).
+    const aws_lc: ?*std.Build.Dependency = if (tls) awsLcDependency(b, target) else null;
+    const rust_aws_lc: ?CargoAwsLc = if (aws_lc) |dep| .{ .prefix = dep.namedLazyPath("prefix"), .triple = rustTriple(b, target.result) } else null;
+    const rust_lib: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, external_link, rust_v8, rust_aws_lc);
     // Zig-linked programs (debug, tests) resolve duplicate Rust runtime symbols on their own and
     // would break on a pre-linked object (thread-locals), so they take the plain archive.
-    const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, false, rust_v8);
-    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, rust_v8, cargo_offline, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
-    b.step("clippy", "Run clippy (-D warnings) over the Rust workspace with the V8 environment").dependOn(&cargoCommand(b, rust_v8, cargo_offline, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
+    const rust_archive: ?std.Build.LazyPath = rustLibrary(b, target, cargo_offline, rust_features, false, rust_v8, rust_aws_lc);
+    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, rust_v8, cargo_offline, null, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
+    // Clippy checks every crate whatever the features, origine_tls (and so aws-lc-sys) included,
+    // for the host: it gets a host AWS-LC so that aws-lc-sys's build script does not run either
+    // (with -Dtls=false nothing of AWS-LC is fetched, and clippy falls back to that build script).
+    const host_aws_lc: ?CargoAwsLc = if (!tls) null else if (awsLcDependency(b, b.graph.host)) |dep| .{ .prefix = dep.namedLazyPath("prefix"), .triple = "host" } else null;
+    b.step("clippy", "Run clippy (-D warnings) over the Rust workspace with the V8 environment").dependOn(&cargoCommand(b, rust_v8, cargo_offline, host_aws_lc, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -83,6 +92,15 @@ pub fn build(b: *std.Build) void {
     const icu_lib: ?*std.Build.Step.Compile = if (prebuilt == null) v8.artifact("v8_icu") else null;
     // The Rust HTTP/2 crate binds nghttp2's C ABI; like `oio_*`, every program that links the Rust library links it.
     const nghttp2_lib: ?*std.Build.Step.Compile = if (http) nghttp2Library(b, target) else null;
+    // libcrypto for aws-lc-rs: the Rust library refers to it without embedding it (`-bundle`).
+    const aws_lc_crypto: ?*std.Build.Step.Compile = if (aws_lc) |dep| dep.artifact("aws_lc_crypto") else null;
+    // libssl is built for QUIC's TLS API (-Dquic) but nothing links it yet: it is C++ and needs
+    // V8's libc++ at the final link (docs/aws-lc.md).
+    if (quic) if (aws_lc) |dep| b.getInstallStep().dependOn(&dep.artifact("aws_lc_ssl").step);
+    // The C libraries every program that links the Rust library links too.
+    var native_list: std.ArrayList(*std.Build.Step.Compile) = .empty;
+    for ([_]?*std.Build.Step.Compile{ nghttp2_lib, aws_lc_crypto }) |lib| if (lib) |l| native_list.append(b.allocator, l) catch @panic("OOM");
+    const native_libs = native_list.items;
     root.addImport("@io", io_module);
     root.addImport("@lz4", lz4_dep.module("@lz4"));
     const modules = hostModules(b, v8, io_module, lz4_dep.module("@lz4"), target, optimize, config);
@@ -111,7 +129,7 @@ pub fn build(b: *std.Build) void {
         tool_module.addImport("@lz4", lz4_dep.module("@lz4"));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib, icu_lib, nghttp2_lib);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_lib, io_lib, lz4_lib, icu_lib, native_libs);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg(tool);
         const blob = generate.addOutputFileArg(if (engine_snapshot == .compressed) "engine.snapshot.lz4" else "engine.snapshot");
@@ -120,7 +138,7 @@ pub fn build(b: *std.Build) void {
         root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib, icu_lib, nghttp2_lib);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_lib, io_lib, lz4_lib, icu_lib, native_libs);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -160,7 +178,7 @@ pub fn build(b: *std.Build) void {
     test_root.addImport("@io", io_module);
     test_root.linkLibrary(io_lib);
     test_root.linkLibrary(lz4_lib);
-    if (nghttp2_lib) |lib| test_root.linkLibrary(lib);
+    for (native_libs) |lib| test_root.linkLibrary(lib);
     test_step.dependOn(&lz4_dep.builder.top_level_steps.get("test").?.step);
     for ([_][]const u8{ "@v8", "@util", "@mimalloc" }) |name| {
         test_root.addImport(name, test_v8.module(name));
@@ -243,6 +261,18 @@ fn nghttp2Library(b: *std.Build, target: std.Build.ResolvedTarget) ?*std.Build.S
     return dep.artifact("nghttp2");
 }
 
+/// AWS-LC (lib/aws-lc) for `target`, built ReleaseFast like the C libraries on the request path:
+/// artifacts `aws_lc_crypto` and `aws_lc_ssl`, named lazy path `prefix` (the tree
+/// rust/scripts/cargo-aws-lc.sh takes). Null while the lazy dependency is still being fetched.
+/// Borrows b through build teardown.
+fn awsLcDependency(b: *std.Build, target: std.Build.ResolvedTarget) ?*std.Build.Dependency {
+    return b.lazyDependency("aws_lc", .{ .target = target, .optimize = .ReleaseFast });
+}
+
+/// What `cargoCommand` needs to point aws-lc-sys at the Zig-built AWS-LC: the `prefix` tree and
+/// the Rust triple cargo builds for (`host` without --target).
+const CargoAwsLc = struct { prefix: std.Build.LazyPath, triple: []const u8 };
+
 /// `liborigine_io.a`: the `oio_*` C ABI the Rust runtime calls, built once with LLVM in
 /// ReleaseFast whatever `-Doptimize` says (the event loop is a hot path, and debug builds of the
 /// host should not slow it down). Safety-critical invariants use `src/safe.zig`, which keeps its
@@ -276,8 +306,11 @@ fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std
 /// needs (rust/scripts/cargo-v8.sh). `v8` is null for -Dprebuilt_v8_path, which has no GN output
 /// to run bindgen against: cargo then runs bare and the `v8` crate's build script reports the
 /// missing variables, so a prebuilt V8 cannot build the Rust workspace (a documented limitation).
-/// Borrows b and v8 through build teardown; the returned step is build-owned.
-fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, args: []const []const u8) *std.Build.Step.Run {
+/// With `aws_lc`, rust/scripts/cargo-aws-lc.sh adds the override that replaces aws-lc-sys's build
+/// script with the Zig-built AWS-LC (docs/aws-lc.md); without it, that build script compiles
+/// AWS-LC itself.
+/// Borrows b, v8 and aws_lc through build teardown; the returned step is build-owned.
+fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, aws_lc: ?CargoAwsLc, args: []const []const u8) *std.Build.Step.Run {
     const run = b.addSystemCommand(&.{"sh"});
     if (v8) |dep| {
         run.addFileArg(b.path("rust/scripts/cargo-v8.sh"));
@@ -287,10 +320,17 @@ fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, args: 
         run.addFileArg(dep.namedLazyPath("v8_root"));
         run.addFileArg(dep.namedLazyPath("gn_compile_commands"));
         run.addFileArg(dep.namedLazyPath("binding"));
-        run.addArg("cargo");
     } else {
-        run.addArgs(&.{ "-c", "exec cargo \"$@\"", "cargo" });
+        run.addArgs(&.{ "-c", "exec \"$@\"", "sh" });
     }
+    if (aws_lc) |lc| {
+        // Absolute: cargo-v8.sh changes into rust/ before running this.
+        run.addArg("sh");
+        run.addFileArg2(b.path("rust/scripts/cargo-aws-lc.sh"), .{ .make_absolute = true });
+        run.addDirectoryArg2(lc.prefix, .{ .make_absolute = true });
+        run.addArg(lc.triple);
+    }
+    run.addArg("cargo");
     run.addArg(args[0]);
     if (offline) run.addArg("--offline");
     run.addArgs(&.{ "--manifest-path", b.root.joinString(b.allocator, "rust/Cargo.toml") catch @panic("OOM") });
@@ -306,24 +346,29 @@ fn cargoCommand(b: *std.Build, v8: ?*std.Build.Dependency, offline: bool, args: 
 /// first prefix is origine's own C ABI (`origine_oxc_*`, `origine_api_*`, `origine_api_native_*`).
 const kept_symbol_prefixes = [_][]const u8{ "origine_", "crdtp__", "v8_inspector__", "rusty_v8_RustObj_", "v8__ValueSerializer__Delegate__", "v8__ValueDeserializer__Delegate__" };
 
-/// Builds the Rust workspace in rust/ with cargo and returns the linkable result (see below),
-/// a cache file so consumers depend on its content. Borrows b through build
-/// teardown. Cargo keeps its own incremental state in rust/target (gitignored), so the step
-/// always runs and is cheap when nothing changed. Unsupported targets are a build error.
-fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, features: []const u8, hide_symbols: bool, v8: ?*std.Build.Dependency) std.Build.LazyPath {
-    const result = target.result;
+/// The Rust target triple for a Zig target. Unsupported targets are a build error.
+fn rustTriple(b: *std.Build, result: std.Target) []const u8 {
     const arch = switch (result.cpu.arch) {
         .aarch64 => "aarch64",
         .x86_64 => "x86_64",
         else => std.debug.panic("No Rust target for {s}", .{@tagName(result.cpu.arch)}),
     };
-    const triple = switch (result.os.tag) {
+    return switch (result.os.tag) {
         .macos => b.fmt("{s}-apple-darwin", .{arch}),
         .linux => b.fmt("{s}-unknown-linux-{s}", .{ arch, if (result.abi.isMusl()) "musl" else "gnu" }),
         .windows => b.fmt("{s}-pc-windows-{s}", .{ arch, if (result.abi == .msvc) "msvc" else "gnu" }),
         else => std.debug.panic("No Rust target for {s}", .{@tagName(result.os.tag)}),
     };
-    const cargo = cargoCommand(b, v8, offline, &.{ "build", "--release", "--locked", "--target", triple });
+}
+
+/// Builds the Rust workspace in rust/ with cargo and returns the linkable result (see below),
+/// a cache file so consumers depend on its content. Borrows b through build
+/// teardown. Cargo keeps its own incremental state in rust/target (gitignored), so the step
+/// always runs and is cheap when nothing changed. Unsupported targets are a build error.
+fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, features: []const u8, hide_symbols: bool, v8: ?*std.Build.Dependency, aws_lc: ?CargoAwsLc) std.Build.LazyPath {
+    const result = target.result;
+    const triple = rustTriple(b, result);
+    const cargo = cargoCommand(b, v8, offline, aws_lc, &.{ "build", "--release", "--locked", "--target", triple });
     cargo.addArgs(&.{ "--no-default-features", "--features", features });
     cargo.addArgs(&.{ "--target-dir", (b.root.joinString(b.allocator, "rust/target") catch @panic("OOM")) });
     const file_name = if (result.os.tag == .windows and result.abi == .msvc) "origine_native.lib" else "liborigine_native.a";
@@ -365,7 +410,7 @@ fn rustLibrary(b: *std.Build, target: std.Build.ResolvedTarget, offline: bool, f
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, nghttp2_lib: ?*std.Build.Step.Compile) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: ?std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, native_libs: []const *std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         // The external linker does not add Zig's compiler-rt; an object that needs a soft-float helper
@@ -385,7 +430,7 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         link.addArtifactArg(v8.artifact("mimalloc"));
         link.addArtifactArg(io_lib);
         link.addArtifactArg(lz4_lib);
-        if (nghttp2_lib) |lib| link.addArtifactArg(lib);
+        for (native_libs) |lib| link.addArtifactArg(lib);
         if (rust_lib) |lib| link.addFileArg(lib);
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
@@ -393,7 +438,7 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
     if (rust_lib) |lib| module.addObjectFile(lib);
     module.linkLibrary(io_lib);
     module.linkLibrary(lz4_lib);
-    if (nghttp2_lib) |lib| module.linkLibrary(lib);
+    for (native_libs) |lib| module.linkLibrary(lib);
     const exe = b.addExecutable(.{ .name = name, .root_module = module });
     if (optimize != .debug) {
         exe.use_llvm = true;

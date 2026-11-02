@@ -29,8 +29,9 @@ its `Cargo.toml`), so the library exports `aws_lc_0_47_0_*` names and matches th
 defines are those of aws-lc-sys's cc builder (`builder/cc_builder.rs`) with its compiler checks
 answered for Zig's clang.
 
-Assembly is on for aarch64/x86_64 macOS and Linux (and arm, x86, ppc64le Linux, for which the
-crate has lists); Windows builds C only (`OPENSSL_NO_ASM`, its x86_64 assembly is NASM). CPU
+Supported targets are origine's: aarch64-macos and x86_64/aarch64-linux, all with assembly. Any
+other target (Intel macOS included) stops the build in `lib/aws-lc/build.zig` rather than
+silently building something untested. CPU
 jitter entropy is built (at `-O0`, as AWS-LC requires) except for Apple targets cross-compiled
 without an SDK (`CoreServices.h`); `-Djitter=false` turns it off. Built `ReleaseFast`;
 `-Dsmall` in `lib/aws-lc` adds `OPENSSL_SMALL`.
@@ -40,6 +41,13 @@ for QUIC's TLS API but not linked by anything yet; it needs the C++ runtime of t
 which is V8's libc++, and C consumers of the headers must define `BORINGSSL_PREFIX` to the
 contents of `links`). libssl's own `SSL_*` names are not prefixed (the prefix list covers
 libcrypto); its calls into libcrypto are.
+
+Fetched rather than vendored, like every C library here (`lib/nghttp2`, `lib/lz4`, mimalloc: a
+`build.zig.zon` URL plus hash, only `build.zig` in the tree). Checking AWS-LC in would add
+roughly 30 MB of sources for the three supported targets (the crate's `aws-lc/` is 54 MB
+unpacked; the `.crate` is 9.7 MB compressed) and would need its own update procedure. The hash
+pins the content as firmly as a checked-in copy, and cargo already downloads the same crate for
+the lockfile, so the fetch adds no new source of trust.
 
 ## Cargo: a `links` override
 

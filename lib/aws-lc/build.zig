@@ -9,9 +9,8 @@
 //! (`aws_lc_0_47_0`), the prefix the crate's bindings link against.
 //!
 //! Artifacts:
-//! * `aws_lc_crypto`: libcrypto, what aws-lc-rs needs. Assembly on aarch64/x86_64 macOS and
-//!   Linux (and the other Linux arches aws-lc-sys has lists for); C only on Windows (its x86_64
-//!   assembly is NASM) and unknown arches.
+//! * `aws_lc_crypto`: libcrypto, what aws-lc-rs needs. Targets: aarch64-macos and
+//!   x86_64/aarch64-linux, with assembly; anything else (Intel macOS included) is a build error.
 //! * `aws_lc_ssl`: libssl (C++, `-fno-exceptions -fno-rtti`), for QUIC's TLS API
 //!   (`SSL_set_quic_method`). Built on request only; it needs a C++ runtime from the consumer.
 //!   Its own `SSL_*` names are not prefixed (the prefix list covers libcrypto only); its calls into
@@ -56,7 +55,7 @@ pub fn build(b: *std.Build) void {
         else if (std.mem.endsWith(u8, file, ".c"))
             &c_files
         else
-            // `.asm` (NASM) is listed for Windows only, where `sourceList` selects no assembly.
+            // `.asm` (NASM) is listed for Windows only, which `sourceList` rejects.
             std.debug.panic("aws-lc: unexpected source {s}", .{file});
         list.append(arena, file) catch @panic("OOM");
     }
@@ -159,24 +158,25 @@ fn linksName(source: Crate) []const u8 {
 const Sources = struct { files: []const []const u8, asm_ok: bool };
 
 /// The quoted paths of `builder/cc_builder/universal.rs` plus the list for the target (the same
-/// choice as `identify_sources` there). No list (Windows, other arches): C only, OPENSSL_NO_ASM.
+/// choice as `identify_sources` there). Only origine's targets are accepted: aarch64 macOS and
+/// x86_64/aarch64 Linux, all with assembly. Intel macOS and the rest are a build error.
 fn sourceList(b: *std.Build, source: Crate, t: std.Target) Sources {
-    const arch: ?[]const u8 = switch (t.cpu.arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "aarch64",
-        .arm => "arm",
-        .x86 => "x86",
-        .powerpc64le => "ppc64le",
-        else => null,
+    const platform: []const u8 = switch (t.os.tag) {
+        .macos => switch (t.cpu.arch) {
+            .aarch64 => "apple_aarch64",
+            else => std.debug.panic("aws-lc: unsupported target {s}-macos (only aarch64-macos)", .{@tagName(t.cpu.arch)}),
+        },
+        .linux => switch (t.cpu.arch) {
+            .aarch64 => "linux_aarch64",
+            .x86_64 => "linux_x86_64",
+            else => std.debug.panic("aws-lc: unsupported target {s}-linux (only x86_64, aarch64)", .{@tagName(t.cpu.arch)}),
+        },
+        else => std.debug.panic("aws-lc: unsupported OS {s} (aarch64-macos, x86_64/aarch64-linux)", .{@tagName(t.os.tag)}),
     };
-    const platform: ?[]const u8 = if (t.os.tag == .windows) null else if (t.os.tag.isDarwin()) switch (t.cpu.arch) {
-        .x86_64, .aarch64 => b.fmt("apple_{s}", .{arch.?}),
-        else => null,
-    } else if (arch) |a| b.fmt("linux_{s}", .{a}) else null;
     var files: std.ArrayList([]const u8) = .empty;
     quotedLines(b, source.read("builder/cc_builder/universal.rs"), &files);
-    if (platform) |name| quotedLines(b, source.read(b.fmt("builder/cc_builder/{s}.rs", .{name})), &files);
-    return .{ .files = files.items, .asm_ok = platform != null };
+    quotedLines(b, source.read(b.fmt("builder/cc_builder/{s}.rs", .{platform})), &files);
+    return .{ .files = files.items, .asm_ok = true };
 }
 
 /// libssl's sources: the `.cc`/`.c` names of the `add_library(ssl ...)` call in aws-lc/ssl/CMakeLists.txt.

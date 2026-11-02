@@ -108,6 +108,8 @@ impl RuntimeEntry {
 pub struct HostState {
     ceiling: Ceiling,
     fs: FsConfig,
+    /// The network ceiling (what `api.net` and the resolvers may reach); nothing until configured.
+    pub(crate) net: origine_api_core::NetRules,
     runtimes: BTreeMap<u32, RuntimeEntry>,
     next_runtime: u32,
     grants: BTreeMap<u32, Rc<GrantRecord>>,
@@ -145,6 +147,7 @@ impl HostState {
         HostState {
             ceiling: Ceiling::NONE,
             fs: FsConfig { root: None, write: false, asynchronous: false },
+            net: origine_api_core::NetRules::none(),
             runtimes: BTreeMap::new(),
             next_runtime: 1,
             grants: BTreeMap::new(),
@@ -173,9 +176,10 @@ impl HostState {
         }
     }
 
-    pub(crate) fn configure(&mut self, ceiling: Ceiling, fs: FsConfig) {
+    pub(crate) fn configure(&mut self, ceiling: Ceiling, fs: FsConfig, net: origine_api_core::NetRules) {
         self.ceiling = ceiling;
         self.fs = fs;
+        self.net = net;
     }
 
     pub(crate) fn completions(&self) -> CompletionQueue {

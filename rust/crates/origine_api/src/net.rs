@@ -140,19 +140,28 @@ pub(crate) fn prepare(stream: &TcpStream) -> Result<(), NativeError> {
     Ok(())
 }
 
-/// Loopback addresses `host:port` to try, in order; `PermissionDenied` for any other host.
-/// `localhost` is a name, not resolved: IPv4 first, then IPv6 (`connect` only; `listen` takes the first).
-fn loopback(host: &str, port: u32) -> Result<Vec<SocketAddr>, NativeError> {
+/// The addresses `host:port` names, each kept only if the network ceiling allows it (`listen`: to listen on, else to
+/// connect to). An IP literal is used as given; `localhost` is 127.0.0.1 then ::1 and is never looked up (RFC 6761).
+/// A name that is not a literal is refused: `api.net` does not resolve, so look it up with `api.dns` and pass the
+/// address, which is what the ceiling is checked against (a name could lead anywhere). `PermissionDenied` when
+/// nothing is allowed, with the address (or the name) as the detail.
+pub(crate) fn allowed(host: &HostState, name: &str, port: u32, listen: bool) -> Result<Vec<SocketAddr>, NativeError> {
     let port = u16::try_from(port).map_err(|_| NativeError::Errno(errno::INVALID_INPUT))?;
-    let ips = if host.eq_ignore_ascii_case("localhost") {
+    let ips = if name.eq_ignore_ascii_case("localhost") {
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
     } else {
-        match host.parse::<IpAddr>() {
-            Ok(ip) if ip.is_loopback() => vec![ip],
-            _ => return Err(NativeError::Errno(errno::PERMISSION_DENIED)),
+        match name.parse::<IpAddr>() {
+            Ok(ip) => vec![ip],
+            Err(_) => return Err(NativeError::Errno(errno::PERMISSION_DENIED).with_subject(name.to_owned())),
         }
     };
-    Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect())
+    let candidates: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+    let permitted = |addr: &SocketAddr| if listen { host.net.allows_listen(addr) } else { host.net.allows_connect(addr) };
+    let kept: Vec<SocketAddr> = candidates.iter().copied().filter(permitted).collect();
+    if kept.is_empty() {
+        return Err(NativeError::Errno(errno::PERMISSION_DENIED).with_subject(candidates[0].to_string()));
+    }
+    Ok(kept)
 }
 
 unsafe extern "C" {
@@ -258,7 +267,7 @@ pub(crate) fn stream_of(host: &HostState, key: ScopeKey, id: u32) -> Result<(Rc<
 #[native(side_effect = "any", path = "net.listen", needs = "runtime")]
 fn net_listen(host: &mut HostState, key: ScopeKey, io: u32, addr: String, port: u32) -> Result<Opened, NativeError> {
     host.loop_of(key, io)?;
-    let listener = TcpListener::bind(loopback(&addr, port)?[0])?;
+    let listener = TcpListener::bind(allowed(host, &addr, port, true)?[0])?;
     listener.set_nonblocking(true)?;
     let port = u32::from(listener.local_addr()?.port());
     let id = host.reserve_socket()?;
@@ -326,7 +335,7 @@ fn net_connect(
     port: u32,
 ) -> Result<Op<'static, impl Future<Output = Result<Opened, NativeError>> + use<>>, NativeError> {
     let lp = host.loop_of(key, io)?;
-    let candidates = loopback(&addr, port)?;
+    let candidates = allowed(host, &addr, port, false)?;
     let id = host.reserve_socket()?;
     let slot: Rc<RefCell<Option<TcpStream>>> = Rc::default();
     let filled = Rc::clone(&slot);

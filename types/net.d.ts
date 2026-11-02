@@ -241,7 +241,7 @@ export type Server<M extends Mode = Mode, S extends Mode = Mode> = M extends "pu
     ? EventServer<S>
     : never;
 
-/** Options shared by `listen` and `connect`. Loopback only: any other host is `PermissionDenied`. */
+/** Options shared by `listen` and `connect`. The address must be allowed by the embedder's network ceiling (loopback only by default): any other host, a name included, is `PermissionDenied`. */
 export interface AddressOptions {
   /** `127.0.0.1`, `::1`, another loopback IP literal (used as given) or `localhost` (never resolved; `connect` tries 127.0.0.1 then ::1, `listen` binds 127.0.0.1). Default `'127.0.0.1'`. */
   readonly host?: string;
@@ -276,7 +276,7 @@ export interface HandleClass<T> extends Function {
 }
 
 /**
- * `api.net`: loopback TCP on an {@link Io} runtime. Only loopback addresses are allowed. Every
+ * `api.net`: TCP on an {@link Io} runtime. Only addresses the embedder's network ceiling allows (loopback by default). Every
  * socket belongs to the runtime it was created with; closing the runtime invalidates it.
  */
 export interface NetCap {

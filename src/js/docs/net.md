@@ -1,6 +1,6 @@
-# `api.net`: loopback TCP
+# `api.net`: TCP
 
-`api.net` exists wherever `api.io` does (the embedder's runtime ceiling). Every socket belongs to the `io` runtime it was created with; closing the runtime invalidates its sockets. **Only loopback addresses are allowed** (`127.0.0.1`, `localhost`, `::1`); other hosts reject with `PermissionDenied`. There is no embedder permission for wider network access yet.
+`api.net` exists wherever `api.io` does (the embedder's runtime ceiling). Every socket belongs to the `io` runtime it was created with; closing the runtime invalidates its sockets. **Which addresses are reachable is the embedder's [network ceiling](../../../docs/net-grant.md)**: loopback only by default (`127.0.0.1`, `localhost`, `::1`), wider when the embedder says so (the shell's `--net-connect` and `--net-listen`). An address no rule allows rejects with `PermissionDenied`, the address as the error's `subject`.
 
 ```js
 const io = api.io.create();
@@ -74,7 +74,7 @@ Handles are instances of classes the guest cannot construct (`TypeError`), whose
 
 ### Hosts
 
-Only loopback is reachable. An IP literal (`127.0.0.1`, `::1`, any loopback address) is used exactly as given. `localhost` is a name and is **never** looked up in the system resolver (RFC 6761): `connect` tries `127.0.0.1`, then `::1` if that fails, one after the other; `listen` binds `127.0.0.1` (pass `'::1'` to listen on IPv6). Any other host rejects with `PermissionDenied`. `connect` never blocks: the socket is created non-blocking and the loop finishes the handshake.
+An IP literal is used exactly as given and checked against the [ceiling](../../../docs/net-grant.md) (by default only loopback passes); an IPv4-mapped literal is checked as the IPv4 address it stands for. `localhost` is a name and is **never** looked up in the system resolver (RFC 6761): `connect` tries `127.0.0.1`, then `::1` if that fails, one after the other; `listen` binds `127.0.0.1` (pass `'::1'` to listen on IPv6); the addresses the ceiling does not allow are dropped from that list. Any other host, **a name included** (`api.net` does not resolve: look it up with `api.dns` and pass the address), rejects with `PermissionDenied`. `connect` never blocks: the socket is created non-blocking and the loop finishes the handshake.
 
 ### Closing
 
@@ -147,4 +147,4 @@ Registrations never keep the program alive on their own, so a program that regis
 - Closing a `Socket` shuts it down, so a pending `read` resolves with an empty array. Closing a `PullServer` rejects a pending `accept` with `Canceled`, and its promise resolves once the port is free.
 - `read` allocates its result (zero-initialised `length` bytes, compacted to the bytes read when that is at most half of a 4 KiB+ buffer).
 - Backends: sockets work on `uring`, `kqueue` and `threaded` (the threaded backend waits for readiness on its workers).
-- The Rust side: [natives.md](../../../rust/crates/origine_api/docs/natives.md#net-loopback-tcp-needs--runtime).
+- The Rust side: [natives.md](../../../rust/crates/origine_api/docs/natives.md#net-tcp-needs--runtime).

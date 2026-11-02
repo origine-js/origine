@@ -47,8 +47,8 @@ export declare class SocketAddr {
 
 /**
  * How one DNS server is reached. Servers are `IpAddr` (the transport's default port: 53, or 853 for TLS) or
- * `SocketAddr` values, and **must be loopback addresses for now** (`PermissionDenied` at `dns.resolver`): a
- * resolver opens sockets of its own, and there is no embedder permission for the wider network yet.
+ * `SocketAddr` values, and each must be allowed by a `connect` rule of the embedder's network ceiling
+ * (`PermissionDenied` at `dns.resolver`, loopback only by default): a resolver opens sockets of its own.
  */
 export declare class DnsServer {
   private constructor();

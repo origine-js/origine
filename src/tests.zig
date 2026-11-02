@@ -27,6 +27,7 @@ test {
     _ = @import("tests/managed/tls.zig");
     _ = @import("tests/managed/http.zig");
     _ = @import("tests/managed/dns.zig");
+    _ = @import("tests/managed/netgrant.zig");
     _ = @import("tests/managed/graph_chain.zig");
     _ = @import("tests/managed/snapshot_api.zig");
     _ = @import("tests/managed/snapshot.zig");

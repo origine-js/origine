@@ -103,7 +103,18 @@ pub const ALL: [(u32, &str); HOST_CODES.len() + IO_CODES.len()] = {
 
 /// Whether `code` is in the host domain (`false` for I/O codes and unknown ones).
 pub fn is_host(code: u32) -> bool {
-    matches!(code, UNEXPECTED | BAD_HANDLE | STALE_HANDLE | CANCELED | CERTIFICATE_REJECTED | TLS_ALERT | NO_APPLICATION_PROTOCOL | PROTOCOL_ERROR | SERVER_FAILURE)
+    matches!(
+        code,
+        UNEXPECTED
+            | BAD_HANDLE
+            | STALE_HANDLE
+            | CANCELED
+            | CERTIFICATE_REJECTED
+            | TLS_ALERT
+            | NO_APPLICATION_PROTOCOL
+            | PROTOCOL_ERROR
+            | SERVER_FAILURE
+    )
 }
 
 /// The guest-visible name of `code` (`native.errors` / `origine:@std/errno`); unknown codes are

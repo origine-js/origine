@@ -3,9 +3,9 @@
 //! A resolver is a list of servers (UDP, TCP, or TLS) plus, for `system()`, what `/etc/resolv.conf` and
 //! `/etc/hosts` say. Each query opens its own socket on the resolver's runtime (a connected UDP socket, or a
 //! stream, framed as RFC 1035 section 4.2.2 says, over TLS for DoT) and ends after one answer or its timeout.
-//! The servers' sockets are not `api.net` sockets, so **servers must be loopback addresses for now**
-//! (`PermissionDenied` otherwise, with the address as the detail): there is no embedder permission for wider
-//! network access yet, and a resolver must not be a way around that.
+//! The servers' sockets are not `api.net` sockets, so each server address is checked against the embedder's
+//! network ceiling (`connect` rules; `PermissionDenied` otherwise, with the address as the detail) when the
+//! resolver is made and again before every query: a resolver must not be a way around the ceiling.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -15,7 +15,7 @@ use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::time::Duration;
 
-use origine_api_core::{NativeError, errno};
+use origine_api_core::{NativeError, NetRules, errno};
 use origine_dns::{Config, DnsError, Exchange, Family, Hosts, Resolver, Server, Transport as DnsTransport, parse_resolv_conf};
 use origine_io::Loop;
 use origine_io::rt::Handle;
@@ -34,6 +34,7 @@ struct NetExchange {
     key: ScopeKey,
     runtime: u32,
     lp: Rc<Loop>,
+    net: NetRules,
     #[cfg(feature = "tls")]
     tls: Option<origine_tls::TlsClient>,
 }
@@ -92,7 +93,7 @@ async fn read_exact<T: Transport>(transport: &T, len: usize) -> io::Result<Vec<u
 
 impl Exchange for NetExchange {
     async fn exchange(&self, server: &Server, addr: SocketAddr, query: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
-        if !addr.ip().to_canonical().is_loopback() {
+        if !self.net.allows_connect(&addr) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
         let work = async {
@@ -158,7 +159,7 @@ fn denied(addr: &SocketAddr) -> NativeError {
     NativeError::Errno(errno::PERMISSION_DENIED).with_subject(addr.to_string())
 }
 
-fn addrs_of(list: &str) -> Result<Vec<SocketAddr>, NativeError> {
+fn addrs_of(list: &str, net: &NetRules) -> Result<Vec<SocketAddr>, NativeError> {
     let addrs = list
         .split(',')
         .filter(|a| !a.is_empty())
@@ -167,8 +168,8 @@ fn addrs_of(list: &str) -> Result<Vec<SocketAddr>, NativeError> {
     if addrs.is_empty() {
         return Err(NativeError::Errno(errno::INVALID_INPUT));
     }
-    // Resolvers open sockets of their own: until there is an embedder permission for the network, loopback only.
-    match addrs.iter().find(|a| !a.ip().to_canonical().is_loopback()) {
+    // Resolvers open sockets of their own, so the ceiling applies to them as it does to `api.net`.
+    match addrs.iter().find(|a| !net.allows_connect(a)) {
         Some(addr) => Err(denied(addr)),
         None => Ok(addrs),
     }
@@ -189,22 +190,23 @@ fn dns_resolver(
     tries: u32,
 ) -> Result<u32, NativeError> {
     let lp = host.loop_of(key, io)?;
+    let net = host.net.clone();
     let mut servers = Vec::new();
     let (mut search, mut ndots, mut hosts) = (Vec::new(), None, Hosts::new());
     let mut wants_tls = false;
     for line in spec.lines().filter(|l| !l.is_empty()) {
         let mut words = line.splitn(3, ' ');
         match (words.next(), words.next(), words.next()) {
-            (Some("udp"), Some(addrs), None) => servers.push(Server { transport: DnsTransport::Udp, addrs: addrs_of(addrs)? }),
-            (Some("tcp"), Some(addrs), None) => servers.push(Server { transport: DnsTransport::Tcp, addrs: addrs_of(addrs)? }),
+            (Some("udp"), Some(addrs), None) => servers.push(Server { transport: DnsTransport::Udp, addrs: addrs_of(addrs, &net)? }),
+            (Some("tcp"), Some(addrs), None) => servers.push(Server { transport: DnsTransport::Tcp, addrs: addrs_of(addrs, &net)? }),
             (Some("tls"), Some(name), Some(addrs)) => {
                 wants_tls = true;
-                servers.push(Server { transport: DnsTransport::Tls { name: name.to_owned() }, addrs: addrs_of(addrs)? });
+                servers.push(Server { transport: DnsTransport::Tls { name: name.to_owned() }, addrs: addrs_of(addrs, &net)? });
             }
             (Some("system"), None, None) => {
                 let conf = parse_resolv_conf(&std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default());
                 for ip in conf.nameservers {
-                    servers.push(Server { transport: DnsTransport::Udp, addrs: addrs_of(&SocketAddr::new(ip, 53).to_string())? });
+                    servers.push(Server { transport: DnsTransport::Udp, addrs: addrs_of(&SocketAddr::new(ip, 53).to_string(), &net)? });
                 }
                 search = conf.search;
                 ndots = conf.ndots;
@@ -241,6 +243,7 @@ fn dns_resolver(
         key,
         runtime: io,
         lp,
+        net,
         #[cfg(feature = "tls")]
         tls,
     };

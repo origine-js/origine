@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include "origine_api.h"
 
-_Static_assert(sizeof(origine_api_cfg) == 20, "origine_api_cfg: size");
+_Static_assert(sizeof(origine_api_cfg) == 40, "origine_api_cfg: size");
 _Static_assert(offsetof(origine_api_cfg, max_runtimes) == 0, "origine_api_cfg.max_runtimes: offset");
 _Static_assert(_Generic((((origine_api_cfg *)0)->max_runtimes), uint32_t: 1, default: 0), "origine_api_cfg.max_runtimes: type");
 _Static_assert(offsetof(origine_api_cfg, backends_mask) == 4, "origine_api_cfg.backends_mask: offset");
@@ -20,6 +20,10 @@ _Static_assert(offsetof(origine_api_cfg, fs_write) == 16, "origine_api_cfg.fs_wr
 _Static_assert(_Generic((((origine_api_cfg *)0)->fs_write), uint8_t: 1, default: 0), "origine_api_cfg.fs_write: type");
 _Static_assert(offsetof(origine_api_cfg, fs_async) == 17, "origine_api_cfg.fs_async: offset");
 _Static_assert(_Generic((((origine_api_cfg *)0)->fs_async), uint8_t: 1, default: 0), "origine_api_cfg.fs_async: type");
+_Static_assert(offsetof(origine_api_cfg, net_rules) == 24, "origine_api_cfg.net_rules: offset");
+_Static_assert(_Generic((((origine_api_cfg *)0)->net_rules), const uint8_t *: 1, default: 0), "origine_api_cfg.net_rules: type");
+_Static_assert(offsetof(origine_api_cfg, net_rules_len) == 32, "origine_api_cfg.net_rules_len: offset");
+_Static_assert(_Generic((((origine_api_cfg *)0)->net_rules_len), size_t: 1, default: 0), "origine_api_cfg.net_rules_len: type");
 _Static_assert(sizeof(origine_api_native) == 24, "origine_api_native: size");
 _Static_assert(offsetof(origine_api_native, path) == 0, "origine_api_native.path: offset");
 _Static_assert(_Generic((((origine_api_native *)0)->path), const char *: 1, default: 0), "origine_api_native.path: type");
@@ -40,6 +44,7 @@ int origine_api_natives_get(size_t, origine_api_native *);
 bool origine_api_attach_isolate(void *);
 void origine_api_detach_isolate(void *);
 void origine_api_configure(void *, const origine_api_cfg *);
+size_t origine_api_net_rules_check(const uint8_t *, size_t, uint8_t *, size_t);
 int64_t origine_api_poll(void *, uint8_t, int64_t);
 uint8_t origine_api_has_work(void *);
 int64_t origine_api_pollable(void *);

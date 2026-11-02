@@ -94,9 +94,9 @@ operation releases its guard.
 Buffer semantics (pin/detach, lifetime invariant): [README](README.md#buffers-pinning).
 `fileRead`/`filePread` remain copying (they allocate `buffer.length` bytes per call).
 
-## `net.*` (loopback TCP, `needs = "runtime"`)
+## `net.*` (TCP, `needs = "runtime"`)
 
-Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, bound to the runtime they were created on and checked against the calling scope on every call (`BadHandle` otherwise). `accept`/`read`/`write` run on the runtime's loop; `connect` creates a raw non-blocking `socket(2)` and lets the loop's `connect` op finish the handshake, so nothing blocks the isolate thread. The destination is restricted to loopback: IP literals that are loopback are used as given, `localhost` is never resolved (RFC 6761: `connect` tries `127.0.0.1` then `::1`, `listen` binds `127.0.0.1`), anything else is `PermissionDenied`.
+Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, bound to the runtime they were created on and checked against the calling scope on every call (`BadHandle` otherwise). `accept`/`read`/`write` run on the runtime's loop; `connect` creates a raw non-blocking `socket(2)` and lets the loop's `connect` op finish the handshake, so nothing blocks the isolate thread. The destination is checked against the embedder's network ceiling ([net-grant.md](../../../../docs/net-grant.md), `HostState::net`): IP literals are used as given, `localhost` is never resolved (RFC 6761: `connect` tries `127.0.0.1` then `::1`, `listen` binds `127.0.0.1`), each address the ceiling does not allow is dropped, and when none is left (or the host is any other name) the call is `PermissionDenied` with the address or name as the detail.
 
 | native | args | result |
 |---|---|---|
@@ -176,7 +176,7 @@ Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../.
 
 ## `dns.*` (address lookups, `needs = "runtime"`, feature `dns`)
 
-Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/docs/dns.md`](../../../../src/js/docs/dns.md). A resolver is an `origine_dns::Resolver` whose `Exchange` opens one socket per query on the resolver's runtime: a connected UDP socket (datagrams not carrying our id are skipped), or a stream (RFC 1035 length-prefixed, over TLS for DoT with the `origine_tls` client built from the roots at creation), all inside the per-attempt timeout. Server addresses must be loopback (canonicalised), checked at creation and again per query.
+Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/docs/dns.md`](../../../../src/js/docs/dns.md). A resolver is an `origine_dns::Resolver` whose `Exchange` opens one socket per query on the resolver's runtime: a connected UDP socket (datagrams not carrying our id are skipped), or a stream (RFC 1035 length-prefixed, over TLS for DoT with the `origine_tls` client built from the roots at creation), all inside the per-attempt timeout. Server addresses are checked against the network ceiling's `connect` rules, at creation and again per query.
 
 | Native | Args | Returns |
 |---|---|---|

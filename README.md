@@ -100,7 +100,7 @@ export const greet = name => `hello, ${name}`;
 ### Capabilities
 
 The `api` object offers `fs`, `host`, `graph`, `context`, `isolate` and, when the host grants an
-I/O runtime, `io` (timers, async runtimes) and `net` (loopback TCP). A closeable resource is
+I/O runtime, `io` (timers, async runtimes) and `net` (TCP; loopback unless the embedder allows more, see [docs/net-grant.md](docs/net-grant.md)). A closeable resource is
 closed by `using` (sync) or `await using` (async) at scope exit, also when the scope throws:
 
 ```js

@@ -5,6 +5,9 @@
 //!   Zig functions; see src/api/binding.zig.
 //! - The guest side lives in src/js/ (`glue/` and the `origine:@std/*` modules).
 pub const Host = @import("api/host.zig").Host;
+pub const NetConfig = @import("api/host.zig").NetConfig;
+pub const loopback_rules = @import("api/host.zig").loopback_rules;
+pub const checkNetRules = @import("api/host.zig").checkNetRules;
 pub const tls_enabled = @import("api/host.zig").tls_enabled;
 pub const http_enabled = @import("api/host.zig").http_enabled;
 pub const dns_enabled = @import("api/host.zig").dns_enabled;

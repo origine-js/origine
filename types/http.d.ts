@@ -123,7 +123,7 @@ export declare class ServerSession extends Session {
 }
 
 export interface HttpConnectOptions {
-  /** Defaults to 127.0.0.1; only loopback is reachable for now. */
+  /** An IP address (a name is not resolved); defaults to 127.0.0.1. Subject to the network ceiling (loopback only by default). */
   host?: string;
   port: number;
   /** A client configuration whose `alpn` includes `'h2'`: the connection is TLS and must negotiate `h2` (`NoApplicationProtocol` otherwise). */

@@ -4,12 +4,14 @@
 pub mod arg;
 pub mod errno;
 pub mod error;
+pub mod net_rules;
 pub mod pin;
 pub mod slab;
 pub mod table;
 
 pub use arg::ArgError;
 pub use error::NativeError;
+pub use net_rules::NetRules;
 
 /// An I/O backend a guest may ask for (`api.io.create({ backend })`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

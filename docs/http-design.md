@@ -1,6 +1,6 @@
 # HTTP/2, TLS, DNS and QUIC: design
 
-Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls`, `Resolver.lookup`; loopback servers only until the net grant; no cache, DNSSEC, DoH or DoQ). Not yet: event mode for TLS and HTTP, `api.quic`.
+Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls`, `Resolver.lookup`; servers subject to the network ceiling; no cache, DNSSEC, DoH or DoQ). Not yet: event mode for TLS and HTTP, `api.quic`.
 
 Original status: **draft, first slice not implemented.** Scope: an HTTP/2 client and server (`api.http`) behind a build flag that is **on by default**, `api.tls`, `api.dns`, and interface-only declarations for `api.quic` and `api.net.udp`. Every public name is subject to [api-guidelines.md](api-guidelines.md); the shapes follow [`api.net`](../src/js/docs/net.md) (`mode: 'pull' | 'event'`, `queued` / `direct` write lanes, `end(side)`).
 
@@ -107,9 +107,9 @@ Servers carry their own IPs, so DoH and DoQ never need DNS to find the server. D
 
 **Presets** are data in their own module, not part of `DnsServer`: `import { presets } from 'origine:@std/dns/presets'` gives `presets.cloudflare`, `cloudflareMalware`, `cloudflareFamily`, `adguard`, `google`, `quad9`, each with `.name`, `.servers` and one method per transport it offers (`presets.cloudflare.tls()`); a method for a transport a preset lacks is absent (`presets.google.quic === undefined`). Each method calls the public `DnsServer` constructors. The address and name table is pinned in a test and must be verified against each provider's published docs when written; the filtering ones change answers and the docs say so. Presets are never a default: `servers` is always explicit.
 
-## Permission model (prerequisite for non-loopback)
+## Permission model
 
-`api.net` is loopback-only. The first slice keeps that (`http.connect` / `serve` work on loopback; `lookup` works for any name). A later **net grant** adds `Config.net = { connect: HostRule[], listen: ListenRule[] }`, narrowing only; **checks run on the resolved, canonicalised address** (`IpAddr.toCanonical()`), not the name (DNS rebinding, IPv4-mapped IPv6); redirects re-check each hop; `localhost` stays unresolved (RFC 6761).
+Built: the embedder's **network ceiling** ([net-grant.md](net-grant.md)): `connect` and `listen` rules over CIDR ranges and ports, checked on the canonicalised address a program is about to use, loopback only by default. It covers `api.net`, everything built on it (`api.tls`, `api.http`) and the servers of `api.dns` resolvers (at creation and per query). Decisions that differ from the first sketch: rules are about **addresses, not names** (a name could resolve anywhere, so `api.net` takes literals and `api.dns` results), and there is no per-request narrowing yet (that would be `api.net.narrow` for a child scope or isolate). `localhost` stays unresolved (RFC 6761). Still to do: redirects re-checking each hop (there are none yet) and a connection or rate limit.
 
 ## Phasing
 
@@ -118,7 +118,7 @@ Servers carry their own IPs, so DoH and DoQ never need DNS to find the server. D
 | 0 | aws-lc + rustls cross-compile for every `build.zig` target with size delta; nghttp2 Zig build; `oio` UDP `sendmsg` / `recvmsg` smoke test | builds everywhere; default release <= 70 MB |
 | 1 | `origine:@std/net` addresses; `origine_tls`, `api.tls`; `origine_h2`, `api.http` on loopback (h2c and TLS) | `curl --http2-prior-knowledge`, `h2spec`, self-test client <-> server |
 | 2 | `origine_dns`, `api.dns` (system, udp, tcp, tls), presets, `api.net.udp` | lookups against local fixture servers; presets table test |
-| 3 | net grant, pool, redirects, DoH | SSRF suite |
+| 3 | net grant (done), pool, redirects, DoH | SSRF suite |
 | 4 | `api.quic` (ngtcp2 + nghttp3), DoQ, DNSSEC validation | `quic-interop-runner` subset, `curl --http3` |
 
 ## Open questions

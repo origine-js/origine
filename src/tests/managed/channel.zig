@@ -24,6 +24,15 @@ pub const Parent = struct {
 
     /// `isolates` enables `api.isolate`; the host's argument is the init path (the way the process entry point passes it).
     pub fn setupWith(self: *Parent, name: []const u8, source: []const u8, isolates: ?m.Api.IsolateConfig) !void {
+        return self.setupFull(name, source, isolates, .{});
+    }
+
+    /// With the network ceiling `rules` (text, borrowed until `deinit`).
+    pub fn setupNet(self: *Parent, name: []const u8, source: []const u8, rules: []const u8) !void {
+        return self.setupFull(name, source, null, .{ .rules = rules });
+    }
+
+    fn setupFull(self: *Parent, name: []const u8, source: []const u8, isolates: ?m.Api.IsolateConfig, net: m.Api.NetConfig) !void {
         ensureV8();
         self.tmp = t.tmpDir(.{ .iterate = true });
         errdefer self.tmp.cleanup();
@@ -36,6 +45,7 @@ pub const Parent = struct {
         self.host = try m.Api.Host.create(t.allocator, .{
             .args = &self.argv,
             .fs = .{ .root = .{ .handle = self.tmp.dir.handle } },
+            .net = net,
             .runtime = .{},
             .isolates = isolates,
         });

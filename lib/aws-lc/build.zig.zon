@@ -1,0 +1,17 @@
+.{
+    .name = .aws_lc,
+    // The aws-lc-sys crate version (rust/Cargo.lock), not AWS-LC's own (5.12.0 for this crate).
+    .version = "0.47.0",
+    .fingerprint = 0x3a0133358d09fa67,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // The aws-lc-sys crate itself, exactly the version rust/Cargo.lock pins (same sha256 as its
+        // `checksum`): its AWS-LC sources, symbol-prefix headers, per-target source lists and Rust
+        // bindings all match. See docs/aws-lc.md.
+        .source = .{
+            .url = "https://static.crates.io/crates/aws-lc-sys/aws-lc-sys-0.47.0.crate",
+            .hash = "N-V-__8AAOsN9QNcagXNSKqmB1TUklYqgVilUKie-5_LaK4U",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon" },
+}

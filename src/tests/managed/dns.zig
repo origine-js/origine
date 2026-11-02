@@ -61,9 +61,12 @@ const prelude = tls_prelude ++
 ;
 
 /// A datagram DNS server on loopback: an A record 192.0.2.1 for every name but `missing.test` (NXDOMAIN), no AAAA.
+/// A `truncating` one answers every question with an empty answer that has the TC bit set (RFC 1035 section 4.1.1):
+/// "ask again over TCP".
 const Udp = struct {
     fd: c_int,
     port: u16,
+    truncating: bool = false,
     stop: std.atomic.Value(bool) = .init(false),
     queries: std.atomic.Value(u32) = .init(0),
     thread: std.Thread = undefined,
@@ -79,6 +82,10 @@ const Udp = struct {
     };
 
     fn start() !*Udp {
+        return startWith(false);
+    }
+
+    fn startWith(truncating: bool) !*Udp {
         const self = try t.allocator.create(Udp);
         errdefer t.allocator.destroy(self);
         const fd = sys.socket(2, 2, 0);
@@ -95,7 +102,7 @@ const Udp = struct {
         const SO_RCVTIMEO: c_int = if (builtin.os.tag == .linux) 20 else 0x1006;
         var tv: std.c.timeval = .{ .sec = 0, .usec = 50_000 };
         if (sys.setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, @sizeOf(std.c.timeval)) != 0) return error.SocketUnavailable;
-        self.* = .{ .fd = fd, .port = std.mem.bigToNative(u16, addr.port) };
+        self.* = .{ .fd = fd, .port = std.mem.bigToNative(u16, addr.port), .truncating = truncating };
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
@@ -127,11 +134,11 @@ const Udp = struct {
             if (end > query.len) continue;
             const qtype = std.mem.readInt(u16, query[at + 1 ..][0..2], .big);
             const missing = std.mem.eql(u8, name[0..name_len], "missing.test");
-            const answers: u8 = if (!missing and qtype == 1) 1 else 0;
+            const answers: u8 = if (!missing and qtype == 1 and !self.truncating) 1 else 0;
             var out: [512]u8 = undefined;
             @memcpy(out[0..end], query[0..end]);
-            out[2] = 0x81;
-            out[3] = 0x80 | @as(u8, if (missing) 3 else 0);
+            out[2] = if (self.truncating) 0x83 else 0x81;
+            out[3] = 0x80 | @as(u8, if (missing and !self.truncating) 3 else 0);
             @memset(out[4..12], 0);
             out[5] = 1;
             out[7] = answers;
@@ -447,4 +454,48 @@ test "dns: presets are pinned data over the public constructors" {
     defer p.deinit();
     try p.run();
     try check(p.scope, "report.keys && report.table && report.frozen && report.servers && report.made && report.noQuic && report.ceiling");
+}
+
+test "dns: a truncated datagram answer is asked again over TCP, at the same address" {
+    if (!m.Api.dns_enabled) return error.SkipZigTest;
+    // The datagram server answers every question with an empty answer and the TC bit; the stream server (JS, the
+    // zone above) listens on the same port number and has the records.
+    const udp = try Udp.startWith(true);
+    defer udp.deinit();
+    // This one is truncating too, and nothing listens for TCP on its port.
+    const lonely = try Udp.startWith(true);
+    defer lonely.deinit();
+    const source = try std.fmt.allocPrint(t.allocator, "const UDP_PORT = {d};\nconst LONELY_PORT = {d};\n{s}", .{
+        udp.port,
+        lonely.port,
+        prelude ++
+            \\export async function main(api) {
+            \\  const out = globalThis.report = {};
+            \\  const io = api.io.create();
+            \\  const { DnsServer } = api.dns;
+            \\  const listener = api.net.listen(io, { mode: 'pull', socketMode: 'pull', port: UDP_PORT });
+            \\  (async () => { for (;;) { let s; try { s = await listener.accept(); } catch { return; } framed(s); } })();
+            \\  const resolver = api.dns.resolver(io, { servers: [DnsServer.udp([local(api, UDP_PORT)])], ...options });
+            \\  out.a = show(await resolver.lookup('web.test', { family: 'ipv4' })) === '192.0.2.7';
+            \\  out.tcpAsked = stats.queries === 1;
+            \\  // Both families: each question goes out by datagram first, then by stream.
+            \\  out.both = show(await resolver.lookup('web.test', { family: 'any' })) === '2001:db8::7,192.0.2.7' && stats.queries === 3;
+            \\  // The stream answer is the answer: a name the zone lacks is NXDOMAIN there, whatever the datagram said.
+            \\  out.missing = await outcome(resolver.lookup('missing.test', { family: 'any' }));
+            \\  out.streamQueries = stats.queries;
+            \\  // A truncated answer is never used as if it were whole: with no stream server the lookup fails.
+            \\  const lonely = api.dns.resolver(io, { servers: [DnsServer.udp([local(api, LONELY_PORT)])], ...options });
+            \\  out.noStream = await outcome(lonely.lookup('web.test', { family: 'ipv4' }));
+            \\  await io.close();
+            \\}
+    });
+    defer t.allocator.free(source);
+    var p: Parent = undefined;
+    try p.setup("init.js", source);
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.a && report.tcpAsked && report.both && report.missing === 'NotFound' && report.streamQueries === 4 && report.noStream === 'ConnectionRefused'");
+    // One datagram per question (A; AAAA and A; AAAA of the missing name, which settles it), each then asked over TCP.
+    try t.expectEqual(@as(u32, 4), udp.queries.load(.monotonic));
+    try t.expectEqual(@as(u32, 1), lonely.queries.load(.monotonic));
 }

@@ -193,6 +193,71 @@ fn a_truncated_datagram_answer_is_asked_again_over_tcp() {
 }
 
 #[test]
+fn the_tcp_retry_goes_to_the_address_that_truncated_and_its_answer_is_final() {
+    // Two servers: the first truncates, so its own address is asked again over TCP, and the second is never reached.
+    let servers = vec![server(Transport::Udp, &["127.0.0.1:53"]), server(Transport::Udp, &["127.0.0.2:53"])];
+    let r = resolver(servers, |server, addr, q| {
+        Ok(match (&server.transport, addr.ip().to_string().as_str()) {
+            (Transport::Udp, "127.0.0.1") => respond(q, ResponseCode::NoError, &["192.0.2.66"], true),
+            (Transport::Tcp, "127.0.0.1") => respond(q, ResponseCode::NoError, &["192.0.2.8", "192.0.2.9"], false),
+            _ => panic!("only 127.0.0.1 is asked: {server:?} {addr}"),
+        })
+    });
+    // The partial answer a truncated datagram carries is dropped, not mixed in.
+    assert_eq!(pollster::block_on(r.lookup("big.test", Family::V4)).unwrap(), [a("192.0.2.8"), a("192.0.2.9")]);
+    assert_eq!(queried(&r), ["udp 127.0.0.1:53 big.test. A", "tcp 127.0.0.1:53 big.test. A"]);
+}
+
+#[test]
+fn a_truncated_answer_is_never_used_when_the_tcp_retry_fails() {
+    // The stream cannot be reached: the lookup fails with that error and does not settle for the partial datagram.
+    let refused = resolver(one(), |server, _, q| match server.transport {
+        Transport::Udp => Ok(respond(q, ResponseCode::NoError, &["192.0.2.66"], true)),
+        _ => Err(io::Error::from(io::ErrorKind::ConnectionRefused)),
+    });
+    assert!(
+        matches!(pollster::block_on(refused.lookup("big.test", Family::V4)), Err(DnsError::Io(e)) if e.kind() == io::ErrorKind::ConnectionRefused)
+    );
+    // Two rounds (`tries`), each a datagram and a refused stream.
+    assert_eq!(queried(&refused).len(), 4);
+    let timed_out = resolver(one(), |server, _, q| match server.transport {
+        Transport::Udp => Ok(respond(q, ResponseCode::NoError, &[], true)),
+        _ => Err(io::Error::from(io::ErrorKind::TimedOut)),
+    });
+    assert!(matches!(pollster::block_on(timed_out.lookup("big.test", Family::V4)), Err(DnsError::TimedOut)));
+}
+
+#[test]
+fn only_datagrams_are_retried_and_only_once() {
+    // The stream answer has TC set too (a server that should not): it is read as it is, with no third query.
+    let r = resolver(one(), |server, _, q| {
+        Ok(match server.transport {
+            Transport::Udp => respond(q, ResponseCode::NoError, &[], true),
+            _ => respond(q, ResponseCode::NoError, &["192.0.2.8"], true),
+        })
+    });
+    assert_eq!(pollster::block_on(r.lookup("big.test", Family::V4)).unwrap(), [a("192.0.2.8")]);
+    assert_eq!(queried(&r), ["udp 127.0.0.1:53 big.test. A", "tcp 127.0.0.1:53 big.test. A"]);
+    // A stream server that sets TC is not asked again over a stream.
+    let tcp =
+        resolver(vec![server(Transport::Tcp, &["127.0.0.1:53"])], |_, _, q| Ok(respond(q, ResponseCode::NoError, &["192.0.2.8"], true)));
+    assert_eq!(pollster::block_on(tcp.lookup("big.test", Family::V4)).unwrap(), [a("192.0.2.8")]);
+    assert_eq!(queried(&tcp), ["tcp 127.0.0.1:53 big.test. A"]);
+    // The retry is checked like any answer: one that is not about our question is not believed.
+    let spoofed = resolver(one(), |server, _, q| {
+        Ok(match server.transport {
+            Transport::Udp => respond(q, ResponseCode::NoError, &[], true),
+            _ => {
+                let mut other = Message::from_vec(&respond(q, ResponseCode::NoError, &["192.0.2.66"], false)).unwrap();
+                other.set_id(q.id().wrapping_add(1));
+                other.to_vec().unwrap()
+            }
+        })
+    });
+    assert!(matches!(pollster::block_on(spoofed.lookup("big.test", Family::V4)), Err(DnsError::BadResponse(_))));
+}
+
+#[test]
 fn answers_to_other_questions_are_not_believed() {
     // A spoofed id, then an answer about another name, then the real one from the second server.
     let servers = vec![server(Transport::Udp, &["127.0.0.1:53", "127.0.0.2:53", "127.0.0.3:53"])];

@@ -11,7 +11,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use origine_api_core::{NativeError, NetRules, errno};
@@ -33,7 +33,9 @@ const DATAGRAM: usize = 4096;
 struct NetExchange {
     key: ScopeKey,
     runtime: u32,
-    lp: Rc<Loop>,
+    /// Weak: a resolver (owned by the garbage collector) must never be what keeps an event loop alive, or tears one
+    /// down when it is collected. Once the runtime is closed a query fails.
+    lp: Weak<Loop>,
     net: NetRules,
     #[cfg(feature = "tls")]
     tls: Option<origine_tls::TlsClient>,
@@ -44,14 +46,19 @@ fn to_io(e: NativeError) -> io::Error {
 }
 
 impl NetExchange {
+    fn lp(&self) -> io::Result<Rc<Loop>> {
+        self.lp.upgrade().ok_or_else(|| io::Error::new(io::ErrorKind::ConnectionAborted, "the event loop is closed"))
+    }
+
     async fn udp(&self, addr: SocketAddr, query: &[u8]) -> io::Result<Vec<u8>> {
+        let lp = self.lp()?;
         let fd = new_datagram(&addr).map_err(to_io)?;
         let raw = fd.as_raw_fd() as isize;
-        self.lp.connect(raw, sockaddr_bytes(&addr)).await?;
-        let (sent, _) = self.lp.send(raw, query.to_vec(), SEND_FLAGS).await;
+        lp.connect(raw, sockaddr_bytes(&addr)).await?;
+        let (sent, _) = lp.send(raw, query.to_vec(), SEND_FLAGS).await;
         sent?;
         loop {
-            let (read, mut buf) = self.lp.recv(raw, vec![0u8; DATAGRAM], 0).await;
+            let (read, mut buf) = lp.recv(raw, vec![0u8; DATAGRAM], 0).await;
             buf.truncate(read?);
             // A datagram that is not the answer to this query (another id) is somebody else's: keep waiting.
             if buf.len() >= 2 && buf[..2] == query[..2] {
@@ -61,10 +68,11 @@ impl NetExchange {
     }
 
     async fn stream(&self, addr: SocketAddr) -> io::Result<SocketTransport> {
+        let lp = self.lp()?;
         let stream = new_stream(&addr).map_err(to_io)?;
-        self.lp.connect(stream.as_raw_fd() as isize, sockaddr_bytes(&addr)).await?;
+        lp.connect(stream.as_raw_fd() as isize, sockaddr_bytes(&addr)).await?;
         let _ = stream.set_nodelay(true);
-        Ok(SocketTransport { socket: Rc::new(Socket::accepted(self.key, self.runtime, stream)), lp: Rc::clone(&self.lp) })
+        Ok(SocketTransport { socket: Rc::new(Socket::accepted(self.key, self.runtime, stream)), lp })
     }
 
     async fn framed<T: Transport>(transport: &T, query: &[u8]) -> io::Result<Vec<u8>> {
@@ -232,7 +240,7 @@ fn dns_resolver(
     let exchange = NetExchange {
         key,
         runtime: io,
-        lp,
+        lp: Rc::downgrade(&lp),
         net,
         #[cfg(feature = "tls")]
         tls,

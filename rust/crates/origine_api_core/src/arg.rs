@@ -33,6 +33,12 @@ impl ArgError {
         };
         ArgError { index: self.index, expected: Cow::Owned(expected) }
     }
+
+    /// Widens the error of one array item to the array: `expected an array of: <expected>`.
+    #[must_use]
+    pub fn in_array(self) -> ArgError {
+        ArgError { index: self.index, expected: Cow::Owned(format!("an array of: {}", self.expected)) }
+    }
 }
 
 impl fmt::Display for ArgError {

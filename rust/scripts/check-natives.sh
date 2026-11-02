@@ -1,12 +1,13 @@
 #!/bin/sh
 # CONTRACT (docs/contracts.md, surface B): the guest glue (src/js/glue/*.js) must use exactly the
-# natives the Rust registry declares (`#[native(path = "namespace.name")]` in rust/crates/origine_api).
+# natives the Rust registry declares (`#[native(path = "namespace.name")]` in rust/crates/origine_api, and the
+# class installers of `#[class(path = "namespace.Class")]`).
 #   - every registered `namespace.name` is referenced in the glue (as `native.ns.name`, or `ops.name`
 #     for the async fs ops, which glue/fs.js reaches through `makeAsyncOps(native.fsAsync, ..)`);
 #   - every `native.<registered namespace>.<name>` the glue mentions is registered.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-paths=$(grep -rh '^#\[native(' "$root"/rust/crates/origine_api/src/*.rs | grep -oE 'path = "[A-Za-z0-9]+\.[A-Za-z0-9]+"' | sed 's/path = "\(.*\)"/\1/' | sort -u)
+paths=$(grep -rhE '^#\[(native|class)\(' "$root"/rust/crates/origine_api/src/*.rs | grep -oE 'path = "[A-Za-z0-9]+\.[A-Za-z0-9]+"' | sed 's/path = "\(.*\)"/\1/' | sort -u)
 [ -n "$paths" ] || { echo "check-natives: no registered natives found" >&2; exit 2; }
 status=0
 for p in $paths; do

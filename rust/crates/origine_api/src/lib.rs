@@ -17,6 +17,7 @@
 extern crate self as origine_api;
 
 mod channel;
+pub mod class;
 pub mod decode;
 #[cfg(feature = "dns")]
 mod dns;
@@ -51,7 +52,7 @@ pub use decode::{ArrayBufferArg, FromJs};
 pub use encode::IntoJs;
 pub use host::HostState;
 pub use origine_api_core::{ArgError, NativeError};
-pub use origine_api_macros::{FromJs, IntoJs, native};
+pub use origine_api_macros::{FromJs, IntoJs, class, native};
 /// The `v8` crate, re-exported for `#[native]`'s generated code.
 pub use v8;
 

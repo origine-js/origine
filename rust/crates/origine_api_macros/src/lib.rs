@@ -17,6 +17,23 @@
 //! (register only when the embedder configured an io runtime / async fs), `promise` (the fn returns a
 //! future; the native returns a `Promise`).
 
+//!
+//! `#[class(path = "namespace.ClassName", side_effect = "..", needs = "..")]` on an inherent impl block makes the
+//! type a JS class (`origine_api::class`): `#[static_method]` fns go on the constructor, `&self` fns on the
+//! prototype (`#[method(..)]` for options), `#[getter]` fns are read-only accessors.
+//!
+//! ```ignore
+//! #[class(path = "tls.RootPki", side_effect = "any", needs = "runtime")]
+//! impl RootPki {
+//!     #[static_method]
+//!     fn bundled() -> RootPki { .. }
+//!     #[static_method(name = "fromPem")]
+//!     fn from_pem(pem: ArrayBufferArg<'_>) -> Result<RootPki, TlsFailure> { .. }
+//!     fn release(&self) { .. }
+//! }
+//! ```
+
+mod class;
 mod derive;
 mod native;
 
@@ -26,6 +43,12 @@ use proc_macro::TokenStream;
 #[proc_macro_attribute]
 pub fn native(attr: TokenStream, item: TokenStream) -> TokenStream {
     native::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Turns an inherent impl block into a JS class; see the crate docs.
+#[proc_macro_attribute]
+pub fn class(attr: TokenStream, item: TokenStream) -> TokenStream {
+    class::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Reads a struct from a JS option bag: own data properties only, camelCase names, unknown keys ignored.

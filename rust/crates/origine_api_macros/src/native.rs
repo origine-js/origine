@@ -18,44 +18,55 @@ struct Options {
     needs: &'static str,
 }
 
+/// The string literal of `name = "..."`; `hint` is the error when it is not one.
+pub(crate) fn string_of<'a>(nv: &'a syn::MetaNameValue, hint: &str) -> Result<&'a syn::LitStr> {
+    match &nv.value {
+        Expr::Lit(ExprLit { lit: Lit::Str(text), .. }) => Ok(text),
+        other => Err(syn::Error::new(other.span(), hint)),
+    }
+}
+
+/// `side_effect = "none" | "receiver" | "any"` as its `SideEffect` variant name.
+pub(crate) fn side_effect_of(nv: &syn::MetaNameValue) -> Result<&'static str> {
+    let text = string_of(nv, "side_effect must be a string: \"none\", \"receiver\" or \"any\"")?;
+    match text.value().as_str() {
+        "none" => Ok("None"),
+        "receiver" => Ok("Receiver"),
+        "any" => Ok("Any"),
+        _ => Err(syn::Error::new(text.span(), "side_effect must be \"none\", \"receiver\" or \"any\"")),
+    }
+}
+
+/// `needs = "runtime" | "async_fs"` as its `Needs` variant name.
+pub(crate) fn needs_of(nv: &syn::MetaNameValue) -> Result<&'static str> {
+    let text = string_of(nv, "needs must be a string: \"runtime\" or \"async_fs\"")?;
+    match text.value().as_str() {
+        "runtime" => Ok("Runtime"),
+        "async_fs" => Ok("AsyncFs"),
+        _ => Err(syn::Error::new(text.span(), "needs must be \"runtime\" or \"async_fs\"")),
+    }
+}
+
+/// `path = "namespace.name"`, checked.
+pub(crate) fn path_of(nv: &syn::MetaNameValue, example: &str) -> Result<String> {
+    let text = string_of(nv, &format!("path must be a string such as \"{example}\""))?;
+    let value = text.value();
+    let segments: Vec<&str> = value.split('.').collect();
+    if segments.len() != 2 || segments.iter().any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric())) {
+        return Err(syn::Error::new(text.span(), "path must be `namespace.name` (ASCII letters and digits)"));
+    }
+    Ok(value)
+}
+
 fn parse_options(attr: TokenStream) -> Result<Options> {
     let metas = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(attr)?;
     let (mut side_effect, mut promise, mut path, mut needs) = (None, false, None, "None");
     for meta in &metas {
         match meta {
-            Meta::NameValue(nv) if nv.path.is_ident("side_effect") => {
-                let Expr::Lit(ExprLit { lit: Lit::Str(text), .. }) = &nv.value else {
-                    return Err(syn::Error::new(nv.value.span(), "side_effect must be a string: \"none\", \"receiver\" or \"any\""));
-                };
-                side_effect = Some(match text.value().as_str() {
-                    "none" => "None",
-                    "receiver" => "Receiver",
-                    "any" => "Any",
-                    _ => return Err(syn::Error::new(text.span(), "side_effect must be \"none\", \"receiver\" or \"any\"")),
-                });
-            }
+            Meta::NameValue(nv) if nv.path.is_ident("side_effect") => side_effect = Some(side_effect_of(nv)?),
             Meta::Path(path) if path.is_ident("promise") => promise = true,
-            Meta::NameValue(nv) if nv.path.is_ident("path") => {
-                let Expr::Lit(ExprLit { lit: Lit::Str(text), .. }) = &nv.value else {
-                    return Err(syn::Error::new(nv.value.span(), "path must be a string such as \"fsAsync.openFile\""));
-                };
-                let value = text.value();
-                let segments: Vec<&str> = value.split('.').collect();
-                if segments.len() != 2 || segments.iter().any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric())) {
-                    return Err(syn::Error::new(text.span(), "path must be `namespace.name` (ASCII letters and digits)"));
-                }
-                path = Some(value);
-            }
-            Meta::NameValue(nv) if nv.path.is_ident("needs") => {
-                let Expr::Lit(ExprLit { lit: Lit::Str(text), .. }) = &nv.value else {
-                    return Err(syn::Error::new(nv.value.span(), "needs must be a string: \"runtime\" or \"async_fs\""));
-                };
-                needs = match text.value().as_str() {
-                    "runtime" => "Runtime",
-                    "async_fs" => "AsyncFs",
-                    _ => return Err(syn::Error::new(text.span(), "needs must be \"runtime\" or \"async_fs\"")),
-                };
-            }
+            Meta::NameValue(nv) if nv.path.is_ident("path") => path = Some(path_of(nv, "fsAsync.openFile")?),
+            Meta::NameValue(nv) if nv.path.is_ident("needs") => needs = needs_of(nv)?,
             other => {
                 return Err(syn::Error::new(
                     other.span(),
@@ -80,7 +91,7 @@ fn parse_options(attr: TokenStream) -> Result<Options> {
 }
 
 /// How a parameter is supplied.
-enum Param {
+pub(crate) enum Param {
     /// `&HostState` / `&mut HostState`, from the isolate slot.
     Host { mutable: bool },
     /// `&mut v8::PinScope<..>` / `&mut v8::HandleScope<..>`.
@@ -98,7 +109,7 @@ fn last_segment(ty: &Type) -> Option<String> {
     }
 }
 
-fn classify(ty: &Type) -> Param {
+pub(crate) fn classify(ty: &Type) -> Param {
     if let Type::Reference(reference) = ty {
         match last_segment(&reference.elem).as_deref() {
             Some("HostState") => return Param::Host { mutable: reference.mutability.is_some() },
@@ -138,6 +149,113 @@ fn anonymous_lifetimes(ty: &Type) -> TokenStream {
     walk(quote!(#ty))
 }
 
+/// The parameters of a native or class member, in order, `self` excluded. `what` names the fn in errors;
+/// `key` says whether a `ScopeKey` may be asked for (a class member has no calling scope to give).
+pub(crate) fn parameters(inputs: &Punctuated<FnArg, Token![,]>, what: &str, key: bool) -> Result<Vec<Param>> {
+    let mut params = Vec::new();
+    let mut seen_arg = false;
+    for input in inputs {
+        let FnArg::Typed(typed) = input else { continue };
+        let param = classify(&typed.ty);
+        match param {
+            Param::Arg(_) => seen_arg = true,
+            Param::Key if !key => {
+                return Err(syn::Error::new(
+                    typed.ty.span(),
+                    format!("{what} cannot take a ScopeKey: a class member is not bound to a scope; keep the owner in the value"),
+                ));
+            }
+            _ if seen_arg => {
+                return Err(syn::Error::new(
+                    typed.ty.span(),
+                    format!("in {what}, the host state, scope and key parameters must come before the JS arguments"),
+                ));
+            }
+            _ => {}
+        }
+        params.push(param);
+    }
+    if params.iter().filter(|param| matches!(param, Param::Host { .. })).count() > 1
+        || params.iter().filter(|param| matches!(param, Param::Key)).count() > 1
+    {
+        return Err(syn::Error::new(inputs.span(), format!("{what} takes at most one host state and one key parameter")));
+    }
+    if params.iter().any(|param| matches!(param, Param::Host { .. })) && params.iter().any(|param| matches!(param, Param::Scope)) {
+        return Err(syn::Error::new(
+            inputs.span(),
+            format!(
+                "{what} cannot take both the host state and the scope (both borrow the scope): take the scope and call `native::host_mut(scope)`"
+            ),
+        ));
+    }
+    Ok(params)
+}
+
+/// The number of JS arguments `params` read (the function's `length`).
+pub(crate) fn js_length(params: &[Param]) -> usize {
+    params.iter().filter(|param| matches!(param, Param::Arg(_))).count()
+}
+
+/// The body of a V8 callback (inside `native::run_sync(info, |scope, args| ..)`): decodes the arguments, calls
+/// `call` and encodes its result (or starts its op for a `promise`). `receiver`, when given, is a statement
+/// that binds `__this` before anything else is decoded; it is passed first.
+pub(crate) fn call_body(call: TokenStream, params: &[Param], promise: bool, receiver: Option<TokenStream>) -> TokenStream {
+    let mut decode = Vec::new();
+    let mut call_args = Vec::new();
+    let mut host_fetch = None;
+    let mut keys = Vec::new();
+    if receiver.is_some() {
+        call_args.push(quote! { __this });
+    }
+    for (position, param) in params.iter().enumerate() {
+        match param {
+            Param::Arg(ty) => {
+                let var = format_ident!("__arg{}", position);
+                let ty = anonymous_lifetimes(ty);
+                decode.push(quote! {
+                    let #var: #ty = ::origine_api::FromJs::from_args(scope, args, __index)?;
+                    __index += ::origine_api::decode::arity_of(&#var);
+                });
+                call_args.push(quote! { #var });
+            }
+            Param::Host { mutable } => {
+                let getter = if *mutable { quote!(host_mut) } else { quote!(host_ref) };
+                host_fetch = Some(quote! { let __host = ::origine_api::native::#getter(scope)?; });
+                call_args.push(quote! { __host });
+            }
+            Param::Scope => call_args.push(quote! { scope }),
+            Param::Key => {
+                let var = format_ident!("__key{}", position);
+                keys.push(quote! { let #var = ::origine_api::native::scope_key(args); });
+                call_args.push(quote! { #var });
+            }
+        }
+    }
+    let prologue = quote! {
+        #receiver
+        #(#keys)*
+        let mut __index = 0usize;
+        #(#decode)*
+        let _ = __index;
+    };
+    if promise {
+        quote! {
+            ::origine_api::native::promise(scope, |scope| {
+                #prologue
+                #host_fetch
+                ::origine_api::native::IntoOp::into_op(#call(#(#call_args),*))
+            })
+        }
+    } else {
+        quote! {
+            #prologue
+            #host_fetch
+            let __out = #call(#(#call_args),*);
+            ::origine_api::IntoJs::into_js(__out, scope)
+        }
+    }
+}
+
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let options = parse_options(attr)?;
     let func: ItemFn = syn::parse2(item)?;
@@ -155,86 +273,17 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     if options.promise && matches!(sig.output, ReturnType::Default) {
         return Err(syn::Error::new(sig.span(), "a `promise` native returns a future (`impl Future<Output = ..>`)"));
     }
-
-    let mut params = Vec::new();
-    let mut seen_arg = false;
-    for input in &sig.inputs {
-        let FnArg::Typed(typed) = input else {
-            return Err(syn::Error::new(input.span(), "a #[native] fn cannot take `self`"));
-        };
-        let param = classify(&typed.ty);
-        if matches!(param, Param::Arg(_)) {
-            seen_arg = true;
-        } else if seen_arg {
-            return Err(syn::Error::new(typed.ty.span(), "the host state, scope and key parameters must come before the JS arguments"));
-        }
-        params.push(param);
-    }
-    if params.iter().filter(|param| matches!(param, Param::Host { .. })).count() > 1
-        || params.iter().filter(|param| matches!(param, Param::Key)).count() > 1
-    {
-        return Err(syn::Error::new(sig.span(), "a #[native] fn takes at most one host state and one key parameter"));
+    if let Some(receiver) = sig.inputs.iter().find(|input| matches!(input, FnArg::Receiver(_))) {
+        return Err(syn::Error::new(receiver.span(), "a #[native] fn cannot take `self`: methods belong in a #[class] impl block"));
     }
 
+    let params = parameters(&sig.inputs, "a #[native] fn", true)?;
     let name = &sig.ident;
     let vis = &func.vis;
     let raw = format_ident!("{}_raw", name);
     let table = format_ident!("NATIVE_{}", name.to_string().to_uppercase());
     let side_effect = format_ident!("{}", options.side_effect);
-
-    // Decode the JS arguments in order, then fetch the special parameter.
-    let mut decode = Vec::new();
-    let mut call_args = Vec::new();
-    let mut special = None;
-    let mut keys = Vec::new();
-    for (position, param) in params.iter().enumerate() {
-        match param {
-            Param::Arg(ty) => {
-                let var = format_ident!("__arg{}", position);
-                let ty = anonymous_lifetimes(ty);
-                decode.push(quote! {
-                    let #var: #ty = ::origine_api::FromJs::from_args(scope, args, __index)?;
-                    __index += ::origine_api::decode::arity_of(&#var);
-                });
-                call_args.push(quote! { #var });
-            }
-            Param::Host { mutable } => {
-                let getter = if *mutable { quote!(host_mut) } else { quote!(host_ref) };
-                special = Some(quote! { let __host = ::origine_api::native::#getter(scope)?; });
-                call_args.push(quote! { __host });
-            }
-            Param::Scope => call_args.push(quote! { scope }),
-            Param::Key => {
-                let var = format_ident!("__key{}", position);
-                keys.push(quote! { let #var = ::origine_api::native::scope_key(args); });
-                call_args.push(quote! { #var });
-            }
-        }
-    }
-    let host_fetch = special.filter(|_| params.iter().any(|param| matches!(param, Param::Host { .. })));
-    let prologue = quote! {
-        #(#keys)*
-        let mut __index = 0usize;
-        #(#decode)*
-        let _ = __index;
-    };
-
-    let body = if options.promise {
-        quote! {
-            ::origine_api::native::promise(scope, |scope| {
-                #prologue
-                #host_fetch
-                ::origine_api::native::IntoOp::into_op(#name(#(#call_args),*))
-            })
-        }
-    } else {
-        quote! {
-            #prologue
-            #host_fetch
-            let __out = #name(#(#call_args),*);
-            ::origine_api::IntoJs::into_js(__out, scope)
-        }
-    };
+    let body = call_body(quote!(#name), &params, options.promise, None);
 
     let safety_doc = "Only V8 may call this, as a function callback; `info` must be the pointer V8 passed.";
     let path = &options.path;

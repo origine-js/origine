@@ -1,6 +1,6 @@
 # HTTP/2, TLS, DNS and QUIC: design
 
-Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull and event mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull and event mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls`, `Resolver.lookup`; servers subject to the network ceiling; no cache, DNSSEC, DoH or DoQ). Not yet: `api.quic`.
+Status: **in progress.** Done: `origine_tls`, `origine_h2` (+ async driver), `origine_transport`, `api.net.udp`'s loop ops tested, the `api.tls` natives and JS glue (pull and event mode, `-Dtls`), and the `api.http` natives and JS glue (HTTP/2 sessions over `api.net` or `api.tls` sockets, pull and event mode, `-Dhttp`). `http.connect` / `http.serve` (no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c). `api.dns` (`IpAddr`, `SocketAddr`, `DnsServer.system/udp/tcp/tls/https`, `Resolver.lookup`; servers subject to the network ceiling; an opt-in resolver cache with TTL clamps; DoH over `origine_h2`; the `origine:@std/dns/presets` module; no DNSSEC or DoQ). Not yet: `api.quic`.
 
 Original status: **draft, first slice not implemented.** Scope: an HTTP/2 client and server (`api.http`) behind a build flag that is **on by default**, `api.tls`, `api.dns`, and interface-only declarations for `api.quic` and `api.net.udp`. Every public name is subject to [api-guidelines.md](api-guidelines.md); the shapes follow [`api.net`](../src/js/docs/net.md) (`mode: 'pull' | 'event'`, `queued` / `direct` write lanes, `end(side)`).
 
@@ -96,16 +96,16 @@ class DnsServer {        // one transport each; Resolver takes an ordered list
   // servers: (IpAddr | SocketAddr)[]: an IpAddr means the transport's default port (udp/tcp 53, tls 853, https 443, quic 853)
   static udp(servers);  static tcp(servers);
   static tls(name: string, servers);        // first slice
-  static https(url: URL, servers);          // with api.http
+  static https(url: string, servers);       // https://host[:port]/path; origine_h2 + origine_tls directly, not api.http
   static quic(name: string, servers);       // with api.quic
 }
-dns.resolver(io, { servers: DnsServer[], roots?: RootPki, dnssec: 'off' | 'validate', timeout, tries })   // 'validate' is Unsupported until built
+dns.resolver(io, { servers: DnsServer[], roots?: RootPki, dnssec: 'off' | 'validate', timeout, tries, cache?: { limit, ttl: { min, max }, negative: { min, max } } })   // 'validate' is Unsupported until built
 Resolver.lookup(name, { family: 'ipv4' | 'ipv6' | 'any' }): Promise<IpAddr[]>
 ```
 
 Servers carry their own IPs, so DoH and DoQ never need DNS to find the server. DNS answers are unauthenticated input unless `dnssec: 'validate'` (hickory-proto gives verification primitives; chain walking and denial of existence are ours to write, later). The resolver opens its own sockets, so the server list is part of the embedder's permission ceiling.
 
-**Presets** are data in their own module, not part of `DnsServer`: `import { presets } from 'origine:@std/dns/presets'` gives `presets.cloudflare`, `cloudflareMalware`, `cloudflareFamily`, `adguard`, `google`, `quad9`, each with `.name`, `.servers` and one method per transport it offers (`presets.cloudflare.tls()`); a method for a transport a preset lacks is absent (`presets.google.quic === undefined`). Each method calls the public `DnsServer` constructors. The address and name table is pinned in a test and must be verified against each provider's published docs when written; the filtering ones change answers and the docs say so. Presets are never a default: `servers` is always explicit.
+**Presets** are data in their own module, not part of `DnsServer`: `import { presets } from 'origine:@std/dns/presets'` gives `presets.cloudflare`, `cloudflareMalware`, `cloudflareFamily`, `adguard`, `google`, `quad9`, each with `.name`, `.servers` and one method per transport it offers (`presets.cloudflare.tls()`); a method for a transport a preset lacks is absent (`presets.google.quic === undefined`). Each method calls the public `DnsServer` constructors. The address and name table is pinned in a test and must be verified against each provider's published docs when written; the filtering ones change answers and the docs say so. Presets are never a default: `servers` is always explicit. **Built:** the table is in [dns.md](../src/js/docs/dns.md#presets) and pinned in `src/tests/managed/dns.zig`; it was written from the providers' well-known published addresses and names and should be re-checked against their docs before a release (the module is pure data in `src/js/std/dns/presets.js`, reaching `DnsServer` through `origine:@internal/handles`).
 
 ## Permission model
 
@@ -118,13 +118,13 @@ Built: the embedder's **network ceiling** ([net-grant.md](net-grant.md)): `conne
 | 0 | aws-lc + rustls cross-compile for every `build.zig` target with size delta; nghttp2 Zig build; `oio` UDP `sendmsg` / `recvmsg` smoke test | builds everywhere; default release <= 70 MB |
 | 1 | `origine:@std/net` addresses; `origine_tls`, `api.tls`; `origine_h2`, `api.http` on loopback (h2c and TLS) | `curl --http2-prior-knowledge`, `h2spec`, self-test client <-> server |
 | 2 | `origine_dns`, `api.dns` (system, udp, tcp, tls), presets, `api.net.udp` | lookups against local fixture servers; presets table test |
-| 3 | net grant (done), pool, redirects, DoH | SSRF suite |
+| 3 | net grant (done), pool, redirects, DoH (done: one connection per query, no pooling) | SSRF suite |
 | 4 | `api.quic` (ngtcp2 + nghttp3), DoQ, DNSSEC validation | `quic-interop-runner` subset, `curl --http3` |
 
 ## Open questions
 
 1. **Unify aws-lc.** QUIC needs a C aws-lc (ngtcp2 helper); rustls brings its own. Options after Phase 0: accept two copies; use the C libssl for TCP TLS too; or write ngtcp2 crypto callbacks over rustls. Check whether `aws-lc-sys` can expose libssl.
-2. **`URL`.** No URL class exists in origine; `DnsServer.https` needs a minimal https-only parser or takes `{ host, port, path }`.
+2. **`URL`.** No URL class exists in origine: `DnsServer.https` takes a string and parses `https://host[:port][/path][?query]` itself (a host name or IPv4 address; no userinfo, fragment or IPv6 brackets). Revisit when a `URL` exists.
 3. **System roots.** `RootPki.system()` waits on per-OS loading (Security.framework etc.); `bundled()` first.
 4. **UDP on `oio`.** Tested in `src/io/udp_test.zig` (macOS: kqueue and threaded backends; IPv4 and IPv6 loopback): datagram boundaries, sender address, truncation flag, cancel and in-order delivery all hold. Findings the UDP layer must respect: an empty datagram completes with 0 (not an end of stream), and concurrent sends on one socket are unordered on the threaded backend and on blocking descriptors, so `api.net.udp` keeps one send in flight per socket. Still untested: the io_uring path (needs a Linux run of `zig build test-io`).
 5. **`system()` on macOS** (VPN / scoped resolvers): verify what the resolv.conf view misses.

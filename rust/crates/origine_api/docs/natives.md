@@ -182,10 +182,10 @@ Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../.
 
 ## `dns.*` (address lookups, `needs = "runtime"`, feature `dns`)
 
-Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/docs/dns.md`](../../../../src/js/docs/dns.md). A resolver is an `origine_dns::Resolver` whose `Exchange` opens one socket per query on the resolver's runtime: a connected UDP socket (datagrams not carrying our id are skipped), or a stream (RFC 1035 length-prefixed, over TLS for DoT with the `origine_tls` client built from the roots at creation), all inside the per-attempt timeout. Server addresses are checked against the network ceiling's `connect` rules, at creation and again per query.
+Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/docs/dns.md`](../../../../src/js/docs/dns.md). A resolver is an `origine_dns::Resolver` whose `Exchange` opens one socket per query on the resolver's runtime: a connected UDP socket (datagrams not carrying our id are skipped), or a stream (RFC 1035 length-prefixed, over TLS for DoT with the `origine_tls` client built from the roots at creation), or DoH: one `origine_h2` client connection over TLS (ALPN `h2`, features `tls` and `http`; `Unsupported` without them or when the server does not negotiate `h2`) and one POST per query, its driver polled by the query itself (never spawned, so an idle resolver keeps nothing alive), all inside the per-attempt timeout. Server addresses are checked against the network ceiling's `connect` rules, at creation and again per query.
 
 | Native | Args | Returns |
 |---|---|---|
-| `dns.resolver` | `io, spec, roots (undefined none), timeout (ms), tries` | resolver wrapper object. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
+| `dns.resolver` | `io, spec, roots (undefined none), timeout (ms), tries, entries (0 none), min, max, negative_min, negative_max (ms)` | resolver wrapper object. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>`, `https <authority> <path> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
 | `dns.lookup` | `resolver, name, family (0 both, 4, 6)` | Promise of `[4 \| 6, octets]*` |
 

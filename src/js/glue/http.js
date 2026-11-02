@@ -6,6 +6,7 @@
 // class: `Pull*` (`next()`, `accept()`) or `Event*` (`register(event, handler)`); the write side is shared. Event mode
 // is a dispatcher over the same natives, one event at a time, so handlers see events in order.
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
+import client from './http/client.js';
 const { BadHandle, NoApplicationProtocol } = errors;
 const HEAD = 6;
 const DONE = Promise.resolve();
@@ -168,6 +169,7 @@ export default native => {
     #sid;
     #id;
     #done = false;
+    #watch;
     constructor(made, sid, id) {
       if (made !== token || new.target === Exchange) throw new TypeError('exchanges are made by their session');
       this.#sid = sid;
@@ -180,7 +182,25 @@ export default native => {
       return this.#id;
     }
     static next(exchange) {
-      return native.http.next(exchange.#sid, exchange.#id).then(ev => (ev === undefined ? undefined : eventOf(ev)));
+      return native.http.next(exchange.#sid, exchange.#id).then(
+        ev => {
+          if (ev === undefined || ev.kind === 3) exchange.#over();
+          return ev === undefined ? undefined : eventOf(ev);
+        },
+        e => {
+          exchange.#over();
+          throw e;
+        },
+      );
+    }
+    // The pool's hook: `fn` runs once when the stream is over (its `closed` event was read, the connection died, or `release`).
+    static watch(exchange, fn) {
+      exchange.#watch = fn;
+    }
+    #over() {
+      const fn = this.#watch;
+      this.#watch = undefined;
+      if (fn !== undefined) fn();
     }
     /** Gives `bytes` of received body back to the peer's window: call it when the data was used. */
     consume(bytes) {
@@ -211,6 +231,7 @@ export default native => {
     }
     /** Forgets the stream. One whose own side is still being written is cancelled; a finished one ends quietly. */
     release() {
+      this.#over();
       if (!this.#done) {
         this.#done = true;
         native.http.release(this.#sid, this.#id);
@@ -628,6 +649,47 @@ export default native => {
     }
   }
 
+  const connect = async (io, options) => {
+    const host = own(options, 'host') ?? '127.0.0.1';
+    const port = own(options, 'port');
+    if (typeof host !== 'string') throw new TypeError('host must be a string');
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new TypeError('port must be an integer in 0..65535');
+    const mode = modeOf(options);
+    const limits = limitsOf(own(options, 'limits'));
+    const tls = own(options, 'tls');
+    const servername = own(options, 'servername') ?? host;
+    if (typeof servername !== 'string') throw new TypeError('servername must be a string');
+    let socket = await shared.net.connect(io, { host, port, mode: 'pull' });
+    if (tls !== undefined) socket = await secured(() => tls.connect(socket, { servername, mode: 'pull' }));
+    const session = makeSession(socket, 'client', limits, mode);
+    try {
+      await session.ready();
+    } catch (e) {
+      await session.close();
+      throw e;
+    }
+    return session;
+  };
+
+  const { ClientPool, FetchResponse, pool, fetch } = client({
+    connect,
+    watch: Exchange.watch,
+    peer: session => native.http.peer(Session.idOf(session)), // the peer's stream limit, or -1 once no stream can be opened
+    merge: lists => {
+      const parts = lists.map(list => HeaderList.packed(list));
+      const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+      let at = 0;
+      for (const part of parts) {
+        out.set(part, at);
+        at += part.length;
+      }
+      return received(out);
+    },
+    HeaderList,
+    limitsOf,
+    modeOf,
+  });
+
   for (const C of [
     HeaderList,
     Exchange,
@@ -645,6 +707,8 @@ export default native => {
     HttpServer,
     PullHttpServer,
     EventHttpServer,
+    ClientPool,
+    FetchResponse,
   ]) {
     freezeMethods(C);
     freezeMethods(C.prototype);
@@ -668,6 +732,10 @@ export default native => {
       HttpServer,
       PullHttpServer,
       EventHttpServer,
+      ClientPool,
+      FetchResponse,
+      pool,
+      fetch,
       /**
        * Starts an HTTP/2 session over `socket` (a pull-mode `api.net` socket, plain or made by `api.tls`), which it consumes.
        * Options: `role` ('client' | 'server'), `mode` ('pull' or 'event'), `limits` ({ streams, headers, window, connection,
@@ -685,27 +753,7 @@ export default native => {
        * TLS and `servername` (default: `host`) is checked; the peer must negotiate 'h2' (`NoApplicationProtocol`
        * otherwise). Required: `port`, `mode` ('pull' or 'event'), `limits`.
        */
-      async connect(io, options) {
-        const host = own(options, 'host') ?? '127.0.0.1';
-        const port = own(options, 'port');
-        if (typeof host !== 'string') throw new TypeError('host must be a string');
-        if (!Number.isInteger(port) || port < 0 || port > 65535) throw new TypeError('port must be an integer in 0..65535');
-        const mode = modeOf(options);
-        const limits = limitsOf(own(options, 'limits'));
-        const tls = own(options, 'tls');
-        const servername = own(options, 'servername') ?? host;
-        if (typeof servername !== 'string') throw new TypeError('servername must be a string');
-        let socket = await shared.net.connect(io, { host, port, mode: 'pull' });
-        if (tls !== undefined) socket = await secured(() => tls.connect(socket, { servername, mode: 'pull' }));
-        const session = makeSession(socket, 'client', limits, mode);
-        try {
-          await session.ready();
-        } catch (e) {
-          await session.close();
-          throw e;
-        }
-        return session;
-      },
+      connect,
       /**
        * Listens on `listen` (`{ host?, port? }`, loopback only for now) and serves HTTP/2 to every client. With `tls` (a
        * `TlsServer` whose `alpn` includes 'h2') connections are TLS and must negotiate 'h2'; without it the server

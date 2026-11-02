@@ -296,3 +296,158 @@ test "dns: datagrams" {
     try check(p.scope, "report.a && report.noAaaa === 'NotFound' && report.missing === 'NotFound' && report.many && report.failover");
     try t.expect(udp.queries.load(.monotonic) >= 33);
 }
+
+test "dns: cache honours TTL clamps and is opt-in" {
+    if (!m.Api.dns_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { DnsServer } = api.dns;
+        \\  const tcp = listen(api, io, framed);
+        \\  const servers = [DnsServer.tcp([local(api, tcp.port)])];
+        \\  const cache = { limit: 16, ttl: { min: 0, max: 400 }, negative: { min: 0, max: 400 } };
+        \\  const cached = api.dns.resolver(io, { servers, ...options, cache });
+        \\  const ask = (r, name = 'web.test') => r.lookup(name, { family: 'ipv4' });
+        \\  let before = stats.queries;
+        \\  const first = show(await ask(cached));
+        \\  const second = show(await ask(cached));
+        \\  out.hit = first === '192.0.2.7' && second === first && stats.queries === before + 1;
+        \\  // The zone's records say 60 s; the resolver's max clamp is 400 ms.
+        \\  await io.sleep(600);
+        \\  await ask(cached);
+        \\  out.expired = stats.queries === before + 2;
+        \\  // Every lookup asks without a cache option.
+        \\  const plain = api.dns.resolver(io, { servers, ...options });
+        \\  before = stats.queries;
+        \\  await ask(plain); await ask(plain);
+        \\  out.optIn = stats.queries === before + 2;
+        \\  // This zone sends no SOA, so NXDOMAIN is not kept (RFC 2308 gives no lifetime).
+        \\  before = stats.queries;
+        \\  await outcome(ask(cached, 'missing.test')); await outcome(ask(cached, 'missing.test'));
+        \\  out.negative = stats.queries === before + 2;
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
+        \\  const bad = c => throws(() => api.dns.resolver(io, { servers, ...options, cache: c }));
+        \\  out.checked = [
+        \\    { ...cache, limit: 0 }, { ...cache, limit: 1.5 }, { ...cache, ttl: { min: 5, max: 1 } }, { ...cache, ttl: { min: 0 } },
+        \\    { ...cache, negative: { min: -1, max: 1 } }, { limit: 1, ttl: cache.ttl }, 5,
+        \\  ].every(c => bad(c) === 'TypeError');
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.hit && report.expired && report.optIn && report.negative && report.checked");
+}
+
+test "dns: DNS over HTTPS" {
+    if (!m.Api.dns_enabled or !m.Api.tls_enabled or !m.Api.http_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\const limits = { streams: 100, headers: 16384, window: 65535, connection: 1 << 20, batch: 4096 };
+        \\const seen = [];
+        \\// A DoH server: the zone above behind POST /dns-query, and failures behind other paths.
+        \\const doh = (api, io, serverTls) => {
+        \\  const server = api.http.serve(io, { listen: { port: 0 }, tls: serverTls, mode: 'pull', limits });
+        \\  (async () => {
+        \\    for await (const ex of server) {
+        \\      (async () => {
+        \\        let head; const body = [];
+        \\        for (let ev; (ev = await ex.next()); ) {
+        \\          if (ev.type === 'headers' && ev.kind === 'request') head = ev;
+        \\          if (ev.type === 'data') { body.push(...ev.data); ex.consume(ev.data.length); }
+        \\          if (ev.type === 'end' || ev.type === 'closed' || (ev.type === 'headers' && ev.endStream)) break;
+        \\        }
+        \\        const query = Uint8Array.from(body);
+        \\        seen.push({ method: head.method, path: head.path, type: head.headers.get('content-type'), accept: head.headers.get('accept'), id: (query[0] << 8) | query[1] });
+        \\        const send = async (status, type, data) => {
+        \\          const h = new api.http.HeaderList(); h.put('content-type', type);
+        \\          ex.respond({ status, headers: h, body: 'stream' });
+        \\          await ex.send(data); ex.finish();
+        \\        };
+        \\        if (head.path === '/status') await send(503, 'application/dns-message', new Uint8Array(0));
+        \\        else if (head.path === '/type') await send(200, 'text/plain', reply(query));
+        \\        else if (head.path === '/redirect') await send(302, 'application/dns-message', reply(query));
+        \\        else await send(200, 'application/dns-message', reply(query));
+        \\      })();
+        \\    }
+        \\  })();
+        \\  return server;
+        \\};
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { tls, dns } = api;
+        \\  const roots = tls.RootPki.fromPem(bytes(CA));
+        \\  const serverTls = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
+        \\  const server = doh(api, io, serverTls);
+        \\  const loopback = dns.IpAddr.v4(127, 0, 0, 1);
+        \\  const url = path => `https://localhost:${server.port}${path}`;
+        \\  const via = (path, extra = {}) => dns.resolver(io, { servers: [dns.DnsServer.https(url(path), [loopback])], roots, ...options, ...extra });
+        \\  const resolver = via('/dns-query');
+        \\  out.both = show(await resolver.lookup('web.test', { family: 'any' })) === '2001:db8::7,192.0.2.7';
+        \\  out.request = seen.length === 2 && seen.every(r => r.method === 'POST' && r.path === '/dns-query' && r.type === 'application/dns-message' && r.accept === 'application/dns-message' && r.id === 0);
+        \\  out.missing = await outcome(resolver.lookup('missing.test', { family: 'any' }));
+        \\  // Other failures of the HTTP layer, each with its own meaning; a redirect is not followed.
+        \\  out.status = await via('/status').lookup('web.test', { family: 'ipv4' }).catch(e => e.name + ':' + e.subject);
+        \\  out.type = await outcome(via('/type').lookup('web.test', { family: 'ipv4' }));
+        \\  out.redirect = await via('/redirect').lookup('web.test', { family: 'ipv4' }).catch(e => e.name + ':' + e.subject);
+        \\  // A cache spares the second connection.
+        \\  const kept = via('/dns-query', { cache: { limit: 8, ttl: { min: 0, max: 60000 }, negative: { min: 0, max: 0 } } });
+        \\  const before = seen.length;
+        \\  await kept.lookup('web.test', { family: 'ipv4' }); await kept.lookup('web.test', { family: 'ipv4' });
+        \\  out.cached = seen.length === before + 1;
+        \\  // The certificate must be valid for the URL's host, and chain to the roots given.
+        \\  const wrong = dns.resolver(io, { servers: [dns.DnsServer.https(`https://example.com:${server.port}/dns-query`, [loopback])], roots, ...options });
+        \\  out.wrongName = await outcome(wrong.lookup('web.test', { family: 'any' }));
+        \\  const stranger = via('/dns-query', { roots: tls.RootPki.fromPem(bytes(ROGUE)) });
+        \\  out.unknownIssuer = await outcome(stranger.lookup('web.test', { family: 'any' }));
+        \\  // Inputs.
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
+        \\  const { DnsServer } = dns;
+        \\  out.urls = ['http://dns.test/q', 'https://', 'https://u@dns.test/q', 'https://dns.test:0/q', 'https://dns.test:65536/q', 'https://dns.test/q#frag', 'https://[::1]/q', 'https://dns .test/q', 'ftp://dns.test', '', 42, undefined].every(u => throws(() => DnsServer.https(u, [loopback])) === 'TypeError');
+        \\  out.good = ['https://dns.test', 'https://DNS.test:8443/a/b?x=1', 'https://1.1.1.1/dns-query'].every(u => throws(() => DnsServer.https(u, [loopback])) === 'no');
+        \\  out.needsRoots = throws(() => dns.resolver(io, { servers: [DnsServer.https(url('/dns-query'), [loopback])], ...options }));
+        \\  out.ceiling = throws(() => dns.resolver(io, { servers: [DnsServer.https('https://dns.test/dns-query', [dns.IpAddr.parse('192.0.2.1')])], roots, ...options }));
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.both && report.request && report.missing === 'NotFound' && report.status === 'ServerFailure:HTTP status 503' && report.type === 'ProtocolError' && report.redirect === 'ServerFailure:HTTP status 302' && report.cached && report.wrongName === 'CertificateRejected' && report.unknownIssuer === 'CertificateRejected' && report.urls && report.good && report.needsRoots === 'TypeError' && report.ceiling === 'PermissionDenied'");
+}
+
+test "dns: presets are pinned data over the public constructors" {
+    if (!m.Api.dns_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\import { presets } from 'origine:@std/dns/presets';
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const table = {
+        \\    cloudflare: ['Cloudflare', '1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001'],
+        \\    cloudflareMalware: ['Cloudflare Malware', '1.1.1.2,1.0.0.2,2606:4700:4700::1112,2606:4700:4700::1002'],
+        \\    cloudflareFamily: ['Cloudflare Family', '1.1.1.3,1.0.0.3,2606:4700:4700::1113,2606:4700:4700::1003'],
+        \\    adguard: ['AdGuard', '94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff'],
+        \\    google: ['Google', '8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8844'],
+        \\    quad9: ['Quad9', '9.9.9.9,149.112.112.112,2620:fe::fe,2620:fe::9'],
+        \\  };
+        \\  out.keys = Object.keys(presets).join() === Object.keys(table).join();
+        \\  out.table = Object.entries(table).every(([key, [name, ips]]) => presets[key].name === name && show(presets[key].servers) === ips);
+        \\  out.frozen = Object.isFrozen(presets) && Object.isFrozen(presets.google) && Object.isFrozen(presets.google.servers);
+        \\  out.servers = presets.google.servers.every(ip => ip instanceof api.dns.IpAddr);
+        \\  out.made = Object.values(presets).every(p => ['udp', 'tcp', 'tls', 'https'].every(k => p[k]() instanceof api.dns.DnsServer)) && presets.google.udp() !== presets.google.udp();
+        \\  out.noQuic = presets.google.quic === undefined;
+        \\  // They are public addresses: the network ceiling refuses them unless the embedder allows them.
+        \\  const io = api.io.create();
+        \\  const roots = api.tls.RootPki.fromPem(bytes(CA));
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
+        \\  out.ceiling = ['udp', 'tcp', 'tls', 'https'].map(k => throws(() => api.dns.resolver(io, { servers: [presets.cloudflare[k]()], roots, ...options }))).every(n => n === 'PermissionDenied');
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.keys && report.table && report.frozen && report.servers && report.made && report.noQuic && report.ceiling");
+}

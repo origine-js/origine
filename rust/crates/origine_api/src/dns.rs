@@ -1,6 +1,6 @@
 //! `native.dns.*`: address lookups on the io loop, built on `origine_dns`.
 //!
-//! A resolver is a list of servers (UDP, TCP, or TLS) plus, for `system()`, what `/etc/resolv.conf` and
+//! A resolver is a list of servers (UDP, TCP, TLS, or HTTPS) plus, for `system()`, what `/etc/resolv.conf` and
 //! `/etc/hosts` say. Each query opens its own socket on the resolver's runtime (a connected UDP socket, or a
 //! stream, framed as RFC 1035 section 4.2.2 says, over TLS for DoT) and ends after one answer or its timeout.
 //! The servers' sockets are not `api.net` sockets, so each server address is checked against the embedder's
@@ -15,7 +15,9 @@ use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use origine_api_core::{NativeError, NetRules, errno};
-use origine_dns::{Config, DnsError, Exchange, Family, Hosts, Resolver, Server, Transport as DnsTransport, parse_resolv_conf};
+use origine_dns::{
+    CacheConfig, Config, DnsError, DohError, Exchange, Family, Hosts, Resolver, Server, Transport as DnsTransport, parse_resolv_conf,
+};
 use origine_io::Loop;
 use origine_io::rt::Handle;
 use origine_transport::Transport;
@@ -39,6 +41,9 @@ struct NetExchange {
     net: NetRules,
     #[cfg(feature = "tls")]
     tls: Option<origine_tls::TlsClient>,
+    /// The same, negotiating `h2`, for DNS over HTTPS.
+    #[cfg(all(feature = "tls", feature = "http"))]
+    h2: Option<origine_tls::TlsClient>,
 }
 
 fn to_io(e: NativeError) -> io::Error {
@@ -75,6 +80,23 @@ impl NetExchange {
         Ok(SocketTransport { socket: Rc::new(Socket::accepted(self.key, self.runtime, stream)), lp })
     }
 
+    /// RFC 8484: one HTTP/2 connection over TLS, one POST of the query, the body of the answer. The connection
+    /// lives only as long as this call (its driver is polled by it, not spawned), so an idle resolver holds
+    /// nothing and keeps nothing alive.
+    #[cfg(all(feature = "tls", feature = "http"))]
+    async fn https(&self, addr: SocketAddr, name: &str, authority: &str, path: &str, query: &[u8]) -> io::Result<Vec<u8>> {
+        use origine_h2::{Role, connect};
+        let client = self.h2.as_ref().ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
+        let tls = origine_tls::TlsStream::connect(client, self.stream(addr).await?, name).await.map_err(io::Error::from)?;
+        if tls.info().alpn.as_deref() != Some("h2") {
+            // The server does not speak HTTP/2: there is nothing weaker to fall back to.
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        let limits = origine_h2::Limits { streams: 1, headers: 16 * 1024, window: 65535, connection: 65535, batch: 16 * 1024 };
+        let (connection, driver) = connect(Role::Client, limits, tls).map_err(io::Error::other)?;
+        both(doh_request(&connection, authority, path, query), driver.run()).await
+    }
+
     async fn framed<T: Transport>(transport: &T, query: &[u8]) -> io::Result<Vec<u8>> {
         let length = u16::try_from(query.len()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let mut message = Vec::with_capacity(2 + query.len());
@@ -84,6 +106,91 @@ impl NetExchange {
         let head = read_exact(transport, 2).await?;
         read_exact(transport, usize::from(u16::from_be_bytes([head[0], head[1]]))).await
     }
+}
+
+/// Polls `work` together with the connection's `driver` until `work` ends; a driver that ends first fails it.
+#[cfg(all(feature = "tls", feature = "http"))]
+async fn both(
+    work: impl Future<Output = io::Result<Vec<u8>>>,
+    driver: impl Future<Output = Result<(), origine_h2::ConnError>>,
+) -> io::Result<Vec<u8>> {
+    use std::pin::pin;
+    use std::task::Poll;
+    let (mut work, mut driver, mut driver_done) = (pin!(work), pin!(driver), false);
+    std::future::poll_fn(move |cx| {
+        // The driver first: when it ends it tells every stream, and `work` hears of it in the same poll.
+        if !driver_done && driver.as_mut().poll(cx).is_ready() {
+            driver_done = true;
+        }
+        match work.as_mut().poll(cx) {
+            Poll::Pending if driver_done => Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
+            other => other,
+        }
+    })
+    .await
+}
+
+#[cfg(all(feature = "tls", feature = "http"))]
+fn conn_io(e: origine_h2::ConnError) -> io::Error {
+    use origine_h2::ConnError;
+    match e {
+        ConnError::Transport(kind, _) => io::Error::from(kind),
+        ConnError::Protocol(e) => io::Error::other(e),
+        ConnError::Closed => io::Error::from(io::ErrorKind::ConnectionAborted),
+    }
+}
+
+/// The largest DNS message there is.
+#[cfg(all(feature = "tls", feature = "http"))]
+const MAX_MESSAGE: usize = 65535;
+
+/// The HTTP/2 error code `CANCEL`.
+#[cfg(all(feature = "tls", feature = "http"))]
+const CANCEL: u32 = 8;
+
+#[cfg(all(feature = "tls", feature = "http"))]
+async fn doh_request(connection: &origine_h2::Connection, authority: &str, path: &str, query: &[u8]) -> io::Result<Vec<u8>> {
+    use origine_h2::{Body, FieldList, HeaderKind, RequestHead, StreamEvent};
+    connection.ready().await.map_err(conn_io)?;
+    let mut fields = FieldList::new();
+    let length = query.len().to_string();
+    for (name, value) in [("accept", "application/dns-message"), ("content-type", "application/dns-message"), ("content-length", &length)] {
+        fields.put(name.as_bytes(), value.as_bytes()).map_err(io::Error::other)?;
+    }
+    let head = RequestHead { method: "POST", scheme: "https", authority, path };
+    let exchange = connection.open(&head, &fields, Body::Stream).map_err(io::Error::other)?;
+    exchange.send(query.to_vec()).await.map_err(io::Error::other)?;
+    exchange.finish(None).map_err(io::Error::other)?;
+    let (mut status, mut dns_type, mut body) = (0, false, Vec::new());
+    while let Some(event) = exchange.next().await {
+        match event {
+            StreamEvent::Headers { kind: HeaderKind::Response, pseudo, fields, .. } => {
+                status = pseudo.status.unwrap_or(status);
+                if let Some(value) = fields.get("content-type") {
+                    dns_type = value.eq_ignore_ascii_case(b"application/dns-message");
+                }
+            }
+            StreamEvent::Data(data) => {
+                exchange.consume(data.len());
+                if body.len() + data.len() > MAX_MESSAGE {
+                    exchange.reset(CANCEL);
+                    return Err(io::Error::other(DohError::TooLarge));
+                }
+                body.extend_from_slice(&data);
+            }
+            StreamEvent::Closed(0) => break,
+            StreamEvent::Closed(_) => return Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+            StreamEvent::Aborted(e) => return Err(conn_io(e)),
+            _ => {}
+        }
+    }
+    if status != 200 {
+        return Err(io::Error::other(DohError::Status(status)));
+    }
+    if !dns_type {
+        return Err(io::Error::other(DohError::ContentType));
+    }
+    Ok(body)
 }
 
 async fn read_exact<T: Transport>(transport: &T, len: usize) -> io::Result<Vec<u8>> {
@@ -116,6 +223,10 @@ impl Exchange for NetExchange {
                 }
                 #[cfg(not(feature = "tls"))]
                 DnsTransport::Tls { .. } => Err(io::Error::from(io::ErrorKind::Unsupported)),
+                #[cfg(all(feature = "tls", feature = "http"))]
+                DnsTransport::Https { name, authority, path } => self.https(addr, name, authority, path, query).await,
+                #[cfg(not(all(feature = "tls", feature = "http")))]
+                DnsTransport::Https { .. } => Err(io::Error::from(io::ErrorKind::Unsupported)),
             }
         };
         match Handle::current().timeout(timeout, work).await {
@@ -140,7 +251,7 @@ fn dns_error(e: DnsError, name: &str) -> NativeError {
     match e {
         DnsError::NotFound => detailed(errno::NOT_FOUND, name.to_owned()),
         DnsError::TimedOut => NativeError::Errno(errno::TIMED_OUT),
-        DnsError::ServerFailure(code) => detailed(errno::SERVER_FAILURE, code),
+        DnsError::ServerFailure(failure) => detailed(errno::SERVER_FAILURE, failure.to_string()),
         // A TLS failure travelled inside an `io::Error`: give it back its own meaning.
         #[cfg(feature = "tls")]
         DnsError::Io(e) if e.get_ref().is_some_and(|inner| inner.is::<origine_tls::TlsError>()) => {
@@ -149,7 +260,7 @@ fn dns_error(e: DnsError, name: &str) -> NativeError {
         }
         DnsError::Io(e) => NativeError::from(e),
         DnsError::InvalidName(n) => detailed(errno::INVALID_INPUT, n),
-        DnsError::BadResponse(why) => detailed(errno::PROTOCOL_ERROR, why),
+        DnsError::BadResponse(why) => detailed(errno::PROTOCOL_ERROR, why.to_string()),
         _ => NativeError::Errno(errno::UNEXPECTED),
     }
 }
@@ -174,11 +285,15 @@ fn addrs_of(list: &str, net: &NetRules) -> Result<Vec<SocketAddr>, NativeError> 
     }
 }
 
-/// `native.dns.resolver(io, spec, roots, timeout, tries)`: a resolver over the servers in `spec`, one per line:
-/// `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>` (`addrs` are `ip:port`, comma-separated) or `system` (the
-/// nameservers, search list and hosts file of this machine, read now). `roots` is the roots TLS
-/// servers are checked against (undefined if there are none); `timeout` is milliseconds per attempt. Returns the resolver.
+/// `native.dns.resolver(io, spec, roots, timeout, tries, entries, min, max, negative_min, negative_max)`: a resolver
+/// over the servers in `spec`, one per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>`,
+/// `https <authority> <path> <addrs>` (`addrs` are `ip:port`, comma-separated; the authority is the host and a
+/// `:port` that is not 443) or `system` (the nameservers, search list and hosts file of this machine, read
+/// now). `roots` is the roots TLS and HTTPS servers are checked against (undefined if there are none);
+/// `timeout` is milliseconds per attempt. `entries` is the cache's size (0: no cache) and the four that follow are
+/// its TTL clamps in milliseconds. Returns the resolver.
 #[native(side_effect = "any", path = "dns.resolver", needs = "runtime")]
+#[allow(clippy::too_many_arguments)]
 fn dns_resolver(
     host: &mut HostState,
     key: ScopeKey,
@@ -187,12 +302,17 @@ fn dns_resolver(
     roots: Option<Gc<origine_tls::RootPki>>,
     timeout: u32,
     tries: u32,
+    entries: u64,
+    min: u64,
+    max: u64,
+    negative_min: u64,
+    negative_max: u64,
 ) -> Result<Gc<ResolverHandle>, NativeError> {
     let lp = host.loop_of(key, io)?;
     let net = host.net.clone();
     let mut servers = Vec::new();
     let (mut search, mut ndots, mut hosts) = (Vec::new(), None, Hosts::new());
-    let mut wants_tls = false;
+    let (mut wants_tls, mut wants_h2) = (false, false);
     for line in spec.lines().filter(|l| !l.is_empty()) {
         let mut words = line.splitn(3, ' ');
         match (words.next(), words.next(), words.next()) {
@@ -201,6 +321,16 @@ fn dns_resolver(
             (Some("tls"), Some(name), Some(addrs)) => {
                 wants_tls = true;
                 servers.push(Server { transport: DnsTransport::Tls { name: name.to_owned() }, addrs: addrs_of(addrs, &net)? });
+            }
+            (Some("https"), Some(authority), Some(rest)) => {
+                wants_h2 = true;
+                let (path, addrs) =
+                    rest.split_once(' ').ok_or_else(|| NativeError::Errno(errno::INVALID_INPUT).with_subject(line.to_owned()))?;
+                let name = authority.rsplit_once(':').map_or(authority, |(host, _)| host);
+                servers.push(Server {
+                    transport: DnsTransport::Https { name: name.to_owned(), authority: authority.to_owned(), path: path.to_owned() },
+                    addrs: addrs_of(addrs, &net)?,
+                });
             }
             (Some("system"), None, None) => {
                 let conf = parse_resolv_conf(&std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default());
@@ -218,17 +348,29 @@ fn dns_resolver(
         return Err(NativeError::Errno(errno::INVALID_INPUT).with_subject("no servers".to_owned()));
     }
     #[cfg(feature = "tls")]
-    let tls = if wants_tls {
-        let Some(Gc(roots)) = roots else {
+    let roots = roots.map(|Gc(roots)| roots);
+    #[cfg(feature = "tls")]
+    let client = |wanted: bool, alpn: &[&str]| -> Result<Option<origine_tls::TlsClient>, NativeError> {
+        if !wanted {
+            return Ok(None);
+        }
+        let Some(roots) = roots.clone() else {
             return Err(NativeError::Errno(errno::INVALID_INPUT).with_subject("TLS servers need roots".to_owned()));
         };
-        Some(
-            origine_tls::TlsClient::new(origine_tls::ClientOptions { roots, identity: None, alpn: Vec::new(), sessions: None })
-                .map_err(|e| NativeError::Errno(errno::INVALID_DATA).with_subject(e.to_string()))?,
-        )
-    } else {
-        None
+        let alpn = alpn.iter().map(|name| (*name).to_owned()).collect();
+        origine_tls::TlsClient::new(origine_tls::ClientOptions { roots, identity: None, alpn, sessions: None })
+            .map(Some)
+            .map_err(|e| NativeError::Errno(errno::INVALID_DATA).with_subject(e.to_string()))
     };
+    #[cfg(feature = "tls")]
+    let tls = client(wants_tls, &[])?;
+    // DNS over HTTPS needs the HTTP/2 client as well as TLS: without both it is `Unsupported`, never a weaker path.
+    #[cfg(all(feature = "tls", feature = "http"))]
+    let h2 = client(wants_h2, &["h2"])?;
+    #[cfg(not(all(feature = "tls", feature = "http")))]
+    if wants_h2 {
+        return Err(NativeError::Errno(errno::UNSUPPORTED));
+    }
     #[cfg(not(feature = "tls"))]
     if wants_tls || roots.is_some() {
         return Err(NativeError::Errno(errno::UNSUPPORTED));
@@ -237,6 +379,20 @@ fn dns_resolver(
     config.search = search;
     config.ndots = ndots.unwrap_or(1);
     config.hosts = hosts;
+    if entries > 0 {
+        let ms = Duration::from_millis;
+        let cache = CacheConfig {
+            entries: usize::try_from(entries).map_err(|_| NativeError::Errno(errno::INVALID_INPUT))?,
+            min: ms(min),
+            max: ms(max),
+            negative_min: ms(negative_min),
+            negative_max: ms(negative_max),
+        };
+        if !cache.valid() {
+            return Err(NativeError::Errno(errno::INVALID_INPUT).with_subject("cache".to_owned()));
+        }
+        config.cache = Some(cache);
+    }
     let exchange = NetExchange {
         key,
         runtime: io,
@@ -244,6 +400,8 @@ fn dns_resolver(
         net,
         #[cfg(feature = "tls")]
         tls,
+        #[cfg(all(feature = "tls", feature = "http"))]
+        h2,
     };
     Ok(Gc(ResolverHandle { owner: key, runtime: io, resolver: Rc::new(Resolver::new(config, exchange)) }))
 }

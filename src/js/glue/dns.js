@@ -1,13 +1,27 @@
 // `api.dns`: address lookups (docs/http-design.md). An ES module factory used by index.js, like net.js. A
-// `DnsServer` says how one server is reached (`udp`, `tcp`, `tls`, or `system()`); `dns.resolver` makes a
+// `DnsServer` says how one server is reached (`udp`, `tcp`, `tls`, `https`, or `system()`); `dns.resolver` makes a
 // `Resolver` over an ordered list of them; `resolver.lookup(name, { family })` resolves a name to `IpAddr`s.
-// Servers must be loopback addresses for now (the sockets are not `api.net` sockets, and there is no embedder
-// permission for the wider network yet).
+// Every server address is checked against the embedder's network ceiling (the sockets are not `api.net` sockets).
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
+import { provide } from './handles.js';
 import { IpAddr, SocketAddr } from './addr.js';
 const { BadHandle, Unsupported } = errors;
 const DONE = Promise.resolve();
-const DEFAULT_PORT = { udp: 53, tcp: 53, tls: 853 };
+const DEFAULT_PORT = { udp: 53, tcp: 53, tls: 853, https: 443 };
+const LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+// `https://host[:port][/path][?query]` only: no userinfo, no fragment, no IP-literal brackets, no whitespace.
+const parseUrl = url => {
+  const match = typeof url === 'string' ? /^https:\/\/([^/?#@\s[\]]+)(\/[^\s#]*|\?[^\s#]*)?$/.exec(url) : null;
+  if (match === null) throw new TypeError('url must be an https:// URL with a host, an optional port, a path and a query');
+  const [, hostPort, rest = '/'] = match;
+  const colon = hostPort.lastIndexOf(':');
+  const host = (colon < 0 ? hostPort : hostPort.slice(0, colon)).toLowerCase();
+  const port = colon < 0 ? 443 : /^[1-9][0-9]{0,4}$/.test(hostPort.slice(colon + 1)) ? Number(hostPort.slice(colon + 1)) : 0;
+  if (port < 1 || port > 65535 || host.length > 253 || !host.split('.').every(label => label.length <= 63 && LABEL.test(label))) {
+    throw new TypeError('url must have a host name and a port from 1 to 65535');
+  }
+  return { host, port, authority: port === 443 ? host : `${host}:${port}`, path: rest.startsWith('/') ? rest : `/${rest}` };
+};
 
 export default native => {
   const token = {};
@@ -16,12 +30,12 @@ export default native => {
     return io.id;
   };
   // An `IpAddr` means the transport's default port; a `SocketAddr` names the port.
-  const addrsOf = (kind, servers) => {
+  const addrsOf = (kind, servers, port = DEFAULT_PORT[kind]) => {
     if (!Array.isArray(servers) || servers.length === 0) throw new TypeError('servers must be a non-empty array of IpAddr or SocketAddr');
     return Object.freeze(
       servers.map(server => {
         if (server instanceof SocketAddr) return server;
-        if (server instanceof IpAddr) return SocketAddr.new(server, DEFAULT_PORT[kind]);
+        if (server instanceof IpAddr) return SocketAddr.new(server, port);
         throw new TypeError('servers must hold IpAddr or SocketAddr values');
       }),
     );
@@ -32,11 +46,13 @@ export default native => {
     #kind;
     #name;
     #addrs;
-    constructor(made, kind, name, addrs) {
-      if (made !== token) throw new TypeError('use DnsServer.system, udp, tcp or tls');
+    #target;
+    constructor(made, kind, name, addrs, target) {
+      if (made !== token) throw new TypeError('use DnsServer.system, udp, tcp, tls or https');
       this.#kind = kind;
       this.#name = name;
       this.#addrs = addrs;
+      this.#target = target;
       Object.freeze(this);
     }
     /** The nameservers, search list and hosts file of this machine, read when the resolver is made. */
@@ -55,13 +71,20 @@ export default native => {
       if (typeof name !== 'string' || name === '' || /\s/.test(name)) throw new TypeError('name must be a non-empty string');
       return new DnsServer(token, 'tls', name, addrsOf('tls', servers));
     }
+    /** DNS over HTTPS (RFC 8484, HTTP/2 POST): `url` is `https://host[:port]/path`, the host is what the server's certificate must be valid for. An `IpAddr` means the URL's port (443 if it has none). Needs `roots` in `dns.resolver`. */
+    static https(url, servers) {
+      const { host, port, authority, path } = parseUrl(url);
+      return new DnsServer(token, 'https', host, addrsOf('https', servers, port), `${authority} ${path}`);
+    }
     static line(server) {
       if (!(server instanceof DnsServer)) throw new TypeError('servers must be DnsServer values');
       const list = server.#addrs.join(',');
-      return server.#kind === 'system' ? 'system' : server.#kind === 'tls' ? `tls ${server.#name} ${list}` : `${server.#kind} ${list}`;
+      if (server.#kind === 'system') return 'system';
+      if (server.#kind === 'tls') return `tls ${server.#name} ${list}`;
+      return server.#kind === 'https' ? `https ${server.#target} ${list}` : `${server.#kind} ${list}`;
     }
-    static isTls(server) {
-      return server.#kind === 'tls';
+    static needsRoots(server) {
+      return server.#kind === 'tls' || server.#kind === 'https';
     }
   }
 
@@ -115,6 +138,9 @@ export default native => {
     }
   }
 
+  // The presets module (`origine:@std/dns/presets`) makes servers with the public constructors of this realm.
+  provide('dns/classes', { DnsServer, IpAddr });
+
   for (const C of [DnsServer, Resolver]) {
     freezeMethods(C);
     freezeMethods(C.prototype);
@@ -129,9 +155,10 @@ export default native => {
       DnsServer,
       Resolver,
       /**
-       * `{ servers: DnsServer[] (at least one), roots?: RootPki (required with `DnsServer.tls`), dnssec: 'off',
-       * timeout: ms per attempt, tries: rounds over the servers }`; every number is required. `dnssec: 'validate'` is
-       * `Unsupported` until validation is built.
+       * `{ servers: DnsServer[] (at least one), roots?: RootPki (required with `DnsServer.tls` and `https`), dnssec: 'off',
+       * timeout: ms per attempt, tries: rounds over the servers, cache?: { limit, ttl: { min, max }, negative: { min, max } } }`;
+       * every number is required, and no `cache` means no caching. `dnssec: 'validate'` is `Unsupported` until
+       * validation is built.
        */
       resolver(io, options) {
         const servers = own(options, 'servers');
@@ -148,10 +175,30 @@ export default native => {
         const tries = positive('tries');
         const spec = servers.map(DnsServer.line).join('\n');
         const roots = own(options, 'roots');
-        const needsRoots = servers.some(DnsServer.isTls);
-        if (needsRoots && roots === undefined) throw new TypeError('roots is required with DnsServer.tls');
+        const needsRoots = servers.some(DnsServer.needsRoots);
+        if (needsRoots && roots === undefined) throw new TypeError('roots is required with DnsServer.tls and DnsServer.https');
+        const cache = own(options, 'cache');
+        let numbers = [0, 0, 0, 0, 0];
+        if (cache !== undefined) {
+          const count = (object, name, least) => {
+            const value = own(object, name);
+            if (!Number.isSafeInteger(value) || value < least) throw new TypeError(`cache.${name} must be an integer of at least ${least}`);
+            return value;
+          };
+          const clamp = (object, what) => {
+            const min = count(object, 'min', 0);
+            const max = count(object, 'max', 0);
+            if (min > max) throw new TypeError(`${what}.min must not be above ${what}.max`);
+            return [min, max];
+          };
+          numbers = [
+            count(cache, 'limit', 1),
+            ...clamp(own(cache, 'ttl'), 'cache.ttl'),
+            ...clamp(own(cache, 'negative'), 'cache.negative'),
+          ];
+        }
         const rootsHandle = roots === undefined ? undefined : shared.tlsRootsHandle(roots);
-        return new Resolver(token, native.dns.resolver(ioId(io), spec, rootsHandle, timeout, tries), io);
+        return new Resolver(token, native.dns.resolver(ioId(io), spec, rootsHandle, timeout, tries, ...numbers), io);
       },
     });
 };

@@ -104,7 +104,7 @@ pub fn statePointer(comptime T: type, data: v8.Value) *T {
 // ---- rebindable natives (startup snapshots) --------------------------------
 
 /// Modules whose natives can be built for a snapshot.
-pub const max_rebind = 16;
+pub const max_rebind = 32;
 /// Only the addresses matter: a native built for a snapshot carries `&rebind_markers[i]` as its
 /// External data (static, so snapshot-safe and registered as an external reference) in place of
 /// a state pointer.

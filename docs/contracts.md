@@ -26,6 +26,7 @@ maintained by hand carry a `CONTRACT (docs/contracts.md, surface X)` comment.
 | E | `origine_oxc.h` <-> Rust `origine_oxc` <-> Zig `oxc_abi.zig` | the header | checked (both sides) |
 | G | `origine_repl.h` <-> Rust `origine_repl` <-> Zig `repl_abi.zig` | the header | generated + checked (both sides) |
 | F | exported / kept symbol lists | `kept_symbol_prefixes` in `build.zig` | generated + checked |
+| H | aws-lc-sys bindings <-> Zig-built AWS-LC (`lib/aws-lc`) | the aws-lc-sys `.crate` pinned by `rust/Cargo.lock` | derived at configure time + link-checked |
 
 ## A. I/O C API (`src/io/include/origine_io.h`)
 
@@ -123,6 +124,17 @@ generated from it (the old `rust/exports.macos.txt` is gone). `rust/scripts/chec
 with a kept prefix. A Zig `extern fn` without a Rust definition is a link error. Not exercised
 automatically: the macOS release external-link and Linux `ld -r` paths (they need V8's `ld64.lld`
 / a Linux host).
+
+## H. AWS-LC (aws-lc-sys bindings <-> `lib/aws-lc`)
+
+Source of truth: the aws-lc-sys crate version in `rust/Cargo.lock`. `lib/aws-lc` fetches that same
+`.crate` (`build.zig.zon`: version, url, hash) and builds its AWS-LC with the symbol prefix of its
+`links` key; cargo uses the crate's pregenerated `universal` bindings through a build-script
+override (`rust/scripts/cargo-aws-lc.sh`). The prefix, the source lists and libssl's sources are
+read from the crate, so nothing is copied by hand. A version skew between the two fails
+`cargo-aws-lc.sh` (it compares the built `links` with Cargo.lock's aws-lc-sys version; the override
+would otherwise be ignored and aws-lc-sys would build its own copy); a feature that turns on
+aws-lc-sys's `all-bindings` is a compile error. Updating and the details: [aws-lc.md](aws-lc.md).
 
 ## B. Natives registry (Rust -> Zig -> JS)
 

@@ -20,13 +20,13 @@ Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, an
 | --- | --- | --- |
 | HTTP versions | **HTTP/2 only**: h2 over TLS by ALPN, cleartext h2c for loopback and tests. No HTTP/1.x | one framing layer to get right; h2c gives certificate-free tests. Cost: a server that only speaks HTTP/1 is unreachable (`NoApplicationProtocol`) |
 | h2 core | **nghttp2** (sans-io C, built by Zig in `lib/nghttp2`), wrapped in `origine_h2` | header callbacks per field; no socket or loop of its own |
-| TLS | **rustls on aws-lc-rs** (`origine_tls`) | Rust is core to the build; sans-io `read_tls` / `write_tls` |
+| TLS | **rustls on aws-lc-rs** (`origine_tls`); AWS-LC built by Zig in `lib/aws-lc`, not by aws-lc-sys ([aws-lc.md](aws-lc.md)) | Rust is core to the build; sans-io `read_tls` / `write_tls` |
 | DNS | **hickory-proto as the wire codec only**; the resolver logic is ours (`origine_dns`) | c-ares has no DoT/DoH/DNSSEC; hickory-resolver needs tokio and `Send` futures, we have a single-threaded `oio` loop |
 | Engines vs loop | every protocol engine is sans-io behind the `Transport` trait of `origine_transport` (owned buffers, `!Send` futures) | protocol bugs and loop bugs stay separable: engines are tested over in-memory pipes, then over sockets |
 | uSockets / uWS | rejected | readiness-only; would need a second socket world beside `oio` and loses zero-copy receives |
 | Rust-defined classes | values with native state are classes defined in Rust (`#[class]`), owned by V8's cppgc heap | see [Values](#values-and-ownership) |
 | Names | the network ceiling is about **addresses**; `api.net` and `api.http.connect` take IP literals, `api.dns` turns names into addresses | a name could resolve anywhere, so a check on names proves nothing |
-| Size | default release build at most 70 MB stripped (`just check-size`) | a runtime that is a single download. A local `-Doptimize=small` run on 2026-11-02 measured 43,852,304 bytes with every flag on, against 40.1 MB before the networking crates; no CI job runs it yet |
+| Size | default release build at most 70 MB stripped (`just check-size`) | a runtime that is a single download. A local `-Doptimize=small` run on 2026-11-02 measured 43,852,304 bytes with every flag on, against 40.1 MB before the networking crates (44,092,784 bytes once AWS-LC came from `lib/aws-lc`, +41,680 bytes, [aws-lc.md](aws-lc.md)); no CI job runs it yet |
 
 ## Architecture
 
@@ -46,7 +46,7 @@ Each protocol is an internal Rust crate; the natives (`rust/crates/origine_api`)
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-Dhttp` | `true` | `api.http`; builds and links nghttp2 (`lib/nghttp2`, a lazy dependency: a disabled flag fetches nothing) |
-| `-Dtls` | `true` | `api.tls`; rustls and aws-lc |
+| `-Dtls` | `true` | `api.tls`; rustls, and AWS-LC's libcrypto built and linked by Zig (`lib/aws-lc`, a lazy dependency; [aws-lc.md](aws-lc.md)) |
 | `-Ddns` | `true` | `api.dns` |
 | `-Dquic` | `true`, needs `-Dtls` | reserved; gates nothing yet (see [quic-design.md](quic-design.md)) |
 

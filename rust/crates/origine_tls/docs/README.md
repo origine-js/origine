@@ -2,7 +2,8 @@
 
 TLS 1.2/1.3 over any byte transport: [rustls](https://github.com/rustls/rustls) on aws-lc-rs, driven
 sans-io. It does no I/O itself, needs no V8 and no Zig-built library, so its tests run anywhere with
-plain `cargo test -p origine_tls`. Design and decisions: [docs/http-design.md](../../../../docs/http-design.md).
+plain `cargo test -p origine_tls` (aws-lc-sys then compiles AWS-LC itself; `just test-net` and the Zig
+build link the Zig-built copy instead, see [docs/aws-lc.md](../../../../docs/aws-lc.md)). Design and decisions: [docs/http-design.md](../../../../docs/http-design.md).
 `api.tls` (in `origine_api`) and the DNS resolver (DoT) sit on it.
 
 ```

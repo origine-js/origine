@@ -1,12 +1,13 @@
 // `api.dns`: address lookups (docs/http-design.md). An ES module factory used by index.js, like net.js. A
 // `DnsServer` says how one server is reached (`udp`, `tcp`, `tls`, or `system()`); `dns.resolver` makes a
-// `Resolver` over an ordered list of them; `resolver.lookup(name, { family })` resolves a name to `IpAddr`s.
+// `Resolver` (a class defined in Rust) over an ordered list of them; `resolver.lookup(name, { family })` resolves a name to `IpAddr`s.
 // Servers must be loopback addresses for now (the sockets are not `api.net` sockets, and there is no embedder
 // permission for the wider network yet).
-import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
+import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, hostError } from './util.js';
 import { IpAddr, SocketAddr } from './addr.js';
 const { BadHandle, Unsupported } = errors;
-const DONE = Promise.resolve();
+// Read when the module is evaluated (before guest code): a realm cannot swap it.
+const { asyncDispose } = Symbol;
 const DEFAULT_PORT = { udp: 53, tcp: 53, tls: 853 };
 
 export default native => {
@@ -65,22 +66,15 @@ export default native => {
     }
   }
 
-  /** A resolver: lookups go through its servers in order. Closing it, or collecting it, releases it: the native resolver is owned by the garbage collector. */
-  class Resolver {
-    #handle;
-    #io;
-    #closed = false;
-    constructor(made, id, io) {
-      if (made !== token) throw new TypeError('resolvers are made by dns.resolver');
-      this.#handle = id;
-      this.#io = io;
-    }
+  // `Resolver` is a class defined in Rust (rust/crates/origine_api/src/dns.rs: `closed`, `close()`); these members
+  // need the glue's own objects (the `api.io` handle, `IpAddr`) and are defined on its prototype by the installer.
+  const ios = new WeakMap();
+  const resolverMembers = {
     get io() {
-      return this.#io;
-    }
-    get closed() {
-      return this.#closed || closedIo.has(this.#io);
-    }
+      const io = ios.get(this);
+      if (io === undefined) throw new TypeError('Resolver.prototype.io called on an object that is not a Resolver');
+      return io;
+    },
     /**
      * The addresses of `name`: an IP literal is itself, `localhost` is the loopback addresses, then the hosts file
      * (for `system()`), then the servers. `family` ('ipv4' | 'ipv6' | 'any') is required; IPv6 comes first for 'any'.
@@ -91,9 +85,8 @@ export default native => {
       if (typeof name !== 'string') throw new TypeError('name must be a string');
       const family = { ipv4: 4, ipv6: 6, any: 0 }[own(options, 'family')];
       if (family === undefined) throw new TypeError("family must be 'ipv4', 'ipv6' or 'any'");
-      if (this.#closed || closedIo.has(this.#io)) throw failure(BadHandle);
-      if (this.#handle === null) throw failure(BadHandle);
-      const packed = await native.dns.lookup(this.#handle, name, family);
+      if (this.closed) throw failure(BadHandle);
+      const packed = await native.dns.lookup(this, name, family);
       const out = [];
       for (let at = 0; at < packed.length;) {
         const length = packed[at] === 4 ? 4 : 16;
@@ -101,29 +94,23 @@ export default native => {
         at += 1 + length;
       }
       return out;
-    }
-    /** Forgets the resolver; lookups in flight finish. Idempotent. */
-    close() {
-      if (!this.#closed) {
-        this.#closed = true;
-        this.#handle = null;
-      }
-      return DONE;
-    }
-    [Symbol.asyncDispose]() {
+    },
+    [asyncDispose]() {
       return this.close();
-    }
-  }
+    },
+  };
 
-  for (const C of [DnsServer, Resolver]) {
+  for (const C of [DnsServer]) {
     freezeMethods(C);
     freezeMethods(C.prototype);
     Object.freeze(C.prototype);
     Object.freeze(C);
   }
 
-  return () =>
-    freeze({
+  // Called when the capability is bound (index.js `late`): the installer exists only then.
+  return () => {
+    const Resolver = native.dns.Resolver(hostError, resolverMembers);
+    return freeze({
       IpAddr,
       SocketAddr,
       DnsServer,
@@ -150,8 +137,10 @@ export default native => {
         const roots = own(options, 'roots');
         const needsRoots = servers.some(DnsServer.isTls);
         if (needsRoots && roots === undefined) throw new TypeError('roots is required with DnsServer.tls');
-        const rootsHandle = roots === undefined ? undefined : shared.tlsRootsHandle(roots);
-        return new Resolver(token, native.dns.resolver(ioId(io), spec, rootsHandle, timeout, tries), io);
+        const resolver = native.dns.resolver(ioId(io), spec, roots, timeout, tries);
+        ios.set(resolver, io);
+        return resolver;
       },
     });
+  };
 };

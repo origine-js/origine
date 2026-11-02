@@ -49,6 +49,10 @@ export function create(native) {
   // `context` is built on the parts `graph` publishes, so binding it binds `graph` first.
   const needs = { context: 'graph', isolate: 'host', http: 'net' };
   const rustNamespaces = ['fsAsync', 'io', 'net', 'tls', 'http', 'dns', 'channel'];
+  // Capabilities whose classes are defined in Rust: their natives return the classes, which exist only once
+  // the capability is bound (at run time, per realm; never in a snapshot), so the capability is built then.
+  const late = { tls: true, dns: true };
+  const builders = Object.create(null);
   const wrapped = new WeakSet();
   const access = name => {
     if (needs[name] !== undefined) access(needs[name]);
@@ -66,6 +70,7 @@ export function create(native) {
             wrapped.add(native[namespace]);
           }
         }
+        if (late[name]) capabilities[name] = freezeMethods(builders[name](options[name]));
         bound[name] = true;
       } finally {
         cell.errno[0] = previous;
@@ -74,7 +79,8 @@ export function create(native) {
     return capabilities[name];
   };
   for (const [name, factory] of Object.entries(factories)) {
-    capabilities[name] = freezeMethods(factory(native, cell)(options[name]));
+    if (late[name]) builders[name] = factory(native, cell);
+    else capabilities[name] = freezeMethods(factory(native, cell)(options[name]));
     const descriptor = { get: freeze(() => access(name)), enumerable: true, configurable: false };
     Object.defineProperty(full, name, descriptor);
     if (name !== 'io' && name !== 'net' && name !== 'tls' && name !== 'http' && name !== 'dns' && name !== 'isolate')

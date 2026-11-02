@@ -296,3 +296,33 @@ test "dns: datagrams" {
     try check(p.scope, "report.a && report.noAaaa === 'NotFound' && report.missing === 'NotFound' && report.many && report.failover");
     try t.expect(udp.queries.load(.monotonic) >= 33);
 }
+
+test "dns: Resolver is a Rust-defined class, frozen and brand-checked" {
+    if (!m.Api.dns_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { Resolver, DnsServer } = api.dns;
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
+        \\  const resolver = api.dns.resolver(io, { servers: [DnsServer.tcp([local(api, 1)])], ...options });
+        \\  out.cls = Resolver.name === 'Resolver' && resolver instanceof Resolver && Object.getPrototypeOf(resolver) === Resolver.prototype && api.dns.Resolver === Resolver;
+        \\  out.noNew = throws(() => new Resolver()) === 'TypeError';
+        \\  const closedGetter = Object.getOwnPropertyDescriptor(Resolver.prototype, 'closed').get;
+        \\  out.frozen = Object.isFrozen(Resolver) && Object.isFrozen(Resolver.prototype) && Object.isFrozen(Resolver.prototype.lookup) && Object.isFrozen(closedGetter) &&
+        \\    typeof Resolver.prototype[Symbol.asyncDispose] === 'function';
+        \\  out.members = resolver.io === io && resolver.closed === false;
+        \\  out.receiver = throws(() => Resolver.prototype.close.call({})) === 'TypeError' && throws(() => closedGetter.call(io)) === 'TypeError' &&
+        \\    throws(() => Object.getOwnPropertyDescriptor(Resolver.prototype, 'io').get.call({})) === 'TypeError' && await outcome(Resolver.prototype.lookup.call({}, 'x.test', { family: 'any' })) === 'TypeError';
+        \\  await resolver[Symbol.asyncDispose]();
+        \\  out.closed = resolver.closed && await outcome(resolver.lookup('x.test', { family: 'any' })) === 'BadHandle' && (await resolver.close()) === undefined;
+        \\  const other = api.dns.resolver(io, { servers: [DnsServer.tcp([local(api, 1)])], ...options });
+        \\  await io.close();
+        \\  out.ioClosed = other.closed;
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.cls && report.noNew && report.frozen && report.members && report.receiver && report.closed && report.ioClosed");
+}

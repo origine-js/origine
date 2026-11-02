@@ -64,7 +64,8 @@ export function freezeMethods(object) {
 
 // The Rust natives reject with an `Error` carrying `errno`, `name` and the `ErrorDetail` fields
 // (`subject`, `os`): callers get the shared error class instance, with those fields, instead.
-const hostError = e => (typeof e?.errno === 'number' && !(e instanceof OrigineError) ? fromDetail(e.errno, e) : e);
+// Also what the Rust classes (`native.<ns>.<Class>(hostError)`) convert their errors with.
+export const hostError = e => (typeof e?.errno === 'number' && !(e instanceof OrigineError) ? fromDetail(e.errno, e) : e);
 export const settled = promise =>
   promise.then(undefined, e => {
     throw hostError(e);
@@ -82,15 +83,17 @@ export const settling = ops =>
   Object.fromEntries(
     Object.entries(ops).map(([name, op]) => [
       name,
-      typeof op !== 'function' ? op : (...args) => {
-        let result;
-        try {
-          result = op(...args);
-        } catch (e) {
-          throw hostError(e);
-        }
-        return result instanceof Promise ? settled(result) : result;
-      },
+      typeof op !== 'function'
+        ? op
+        : (...args) => {
+            let result;
+            try {
+              result = op(...args);
+            } catch (e) {
+              throw hostError(e);
+            }
+            return result instanceof Promise ? settled(result) : result;
+          },
     ]),
   );
 

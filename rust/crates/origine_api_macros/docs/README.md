@@ -1,6 +1,6 @@
 # origine_api_macros
 
-Proc-macro crate for [`origine_api`](../../origine_api/docs/README.md): `#[native(...)]`,
+Proc-macro crate for [`origine_api`](../../origine_api/docs/README.md): `#[native(...)]`, `#[class(...)]`,
 `#[derive(FromJs)]`, `#[derive(IntoJs)]`. It depends on `origine_api_core` (for `camel_case`),
 `syn`, `quote`, `proc-macro2`. The generated code refers to `::origine_api::...`, so users need the
 crate named `origine_api` in scope (`origine_api` itself has `extern crate self as origine_api;`).
@@ -71,6 +71,8 @@ argument index; a two-argument type reports the offending position).
 | `bool` | boolean | |
 | `String` | string | copied (lossy UTF-8) |
 | `Option<T>` | `T` or `null`/`undefined` | consumes `T::ARITY` arguments |
+| `Vec<T>` (not `u8`) | array | each item decoded as `T`; `expected an array of: X` |
+| `&T` (`T` a `#[class]`) | an instance of the class | borrowed for the call; `expected a T` otherwise |
 | `Vec<u8>` | `ArrayBuffer` or any view | copies the covered bytes |
 | `ArrayBufferArg<'s>` | `ArrayBuffer` or view | handle + offset/len, no copy ([origine_api README](../../origine_api/docs/README.md#buffers-and-copy-semantics)) |
 | `v8::Local<Object / Function / ArrayBuffer / Array / Value>` | | type check only |
@@ -98,9 +100,63 @@ argument yields an already-rejected promise. A panic in the future rejects with 
 Errors become values via `native::error_value`: `NativeError::Arg`/`Type` -> `TypeError`,
 `Range` -> `RangeError`, `Error` -> `Error`, `Errno(code)` -> an `OrigineError` subclass instance.
 
+## `#[class(...)]`
+
+On an inherent impl block: the type becomes a JS class (runtime in
+[`origine_api/src/class.rs`](../../origine_api/src/class.rs), design in
+[natives.md](../../origine_api/docs/natives.md#rust-defined-classes-class)).
+
+```rust
+pub(crate) struct RootPki(Releasable<origine_tls::RootPki>);
+
+#[class(path = "tls.RootPki", side_effect = "any", needs = "runtime")]
+impl RootPki {
+    /// The Mozilla roots compiled into the binary.
+    #[static_method]
+    fn bundled() -> RootPki { RootPki(Releasable::new(origine_tls::RootPki::bundled())) }
+
+    #[static_method(name = "fromPem")]
+    fn from_pem(pem: ArrayBufferArg<'_>) -> Result<RootPki, NativeError> { .. }
+
+    /// A method: `&self` is the brand-checked receiver.
+    fn release(&self) { self.0.release(); }
+}
+
+// A native or member takes an instance as `&RootPki` (brand-checked, borrowed for the call):
+#[native(side_effect = "any", path = "tls.client", needs = "runtime")]
+fn tls_client(options: ClientConfig<'_>) -> Result<TlsClient, NativeError> { .. }
+// JS (glue): const RootPki = native.tls.RootPki(hostError); RootPki.fromPem(pem) instanceof RootPki
+```
+
+| Option | Meaning |
+|---|---|
+| `path = "namespace.ClassName"` | **required**. The class name (capitalized) and where its installer is (`native.<namespace>.<ClassName>`). |
+| `side_effect = ".."` | **required**: the default of the members (a getter defaults to `"none"`). |
+| `needs = ".."` | as for `#[native]`: when the installer is registered. |
+
+Members (every fn of the block is one):
+
+| Attribute | Goes | Signature |
+|---|---|---|
+| `#[static_method]` / `#[static_method(name, side_effect, promise)]` | on the constructor | no `self` |
+| none, or `#[method(name, side_effect, promise)]` | on the prototype | `&self` |
+| `#[getter]` / `#[getter(name, side_effect)]` | read-only accessor on the prototype | `&self`, no JS arguments |
+
+The JS name is `name = ".."` or the camelCase of the fn name. Parameters after `self` follow the `#[native]` rules
+(host state, scope, then JS arguments; no `ScopeKey`: a member is not bound to a scope). Generated: the member
+callbacks (`__origine_member_<fn>`), `impl Class` (`NAME`, `EXPECTED`, `MEMBERS`), `impl IntoJs` (a new instance),
+and `pub(crate) const CLASS_<TYPE_NAME>: RawNative` (the installer; list it in `NATIVES`). `&T` is `FromJs` for every
+class by a blanket impl in `class.rs`.
+
+Rejected at compile time: no `path` / `side_effect`; a lower-case class name; a trait impl or generic block; a fn
+without `self` and without `#[static_method]` ("put helpers in another impl block"); `self`, `&mut self` (the value is
+shared with the collector: use a `Cell`); `self` on a static; JS arguments on a getter; `promise` on a getter;
+`ScopeKey`; `async` without `promise`; two member attributes on one fn.
+
 ## `#[derive(FromJs)]` / `#[derive(IntoJs)]`
 
-For plain structs with named fields and no generics.
+For plain structs with named fields. A `FromJs` struct may take one lifetime parameter, the handle scope of the
+arguments, to hold borrowed fields such as class instances (`struct ClientConfig<'s> { roots: &'s RootPki }`).
 
 ```rust
 #[derive(origine_api::FromJs)]
@@ -138,7 +194,8 @@ pub struct IoHandle { kind: &'static str, id: u32, backend: &'static str }
 | `a #[native] fn must be a plain fn` | `const`, `unsafe`, `extern "ABI"` or variadic fn |
 | `an async #[native] fn needs the promise option` | `async fn` without `promise` |
 | `a promise native returns a future` | `promise` with no return type |
-| `a #[native] fn cannot take self` | method receivers |
+| `a #[native] fn cannot take self: methods belong in a #[class] impl block` | method receivers |
+| `cannot take both the host state and the scope` | both would borrow the scope |
 | `the host state, scope and key parameters must come before the JS arguments` | ordering |
 | `a #[native] fn takes at most one host state and one key parameter` | duplicates |
 

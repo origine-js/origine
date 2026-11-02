@@ -133,7 +133,7 @@ where
         match body(&mut scope, &args) {
             Ok(value) => rv.set(value),
             Err(error) => {
-                let value = error_value(&mut scope, error);
+                let value = crate::class::guest_error(&mut scope, error);
                 scope.throw_exception(value);
             }
         }
@@ -310,7 +310,7 @@ where
         })
     });
     if let Err(error) = started {
-        let value = error_value(scope, error);
+        let value = crate::class::guest_error(scope, error);
         resolver.reject(scope, value);
     }
     Ok(promise.into())
@@ -367,7 +367,7 @@ pub fn finish<T: for<'a> IntoJs<'a>>(scope: &mut v8::PinScope<'_, '_, ()>, pendi
     match value {
         Ok(value) => resolver.resolve(scope, value),
         Err(error) => {
-            let value = error_value(scope, error);
+            let value = crate::class::guest_error(scope, error);
             resolver.reject(scope, value)
         }
     };

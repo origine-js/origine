@@ -135,8 +135,8 @@ pub struct HostState {
     pub(crate) identity: u32,
     /// Rebuilds a received port (registered by the glue, `channel.setPortFactory`).
     pub(crate) port_factory: Option<Rc<v8::Global<v8::Function>>>,
-    /// The template of the objects that wrap garbage-collected native values (`gc::wrap`), made on first use.
-    pub(crate) wrapper: Option<v8::Global<v8::FunctionTemplate>>,
+    /// The template of each Rust-defined class (`class.rs`), made on first use.
+    pub(crate) classes: std::collections::HashMap<std::any::TypeId, v8::Global<v8::FunctionTemplate>>,
 }
 
 impl HostState {
@@ -168,7 +168,7 @@ impl HostState {
             isolate: 0,
             identity: 0,
             port_factory: None,
-            wrapper: None,
+            classes: std::collections::HashMap::new(),
         }
     }
 
@@ -514,7 +514,7 @@ impl HostState {
         self.pending.clear();
         self.chan_waits.clear();
         self.port_factory = None;
-        self.wrapper = None;
+        self.classes.clear();
         crate::channel::release_owned(self.isolate);
         self.completions.borrow_mut().clear();
         let ids: Vec<u32> = self.runtimes.keys().copied().collect();

@@ -264,6 +264,19 @@ impl<'s> FromJs<'s> for Vec<u8> {
     }
 }
 
+/// An array, each item decoded as a `T` (`Vec<u8>` is the exception: it is bytes, see above).
+impl<'s, T: FromJs<'s>> FromJs<'s> for Vec<T> {
+    fn from_js(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, index: usize) -> Result<Self, ArgError> {
+        let array = v8::Local::<v8::Array>::try_from(value).map_err(|_| ArgError::new(index, "an array"))?;
+        let mut out = Vec::with_capacity(array.length() as usize);
+        for at in 0..array.length() {
+            let item = array.get_index(scope, at).ok_or_else(|| ArgError::new(index, "an array"))?;
+            out.push(T::from_js(scope, item, index).map_err(ArgError::in_array)?);
+        }
+        Ok(out)
+    }
+}
+
 /// `value` as an object, for [`property`] reads (used by `#[derive(FromJs)]`).
 pub fn object_arg<'s>(value: v8::Local<'s, v8::Value>, index: usize) -> Result<v8::Local<'s, v8::Object>, ArgError> {
     v8::Local::<v8::Object>::try_from(value).map_err(|_| ArgError::new(index, "an object"))

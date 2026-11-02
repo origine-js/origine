@@ -1,7 +1,9 @@
 // `IpAddr` and `SocketAddr`, in Rust's vocabulary (camelCase): one class for both families, v4 = 4 octets and
-// v6 = 16, plus the address and port. A glue module shared by `api.dns` (and, later, `api.net` and `api.tls`);
-// frozen instances, made by named constructors that validate where they are called.
+// v6 = 16, plus the address and port. Plain value types, not a capability: guests import them from
+// `origine:@std/net` (src/js/std/net.js, which takes them from the provision below), and the glue (`api.dns`)
+// makes and checks the same instances. Frozen instances, made by named constructors that validate.
 import { seal } from './util.js';
+import { provide } from './handles.js';
 
 const token = {};
 
@@ -228,3 +230,4 @@ export class SocketAddr {
 }
 
 seal(IpAddr, SocketAddr);
+provide('net/addr', { IpAddr, SocketAddr });

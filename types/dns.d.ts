@@ -1,49 +1,6 @@
+import type { IpAddr, SocketAddr } from 'origine:@std/net';
 import type { Io } from './io.d.ts';
 import type { RootPki } from './tls.d.ts';
-
-/**
- * An IP address, v4 (4 octets) or v6 (16), in Rust's vocabulary. Built by named constructors that validate; frozen.
- * (Lives in `api.dns` for now; it is meant to be shared with `api.net` and `api.tls`.)
- */
-export declare class IpAddr {
-  private constructor();
-  static v4(a: number, b: number, c: number, d: number): IpAddr;
-  /** Eight 16-bit segments. */
-  static v6(...segments: number[]): IpAddr;
-  /** 4 or 16 bytes (copied). */
-  static fromOctets(octets: Uint8Array): IpAddr;
-  /** `1.2.3.4` or `::1`: no port, no brackets, no zone. Throws `TypeError` otherwise. */
-  static parse(text: string): IpAddr;
-  readonly family: 4 | 6;
-  /** A fresh copy. */
-  octets(): Uint8Array;
-  isV4(): boolean;
-  isV6(): boolean;
-  isUnspecified(): boolean;
-  /** 127.0.0.0/8 or ::1. An IPv4-mapped address is not loopback until {@link IpAddr.toCanonical}. */
-  isLoopback(): boolean;
-  isMulticast(): boolean;
-  /** RFC 1918 or the unique-local range fc00::/7. */
-  isPrivate(): boolean;
-  isLinkLocal(): boolean;
-  isDocumentation(): boolean;
-  /** `::ffff:a.b.c.d` becomes `a.b.c.d`; anything else is itself. Permission checks must use it. */
-  toCanonical(): IpAddr;
-  equals(other: unknown): boolean;
-  toString(): string;
-}
-
-/** An address and a port. */
-export declare class SocketAddr {
-  private constructor();
-  static new(ip: IpAddr, port: number): SocketAddr;
-  /** `1.2.3.4:53` or `[::1]:853`. */
-  static parse(text: string): SocketAddr;
-  readonly ip: IpAddr;
-  readonly port: number;
-  equals(other: unknown): boolean;
-  toString(): string;
-}
 
 /**
  * How one DNS server is reached. Servers are `IpAddr` (the transport's default port: 53, 853 for TLS, or the URL's
@@ -122,8 +79,6 @@ export declare class Resolver {
 
 /** `api.dns` (needs an `io`; built with `-Ddns`, on by default). Optional cache, no DNSSEC, A and AAAA only. */
 export interface DnsCap {
-  readonly IpAddr: typeof IpAddr;
-  readonly SocketAddr: typeof SocketAddr;
   readonly DnsServer: typeof DnsServer;
   readonly Resolver: typeof Resolver;
   resolver(io: Io, options: ResolverOptions): Resolver;

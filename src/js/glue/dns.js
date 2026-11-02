@@ -1,6 +1,7 @@
 // `api.dns`: address lookups (docs/http-design.md). An ES module factory used by index.js, like net.js. A
 // `DnsServer` says how one server is reached (`udp`, `tcp`, `tls`, `https`, or `system()`); `dns.resolver` makes a
-// `Resolver` (a class defined in Rust) over an ordered list of them; `resolver.lookup(name, { family })` resolves a name to `IpAddr`s.
+// `Resolver` (a class defined in Rust) over an ordered list of them; `resolver.lookup(name, { family })` resolves a name to `IpAddr`s
+// (`origine:@std/net`; not re-exported here).
 // Every server address is checked against the embedder's network ceiling (the sockets are not `api.net` sockets).
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, hostError } from './util.js';
 import { provide } from './handles.js';
@@ -124,7 +125,7 @@ export default native => {
   };
 
   // The presets module (`origine:@std/dns/presets`) makes servers with the public constructors of this realm.
-  provide('dns/classes', { DnsServer, IpAddr });
+  provide('dns/classes', { DnsServer });
 
   for (const C of [DnsServer]) {
     freezeMethods(C);
@@ -137,8 +138,6 @@ export default native => {
   return () => {
     const Resolver = native.dns.Resolver(hostError, resolverMembers);
     return freeze({
-      IpAddr,
-      SocketAddr,
       DnsServer,
       Resolver,
       /**

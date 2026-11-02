@@ -37,7 +37,8 @@ test "net grant: the default ceiling is loopback only" {
         \\  out.mapped = await outcome(api.net.connect(io, { host: '::ffff:10.0.0.1', port: 80, mode: 'pull' }));
         \\  out.mappedLoopback = await allowed(timers, api.net.connect(io, { host: '::ffff:127.0.0.1', port: 1, mode: 'pull' }));
         \\  // DNS servers are connections too.
-        \\  const { DnsServer, IpAddr } = api.dns;
+        \\  const { DnsServer } = api.dns;
+        \\  const { IpAddr } = await import('origine:@std/net');
         \\  const options = { dnssec: 'off', timeout: 100, tries: 1 };
         \\  out.dnsLan = throws(() => api.dns.resolver(io, { servers: [DnsServer.udp([IpAddr.parse('10.0.0.1')])], ...options }));
         \\  out.dnsLoopback = throws(() => api.dns.resolver(io, { servers: [DnsServer.udp([IpAddr.parse('127.0.0.1')])], ...options }));
@@ -72,7 +73,8 @@ test "net grant: rules widen or narrow what is reachable" {
         \\  out.listenOther = throws(() => api.net.listen(io, { ...mode, host: '::1', port: 0 }));
         \\  out.listenWide = throws(() => api.net.listen(io, { ...mode, host: '0.0.0.0', port: 0 }));
         \\  // DNS servers follow the connect rules (address and port), checked when the resolver is made.
-        \\  const { DnsServer, IpAddr, SocketAddr } = api.dns;
+        \\  const { DnsServer } = api.dns;
+        \\  const { IpAddr, SocketAddr } = await import('origine:@std/net');
         \\  const options = { dnssec: 'off', timeout: 100, tries: 1 };
         \\  const server = (ip, port) => throws(() => api.dns.resolver(io, { servers: [DnsServer.udp([SocketAddr.new(IpAddr.parse(ip), port)])], ...options }));
         \\  out.dnsOk = server('192.0.2.53', 80);
@@ -98,7 +100,8 @@ test "net grant: empty rules allow nothing, even loopback" {
         \\  out.listen = throws(() => api.net.listen(io, { mode: 'pull', socketMode: 'pull', host: '127.0.0.1', port: 0 }));
         \\  out.connect = await outcome(api.net.connect(io, { host: '127.0.0.1', port: 1, mode: 'pull' }));
         \\  out.localhost = await outcome(api.net.connect(io, { host: 'localhost', port: 1, mode: 'pull' }));
-        \\  out.dns = throws(() => api.dns.resolver(io, { servers: [api.dns.DnsServer.tcp([api.dns.SocketAddr.parse('127.0.0.1:53')])], dnssec: 'off', timeout: 100, tries: 1 }));
+        \\  const { SocketAddr } = await import('origine:@std/net');
+        \\  out.dns = throws(() => api.dns.resolver(io, { servers: [api.dns.DnsServer.tcp([SocketAddr.parse('127.0.0.1:53')])], dnssec: 'off', timeout: 100, tries: 1 }));
         \\  await io.close();
         \\}
     , "# nothing is granted\n");

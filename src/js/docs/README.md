@@ -13,6 +13,7 @@ sits one directory up.
 | `origine:@std/quansync` | [std/quansync.js](../std/quansync.js) | [quansync.md](quansync.md) | write once, run sync or async |
 | `origine:@std/text` | [std/text.js](../std/text.js) | [text.md](text.md) | `encodeUtf8` / `decodeUtf8` / `tryDecodeUtf8` |
 | `origine:@std/data` | [std/data.js](../std/data.js) | [data.md](data.md) | `snapshot` (copy plain data) / `deepFreeze` (freeze a graph in place) |
+| `origine:@std/net` | [std/net.js](../std/net.js) | [addr.md](addr.md) | `IpAddr` / `SocketAddr` value types (shared with `api.dns`) |
 | `origine:@std/debug` | [std/debug.js](../std/debug.js) | [debug.md](debug.md) | `eprintln`: one line on stderr |
 | `origine:@std/graph/*` | [std/graph/](../std/graph/) | [graph.md](graph.md) | module graph: recipes, sources, import handlers, caches, `api.graph` and `api.context` |
 

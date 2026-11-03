@@ -10,6 +10,7 @@ import net from './net.js';
 import tls from './tls.js';
 import http from './http.js';
 import dns from './dns.js';
+import { link } from './addr.js';
 const factories = {
   fs,
   host,
@@ -29,6 +30,7 @@ const factories = {
 // private context embedder data: [full api, basic api, native, errno cell, initial, errors].
 export function create(native) {
   const cell = util.errnoCell(native);
+  link(native);
   const { freeze, freezeMethods } = util;
   const capabilities = Object.create(null);
   const bound = Object.create(null);

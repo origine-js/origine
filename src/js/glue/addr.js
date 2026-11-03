@@ -37,60 +37,17 @@ const v6Text = o => {
     .join(':')}`;
 };
 
-const parseV4 = text => {
-  const parts = text.split('.');
-  if (parts.length !== 4) return undefined;
-  const out = new Uint8Array(4);
-  for (let i = 0; i < 4; i++) {
-    // Decimal only, no sign, no leading zeros (they are ambiguous with octal).
-    if (!/^(0|[1-9][0-9]{0,2})$/.test(parts[i]) || Number(parts[i]) > 255) return undefined;
-    out[i] = Number(parts[i]);
-  }
-  return out;
+// The parsers are natives (src/api/addr.zig) that fill `scratch`: octets at 0..16 and, for a socket address, the port as a
+// u16 at 16..18. A parse is synchronous and never calls back into JS, so one scratch per realm is enough; the instance
+// copies out the octets it keeps. The natives are bound at install, after this module is evaluated, so `native.addr` is
+// read at call time.
+let native;
+export const link = value => {
+  native = value;
 };
-
-const parseV6 = text => {
-  if (!/^[0-9a-fA-F:.]+$/.test(text) || text.includes(':::')) return undefined;
-  let tail = [];
-  let body = text;
-  // An embedded IPv4 tail (`::ffff:1.2.3.4`) is two groups.
-  const dot = body.lastIndexOf('.');
-  if (dot >= 0) {
-    const colon = body.lastIndexOf(':');
-    const v4 = parseV4(body.slice(colon + 1));
-    if (v4 === undefined) return undefined;
-    tail = [(v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3]];
-    body = body.slice(0, colon + 1);
-    if (body.endsWith('::')) {
-      // `::1.2.3.4`: nothing before the tail.
-    } else if (body.endsWith(':')) {
-      body = body.slice(0, -1);
-    }
-  }
-  const halves = body.split('::');
-  if (halves.length > 2) return undefined;
-  const groups = part => (part === '' ? [] : part.split(':'));
-  const group = g => (/^[0-9a-fA-F]{1,4}$/.test(g) ? parseInt(g, 16) : NaN);
-  const head = groups(halves[0]).map(group);
-  const rest = halves.length === 2 ? groups(halves[1]).map(group) : [];
-  const all = halves.length === 2 ? null : head;
-  if (head.some(Number.isNaN) || rest.some(Number.isNaN)) return undefined;
-  let segments;
-  if (all !== null) {
-    segments = [...all, ...tail];
-    if (segments.length !== 8) return undefined;
-  } else {
-    const fill = 8 - head.length - rest.length - tail.length;
-    if (fill < 1) return undefined;
-    segments = [...head, ...Array.from({ length: fill }, () => 0), ...rest, ...tail];
-  }
-  const out = new Uint8Array(16);
-  segments.forEach((s, i) => {
-    out[2 * i] = s >> 8;
-    out[2 * i + 1] = s & 255;
-  });
-  return out;
-};
+const scratch = new Uint8Array(18);
+const scratchPort = new Uint16Array(scratch.buffer, 16, 1);
+const familyOctets = family => scratch.slice(0, family === 4 ? 4 : 16);
 
 export class IpAddr {
   #octets;
@@ -124,9 +81,9 @@ export class IpAddr {
   /** `1.2.3.4` or `::1`: no port, no brackets, no zone. Throws `TypeError` otherwise. */
   static parse(text) {
     if (typeof text !== 'string') throw new TypeError('text must be a string');
-    const octets = text.includes(':') ? parseV6(text) : parseV4(text);
-    if (octets === undefined) throw new TypeError(`invalid IP address: ${JSON.stringify(text)}`);
-    return new IpAddr(token, octets);
+    const family = native.addr.parseIp(text, scratch);
+    if (!family) throw new TypeError(`invalid IP address: ${JSON.stringify(text)}`);
+    return new IpAddr(token, familyOctets(family));
   }
   get family() {
     return this.#octets.length === 4 ? 4 : 6;
@@ -207,13 +164,11 @@ export class SocketAddr {
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new TypeError('port must be an integer in 0..65535');
     return new SocketAddr(token, ip, port);
   }
-  /** `1.2.3.4:53` or `[::1]:853`. */
+  /** `1.2.3.4:53` or `[::1]:853`, as Rust's `SocketAddr::from_str`: v6 needs brackets, v4 must not have them. */
   static parse(text) {
-    const m = typeof text === 'string' ? /^(?:\[([^\]]+)\]|([^:[\]]+)):([0-9]{1,5})$/.exec(text) : null;
-    if (m === null || Number(m[3]) > 65535) throw new TypeError(`invalid socket address: ${JSON.stringify(text)}`);
-    const ip = IpAddr.parse(m[1] ?? m[2]);
-    if (m[1] !== undefined && !ip.isV6()) throw new TypeError(`invalid socket address: ${JSON.stringify(text)}`);
-    return new SocketAddr(token, ip, Number(m[3]));
+    const family = native.addr.parseSocket(text, scratch);
+    if (!family) throw new TypeError(`invalid socket address: ${JSON.stringify(text)}`);
+    return new SocketAddr(token, new IpAddr(token, familyOctets(family)), scratchPort[0]);
   }
   get ip() {
     return this.#ip;

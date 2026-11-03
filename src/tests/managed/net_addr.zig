@@ -25,8 +25,8 @@ test "net: IpAddr and SocketAddr parse, print and classify like Rust's" {
         \\  out.canonical = !mapped.isLoopback() && mapped.toCanonical().isLoopback() && mapped.toCanonical().toString() === '127.0.0.1' && IpAddr.parse('::1').toCanonical().toString() === '::1' && IpAddr.parse('::1.2.3.4').toCanonical().isV6();
         \\  out.equals = IpAddr.parse('1.2.3.4').equals(IpAddr.v4(1, 2, 3, 4)) && !IpAddr.parse('::1').equals(IpAddr.parse('1.2.3.4')) && !IpAddr.parse('1.2.3.4').equals('1.2.3.4');
         \\  const s = SocketAddr.parse('[::1]:853');
-        \\  out.socket = s.toString() === '[::1]:853' && s.port === 853 && s.ip.isV6() && SocketAddr.parse('1.2.3.4:53').toString() === '1.2.3.4:53' && SocketAddr.new(IpAddr.v4(1, 2, 3, 4), 0).port === 0 && s.equals(SocketAddr.new(IpAddr.parse('::1'), 853));
-        \\  out.socketBad = ['1.2.3.4', '[1.2.3.4]:53', '::1:53', '1.2.3.4:65536', '1.2.3.4:', ':53', '[::1]'].map(x => throws(() => SocketAddr.parse(x))).every(n => n === 'TypeError') && throws(() => SocketAddr.new(IpAddr.v4(1, 1, 1, 1), 70000)) === 'TypeError' && throws(() => SocketAddr.new('1.1.1.1', 1)) === 'TypeError';
+        \\  out.socket = s.toString() === '[::1]:853' && s.port === 853 && s.ip.isV6() && SocketAddr.parse('1.2.3.4:53').toString() === '1.2.3.4:53' && SocketAddr.parse('1.2.3.4:00053').port === 53 && SocketAddr.parse('[::ffff:1.2.3.4]:65535').port === 65535 && SocketAddr.new(IpAddr.v4(1, 2, 3, 4), 0).port === 0 && s.equals(SocketAddr.new(IpAddr.parse('::1'), 853));
+        \\  out.socketBad = ['1.2.3.4', '[1.2.3.4]:53', '::1:53', '1.2.3.4:65536', '1.2.3.4:', ':53', '[::1]', '1.2.3.4:5a', '[::1]]:53', 5, undefined].map(x => throws(() => SocketAddr.parse(x))).every(n => n === 'TypeError') && throws(() => SocketAddr.new(IpAddr.v4(1, 1, 1, 1), 70000)) === 'TypeError' && throws(() => SocketAddr.new('1.1.1.1', 1)) === 'TypeError';
         \\  out.shared = IpAddr === (await import('origine:@std/net')).IpAddr && throws(() => new SocketAddr()) === 'TypeError';
         \\  out.frozen = Object.isFrozen(IpAddr.parse('1.2.3.4')) && Object.isFrozen(IpAddr) && Object.isFrozen(IpAddr.prototype);
         \\}

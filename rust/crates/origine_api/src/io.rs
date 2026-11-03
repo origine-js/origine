@@ -1,6 +1,6 @@
 //! `native.io.*`: the I/O runtimes.
 
-use origine_api_core::{Backend, NativeError};
+use origine_api_core::{BackendChoice, NativeError};
 use std::time::Duration;
 
 use crate::HostState;
@@ -12,7 +12,7 @@ use crate::native::{ScopeKey, host_mut};
 #[derive(crate::FromJs)]
 pub struct IoCreateOpts {
     /// `'auto'` (default), `'uring'`, `'kqueue'` or `'threaded'`.
-    backend: Option<Backend>,
+    backend: Option<BackendChoice>,
     /// Queue depth / worker count hint.
     entries: Option<u32>,
 }
@@ -31,9 +31,9 @@ pub struct IoHandle {
 #[native(side_effect = "any", path = "io.create", needs = "runtime")]
 fn io_create(host: &mut HostState, key: ScopeKey, opts: Option<IoCreateOpts>) -> Result<IoHandle, NativeError> {
     let (backend, entries) = opts.map_or((None, None), |opts| (opts.backend, opts.entries));
-    let backend = backend.unwrap_or(Backend::Auto);
-    let id = host.create_runtime(key, backend, entries)?;
-    Ok(IoHandle { kind: "io", id, backend: backend.name() })
+    let backend = backend.unwrap_or_default();
+    let (id, running) = host.create_runtime(key, backend, entries)?;
+    Ok(IoHandle { kind: "io", id, backend: running.name() })
 }
 
 /// `native.io.close(id)`: Promise<void>. Cancels the runtime's operations (their promises reject

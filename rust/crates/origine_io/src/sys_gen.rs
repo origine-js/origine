@@ -158,6 +158,9 @@ unsafe extern "C" {
     pub fn oio_loop_caps(loop_: *mut oio_loop) -> u64;
 }
 unsafe extern "C" {
+    pub fn oio_loop_backend(loop_: *mut oio_loop) -> u32;
+}
+unsafe extern "C" {
     pub fn oio_nop(loop_: *mut oio_loop, op: *mut oio_op, cb: oio_cb) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
@@ -408,6 +411,7 @@ macro_rules! for_each_oio_fn {
         oio_loop_next_timer_ns,
         oio_loop_active,
         oio_loop_caps,
+        oio_loop_backend,
         oio_nop,
         oio_open,
         oio_close,

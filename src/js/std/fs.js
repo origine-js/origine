@@ -350,7 +350,6 @@ const fileMetadata = quansync(function* (ctx, file) {
 
 // Validates a builder snapshot like Rust does, then opens. Errors throw/reject.
 const openOptions = quansync(function* (ctx, path, spec) {
-  if (spec.append) fail(IoError.Unsupported);
   if (!spec.read && !spec.write) fail(IoError.InvalidInput);
   if (!spec.write && (spec.truncate || spec.create || spec.create_new)) fail(IoError.InvalidInput);
   const create = spec.create || spec.create_new;
@@ -361,10 +360,10 @@ const openOptions = quansync(function* (ctx, path, spec) {
   );
 });
 
-/// `std::fs::OpenOptions` builder. `append` is not supported yet.
+/// `std::fs::OpenOptions` builder. There is no `append`: append mode is not shipped.
 class OpenOptionsBuilder {
   #ctx;
-  #spec = { read: false, write: false, append: false, truncate: false, create: false, create_new: false };
+  #spec = { read: false, write: false, truncate: false, create: false, create_new: false };
   constructor(ctx) {
     this.#ctx = ctx;
   }
@@ -374,10 +373,6 @@ class OpenOptionsBuilder {
   }
   write(on) {
     this.#spec.write = on;
-    return this;
-  }
-  append(on) {
-    this.#spec.append = on;
     return this;
   }
   truncate(on) {

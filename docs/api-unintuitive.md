@@ -3,11 +3,31 @@
 Found while writing the examples in [examples/](../examples/README.md). Each item says where it shows up and whether it
 was reproduced by running an example or a probe (the probes are not kept). The order is: behaviour that looks like a
 bug, error messages that send you the wrong way, names, and reference documentation that is out of date. Nothing here
-is fixed by the change that adds these examples; each item is a candidate for a follow-up.
+was fixed by the change that adds these examples; see Status for what the follow-up did.
 
-Verification caveat: every example was run with `zig-out/bin/origine` as it was built on the main checkout (22:28),
-which predates the branch's head (`80f19e3`, 23:07). No build was run. Formatting (`oxfmt`, `oxlint`) and the
-TypeScript check of `examples/` (`types/tests/tsconfig.examples.json`) were not run: the tools need the network.
+## Status
+
+Fixed by the follow-up (JS, types and docs only):
+
+| Item | What changed |
+| --- | --- |
+| 1 | `reference.load()` now rejects `Unsupported` with a message naming `ImportHook.exports`, instead of `NotFound ... is not provided`. A context's own import of an `exports` verdict already worked through the host's chain; making `reference.load()` answer one needs a synthetic reference and is not done. |
+| 2 | `IoHandle.backend` is now the backend that runs, and the two meanings are two types: `Backend` (running, no `auto`) and `BackendChoice` (`auto` or a `Backend`) in `types/io.d.ts`, `origine_api_core` and `origine_io`. The loop records what `auto` resolved to (`Loop.kind`), a new `oio_loop_backend` exports it (header, Zig, Rust `sys_gen.rs` and mock), and `io.create` answers it. Not compiled: only `zig ast-check` ran, because `lib/v8_zig/rusty_v8` is absent from this worktree and a full build compiles V8. |
+| 5 | Not a bug: `fileWriteMoveAll` is a `writeAll`, typed `void` like `fileWriteAll`. Only `write` and `writeMove` return a count. |
+| 18 | Not a bug: `docs/net-grant.md` defines the subject as `host:port`. `net.md` now says so. |
+| 14 | Not a bug: `BadHandle` is a `HostError` code, as `docs/io.md` says. |
+| 15, 16, 20 | Documented where they bite: `readInto`, `Preload.module` and `env.args()` in `types/`. |
+| 19 | `OpenOptions.append` is deleted (JS, types, `fs.md`, the example), per the guidelines. |
+| 23 | `docs/api-design.md` no longer lists `env.narrow`, `Socket.write` or `send`. |
+
+Open: 3 (`ImportError.other` is `Unexpected` by design; only the message format is odd), 4 (needs a server ticket
+option), 6, 7, 8, 9, 10 (the thread isolate keeps only the Zig error name, `thread_isolate.zig`, and drops the
+rejection held in `ErrorInfo`), 11, 12, 13, 17, 21, 22. They change native behaviour or the error model, and need a
+real build to check.
+
+Nothing was built or run for this follow-up; the checks were reading the code. The original verification caveat stands:
+the examples ran against a `zig-out/bin/origine` older than the branch head, and `oxfmt`, `oxlint` and the TypeScript
+check of `examples/` were not run.
 
 ## Behaviour that looks like a bug
 

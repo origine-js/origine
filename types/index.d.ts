@@ -68,7 +68,7 @@ export type {
   SyncFs,
   SyncFsOps,
 } from './fs.d.ts';
-export type { Backend, Io, IoCap, IoNarrow, IoOptions, Timer } from './io.d.ts';
+export type { Backend, BackendChoice, Io, IoCap, IoNarrow, IoOptions, Timer } from './io.d.ts';
 export type {
   AddressOptions,
   BytesLike,

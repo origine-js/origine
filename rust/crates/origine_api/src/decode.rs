@@ -3,7 +3,7 @@
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use origine_api_core::Backend;
+use origine_api_core::BackendChoice;
 use origine_api_core::arg::{self, ArgError};
 
 pub use origine_api_core::arg::MAX_SAFE_INTEGER;
@@ -74,11 +74,11 @@ impl<'s> FromJs<'s> for String {
     }
 }
 
-impl<'s> FromJs<'s> for Backend {
+impl<'s> FromJs<'s> for BackendChoice {
     fn from_js(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, index: usize) -> Result<Self, ArgError> {
         const EXPECTED: &str = "one of \"auto\", \"uring\", \"kqueue\", \"threaded\"";
         let name = String::from_js(scope, value, index).map_err(|_| ArgError::new(index, EXPECTED))?;
-        Backend::parse(&name).ok_or_else(|| ArgError::new(index, EXPECTED))
+        BackendChoice::parse(&name).ok_or_else(|| ArgError::new(index, EXPECTED))
     }
 }
 

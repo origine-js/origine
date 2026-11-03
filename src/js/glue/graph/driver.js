@@ -5,7 +5,7 @@ import { freeze, own, errors } from '../util.js';
 export default g => {
   const { native, host, named } = g;
   const { applyTransformer, byId, grantOf, loadCache, metaOf, pinned, readText, recipeCacheId, referenceState, register, sourceText } = g;
-  const { InvalidInput, NotFound, NotADirectory, InvalidData } = errors;
+  const { InvalidInput, NotFound, NotADirectory, InvalidData, Unsupported } = errors;
 
   /// The host's chain of a handler runs its host elements itself and calls `step` only for a function
   /// of this realm: one layer, hook, maker, transformer or `meta` at a time, each answering data. The
@@ -159,6 +159,8 @@ export default g => {
       else if (reply.kind === PipelineKind.Provide) supplied = reply.source;
       else if (reply.kind === PipelineKind.Final) return finished(byId.get(reply.handler), reply.source, id, reply.codeCache);
       else if (reply.kind === PipelineKind.Link) return reply;
+      // `reference.load()` builds module references from source text; a module of ready values has none.
+      else if (reply.kind === PipelineKind.Exports) throw named(Unsupported, `${id}: ImportHook.exports is answered only when a context imports; reference.load() needs a source`);
     }
     if (supplied === undefined) throw named(NotFound, `${id} is not provided`);
     const maker = record.handler.maker;

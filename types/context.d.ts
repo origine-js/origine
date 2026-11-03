@@ -1,6 +1,6 @@
 import type { ModuleGraph, ModuleReference } from "./graph.d.ts";
 
-/** A script (`source`, a function expression called with `values`) or an ES module (`module`, whose default export is called with `values` when it is a function) run in the context before it imports anything. */
+/** A script (`source`, a function expression called with `values`) or an ES module (`module`: the module's source text, not a specifier or path; a name such as `./preload.js` runs as code and fails with `ReferenceError`. Its default export is called with `values` when it is a function) run in the context before it imports anything. */
 export type Preload =
   | { readonly source: string; readonly module?: never; readonly values?: unknown }
   | { readonly module: string; readonly source?: never; readonly values?: unknown };

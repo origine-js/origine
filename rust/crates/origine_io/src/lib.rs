@@ -62,20 +62,26 @@ pub mod flags {
     };
 }
 
-/// Backend selection.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A backend that runs a loop (`oio_loop_backend`). Never `auto`; see [`BackendChoice`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    #[default]
-    Auto,
     Uring,
     KqueueGcd,
     Iocp,
     Threaded,
 }
 
+/// Backend selection: `Auto` lets the C library pick one, which [`Loop::backend`] then reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackendChoice {
+    #[default]
+    Auto,
+    Named(Backend),
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
-    pub backend: Backend,
+    pub backend: BackendChoice,
     /// Queue depth / worker count hint, 0 = default.
     pub entries: u32,
 }
@@ -205,11 +211,11 @@ impl Loop {
     pub fn new(options: Options) -> io::Result<Loop> {
         let o = sys::oio_options {
             backend: match options.backend {
-                Backend::Auto => sys::OIO_BACKEND_AUTO,
-                Backend::Uring => sys::OIO_BACKEND_URING,
-                Backend::KqueueGcd => sys::OIO_BACKEND_KQUEUE_GCD,
-                Backend::Iocp => sys::OIO_BACKEND_IOCP,
-                Backend::Threaded => sys::OIO_BACKEND_THREADED,
+                BackendChoice::Auto => sys::OIO_BACKEND_AUTO,
+                BackendChoice::Named(Backend::Uring) => sys::OIO_BACKEND_URING,
+                BackendChoice::Named(Backend::KqueueGcd) => sys::OIO_BACKEND_KQUEUE_GCD,
+                BackendChoice::Named(Backend::Iocp) => sys::OIO_BACKEND_IOCP,
+                BackendChoice::Named(Backend::Threaded) => sys::OIO_BACKEND_THREADED,
             },
             entries: options.entries,
         };
@@ -272,6 +278,17 @@ impl Loop {
     pub fn active(&self) -> u32 {
         // SAFETY: the loop is alive while `self.inner` is.
         unsafe { sys::oio_loop_active(self.raw()) }
+    }
+
+    /// The backend that is running: what `BackendChoice::Auto` resolved to.
+    pub fn backend(&self) -> Backend {
+        // SAFETY: the loop is alive while `self.inner` is.
+        match unsafe { sys::oio_loop_backend(self.raw()) } {
+            sys::OIO_BACKEND_URING => Backend::Uring,
+            sys::OIO_BACKEND_KQUEUE_GCD => Backend::KqueueGcd,
+            sys::OIO_BACKEND_IOCP => Backend::Iocp,
+            other => unreachable!("oio_loop_backend answered {other}, which is no running backend"),
+        }
     }
 
     pub fn caps(&self) -> u64 {

@@ -71,9 +71,9 @@ or `api.fs` async ops (`fileReadInto`, `fileReadAlloc`).
   the buffer, see above), `flush()`, `set_len(n)`, `sync_all()`, `sync_data()`, `metadata()`, `close()`.
   Rust closes on drop; **call `close()`** here.
 - **`OpenOptions`** (`fs.OpenOptions.new()`, or `File.options()`): chainable `read`, `write`,
-  `append`, `truncate`, `create`, `create_new`, then `open(path)`. Validated as in Rust:
-  neither read nor write → `InvalidInput`; truncate/create without write → `InvalidInput`;
-  `append(true)` → `Unsupported`.
+  `truncate`, `create`, `create_new`, then `open(path)`. Validated as in Rust:
+  neither read nor write → `InvalidInput`; truncate/create without write → `InvalidInput`. There is no
+  `append` (append mode is not shipped).
 
 ## Symlinks and confinement
 

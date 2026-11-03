@@ -31,7 +31,7 @@ All functions that return `int` return `0` or a value `>= 0` on success and `-er
 | `oio_loop_destroy` | the loop thread, with no other call in progress or to follow |
 | `oio_loop_wake`, `oio_loop_post` | **any thread**, while the loop is alive |
 | `oio_loop_active`, `oio_loop_next_timer_ns` | loop thread only |
-| `oio_loop_pollable`, `oio_loop_caps` | constants after creation; in practice readable from any thread |
+| `oio_loop_pollable`, `oio_loop_caps`, `oio_loop_backend` | constants after creation; in practice readable from any thread |
 
 `oio_loop_post(loop, void (*fn)(void *), void *ud)` queues `fn(ud)` to run on the loop thread during a later `oio_loop_run` (FIFO), and wakes a blocked run. Posts still pending at destroy are run by destroy. `oio_loop_wake` makes a blocked `ONCE` run return even if nothing completed (`wake` calls may coalesce).
 

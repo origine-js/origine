@@ -159,7 +159,7 @@ export interface PullSocket extends SocketBase {
   /**
    * Reads once straight into `buffer` (not empty) with **no copy**: the buffer is detached while the
    * read runs and the promise resolves `{ bytes, buffer }` with `buffer` a new `ArrayBuffer` over
-   * the same memory (`bytes` 0 at end of stream). Rejects `Unsupported` for a buffer that cannot be
+   * the same memory (`bytes` 0 at end of stream). `buffer` covers the whole memory you passed: slice it with `buffer.subarray(0, bytes)` (`new Uint8Array(view, 0, n)` copies all of a view). Rejects `Unsupported` for a buffer that cannot be
    * detached (shared, resizable). Best for large reads.
    */
   readInto(buffer: BytesLike): Promise<{ readonly bytes: number; readonly buffer: ArrayBuffer }>;

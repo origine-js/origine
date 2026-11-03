@@ -9,7 +9,6 @@
 //   exists: true | try_exists(missing): false | exists(../x): false (any error answers false)
 //   read_dir: a.txt, binary.bin, nested
 //   OpenOptions create_new on an existing file: AlreadyExists
-//   OpenOptions append: Unsupported (append mode is not shipped)
 //   copy: 9 bytes | rename and remove_file: ok
 //   read_to_string of binary: InvalidData
 import { fs } from 'origine:@std/fs';
@@ -44,11 +43,6 @@ export async function main(api) {
     rs.OpenOptions.new().write(true).create_new(true).open('a.txt');
   } catch (e) {
     eprintln(`OpenOptions create_new on an existing file: ${e.name}`);
-  }
-  try {
-    rs.OpenOptions.new().append(true).open('a.txt');
-  } catch (e) {
-    eprintln(`OpenOptions append: ${e.name} (append mode is not shipped)`);
   }
 
   const copied = rs.copy('a.txt', 'c.txt');

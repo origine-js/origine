@@ -12,7 +12,7 @@ import { eprintln } from 'origine:@std/debug';
 export async function main(api) {
   await using io = api.io.create({});
   const sleeper = api.isolate.create({ init: 'examples/isolate/terminate/sleeper.js' });
-  await io.sleep(100);                   // give the child time to start sleeping
+  await io.timer.sleep(100); // give the child time to start sleeping
   sleeper.terminate();
   const exit = await sleeper.join();
   eprintln(`sleeping child: ${exit.status}, error ${exit.error}`);

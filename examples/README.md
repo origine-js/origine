@@ -29,7 +29,7 @@ Examples that write files do it under a `work/` directory they create and that g
 | | [runtimes](io/runtimes/init.js) | `create` options, `narrow`, `maxRuntimes`, `now`, `run`, `close`, `await using` |
 | [net](net) | [promises](net/promises/init.js) | `'pull'` sockets: `read`, `readCopy`, `readInto`, `queued.send` |
 | | [events](net/events/init.js) | `'event'` sockets: `register`, `queued.put`, `drain`, `pause`, leases |
-| | [lifecycle](net/lifecycle/init.js) | `end('write')`, the auto-close rule, `toEvent()` |
+| | [lifecycle](net/lifecycle/init.js) | `end('write')`, the auto-close rule, `toEvented()` |
 | | [write-lanes](net/write-lanes/init.js) | `direct.write`, `queued.limit`, `drained()`, `end('read')`, server `toEvent`/`toPull` |
 | | [addresses](net/addresses/init.js) | loopback by default, `localhost`, `PermissionDenied` outside the ceiling |
 | [tls](tls) | [loopback](tls/loopback/init.js) | `tls.server`, `tls.client`, `RootPki`, `Identity`, `tls.info`, the errors |

@@ -8,6 +8,7 @@
 //   client with an identity: connected
 import { fs } from 'origine:@std/fs';
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
@@ -19,12 +20,12 @@ export async function main(api) {
 
   const io = api.io.create({});
   try {
-    const listener = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    const listener = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
     const attempt = async client => {
-      const [plainClient, plainServer] = await Promise.all([api.net.connect(io, { port: listener.port, mode: 'pull' }), listener.accept()]);
+      const [plainClient, plainServer] = await Promise.all([io.tcp.connect(listener.localAddr), listener.accept()]);
       const [clientSide, serverSide] = await Promise.allSettled([
-        client.connect(plainClient, { servername: 'localhost', mode: 'pull' }),
-        server.accept(plainServer, { mode: 'pull' }),
+        client.connect(plainClient, { servername: 'localhost' }),
+        server.accept(plainServer),
       ]);
       if (clientSide.status === 'fulfilled') await clientSide.value.close();
       if (serverSide.status === 'fulfilled') await serverSide.value.close();
@@ -37,7 +38,9 @@ export async function main(api) {
     eprintln(`client with no identity: client ${anonymous.clientSide.status === 'fulfilled' ? 'connected' : 'failed'}, server ${refused}`);
 
     const withIdentity = await attempt(tls.client({ roots: ca, identity: identity() }));
-    eprintln(`client with an identity: ${withIdentity.clientSide.status === 'fulfilled' ? 'connected' : withIdentity.clientSide.reason.name}`);
+    eprintln(
+      `client with an identity: ${withIdentity.clientSide.status === 'fulfilled' ? 'connected' : withIdentity.clientSide.reason.name}`,
+    );
     await listener.close();
   } finally {
     await io.close();

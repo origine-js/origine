@@ -736,7 +736,7 @@ pub const Host = struct {
         const host = state.host;
         const env = call.env();
         const part = switch (module) {
-            .common, .util, .errors, .handle, .handles, .errno, .addr, .@"http/client", .@"net/event", .@"net/send", .@"net/core", .@"net/server", .@"net/socket", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
+            .common, .util, .errors, .handle, .handles, .errno, .addr, .@"http/client", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
             .host => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),

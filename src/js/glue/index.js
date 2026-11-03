@@ -49,11 +49,11 @@ export function create(native) {
   const full = {};
   const basic = {};
   // `context` is built on the parts `graph` publishes, so binding it binds `graph` first.
-  const needs = { context: 'graph', isolate: 'host', http: 'net' };
+  const needs = { context: 'graph', isolate: 'host', io: 'net', tls: 'io', http: 'io', dns: 'io' };
   const rustNamespaces = ['fsAsync', 'io', 'net', 'tls', 'http', 'dns', 'channel'];
   // Capabilities whose classes are defined in Rust: their natives return the classes, which exist only once
   // the capability is bound (at run time, per realm; never in a snapshot), so the capability is built then.
-  const late = { tls: true, dns: true };
+  const late = { io: true, net: true, tls: true, http: true, dns: true };
   const builders = Object.create(null);
   const wrapped = new WeakSet();
   const access = name => {

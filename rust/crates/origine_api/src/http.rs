@@ -16,39 +16,13 @@ use std::rc::Rc;
 use origine_api_core::{NativeError, errno};
 use origine_h2::{Body, ConnError, Connection, Exchange, FieldList, H2Error, HeaderKind, Limits, RequestHead, Role, StreamEvent, connect};
 use origine_io::rt::AbortHandle;
-use origine_transport::Transport;
 
 use crate::HostState;
 use crate::decode::ArrayBufferArg;
 use crate::native;
 use crate::native::{Op, ScopeKey};
 use crate::net::Socket;
-use crate::sockstream::{SocketTransport, take_socket};
-
-/// What a session runs over.
-enum AnyTransport {
-    Plain(SocketTransport),
-    #[cfg(feature = "tls")]
-    Tls(origine_tls::TlsStream<SocketTransport>),
-}
-
-impl Transport for AnyTransport {
-    async fn read(&self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
-        match self {
-            AnyTransport::Plain(t) => t.read(buf).await,
-            #[cfg(feature = "tls")]
-            AnyTransport::Tls(t) => Transport::read(t, buf).await,
-        }
-    }
-
-    async fn write_all(&self, buf: Vec<u8>) -> (io::Result<()>, Vec<u8>) {
-        match self {
-            AnyTransport::Plain(t) => t.write_all(buf).await,
-            #[cfg(feature = "tls")]
-            AnyTransport::Tls(t) => Transport::write_all(t, buf).await,
-        }
-    }
-}
+use crate::sockstream::{SocketTransport, StreamArg};
 
 struct Conn {
     owner: ScopeKey,
@@ -135,16 +109,15 @@ fn fields_of(packed: &ArrayBufferArg<'_>) -> Result<FieldList, NativeError> {
 
 // ---- sessions ----
 
-/// `native.http.session(io, id, role, streams, headers, window, connection, batch)`: starts an HTTP/2
-/// session over the stream socket `id` (plain or TLS), which it consumes; `role` is 0 for a
-/// client and 1 for a server; the rest are the `Limits`. Returns the session id.
+/// `native.http.session(stream, role, streams, headers, window, connection, batch)`: starts an HTTP/2 session over
+/// `stream` (a native stream, plain or TLS, nothing is using), which it consumes; `role` is 0 for a client and 1 for
+/// a server; the rest are the `Limits`. Returns the session id.
 #[native(side_effect = "any", path = "http.session", needs = "runtime")]
 #[allow(clippy::too_many_arguments)]
 fn http_session(
     host: &mut HostState,
     key: ScopeKey,
-    io: u32,
-    id: u32,
+    stream: StreamArg<'_>,
     role: u32,
     streams: u32,
     headers: u32,
@@ -157,32 +130,28 @@ fn http_session(
         1 => Role::Server,
         _ => return Err(NativeError::Errno(errno::INVALID_INPUT)),
     };
-    let (socket, lp) = take_socket(host, key, io, id)?;
-    // A TLS socket carries its stream and the plain socket under it; the session shuts the plain one down at its end.
-    #[cfg(feature = "tls")]
-    let tls = socket.tls().map(|(stream, inner)| (stream.clone(), Rc::clone(inner)));
-    #[cfg(not(feature = "tls"))]
-    let tls: Option<((), Rc<Socket>)> = None;
-    let (transport, socket) = match tls {
-        #[cfg(feature = "tls")]
-        Some((stream, inner)) => (AnyTransport::Tls(stream), inner),
-        #[allow(unreachable_patterns)]
-        _ => (AnyTransport::Plain(SocketTransport { socket: Rc::clone(&socket), lp }), socket),
-    };
+    let lp = stream.conn()?.io.lp(host)?;
+    let (io, socket) = stream.take()?;
+    if io.owner != key {
+        socket.shutdown();
+        return Err(NativeError::Errno(errno::BAD_HANDLE));
+    }
+    let transport = SocketTransport { socket: Rc::clone(&socket), lp };
     let (handle, driver) = connect(role, Limits { streams, headers, window, connection, batch }, transport).map_err(h2_error)?;
     let session = host.http.next.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
     host.http.next = session;
     let closing = Rc::clone(&socket);
     let abort = host.spawn_detached(
-        io,
+        io.runtime,
         Box::pin(async move {
             let _ = driver.run().await;
             closing.shutdown();
         }),
     )?;
-    host.http
-        .conns
-        .insert(session, Rc::new(Conn { owner: key, runtime: io, connection: handle, exchanges: RefCell::default(), abort, socket }));
+    host.http.conns.insert(
+        session,
+        Rc::new(Conn { owner: key, runtime: io.runtime, connection: handle, exchanges: RefCell::default(), abort, socket }),
+    );
     Ok(session)
 }
 

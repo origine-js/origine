@@ -5,10 +5,11 @@
 // A session, a server and their exchanges have one of two read modes, fixed when they are made and visible in their
 // class: `Pull*` (`next()`, `accept()`) or `Event*` (`register(event, handler)`); the write side is shared. Event mode
 // is a dispatcher over the same natives, one event at a time, so handlers see events in order.
-import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
+import { freeze, freezeMethods, own, failure, errors, shared } from './util.js';
+import { IpAddr, SocketAddr } from './addr.js';
 import client from './http/client.js';
-import { constants } from './errors.js';
-const { BadHandle, NoApplicationProtocol } = errors;
+import { constants, fromDetail } from './errors.js';
+const { BadHandle, NoApplicationProtocol, PermissionDenied } = errors;
 const HEAD = 6;
 const DONE = Promise.resolve();
 
@@ -44,9 +45,20 @@ const decode = (bytes, from, to) => {
 
 export default native => {
   const token = {};
-  const ioId = io => {
-    if (io === null || typeof io !== 'object' || !ioHandles.has(io) || closedIo.has(io)) throw failure(BadHandle);
-    return io.id;
+  // `host` (an IP literal, or `localhost` for 127.0.0.1: never resolved) and `port` as a `SocketAddr`. A name is
+  // refused like the network ceiling refuses it: resolve it with `api.dns` and pass the address.
+  const addrOf = (host, port) => {
+    let ip;
+    try {
+      ip = IpAddr.parse(host.toLowerCase() === 'localhost' ? '127.0.0.1' : host);
+    } catch {
+      throw fromDetail(PermissionDenied, { subject: host });
+    }
+    return SocketAddr.new(ip, port);
+  };
+  const liveIo = io => {
+    if (!(io instanceof shared.Io) || io.closed) throw failure(BadHandle);
+    return io;
   };
   const NAME = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
   let received;
@@ -363,14 +375,14 @@ export default native => {
     }
     static idOf(session) {
       if (!(session instanceof Session)) throw new TypeError('not a session');
-      if (session.#closed || closedIo.has(session.#io)) throw failure(BadHandle);
+      if (session.#closed || session.#io?.closed) throw failure(BadHandle);
       return session.#id;
     }
     get io() {
       return this.#io;
     }
     get closed() {
-      return this.#closed || closedIo.has(this.#io);
+      return this.#closed || (this.#io?.closed ?? false);
     }
     /** Resolves once the peer's SETTINGS arrived; open streams after this. */
     ready() {
@@ -517,18 +529,18 @@ export default native => {
     return mode;
   };
 
-  const makeSession = (socket, role, limits, mode) => {
-    const taken = shared.netTake(socket);
-    const id = native.http.session(ioId(taken.io), taken.id, role === 'client' ? 0 : 1, ...limits);
-    taken.consume();
+  // `stream`: a native stream (plain or TLS) nothing is using, consumed by the native. `io` is what `session.io`
+  // reports (undefined for `http.session`, whose stream does not say).
+  const makeSession = (stream, role, limits, mode, io) => {
+    const id = native.http.session(stream, role === 'client' ? 0 : 1, ...limits);
     const event = mode === 'event';
-    if (role === 'client') return new ClientSession(token, id, taken.io, event);
-    return new (event ? EventServerSession : PullServerSession)(token, id, taken.io);
+    if (role === 'client') return new ClientSession(token, id, io, event);
+    return new (event ? EventServerSession : PullServerSession)(token, id, io);
   };
   // Runs a TLS handshake that must end in 'h2'; a connection that negotiated anything else is closed.
   const secured = async handshake => {
     const socket = await handshake();
-    if (shared.tlsInfo(socket)?.alpn !== 'h2') {
+    if (shared.tlsInfo?.(socket)?.alpn !== 'h2') {
       await socket.close();
       throw failure(NoApplicationProtocol);
     }
@@ -538,15 +550,17 @@ export default native => {
   /** The listener and accept loop of `http.serve`: every client's requests, from any connection, in arrival order. */
   class HttpServer {
     #listener;
+    #port;
     #sessions = new Set();
     #queue = [];
     #waiting = [];
     #closed = false;
     #dropped = 0;
     #hub = makeHub(['request', 'close', 'error'], () => {});
-    constructor(made, listener, tls, limits, mode) {
+    constructor(made, listener, tls, limits, mode, io) {
       if (made !== token || new.target === HttpServer) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#listener = listener;
+      this.#port = listener.localAddr.port;
       const event = mode === 'event';
       const wake = () => {
         for (const resolve of this.#waiting.splice(0)) resolve();
@@ -554,8 +568,8 @@ export default native => {
       const connection = async plain => {
         let session;
         try {
-          const socket = tls === undefined ? plain : await secured(() => tls.accept(plain, { mode: 'pull' }));
-          session = makeSession(socket, 'server', limits, mode);
+          const socket = tls === undefined ? plain : await secured(() => tls.accept(plain));
+          session = makeSession(socket, 'server', limits, mode, io);
           this.#sessions.add(session);
         } catch {
           // A client that fails its handshake, or does not speak h2, is dropped; `dropped` counts them.
@@ -607,7 +621,7 @@ export default native => {
     }
     /** The port listened on (the real one when `port: 0` was asked). */
     get port() {
-      return this.#listener.port;
+      return this.#port;
     }
     get closed() {
       return this.#closed;
@@ -660,9 +674,9 @@ export default native => {
     const tls = own(options, 'tls');
     const servername = own(options, 'servername') ?? host;
     if (typeof servername !== 'string') throw new TypeError('servername must be a string');
-    let socket = await shared.net.connect(io, { host, port, mode: 'pull' });
-    if (tls !== undefined) socket = await secured(() => tls.connect(socket, { servername, mode: 'pull' }));
-    const session = makeSession(socket, 'client', limits, mode);
+    let socket = await liveIo(io).tcp.connect(addrOf(host, port));
+    if (tls !== undefined) socket = await secured(() => tls.connect(socket, { servername }));
+    const session = makeSession(socket, 'client', limits, mode, io);
     try {
       await session.ready();
     } catch (e) {
@@ -738,7 +752,7 @@ export default native => {
       pool,
       fetch,
       /**
-       * Starts an HTTP/2 session over `socket` (a pull-mode `api.net` socket, plain or made by `api.tls`), which it consumes.
+       * Starts an HTTP/2 session over `socket` (a native stream nothing is using, plain or made by `api.tls`), which it consumes.
        * Options: `role` ('client' | 'server'), `mode` ('pull' or 'event'), `limits` ({ streams, headers, window, connection,
        * batch }, all required; `connection` at least 65535). Synchronous: `await session.ready()` before opening streams.
        */
@@ -746,7 +760,7 @@ export default native => {
         const role = own(options, 'role');
         if (role !== 'client' && role !== 'server') throw new TypeError("role must be 'client' or 'server'");
         const mode = modeOf(options);
-        return makeSession(socket, role, limitsOf(own(options, 'limits')), mode);
+        return makeSession(socket, role, limitsOf(own(options, 'limits')), mode, undefined);
       },
       /**
        * Dials `{ host, port }` (loopback only for now; `host` defaults to 127.0.0.1) and resolves a `ClientSession`
@@ -767,13 +781,12 @@ export default native => {
         const mode = modeOf(options);
         const limits = limitsOf(own(options, 'limits'));
         const tls = own(options, 'tls');
-        const listener = shared.net.listen(io, {
-          host: own(listen, 'host') ?? '127.0.0.1',
-          port: own(listen, 'port') ?? 0,
-          mode: 'pull',
-          socketMode: 'pull',
-        });
-        return new (mode === 'event' ? EventHttpServer : PullHttpServer)(token, listener, tls, limits, mode);
+        const host = own(listen, 'host') ?? '127.0.0.1';
+        const port = own(listen, 'port') ?? 0;
+        if (typeof host !== 'string') throw new TypeError('host must be a string');
+        if (!Number.isInteger(port) || port < 0 || port > 65535) throw new TypeError('port must be an integer in 0..65535');
+        const listener = liveIo(io).tcp.listen(addrOf(host, port)).pulling();
+        return new (mode === 'event' ? EventHttpServer : PullHttpServer)(token, listener, tls, limits, mode, io);
       },
     });
 };

@@ -44,13 +44,13 @@ export async function main(api) {
   const first = one.create({});
   eprintln(`maxRuntimes 1: second create -> ${thrown(() => one.create({}))}`);
   await first.close();
-  const again = one.create({});                 // the slot is free again
+  const again = one.create({}); // the slot is free again
   await again.close();
 
   // now() is monotonic milliseconds since the host started: use it for deadlines, never as a wall clock.
-  const a = io.now();
-  await io.sleep(1);
-  eprintln('now() is monotonic:', io.now() >= a);
+  const a = io.timer.now();
+  await io.timer.sleep(1);
+  eprintln('now() is monotonic:', io.timer.now() >= a);
 
   // run() resolves once every socket with a flowing handler has closed. With none, it resolves at once.
   await io.run();
@@ -58,12 +58,12 @@ export async function main(api) {
 
   await io.close();
   // close() returns the same promise each time; a closed runtime rejects later use with BadHandle.
-  eprintln(`now() after close: ${thrown(() => io.now())}`);
+  eprintln(`now() after close: ${thrown(() => io.timer.now())}`);
 
   // `await using` is the same close, done at scope exit (also when the scope throws).
   {
     await using scoped = api.io.create({});
-    await scoped.sleep(1);
+    await scoped.timer.sleep(1);
   }
   eprintln('await using closes at scope exit');
 }

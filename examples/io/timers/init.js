@@ -10,22 +10,22 @@ export async function main(api) {
   const io = api.io.create();
   try {
     // Schedule against a monotonic deadline, independent of wall-clock changes.
-    const deadline = io.now() + 10;
-    await io.sleepUntil(deadline);
+    const deadline = io.timer.now() + 10;
+    await io.timer.sleepUntil(deadline);
 
-    // timerAt is the cancellable sleepUntil: the deadline comes from io.now(), like the one above.
-    const later = io.timerAt(io.now() + 60_000);
+    // timerAt is the cancellable sleepUntil: the deadline comes from io.timer.now(), like the one above.
+    const later = io.timer.timerAt(io.timer.now() + 60_000);
     later.cancel();
     await later.promise.catch(() => {});
 
-    const timer = io.timer(60_000);
+    const timer = io.timer.timer(60_000);
     const canceled = timer.promise.then(
       () => false,
       error => error.name === 'Canceled',
     );
     timer.cancel();
     if (!(await canceled)) throw new Error('timer was not canceled');
-    await io.sleep(1);
+    await io.timer.sleep(1);
     eprintln('deadline reached, timer canceled: true');
   } finally {
     await io.close();

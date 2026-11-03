@@ -197,7 +197,7 @@ test "api: ES module glue imports once and retains separate module code caches" 
         try t.expect(host.rust_isolate == null);
         try check(scope, "api.io === api.io && Object.isFrozen(api.io.create)");
         try t.expect(host.rust_isolate != null);
-        try check(scope, "api.net === api.net && Object.isFrozen(api.net.Socket.prototype) && Object.isFrozen(api.net.PullSocket.prototype)");
+        try check(scope, "api.net === api.net && Object.isFrozen(api.net.PullTcpStream.prototype) && Object.isFrozen(api.net.EventTcpStream.prototype)");
         try t.expectEqual(glue_modules, probe.loads.count());
         var counts = probe.loads.valueIterator();
         while (counts.next()) |count| try t.expectEqual(@as(usize, 1), count.*);
@@ -242,7 +242,7 @@ test "api: snapshot restores immutable getters and network classes without compi
     try check(a, "Object.isFrozen(api.fs) && Object.isFrozen(api.fs.requestSync) && Object.isFrozen(api.host.env.args) && Object.isFrozen(api.context.create)");
     try t.expect(host.rust_isolate == null);
     try check(a,
-        \\[api.net.Handle, api.net.Server, api.net.PullServer, api.net.EventServer, api.net.Socket, api.net.PullSocket, api.net.EventSocket].every(C =>
+        \\Object.values(api.net).every(C =>
         \\  Object.isFrozen(C) && Object.isFrozen(C.prototype) &&
         \\  Object.values(Object.getOwnPropertyDescriptors(C.prototype)).every(d =>
         \\    (typeof d.value !== 'function' || Object.isFrozen(d.value)) &&
@@ -250,9 +250,9 @@ test "api: snapshot restores immutable getters and network classes without compi
     );
     try check(a, "api.io === api.io && Object.isFrozen(api.io.create)");
     // Separate deserialized contexts retain distinct memoization, errno and class identities.
-    const first_net = try a.eval("api.net.Socket", "test:first-socket", null);
+    const first_net = try a.eval("api.net.PullTcpStream", "test:first-socket", null);
     defer first_net.deinit();
-    const second_net = try b.eval("api.net.Socket", "test:second-socket", null);
+    const second_net = try b.eval("api.net.PullTcpStream", "test:second-socket", null);
     defer second_net.deinit();
     {
         var session: m.Runtime.Session = undefined;
@@ -284,11 +284,12 @@ test "api: init snapshot retains prepared network classes and their runtime bind
         fn load(_: ?*anyopaque, _: m.LoadRequest) !m.LoadResult {
             return .{ .source =
             \\export async function main(api) {
-            \\  const frozen = Object.isFrozen(api.net.PullSocket.prototype.read);
+            \\  const { SocketAddr } = await import('origine:@std/net');
+            \\  const frozen = Object.isFrozen(api.net.PullTcpStream.prototype.read);
             \\  const io = api.io.create({ backend: 'threaded' });
-            \\  const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+            \\  const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
             \\  const serving = (async () => {
-            \\    const peer = await server.accept();
+            \\    const peer = (await server.accept()).pulling();
             \\    let count = 0;
             \\    while (count < 3) {
             \\      const bytes = await peer.read(3);
@@ -297,7 +298,7 @@ test "api: init snapshot retains prepared network classes and their runtime bind
             \\    }
             \\    await peer.close();
             \\  })();
-            \\  const client = await api.net.connect(io, { port: server.port, mode: 'pull' });
+            \\  const client = (await io.tcp.connect(server.localAddr)).pulling();
             \\  await client.queued.send(new Uint8Array([1, 2, 3]));
             \\  const received = [];
             \\  while (received.length < 3) received.push(...await client.read(3));
@@ -333,9 +334,11 @@ test "api: init snapshot retains prepared network classes and their runtime bind
     defer error_info.deinit();
     try host.run(scope, support.engine.platform, "init", &error_info);
     try check(scope, "report === true");
-    try t.expectEqual(@as(usize, 0), probe.loads.count());
+    // No glue module is compiled at run time; the one load is the std module `main` imports (`origine:@std/net`,
+    // for its `SocketAddr`).
+    var loaded = probe.loads.keyIterator();
+    while (loaded.next()) |id| try t.expect(!std.mem.startsWith(u8, id.*, "origine:glue."));
     host.flushGlueCache(scope);
-    try t.expectEqual(@as(usize, 0), probe.stores);
 }
 
 test "api: an init snapshot made on the engine snapshot hands the restored scope the handles module" {
@@ -2476,7 +2479,7 @@ const async_concurrent_source =
     \\export async function main(api) {
     \\  const out = globalThis.report = {};
     \\  const rt = api.io.create({ backend: '@BACKEND@' });
-    \\  out.handle = rt.kind === 'io' && typeof rt.id === 'number' && typeof rt.backend === 'string' && Object.isFrozen(rt);
+    \\  out.handle = rt instanceof Object.getPrototypeOf(rt).constructor && rt.id === undefined && typeof rt.backend === 'string' && Object.isFrozen(rt) && !rt.closed;
     \\  const sync = api.fs.requestSync({ handle: 'plain', access: 'rw' });
     \\  const fs = await api.fs.requestAsync({ handle: 'plain', io: rt, access: 'rw' });
     \\  const cwd = Dir.cwd();
@@ -2621,11 +2624,11 @@ test "api: await using closes an io runtime at scope exit" {
         \\  {
         \\    await using scoped = api.io.create({});
         \\    inner = scoped;
-        \\    out.live = scoped.now() >= 0;
+        \\    out.live = scoped.timer.now() >= 0;
         \\  }
-        \\  try { inner.now(); out.closed = false; } catch (e) { out.closed = HostError.is(e, HostError.BadHandle); }
+        \\  try { inner.timer.now(); out.closed = false; } catch (e) { out.closed = HostError.is(e, HostError.BadHandle); }
         \\  await outer[Symbol.asyncDispose]();
-        \\  try { outer.now(); out.outerClosed = false; } catch (e) { out.outerClosed = HostError.is(e, HostError.BadHandle); }
+        \\  try { outer.timer.now(); out.outerClosed = false; } catch (e) { out.outerClosed = HostError.is(e, HostError.BadHandle); }
         \\}
     , true, .{});
     defer fx.deinit();
@@ -2644,7 +2647,7 @@ test "api: requestAsync needs a live io handle of this scope" {
         \\  const other = api.io.create({});
         \\  out.missing = await code(api.fs.requestAsync({}));
         \\  out.notHandle = await code(api.fs.requestAsync({ handle: 'plain', io: 7, access: 'r' }));
-        \\  out.forged = await code(api.fs.requestAsync({ handle: 'plain', io: Object.freeze({ kind: 'io', id: rt.id, backend: 'auto' }) }));
+        \\  out.forged = await code(api.fs.requestAsync({ handle: 'plain', io: Object.create(Object.getPrototypeOf(rt)) }));
         \\  out.getter = await code(api.fs.requestAsync({ handle: 'plain', get io() { return rt; } }));
         \\  out.badRoot = await code(api.fs.requestAsync({ handle: 'plain', io: rt, root: 42, access: 'r' }));
         \\  out.escape = await code(api.fs.requestAsync({ handle: 'plain', io: rt, root: '../x', access: 'r' }));
@@ -3112,10 +3115,13 @@ test "rust native: api.io.create runs a v8-crate native on the Zig isolate" {
     try f.setup(
         \\export async function main(api) {
         \\  const io = api.io.create({});
-        \\  if (io.kind !== 'io' || io.backend !== 'auto' || typeof io.id !== 'number') throw new Error('bad handle');
+        \\  if (io.kind !== undefined || io.id !== undefined || typeof io.backend !== 'string' || io.closed) throw new Error('bad handle');
+        \\  if (io.constructor.name !== 'Io' || Object.getPrototypeOf(io.timer).constructor.name !== 'IoTimer') throw new Error('bad classes');
+        \\  try { new io.constructor(); throw new Error('constructed'); } catch (e) { if (!(e instanceof TypeError)) throw e; }
         \\  if (!Object.isFrozen(io)) throw new Error('not frozen');
         \\  const second = api.io.create({ backend: 'threaded' });
-        \\  if (second.id === io.id || second.backend !== 'threaded') throw new Error('bad second');
+        \\  if (second.backend !== 'threaded' || second.timer === io.timer || io.timer !== io.timer) throw new Error('bad second');
+        \\  try { io.timer.now.call(second.tcp); throw new Error('no brand check'); } catch (e) { if (!(e instanceof TypeError)) throw e; }
         \\  let threw = false;
         \\  try { api.io.create({ backend: 'nope' }); } catch (e) { threw = e instanceof TypeError; }
         \\  if (!threw) throw new Error('bad backend accepted');
@@ -3426,6 +3432,8 @@ test "api: several BYOB reads over one ArrayBuffer settle cleanly and re-wrapped
 }
 
 const net_source =
+    \\import { SocketAddr } from 'origine:@std/net';
+    \\const at = (port, host = '127.0.0.1') => SocketAddr.parse(`${host}:${port}`);
     \\export async function main(api) {
     \\  try {
     \\    await body(api);
@@ -3435,15 +3443,17 @@ const net_source =
     \\}
     \\async function body(api) {
     \\  const out = globalThis.report = {};
-    \\  const { Handle, Server, Socket, PullServer, PullSocket, EventSocket } = api.net;
+    \\  const { TcpListenerUnshaped, PullTcpListener, TcpStreamUnshaped, PullTcpStream, EventTcpStream } = api.net;
     \\  const io = api.io.create({ backend: '@BACKEND@' });
-    \\  const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
-    \\  out.server = server instanceof PullServer && server instanceof Server && server instanceof Handle && server.port > 0 && server.io === io && !server.closed &&
-    \\    server.register === undefined && typeof server.accept === 'function';
+    \\  const unshaped = io.tcp.listen(at(0));
+    \\  const port = unshaped.localAddr.port;
+    \\  const server = unshaped.pulling();
+    \\  out.server = unshaped instanceof TcpListenerUnshaped && unshaped.closed && server instanceof PullTcpListener && port > 0 && !server.closed &&
+    \\    server.localAddr.port === port && server.register === undefined && typeof server.accept === 'function';
     \\
     \\  // Echo server: one connection, echo until end of stream.
     \\  const echoed = (async () => {
-    \\    const conn = await server.accept();
+    \\    const conn = (await server.accept()).pulling();
     \\    let total = 0;
     \\    for (;;) {
     \\      const chunk = await conn.read(4096);
@@ -3455,9 +3465,11 @@ const net_source =
     \\    return total;
     \\  })();
     \\
-    \\  const client = await api.net.connect(io, { host: '127.0.0.1', port: server.port, mode: 'pull' });
-    \\  out.client = client instanceof PullSocket && client instanceof Socket && client instanceof Handle && client.remotePort === server.port &&
-    \\    client.register === undefined && client.pause === undefined && client.toPull === undefined && typeof client.read === 'function';
+    \\  const raw = await io.tcp.connect(at(port));
+    \\  const client = raw.pulling();
+    \\  out.client = raw instanceof TcpStreamUnshaped && client instanceof PullTcpStream && !(client instanceof EventTcpStream) && client.peerAddr.port === port &&
+    \\    client.peerAddr instanceof SocketAddr && client.localAddr.port > 0 && raw.closed && (() => { try { raw.pulling(); return false; } catch (e) { return e.name === 'BadHandle'; } })() &&
+    \\    client.register === undefined && client.pause === undefined && client.toPulling === undefined && typeof client.read === 'function';
     \\  const message = Uint8Array.from('ping-pong', c => c.charCodeAt(0));
     \\  let reply = '';
     \\  for (let i = 0; i < 3; i++) {
@@ -3474,7 +3486,7 @@ const net_source =
     \\  }
     \\  out.reply = reply === 'ping-pong;ping-pong;ping-pong;';
     \\
-    \\  // readInto: a reusable guest buffer, nothing detached, partial windows, end of stream.
+    \\  // readCopy: a reusable guest buffer, nothing detached, partial windows.
     \\  await client.queued.send(message);
     \\  const reuse = new Uint8Array(32);
     \\  let have = 0;
@@ -3511,29 +3523,30 @@ const net_source =
     \\  out.closed = client.closed && (await client.read(1).then(() => false, e => e.name === 'BadHandle'));
     \\
     \\  // Errors and validation.
-    \\  const refused = await api.net.connect(io, { port: server.port, mode: 'pull' }).then(() => 'ok', e => e.name);
+    \\  const refused = await io.tcp.connect(at(port)).then(() => 'ok', e => e.name);
     \\  await server.close();
     \\  out.refused = refused === 'ConnectionRefused' || refused === 'ok';
-    \\  out.denied = await api.net.connect(io, { host: '8.8.8.8', port: 53, mode: 'pull' }).then(() => false, e => e.name === 'PermissionDenied');
-    \\  out.badIo = (() => { try { api.net.listen({}, { mode: 'pull', socketMode: 'pull' }); return false; } catch (e) { return e.name === 'BadHandle'; } })();
-    \\  out.badArgs = (() => { try { api.net.listen(io, { port: 70000, mode: 'pull', socketMode: 'pull' }); return false; } catch (e) { return e instanceof TypeError; } })() &&
-    \\    (() => { try { api.net.listen(io, { port: 0, socketMode: 'pull' }); return false; } catch (e) { return e instanceof TypeError; } })() &&
-    \\    (() => { try { api.net.listen(io, { port: 0, mode: 'pull' }); return false; } catch (e) { return e instanceof TypeError; } })() &&
-    \\    (() => { try { api.net.listen(io, { port: 0, mode: 'both', socketMode: 'pull' }); return false; } catch (e) { return e instanceof TypeError; } })() &&
-    \\    (await api.net.connect(io, { mode: 'pull' }).then(() => false, e => e instanceof TypeError)) &&
-    \\    (await api.net.connect(io, { port: 1 }).then(() => false, e => e instanceof TypeError));
-    \\  out.noForge = (() => { try { new PullSocket({}, {}); return false; } catch (e) { return e instanceof TypeError; } })() &&
-    \\    await PullSocket.prototype.read.call({}, 1).then(() => false, e => e instanceof TypeError) &&
-    \\    Object.isFrozen(api.net) && Object.isFrozen(Socket) && Object.isFrozen(Socket.prototype);
+    \\  out.denied = await io.tcp.connect(at(53, '8.8.8.8')).then(() => false, e => e.name === 'PermissionDenied' && e.subject === '8.8.8.8:53');
+    \\  out.badIo = (() => { try { io.tcp.listen.call({}, at(0)); return false; } catch (e) { return e instanceof TypeError; } })();
+    \\  out.badArgs = (() => { try { io.tcp.listen('127.0.0.1:0'); return false; } catch (e) { return e instanceof TypeError; } })() &&
+    \\    (() => { try { io.tcp.listen({ toString: () => '127.0.0.1:0' }); return false; } catch (e) { return e instanceof TypeError; } })() &&
+    \\    (await io.tcp.connect().then(() => false, e => e instanceof TypeError)) &&
+    \\    (await io.tcp.connect(Object.create(SocketAddr.prototype)).then(() => false, e => e instanceof TypeError));
+    \\  out.noForge = (() => { try { new PullTcpStream(); return false; } catch (e) { return e instanceof TypeError; } })() &&
+    \\    await PullTcpStream.prototype.read.call({}, 1).then(() => false, e => e instanceof TypeError) &&
+    \\    Object.isFrozen(api.net) && Object.isFrozen(PullTcpStream) && Object.isFrozen(PullTcpStream.prototype);
     \\
-    \\  // Closing the runtime invalidates open handles.
-    \\  const second = api.net.listen(io, { mode: 'pull', socketMode: 'pull' });
+    \\  // Closing the runtime invalidates open handles; they stay usable objects that answer BadHandle.
+    \\  const second = io.tcp.listen(at(0)).pulling();
     \\  await io.close();
-    \\  out.afterIoClose = second.closed && (await second.accept().then(() => false, e => e.name === 'BadHandle'));
+    \\  out.afterIoClose = second.closed && (await second.accept().then(() => false, e => e.name === 'BadHandle')) &&
+    \\    (() => { try { io.tcp.listen(at(0)); return false; } catch (e) { return e.name === 'BadHandle'; } })();
     \\}
 ;
 
 const events_source =
+    \\import { SocketAddr } from 'origine:@std/net';
+    \\const at = (port, host = '127.0.0.1') => SocketAddr.parse(host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`);
     \\export async function main(api) {
     \\  try {
     \\    await body(api);
@@ -3544,12 +3557,14 @@ const events_source =
     \\async function body(api) {
     \\  const out = globalThis.report = {};
     \\  const io = api.io.create({ backend: '@BACKEND@' });
-    \\  const server = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
+    \\  const server = io.tcp.listen(at(0)).evented();
+    \\  const port = server.localAddr.port;
     \\  const enc = s => Uint8Array.from(s, c => c.charCodeAt(0));
     \\  let serverEnded = false, serverClosed = false, serverEvent = false, accepted = 0;
     \\
     \\  // Echo server over events: lease the chunk, send it back, give the lease back.
-    \\  const reg = server.register('connection', conn => {
+    \\  const reg = server.register('connection', raw => {
+    \\    const conn = raw.evented();
     \\    accepted++;
     \\    // Paused while the echo is queued: a slow peer holds the reads back instead of piling up sends.
     \\    conn.register('data', ev => {
@@ -3566,7 +3581,7 @@ const events_source =
     \\  let settled = false;
     \\  running.then(() => { settled = true; });
     \\
-    \\  const client = await api.net.connect(io, { host: '127.0.0.1', port: server.port, mode: 'event' });
+    \\  const client = (await io.tcp.connect(at(port))).evented();
     \\  const waiters = [];
     \\  const poke = () => { for (const w of waiters.splice(0)) w(); };
     \\  const until = pred => new Promise(resolve => {
@@ -3693,11 +3708,13 @@ const events_source =
 ;
 
 const events_idle_source =
+    \\import { SocketAddr } from 'origine:@std/net';
+    \\const at = (port, host = '127.0.0.1') => SocketAddr.parse(host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`);
     \\export async function main(api) {
     \\  const io = api.io.create({ backend: '@BACKEND@' });
-    \\  const server = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
+    \\  const server = io.tcp.listen(at(0)).evented();
     \\  server.register('connection', () => {});
-    \\  globalThis.report = { registered: true, port: server.port > 0 };
+    \\  globalThis.report = { registered: true, port: server.localAddr.port > 0 };
     \\}
 ;
 
@@ -3714,6 +3731,8 @@ test "api: net events with pooled leases, backpressure and io.run (auto and thre
 }
 
 const flow_source =
+    \\import { SocketAddr } from 'origine:@std/net';
+    \\const at = (port, host = '127.0.0.1') => SocketAddr.parse(host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`);
     \\export async function main(api) {
     \\  try {
     \\    await body(api);
@@ -3724,20 +3743,21 @@ const flow_source =
     \\async function body(api) {
     \\  const out = globalThis.report = {};
     \\  const io = api.io.create({ backend: '@BACKEND@' });
-    \\  const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    \\  const server = io.tcp.listen(at(0)).pulling();
+    \\  const port = server.localAddr.port;
     \\  const enc = s => Uint8Array.from(s, c => c.charCodeAt(0));
     \\  const text = bytes => String.fromCharCode(...bytes);
     \\  const names = async promise => promise.then(() => 'ok', e => e.name);
     \\  const pair = async options => {
     \\    const accepting = server.accept();
-    \\    const client = await api.net.connect(io, { port: server.port, mode: 'pull', ...options });
-    \\    return [client, await accepting];
+    \\    const client = (await io.tcp.connect(at(port))).pulling(options);
+    \\    return [client, (await accepting).pulling()];
     \\  };
-    \\  const sleep = () => io.sleep(30);
+    \\  const sleep = () => io.timer.sleep(30);
     \\
     \\  // Queue state and the two lanes: a peer that does not read fills the kernel, then the queue.
     \\  const [pulled, peer] = await pair({ queued: { limit: 65536 } });
-    \\  const client = pulled.toEvent();
+    \\  const client = pulled.toEvented();
     \\  let drains = 0;
     \\  client.register('drain', () => { drains++; });
     \\  out.defaults = client.queued.limit === 65536 && peer.queued.limit === (1 << 20) && client.queued.bytes === 0 && client.queued.waiting === 0;
@@ -3792,7 +3812,7 @@ const flow_source =
     \\
     \\  // Bad arguments.
     \\  const [c3, p3pull] = await pair();
-    \\  const p3 = p3pull.toEvent();
+    \\  const p3 = p3pull.toEvented();
     \\  out.badArgs = (() => { try { c3.queued.put('x'); return false; } catch (e) { return e instanceof TypeError; } })() &&
     \\    (() => { try { c3.direct.write({}); return false; } catch (e) { return e instanceof TypeError; } })() &&
     \\    (() => { try { c3.queued.limit = 0; return false; } catch (e) { return e instanceof TypeError; } })() &&
@@ -3818,7 +3838,7 @@ const flow_source =
     \\
     \\  // No handler, no drop: the socket waits for the next one.
     \\  const [c4, p4pull] = await pair();
-    \\  const p4 = p4pull.toEvent();
+    \\  const p4 = p4pull.toEvented();
     \\  const first = p4.register('data', () => {});
     \\  first.unregister();
     \\  out.autoPaused = p4.paused;
@@ -3830,11 +3850,11 @@ const flow_source =
     \\  out.noDrop = late === 'kept' && !p4.paused;
     \\
     \\  // A paused server stops accepting; the connection waits in the backlog until resume.
-    \\  const l2 = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'pull' });
+    \\  const l2 = io.tcp.listen(at(0)).evented();
     \\  const seen = [];
     \\  l2.register('connection', conn => { seen.push(conn); conn.close(); });
     \\  l2.pause();
-    \\  const c5 = await api.net.connect(io, { port: l2.port, mode: 'pull' });
+    \\  const c5 = await io.tcp.connect(at(l2.localAddr.port));
     \\  await sleep();
     \\  out.serverPaused = seen.length === 0 && l2.paused;
     \\  l2.resume();
@@ -3875,6 +3895,8 @@ test "api: net send queue, direct lane, end and pause/resume (auto and threaded 
 }
 
 const modes_source =
+    \\import { SocketAddr } from 'origine:@std/net';
+    \\const at = (port, host = '127.0.0.1') => SocketAddr.parse(host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`);
     \\export async function main(api) {
     \\  try {
     \\    await body(api);
@@ -3884,16 +3906,17 @@ const modes_source =
     \\}
     \\async function body(api) {
     \\  const out = globalThis.report = {};
-    \\  const { EventSocket, PullSocket, EventServer, PullServer } = api.net;
+    \\  const { EventTcpStream, PullTcpStream } = api.net;
     \\  const io = api.io.create({ backend: '@BACKEND@' });
     \\  const enc = s => Uint8Array.from(s, c => c.charCodeAt(0));
     \\  const text = bytes => String.fromCharCode(...bytes);
-    \\  const sleep = () => io.sleep(30);
+    \\  const sleep = () => io.timer.sleep(30);
     \\  const waitFor = async pred => { for (let i = 0; i < 100 && !pred(); i++) await sleep(); return pred(); };
     \\  // Half-close: the client ends its write side, the server still replies, then ends its own: both close.
     \\  let got = '', serverEnded = false, halfOpen = false, closeEvent = false, conn;
-    \\  const half = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
-    \\  half.register('connection', socket => {
+    \\  const half = io.tcp.listen(at(0)).evented();
+    \\  half.register('connection', raw => {
+    \\    const socket = raw.evented();
     \\    conn = socket;
     \\    socket.register('data', ev => { using chunk = ev.buffer(); got += text(chunk); });
     \\    socket.register('end', async () => {
@@ -3905,7 +3928,7 @@ const modes_source =
     \\    });
     \\    socket.register('close', () => { closeEvent = true; });
     \\  });
-    \\  const client = await api.net.connect(io, { port: half.port, mode: 'pull' });
+    \\  const client = (await io.tcp.connect(at(half.localAddr.port))).pulling();
     \\  await client.queued.send(enc('hello'));
     \\  await client.end('write');
     \\  let reply = '';
@@ -3914,9 +3937,10 @@ const modes_source =
     \\  await half.close();
     \\
     \\  // A peer's FIN alone closes nothing: the socket stays open and writable until the user acts.
-    \\  const hold = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
+    \\  const hold = io.tcp.listen(at(0)).evented();
     \\  let held, ended = false, heldClosed = false;
-    \\  hold.register('connection', socket => {
+    \\  hold.register('connection', raw => {
+    \\    const socket = raw.evented();
     \\    held = socket;
     \\    socket.register('data', ev => ev.buffer().unref());
     \\    socket.register('end', () => { ended = true; });
@@ -3925,7 +3949,7 @@ const modes_source =
     \\  const running = io.run();
     \\  let settled = false;
     \\  running.then(() => { settled = true; });
-    \\  const other = await api.net.connect(io, { port: hold.port, mode: 'pull' });
+    \\  const other = (await io.tcp.connect(at(hold.localAddr.port))).pulling();
     \\  await other.queued.send(enc('x'));
     \\  await other.end('write');
     \\  await waitFor(() => ended);
@@ -3940,10 +3964,10 @@ const modes_source =
     \\  out.runAfterClose = settled;
     \\
     \\  // end() needs a side; 'read' discards what arrives and reads resolve empty; 'both' closes after the flush.
-    \\  const sides = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    \\  const sides = io.tcp.listen(at(0)).pulling();
     \\  const sideAccept = sides.accept();
-    \\  const mine = await api.net.connect(io, { port: sides.port, mode: 'pull' });
-    \\  const theirs = await sideAccept;
+    \\  const mine = (await io.tcp.connect(at(sides.localAddr.port))).pulling();
+    \\  const theirs = (await sideAccept).pulling();
     \\  out.sideRequired = (await mine.end().then(() => false, e => e instanceof TypeError)) &&
     \\    (await mine.end('bogus').then(() => false, e => e instanceof TypeError));
     \\  await mine.end('read');
@@ -3954,8 +3978,8 @@ const modes_source =
     \\  out.readThenWrite = mine.closed;
     \\  await theirs.close();
     \\  const bothAccept = sides.accept();
-    \\  const b1 = await api.net.connect(io, { port: sides.port, mode: 'pull' });
-    \\  const b2 = await bothAccept;
+    \\  const b1 = (await io.tcp.connect(at(sides.localAddr.port))).pulling();
+    \\  const b2 = (await bothAccept).pulling();
     \\  await b1.queued.send(enc('last'));
     \\  await b1.end('both');
     \\  out.endBoth = b1.closed && text(await b2.read(16)) === 'last' && (await b2.read(1)).length === 0 && !b2.closed;
@@ -3966,9 +3990,10 @@ const modes_source =
     \\  const sizes = [100, 1, 7000, 3, 16384, 40000, 5, 1000];
     \\  const lengths = [];
     \\  let exact = true, clean = true, total = 0, inOrder = true, byteLengths = [];
-    \\  const eventServer = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
+    \\  const eventServer = io.tcp.listen(at(0)).evented();
     \\  const echo = [];
-    \\  eventServer.register('connection', socket => {
+    \\  eventServer.register('connection', raw => {
+    \\    const socket = raw.evented();
     \\    socket.register('data', ev => {
     \\      const buf = ev.buffer();
     \\      exact &&= buf.buffer.byteLength === buf.length && buf.buffer.byteLength === ev.length && buf.byteOffset === 0;
@@ -3980,7 +4005,7 @@ const modes_source =
     \\      buf.unref();
     \\    });
     \\  });
-    \\  const feeder = await api.net.connect(io, { port: eventServer.port, mode: 'pull' });
+    \\  const feeder = (await io.tcp.connect(at(eventServer.localAddr.port))).pulling();
     \\  let sent = 0;
     \\  for (const size of sizes) {
     \\    const chunk = new Uint8Array(size).map((_, i) => (sent + i) % 251 + 1);
@@ -3992,90 +4017,84 @@ const modes_source =
     \\  await feeder.close();
     \\  await eventServer.close();
     \\
-    \\  // Mode transfer: the old handle is consumed, the writers carry over, the new class has only its own methods.
-    \\  const pullServer = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    \\  // Mode transfer: the old object is consumed, the connection (and what its queue holds) carries over, the new class has only its own methods.
+    \\  const pullServer = io.tcp.listen(at(0)).pulling();
     \\  const accepting = pullServer.accept();
-    \\  const busyServer = (() => { try { pullServer.toEvent(); return false; } catch (e) { return e.name === 'WouldBlock'; } })();
-    \\  const pulled = await api.net.connect(io, { port: pullServer.port, mode: 'pull' });
-    \\  const accepted = await accepting;
+    \\  const pulled = (await io.tcp.connect(at(pullServer.localAddr.port))).pulling();
+    \\  const accepted = (await accepting).pulling();
     \\  const queue = pulled.queued;
     \\  const pending = pulled.read(8);
-    \\  const busy = (() => { try { pulled.toEvent(); return false; } catch (e) { return e.name === 'WouldBlock'; } })();
+    \\  const busy = (() => { try { pulled.toEvented(); return false; } catch (e) { return e.name === 'WouldBlock'; } })();
     \\  await accepted.queued.send(enc('go'));
     \\  await pending;
-    \\  const evented = pulled.toEvent();
-    \\  out.toEvent = busy && busyServer && evented instanceof EventSocket && evented.queued === queue && typeof evented.direct.write === 'function' &&
+    \\  const evented = pulled.toEvented();
+    \\  out.toEvent = busy && evented instanceof EventTcpStream && evented.queued !== queue && evented.queued.limit === queue.limit && typeof evented.direct.write === 'function' &&
     \\    pulled.closed && !evented.closed && evented.read === undefined && typeof evented.register === 'function' &&
-    \\    (() => { try { pulled.queued; return false; } catch (e) { return e.name === 'BadHandle'; } })() &&
     \\    (await pulled.read(1).then(() => false, e => e.name === 'BadHandle')) &&
-    \\    (() => { try { pulled.toEvent(); return false; } catch (e) { return e.name === 'BadHandle'; } })();
+    \\    (() => { try { pulled.toEvented(); return false; } catch (e) { return e.name === 'BadHandle'; } })();
     \\  const echoed = [];
     \\  evented.register('data', ev => { using chunk = ev.buffer(); echoed.push(text(chunk)); });
     \\  await accepted.queued.send(enc('more'));
     \\  await waitFor(() => echoed.join('') === 'more');
     \\  out.eventedWorks = echoed.join('') === 'more' &&
-    \\    (() => { try { evented.toPull(); return false; } catch (e) { return e.name === 'Unsupported'; } })() && !evented.closed;
+    \\    (() => { try { evented.toPulling(); return false; } catch (e) { return e.name === 'Unsupported'; } })() && !evented.closed;
     \\  await evented.close();
     \\  await accepted.close();
     \\
-    \\  // A socket that never started reading goes back to pull mode (handlers dropped, writers kept).
-    \\  const second = await api.net.connect(io, { port: pullServer.port, mode: 'event' });
-    \\  const secondPeer = await pullServer.accept();
+    \\  // A stream that never started reading goes back to pull mode (handlers dropped).
+    \\  const secondAccept = pullServer.accept();
+    \\  const second = (await io.tcp.connect(at(pullServer.localAddr.port))).evented();
+    \\  const secondPeer = (await secondAccept).pulling();
     \\  let stray = 0;
     \\  second.register('end', () => { stray++; });
-    \\  const back = second.toPull();
-    \\  out.toPull = back instanceof PullSocket && back.read !== undefined && back.register === undefined && second.closed && !back.closed;
+    \\  const back = second.toPulling();
+    \\  out.toPull = back instanceof PullTcpStream && back.read !== undefined && back.register === undefined && second.closed && !back.closed;
     \\  await secondPeer.queued.send(enc('pulled'));
     \\  out.toPullReads = text(await back.read(16)) === 'pulled';
     \\  await secondPeer.close();
     \\  out.toPullEnd = (await back.read(1)).length === 0 && stray === 0;
     \\  await back.close();
+    \\  await pullServer.close();
     \\
-    \\  // Servers: pull to event and back; accepted sockets take the server's socketMode.
-    \\  const eventing = pullServer.toEvent();
-    \\  out.serverTransfer = eventing instanceof EventServer && pullServer.closed && eventing.port === pullServer.port &&
-    \\    (await pullServer.accept().then(() => false, e => e.name === 'BadHandle'));
+    \\  // Listeners: an unshaped listener takes one shape; accepted connections are unshaped and take theirs.
+    \\  const { TcpListenerUnshaped, PullTcpListener, EventTcpListener, TcpStreamUnshaped } = api.net;
+    \\  const fresh = io.tcp.listen(at(0));
+    \\  const eventing = fresh.evented();
+    \\  out.serverTransfer = fresh instanceof TcpListenerUnshaped && eventing instanceof EventTcpListener && fresh.closed &&
+    \\    eventing.localAddr.port > 0 && (() => { try { fresh.pulling(); return false; } catch (e) { return e.name === 'BadHandle'; } })();
     \\  const seen = [];
     \\  const registration = eventing.register('connection', socket => { seen.push(socket); });
-    \\  const third = await api.net.connect(io, { port: eventing.port, mode: 'pull' });
+    \\  const third = await io.tcp.connect(at(eventing.localAddr.port));
     \\  await waitFor(() => seen.length === 1);
-    \\  out.socketMode = seen[0] instanceof PullSocket && seen[0].read !== undefined;
+    \\  out.socketMode = seen[0] instanceof TcpStreamUnshaped && seen[0].read === undefined && seen[0].pulling() instanceof PullTcpStream;
     \\  registration.unregister();
     \\  await third.close();
-    \\  await seen[0].close();
-    \\  out.serverBack = (() => { try { eventing.toPull(); return false; } catch (e) { return e.name === 'Unsupported'; } })();
+    \\  out.serverBack = eventing.accept === undefined && eventing.toPulling === undefined;
     \\  await eventing.close();
-    \\  const idleServer = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
-    \\  const idleBack = idleServer.toPull();
-    \\  out.serverBackIdle = idleBack instanceof PullServer && idleServer.closed && idleBack.accept !== undefined;
+    \\  const idleServer = io.tcp.listen(at(0));
+    \\  const idleBack = idleServer.pulling();
+    \\  out.serverBackIdle = idleBack instanceof PullTcpListener && idleServer.closed && idleBack.accept !== undefined && idleBack.register === undefined;
     \\  await idleBack.close();
     \\
-    \\  // `localhost` is not resolved: 127.0.0.1 first, then ::1; listen binds 127.0.0.1.
-    \\  const lo = api.net.listen(io, { host: 'localhost', port: 0, mode: 'pull', socketMode: 'pull' });
-    \\  const loAccept = lo.accept();
-    \\  const viaName = await api.net.connect(io, { host: 'localhost', port: lo.port, mode: 'pull' });
-    \\  const loPeer = await loAccept;
-    \\  const viaIp = await api.net.connect(io, { host: '127.0.0.1', port: lo.port, mode: 'pull' });
-    \\  out.localhost = viaName.remotePort === lo.port && viaIp.remotePort === lo.port;
-    \\  await Promise.all([viaName.close(), viaIp.close(), loPeer.close(), lo.close()]);
+    \\  // Addresses are `SocketAddr`s: no names (`localhost` included), IPv6 in brackets.
+    \\  out.localhost = (() => { try { SocketAddr.parse('localhost:80'); return false; } catch (e) { return e instanceof TypeError; } })();
     \\  let v6;
-    \\  try { v6 = api.net.listen(io, { host: '::1', port: 0, mode: 'pull', socketMode: 'pull' }); } catch { v6 = null; }
+    \\  try { v6 = io.tcp.listen(at(0, '::1')).pulling(); } catch { v6 = null; }
     \\  if (v6 === null) {
     \\    out.localhostV6 = true;
     \\  } else {
     \\    const v6Accept = v6.accept();
-    \\    const viaFallback = await api.net.connect(io, { host: 'localhost', port: v6.port, mode: 'pull' });
+    \\    const viaV6 = (await io.tcp.connect(at(v6.localAddr.port, '::1'))).pulling();
     \\    const v6Peer = await v6Accept;
-    \\    out.localhostV6 = viaFallback.remotePort === v6.port;
-    \\    await Promise.all([viaFallback.close(), v6Peer.close(), v6.close()]);
+    \\    out.localhostV6 = viaV6.peerAddr.port === v6.localAddr.port && viaV6.peerAddr.ip.isV6() && String(viaV6.peerAddr).startsWith('[::1]:');
+    \\    await Promise.all([viaV6.close(), v6Peer.close(), v6.close()]);
     \\  }
-    \\  const gone = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
-    \\  const goneAt = gone.port;
+    \\  const gone = io.tcp.listen(at(0));
+    \\  const goneAt = gone.localAddr.port;
     \\  await gone.close();
-    \\  const refused = await api.net.connect(io, { host: 'localhost', port: goneAt, mode: 'pull' }).then(() => 'ok', e => e.name);
+    \\  const refused = await io.tcp.connect(at(goneAt)).then(() => 'ok', e => e.name);
     \\  out.refused = refused === 'ConnectionRefused' || refused === 'ok';
-    \\  out.denied = (await api.net.connect(io, { host: 'example.com', port: 80, mode: 'pull' }).then(() => false, e => e.name === 'PermissionDenied')) &&
-    \\    (await api.net.connect(io, { host: '10.0.0.1', port: 80, mode: 'pull' }).then(() => false, e => e.name === 'PermissionDenied'));
+    \\  out.denied = await io.tcp.connect(at(80, '10.0.0.1')).then(() => false, e => e.name === 'PermissionDenied');
     \\  await io.close();
     \\}
 ;
@@ -4137,43 +4156,43 @@ const timers_source =
     \\export async function main(api) {
     \\  const io = api.io.create({ backend: '@BACKEND@' });
     \\  const out = globalThis.report = {};
-    \\  const start = io.now();
+    \\  const start = io.timer.now();
     \\  let synchronous = true;
-    \\  const zero = io.sleep(0).then(value => { out.async = !synchronous && value === undefined; });
+    \\  const zero = io.timer.sleep(0).then(value => { out.async = !synchronous && value === undefined; });
     \\  synchronous = false;
     \\  await zero;
-    \\  const deadline = io.now() + 5;
-    \\  await io.sleepUntil(deadline);
-    \\  out.monotonic = io.now() >= deadline && io.now() >= start;
-    \\  const past = io.timerAt(0);
+    \\  const deadline = io.timer.now() + 5;
+    \\  await io.timer.sleepUntil(deadline);
+    \\  out.monotonic = io.timer.now() >= deadline && io.timer.now() >= start;
+    \\  const past = io.timer.timerAt(0);
     \\  await past.promise;
     \\  out.expired = past.cancel() === false;
-    \\  const siblings = await Promise.all([io.sleep(5).then(() => 2), io.sleep(1).then(() => 1)]);
+    \\  const siblings = await Promise.all([io.timer.sleep(5).then(() => 2), io.timer.sleep(1).then(() => 1)]);
     \\  out.siblings = siblings.join() === '2,1';
-    \\  const long = io.timer(60000);
+    \\  const long = io.timer.timer(60000);
     \\  const rejected = long.promise.then(() => false, e => e.name === 'Canceled');
     \\  out.frozen = Object.isFrozen(long);
     \\  out.cancel = long.cancel() === true && long.cancel() === false && await rejected;
-    \\  const newer = io.timer(1);
+    \\  const newer = io.timer.timer(1);
     \\  out.stale = long.cancel() === false;
     \\  await newer.promise;
     \\  out.validation = [-1, NaN, Infinity, 2147483648, '1', null, undefined].every(ms => {
-    \\    try { io.timer(ms); return false; } catch (e) { return e instanceof TypeError; }
+    \\    try { io.timer.timer(ms); return false; } catch (e) { return e instanceof TypeError; }
     \\  }) && [-1, NaN, Infinity, '1'].every(at => {
-    \\    try { io.timerAt(at); return false; } catch (e) { return e instanceof TypeError; }
+    \\    try { io.timer.timerAt(at); return false; } catch (e) { return e instanceof TypeError; }
     \\  });
-    \\  const closing = io.timer(60000);
+    \\  const closing = io.timer.timer(60000);
     \\  const closingResult = closing.promise.then(() => false, e => e.name === 'Canceled');
     \\  await io.close();
     \\  out.close = await closingResult && closing.cancel() === false;
-    \\  try { io.sleep(1); out.closed = false; } catch (e) { out.closed = e.name === 'BadHandle'; }
+    \\  try { io.timer.sleep(1); out.closed = false; } catch (e) { out.closed = e.name === 'BadHandle'; }
     \\  // Leave the second runtime open: cancellation must remove its work without close().
     \\  const second = api.io.create({ backend: '@BACKEND@' });
-    \\  const canceled = second.timer(60000);
+    \\  const canceled = second.timer.timer(60000);
     \\  const done = canceled.promise.catch(e => e.name === 'Canceled');
     \\  canceled.cancel();
     \\  out.noLiveTimer = await done;
-    \\  await second.sleep(0.5);
+    \\  await second.timer.sleep(0.5);
     \\}
 ;
 
@@ -4194,9 +4213,9 @@ const timer_wake_source =
     \\  // The fastest of several, so that a loaded machine does not fail the test.
     \\  let fastest = Infinity;
     \\  for (let i = 0; i < 5; i++) {
-    \\    const start = io.now();
-    \\    await io.sleep(1);
-    \\    fastest = Math.min(fastest, io.now() - start);
+    \\    const start = io.timer.now();
+    \\    await io.timer.sleep(1);
+    \\    fastest = Math.min(fastest, io.timer.now() - start);
     \\  }
     \\  globalThis.report = { fastest };
     \\  await io.close();

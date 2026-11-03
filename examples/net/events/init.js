@@ -1,6 +1,7 @@
 // Run: zig build run -- examples/net/events/init.js
 // Stream a finite payload using events, exact-size receive leases, and send-queue backpressure.
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
@@ -10,7 +11,7 @@ export async function main(api) {
   let received = 0;
   let failure;
   try {
-    const server = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
+    const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).evented();
     const stop = () => {
       // close() is idempotent and fires close events; closing io drops handlers instead.
       for (const socket of sockets) void socket.close();
@@ -21,7 +22,8 @@ export async function main(api) {
       stop();
     };
     server.register('error', fail);
-    server.register('connection', peer => {
+    server.register('connection', stream => {
+      const peer = stream.evented(); // An accepted connection is unshaped: it takes its own shape.
       sockets.push(peer);
       void server.close(); // One connection is enough for this demo.
       peer.register('error', fail);
@@ -46,7 +48,7 @@ export async function main(api) {
     // Registrations alone do not keep main alive. Start run() after the listener flows,
     // and keep it pending while waiting for callbacks to finish the transfer.
     const running = io.run();
-    const client = await api.net.connect(io, { port: server.port, mode: 'event' });
+    const client = (await io.tcp.connect(server.localAddr)).evented();
     sockets.push(client);
     client.register('error', fail);
     client.register('end', () => {
@@ -61,7 +63,8 @@ export async function main(api) {
         received += chunk.length;
         if (received > total) throw new Error('too many bytes');
         if (received === total) stop();
-      } finally {}
+      } finally {
+      }
     });
     await running; // Resolves once all flowing handles have closed.
     if (failure) throw failure;

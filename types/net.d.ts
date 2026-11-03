@@ -1,31 +1,43 @@
-import type { HostError, IoError } from "./errors.d.ts";
-import type { Io } from "./io.d.ts";
+import type { SocketAddr } from 'origine:@std/net';
 
-/**
- * How a handle is read, chosen explicitly (there is no default) and visible in its type:
- * `'pull'` asks for each read with a promise, `'event'` is pushed to `register`ed handlers.
- * Two behaviours that cannot be mixed are two types, with a consuming transfer between them.
- */
-export type Mode = "event" | "pull";
+// The network objects. They are made by an `Io`'s tables (`io.tcp.listen`, `io.tcp.connect`, `io.udp.bind`) and
+// are instances of classes defined natively: `new` throws a `TypeError`, a member called on another object is a
+// `TypeError`, and no id reaches the program. A factory returns an **unshaped** object that owns the descriptor and
+// flows nothing; `pulling()` or `evented()` consumes it (it answers `BadHandle` afterwards) and returns the shaped
+// class. `close()` frees the descriptor at once; the object stays usable as a value and answers `BadHandle`.
 
-/** Which side of a socket {@link SocketBase.end} ends, as in `shutdown(2)`. */
-export type EndSide = "write" | "read" | "both";
+/** How an HTTP/2 object of `api.http` is read: `'pull'` asks with promises, `'event'` pushes to `register`ed handlers. */
+export type Mode = 'event' | 'pull';
+
+/** A native stream a protocol engine (`api.tls`, `api.http`) can take over: one nothing is using yet. */
+export type NativeStream = TcpStreamUnshaped | PullTcpStream | EventTcpStream;
+
+/** Which side of a stream {@link TcpStreamBase.end} ends, as in `shutdown(2)`. */
+export type EndSide = 'write' | 'read' | 'both';
 
 /** Bytes the write side takes: an `ArrayBuffer` or any view over one. */
 export type BytesLike = ArrayBuffer | ArrayBufferView;
 
 /** What `register` returns. */
 export interface Registration {
-  /** Removes the handler. Returns `true` if it was registered. When the last flowing handler goes the handle pauses itself. */
+  /** Removes the handler. Returns `true` if it was registered. When the last flowing handler goes the object pauses itself. */
   unregister(): boolean;
 }
 
+/** Options of `pulling()` / `evented()` of a stream. */
+export interface ShapeOptions {
+  /** The send queue of the stream. */
+  readonly queued?: {
+    /** Its initial `queued.limit`: a positive integer. Default 1 MiB. */
+    readonly limit?: number;
+  };
+}
+
 /**
- * A chunk received by a socket: a `Uint8Array` over an `ArrayBuffer` of **exactly** the received
- * bytes (`buffer.byteLength === length`, offset 0); no other byte of the socket's memory is
- * reachable through it. Give it back with {@link Lease.unref} or `using`: that detaches the
- * `ArrayBuffer` (any view you kept becomes empty). One you never release is garbage collected like
- * any buffer.
+ * Received bytes: a `Uint8Array` over an `ArrayBuffer` of **exactly** those bytes (`buffer.byteLength === length`,
+ * offset 0); no other byte of the socket's memory is reachable through it. It stays valid, across awaits, until
+ * {@link Lease.unref} or the end of its `using` block detaches the `ArrayBuffer` (any view you kept becomes empty).
+ * One you never release is garbage collected like any buffer.
  */
 export interface Lease extends Uint8Array<ArrayBuffer>, Disposable {
   /** `true` once `unref()` ran. */
@@ -34,269 +46,286 @@ export interface Lease extends Uint8Array<ArrayBuffer>, Disposable {
   unref(): void;
 }
 
-/** The `data` event: valid only while its handlers run. */
+/** The `data` event of an {@link EventTcpStream}: valid only while its handlers run (the object is reused). */
 export interface DataEvent {
   /** Bytes received (0 once the event is over). */
   readonly length: number;
   /**
-   * The chunk as a {@link Lease}: the same lease on every call within one event. Allocates
-   * nothing until called (the bytes were received into a slab and are carved out without copy).
-   * Throws a `TypeError` after the event is over.
+   * The chunk as a {@link Lease}: the same lease on every call within one event. Copies nothing (the bytes were
+   * received into a slab and are carved out). Call it while the handler runs (before an `await`): a `TypeError`
+   * once the event is over. The lease itself stays valid until released.
    */
   buffer(): Lease;
 }
 
-/** Events of an {@link EventSocket} and the arguments their handlers get. */
-export interface SocketEvents {
+/** The `datagram` event of an {@link EventUdpSocket}: one whole datagram. */
+export interface DatagramEvent {
+  /** Bytes of the datagram. */
+  readonly length: number;
+  /** Where it came from. */
+  readonly from: SocketAddr;
+  /** The datagram as a {@link Lease}, the same on every call (made once, by one copy into V8 memory). */
+  buffer(): Lease;
+}
+
+/** Events of an {@link EventTcpStream} and the arguments their handlers get. */
+export interface StreamEvents {
   /** Bytes arrived. The first handler starts the flow. */
   data: [event: DataEvent];
-  /** The peer finished sending (its FIN). The socket stays open and writable: answer with `end('write')` or `close()`. */
+  /** The peer finished sending (its FIN). The stream stays open and writable: answer with `end('write')` or `close()`. */
   end: [];
-  /** A failure: an {@link IoError} or {@link HostError}, or whatever a handler threw. The socket is closed by the runtime, then `close` fires. */
+  /** A failure (an `IoError` or `HostError`), or what a handler threw. The stream is closed, then `close` fires. */
   error: [error: unknown];
-  /** The send queue became empty (after the sends it settles). */
+  /** The send queue became empty. */
   drain: [];
-  /** The handle closed. Fires once; handlers are dropped afterwards. */
+  /** The stream closed. Fires once; handlers are dropped afterwards. */
   close: [];
 }
 
-/** Events of an {@link EventServer}. */
-export interface ServerEvents<S extends Mode> {
-  /** A connection arrived, as a socket of the server's `socketMode`. The first handler starts accepting; a connection nobody handles is closed. */
-  connection: [socket: Socket<S>];
-  /** A failure: an {@link IoError} or {@link HostError}, or whatever a handler threw. */
+/** Events of an {@link EventTcpListener}. */
+export interface ListenerEvents {
+  /** A connection arrived, unshaped. The first handler starts accepting; a connection nobody handles is closed. */
+  connection: [stream: TcpStreamUnshaped];
   error: [error: unknown];
-  /** The server closed. */
   close: [];
 }
 
-/** Base of every handle: what both modes and both kinds share. */
-export interface Handle extends AsyncDisposable {
-  /** The runtime this handle belongs to. */
-  readonly io: Io;
-  /** `true` after `close()`, once the runtime is closed, or after a mode transfer consumed this handle. Every operation on a closed handle throws or rejects `BadHandle`. */
+/** Events of an {@link EventUdpSocket}. */
+export interface DatagramEvents {
+  /** A datagram arrived. The first handler starts receiving. */
+  datagram: [event: DatagramEvent];
+  error: [error: unknown];
+  close: [];
+}
+
+// Handler rules shared by every `register`: handlers of one event run in registration order; a handler that throws
+// goes to the `error` handlers (with none it becomes an unhandled rejection); a promise a handler returns is not
+// awaited (its rejection is the program's to handle). Registrations never keep the program alive: await `io.run()`.
+// After `close` handlers are dropped; `register` on a closed object throws `BadHandle`. `pause()` stops delivery of
+// the read side (`end`, `error` and `close` included) until `resume()`; at most 8 chunks are held, then reading
+// stops and the peer is held back. `paused` is true after `pause()` or while no handler of the flowing event listens.
+
+/** What every network object has. */
+export interface NetObject extends AsyncDisposable {
+  /** `true` once consumed by a transfer, after `close()`, or once the runtime is closed. */
   readonly closed: boolean;
-  /**
-   * Releases the handle and discards what is still queued; pending reads finish with end of
-   * stream, pending sends and a pending `accept()` reject `Canceled`. Idempotent. Closing a
-   * `PullServer` resolves once its port is free.
-   */
+  /** The local address (`BadHandle` once closed). */
+  readonly localAddr: SocketAddr;
+  /** Releases the descriptor now; pending reads end, pending accepts and sends reject `Canceled`. Idempotent. */
   close(): Promise<void>;
 }
 
+/** A connected stream that flows nothing yet (`io.tcp.connect`, an accepted connection, a TLS handshake). */
+export declare class TcpStreamUnshaped implements NetObject {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  readonly peerAddr: SocketAddr;
+  /** Consumes this object: the stream read with promises. */
+  pulling(options?: ShapeOptions): PullTcpStream;
+  /** Consumes this object: the stream that pushes events. */
+  evented(options?: ShapeOptions): EventTcpStream;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
 /**
- * `socket.queued`: the send queue. Everything that goes through it leaves the socket in call
- * order and it has priority over {@link SocketBase.direct}. "Sent" means taken by the kernel
- * (`write(2)` returned), not received by the peer. A write error rejects every pending `send`,
- * throws from `put`, and the socket emits `error` once and closes.
+ * `stream.queued`: the send queue. Everything that goes through it leaves the stream in call order and it has
+ * priority over `direct`. "Sent" means taken by the kernel, not received by the peer. A write error rejects every
+ * pending `send`, throws from `put`, and the stream emits `error` once and closes.
  */
-export interface SendQueue {
+export declare class SendQueue {
+  private constructor();
   /** Bytes in the queue the kernel has not taken yet. */
   readonly bytes: number;
-  /** Sends that wait for room (their bytes are not in the queue yet). */
+  /** Sends (and `end`s) waiting for their turn. */
   readonly waiting: number;
-  /**
-   * Bytes the queue may hold. Default 1 MiB, or the `queued.limit` of `connect`/`listen`
-   * (accepted sockets inherit it). A positive integer (`TypeError` otherwise). A `send` into an
-   * empty queue is admitted whatever its size.
-   */
+  /** Bytes the queue may hold: a positive integer (`TypeError` otherwise). A send into an empty queue is admitted whatever its size. */
   limit: number;
-  /**
-   * Queues as much of `data` as fits under {@link SendQueue.limit} and returns the **number of
-   * bytes taken** (0 when the queue is full or sends are waiting). Copies what it queues, so the
-   * buffer can be reused right after. To wait for room, wait for `drain` or `drained()`.
-   */
+  /** Queues as much of `data` as fits under `limit` and returns the **number of bytes taken** (0 when full or sends wait). Copies what it takes. */
   put(data: BytesLike): number;
-  /**
-   * Queues all of `data`, waiting for room, and resolves when its last byte is in the kernel. Reads
-   * `data` when it is admitted (at once unless the queue is full): leave it untouched until the
-   * promise settles. Rejects when the socket fails (`BrokenPipe`, ...) or closes first (`Canceled`).
-   */
+  /** Copies all of `data` now, waits its turn and room, and resolves once its last byte is in the kernel. Rejects when the stream fails (`BrokenPipe`, ...) or closes first (`Canceled`). */
   send(data: BytesLike): Promise<void>;
-  /** Resolves when the queue is empty and no send is waiting. */
+  /** Resolves when no send waits and the queue is empty. */
   drained(): Promise<void>;
 }
 
-/**
- * `socket.direct`: the unbuffered lane, a plain non-blocking write. It never overtakes the send
- * queue: while anything is queued or waiting it takes nothing.
- */
-export interface DirectWriter {
-  /**
-   * One non-blocking `write(2)` with no copy and nothing kept: returns the **number of bytes the
-   * kernel took** (0 to `data.byteLength`; 0 also when the queue is busy). A write error throws and closes the socket.
-   */
+/** `stream.direct`: the unbuffered lane, a plain non-blocking write. It never overtakes the send queue. */
+export declare class Direct {
+  private constructor();
+  /** One non-blocking `write(2)` with no copy: the **number of bytes the kernel took** (0 to `data.byteLength`; 0 while the queue is busy; always 0 under TLS). */
   write(data: BytesLike): number;
 }
 
-/** The write side shared by both socket kinds. */
-export interface SocketBase extends Handle {
-  /** The peer's port. */
-  readonly remotePort: number;
-  /** The send queue (`put`, `send`, `drained`, `bytes`, `waiting`, `limit`): written before `direct`. */
+/** The write side shared by both stream shapes. */
+export interface TcpStreamBase extends NetObject {
+  readonly peerAddr: SocketAddr;
+  /** The send queue: written before `direct`. Its own object, kept by a transfer's new object for the same connection. */
   readonly queued: SendQueue;
-  /** The unbuffered write lane (`write`). */
-  readonly direct: DirectWriter;
+  readonly direct: Direct;
   /**
-   * Ends one side or both, like `shutdown(2)`; `side` is required (rejects `TypeError` without it).
-   *
-   * - `'write'`: once everything queued and waiting is out, sends the FIN and resolves; later
-   *   writes fail `BrokenPipe`.
-   * - `'read'`: stops reading and discards what arrives (reads resolve empty, no more `data`/`end`).
-   * - `'both'`: both, the read side after the flush.
-   *
-   * The runtime **never closes a socket because the peer sent its FIN**; a socket closes itself
-   * once the peer finished (or you ended `'read'`) and your write side was ended. `close()`
-   * releases it at any time.
+   * Ends one side or both, like `shutdown(2)`; `side` is required (rejects `TypeError` without it). `'write'`: once
+   * everything queued and waiting is out, sends the FIN (under TLS `close_notify` first) and resolves; later writes
+   * fail `BrokenPipe`. `'read'`: stops reading and discards what arrives. `'both'`: both. A stream closes itself
+   * once the peer finished (or you ended `'read'`) and your write side was ended; never because of the peer's FIN alone.
    */
   end(side: EndSide): Promise<void>;
 }
 
-/** A socket read with promises (`Socket<'pull'>`): `read`, `readInto`, `readCopy`. Has no `register`. */
-export interface PullSocket extends SocketBase {
-  /** Reads once: a `Uint8Array` of 1 to `length` bytes (`length` an integer in 1 to 2**28), **empty at end of stream**. The result is allocated. */
+/** A stream read with promises. */
+export declare class PullTcpStream implements TcpStreamBase {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  readonly peerAddr: SocketAddr;
+  readonly queued: SendQueue;
+  readonly direct: Direct;
+  end(side: EndSide): Promise<void>;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+  /** Reads once: a `Uint8Array` of 1 to `length` bytes (an integer in 1 to 2**28), **empty at end of stream**. Allocated. */
   read(length: number): Promise<Uint8Array>;
-  /**
-   * Reads once straight into `buffer` (not empty) with **no copy**: the buffer is detached while the
-   * read runs and the promise resolves `{ bytes, buffer }` with `buffer` a new `ArrayBuffer` over
-   * the same memory (`bytes` 0 at end of stream). `buffer` covers the whole memory you passed: slice it with `buffer.subarray(0, bytes)` (`new Uint8Array(view, 0, n)` copies all of a view). Rejects `Unsupported` for a buffer that cannot be
-   * detached (shared, resizable). Best for large reads.
-   */
+  /** Reads once straight into `buffer` (not empty) with **no copy**: it is detached while the read runs and comes back as a new `ArrayBuffer`. `Unsupported` for a buffer that cannot be detached. */
   readInto(buffer: BytesLike): Promise<{ readonly bytes: number; readonly buffer: ArrayBuffer }>;
-  /** Reads once into `buffer` (not empty) **by copy** and resolves the byte count (0 at end of stream). The buffer is not detached, so one buffer serves every read. Best for small reads. */
+  /** Reads once into `buffer` (not empty) **by copy**: the byte count, 0 at end of stream. */
   readCopy(buffer: BytesLike): Promise<number>;
-  /** `for await (const chunk of socket)`: the bytes as `read(65536)` returns them, until the end of the stream. */
+  /** `for await (const chunk of stream)`: the bytes as `read(65536)` returns them, until the end of the stream. */
   [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
-  /**
-   * Hands the connection to a **new** `EventSocket` and **consumes this handle**: it reports
-   * `closed === true` and every operation on it throws or rejects `BadHandle` (the connection is
-   * not closed). `queued` and `direct` carry over. Throws `WouldBlock` while a read is pending.
-   */
-  toEvent(): EventSocket;
+  /** Consumes this object: an {@link EventTcpStream} over the connection. `WouldBlock` while a read is pending. */
+  toEvented(): EventTcpStream;
 }
 
-/** A socket that pushes events (`Socket<'event'>`): `register`, `pause`, `resume`. Has no `read*`. */
-export interface EventSocket extends SocketBase {
-  /**
-   * Subscribes `handler` to `event`; handlers of one event run in registration order. The first
-   * `data` handler starts reading. A handler that throws goes to the `error` handlers (with none
-   * it becomes an unhandled rejection). Registrations never keep the program alive: await
-   * `io.run()`. After `close` handlers are dropped; `register` on a closed handle throws `BadHandle`.
-   */
-  register<E extends keyof SocketEvents>(event: E, handler: (...args: SocketEvents[E]) => void): Registration;
-  /** Stops delivery: after it returns no `data`, `end`, `error` or `close` is dispatched until `resume()`. At most 8 chunks are held, then reading stops and TCP holds the peer back. The write side is not paused: `drain` fires and sends proceed. Idempotent. */
-  pause(): void;
-  /** Undoes `pause()`; held events are dispatched first, in order. Idempotent. */
-  resume(): void;
-  /** `true` after `pause()`, or while no `data` handler listens. */
+/** A stream that pushes events to handlers held natively. */
+export declare class EventTcpStream implements TcpStreamBase {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  readonly peerAddr: SocketAddr;
+  readonly queued: SendQueue;
+  readonly direct: Direct;
   readonly paused: boolean;
-  /**
-   * Hands the connection to a **new** `PullSocket` and **consumes this handle** (`BadHandle`
-   * afterwards); registered handlers are dropped. Throws `Unsupported` once a `data` handler
-   * started the flow: the chunks already read belong to the events.
-   */
-  toPull(): PullSocket;
-}
-
-/**
- * A socket of read mode `M`: `Socket<'pull'>` is a {@link PullSocket}, `Socket<'event'>` an
- * {@link EventSocket}. The two share only the write side.
- */
-export type Socket<M extends Mode = Mode> = M extends "pull" ? PullSocket : M extends "event" ? EventSocket : never;
-
-/** Base of the servers. */
-export interface ServerBase extends Handle {
-  /** The port listened on (the real one when `port: 0` was asked). */
-  readonly port: number;
-}
-
-/** A server whose connections are awaited (`Server<'pull', S>`). `S` is the mode of the sockets it accepts. */
-export interface PullServer<S extends Mode = Mode> extends ServerBase {
-  /** Resolves the next connection as a socket of the server's `socketMode`. */
-  accept(): Promise<Socket<S>>;
-  /** `for await (const socket of server)`: the connections as `accept()` resolves them, until the server is closed. */
-  [Symbol.asyncIterator](): AsyncIterableIterator<Socket<S>>;
-  /** Hands the listener to a new `EventServer` and consumes this handle. Throws `WouldBlock` while an `accept()` is pending. */
-  toEvent(): EventServer<S>;
-}
-
-/** A server that emits events (`Server<'event', S>`). `S` is the mode of the sockets it hands out. */
-export interface EventServer<S extends Mode = Mode> extends ServerBase {
-  /** Subscribes to `connection`, `error` or `close`. The first `connection` handler starts accepting. Same rules as {@link EventSocket.register}. */
-  register<E extends keyof ServerEvents<S>>(event: E, handler: (...args: ServerEvents<S>[E]) => void): Registration;
-  /** Stops accepting until `resume()`; connections wait in the kernel backlog. Idempotent. */
+  end(side: EndSide): Promise<void>;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+  register<K extends keyof StreamEvents>(event: K, handler: (...args: StreamEvents[K]) => unknown): Registration;
   pause(): void;
-  /** Undoes `pause()`. Idempotent. */
   resume(): void;
-  /** `true` after `pause()`, or while no `connection` handler listens. */
+  /** Consumes this object: a {@link PullTcpStream}. `Unsupported` once a `data` handler started the flow. */
+  toPulling(): PullTcpStream;
+}
+
+/** A listening socket that accepts nothing yet (`io.tcp.listen`). */
+export declare class TcpListenerUnshaped implements NetObject {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  pulling(): PullTcpListener;
+  evented(): EventTcpListener;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** A listener whose connections are awaited. */
+export declare class PullTcpListener implements NetObject {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  /** The next connection, unshaped. Rejects `Canceled` when the listener closes first. */
+  accept(): Promise<TcpStreamUnshaped>;
+  /** `for await (const stream of listener)`: the connections until the listener is closed. */
+  [Symbol.asyncIterator](): AsyncIterableIterator<TcpStreamUnshaped>;
+  /** Releases the listener; pending accepts reject `Canceled`. Resolves once the port is free. */
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** A listener that emits `connection` events. */
+export declare class EventTcpListener implements NetObject {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
   readonly paused: boolean;
-  /** Hands the listener to a new `PullServer` and consumes this handle. Throws `Unsupported` once a `connection` handler started accepting. */
-  toPull(): PullServer<S>;
+  register<K extends keyof ListenerEvents>(event: K, handler: (...args: ListenerEvents[K]) => unknown): Registration;
+  pause(): void;
+  resume(): void;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
-/** A server of read mode `M` handing out sockets of mode `S`. */
-export type Server<M extends Mode = Mode, S extends Mode = Mode> = M extends "pull"
-  ? PullServer<S>
-  : M extends "event"
-    ? EventServer<S>
-    : never;
-
-/** Options shared by `listen` and `connect`. The address must be allowed by the embedder's network ceiling (loopback only by default): any other host, a name included, is `PermissionDenied`. */
-export interface AddressOptions {
-  /** `127.0.0.1`, `::1`, another loopback IP literal (used as given) or `localhost` (never resolved; `connect` tries 127.0.0.1 then ::1, `listen` binds 127.0.0.1). Default `'127.0.0.1'`. */
-  readonly host?: string;
-  /** The send queue of every socket made through this call. */
-  readonly queued?: {
-    /** Its initial `queued.limit`: a positive integer. Default 1 MiB. */
-    readonly limit?: number;
-  };
+/** A bound datagram socket that receives nothing yet (`io.udp.bind`). */
+export declare class UdpSocketUnshaped implements NetObject {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  pulling(): PullUdpSocket;
+  evented(): EventUdpSocket;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
-/** Options of {@link NetCap.listen}. */
-export interface ListenOptions<M extends Mode = Mode, S extends Mode = Mode> extends AddressOptions {
-  /** The read mode of the server: `'pull'` for `accept()`, `'event'` for `register('connection')`. Required. */
-  readonly mode: M;
-  /** The read mode of the sockets it accepts. Required. */
-  readonly socketMode: S;
-  /** The port to listen on, 0 to 65535; `0` (the default) asks the system for one, see `server.port`. */
-  readonly port?: number;
+/** What both datagram shapes send with. */
+export interface UdpBase extends NetObject {
+  /** The connected peer (`NotConnected` before `connect`). */
+  readonly peerAddr: SocketAddr;
+  /** One datagram to `addr` (checked against the `connect` rules), or without it to the connected peer (`NotConnected` if none). Resolves the bytes sent. */
+  sendTo(data: BytesLike, addr?: SocketAddr): Promise<number>;
+  /** Sends to `addr` by default and receives only its datagrams (`connect` rules). */
+  connect(addr: SocketAddr): void;
 }
 
-/** Options of {@link NetCap.connect}. */
-export interface ConnectOptions<M extends Mode = Mode> extends AddressOptions {
-  /** The read mode of the socket. Required. */
-  readonly mode: M;
-  /** The port to connect to, 0 to 65535. Required (`TypeError` without it). */
-  readonly port: number;
+/** A datagram socket read with promises. */
+export declare class PullUdpSocket implements UdpBase {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  readonly peerAddr: SocketAddr;
+  sendTo(data: BytesLike, addr?: SocketAddr): Promise<number>;
+  connect(addr: SocketAddr): void;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+  /** The next datagram: its first `length` bytes (1 to 65535; the rest is dropped) and its source. */
+  recvFrom(length: number): Promise<{ readonly data: Uint8Array; readonly addr: SocketAddr }>;
 }
 
-/** A frozen class value of `api.net`: handles cannot be constructed by guests (`TypeError`), but `instanceof` works. */
-export interface HandleClass<T> extends Function {
+/** A datagram socket that emits `datagram` events. */
+export declare class EventUdpSocket implements UdpBase {
+  private constructor();
+  readonly closed: boolean;
+  readonly localAddr: SocketAddr;
+  readonly peerAddr: SocketAddr;
+  readonly paused: boolean;
+  sendTo(data: BytesLike, addr?: SocketAddr): Promise<number>;
+  connect(addr: SocketAddr): void;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+  register<K extends keyof DatagramEvents>(event: K, handler: (...args: DatagramEvents[K]) => unknown): Registration;
+  pause(): void;
+  resume(): void;
+}
+
+/** A frozen class value of `api.net`: for `instanceof`; constructing one is a `TypeError`. */
+export interface NetClass<T> extends Function {
   readonly prototype: T;
 }
 
 /**
- * `api.net`: TCP on an {@link Io} runtime. Only addresses the embedder's network ceiling allows (loopback by default). Every
- * socket belongs to the runtime it was created with; closing the runtime invalidates it.
+ * `api.net`: the classes of the network objects, for `instanceof`. Making them is `io.tcp` / `io.udp`'s job: there
+ * is one implementation and this is its facade.
  */
 export interface NetCap {
-  readonly Handle: HandleClass<Handle>;
-  readonly Server: HandleClass<ServerBase>;
-  readonly PullServer: HandleClass<PullServer>;
-  readonly EventServer: HandleClass<EventServer>;
-  readonly Socket: HandleClass<SocketBase>;
-  readonly PullSocket: HandleClass<PullSocket>;
-  readonly EventSocket: HandleClass<EventSocket>;
-  /**
-   * Binds and listens, **synchronously**. The class of the result follows `mode` (a literal), and
-   * `socketMode` types the sockets it hands out. Throws an {@link IoError} (`AddressInUse`,
-   * `PermissionDenied`) or a {@link HostError} (`BadHandle` for a closed `io`) or a `TypeError` for a missing or unknown `mode`/`socketMode`.
-   */
-  listen<M extends Mode, S extends Mode>(io: Io, options: ListenOptions<M, S>): Server<M, S>;
-  /**
-   * Connects to a loopback listener. The class of the result follows `mode`. Never blocks: the
-   * socket is created non-blocking and the loop finishes the handshake. Rejects an {@link IoError}
-   * (`ConnectionRefused`, ...) or a {@link HostError} (`BadHandle`, `Canceled`) or a `TypeError` for missing `port` or `mode`.
-   */
-  connect<M extends Mode>(io: Io, options: ConnectOptions<M>): Promise<Socket<M>>;
+  readonly TcpStreamUnshaped: typeof TcpStreamUnshaped;
+  readonly PullTcpStream: typeof PullTcpStream;
+  readonly EventTcpStream: typeof EventTcpStream;
+  readonly TcpListenerUnshaped: typeof TcpListenerUnshaped;
+  readonly PullTcpListener: typeof PullTcpListener;
+  readonly EventTcpListener: typeof EventTcpListener;
+  readonly UdpSocketUnshaped: typeof UdpSocketUnshaped;
+  readonly PullUdpSocket: typeof PullUdpSocket;
+  readonly EventUdpSocket: typeof EventUdpSocket;
+  readonly SendQueue: typeof SendQueue;
+  readonly Direct: typeof Direct;
+  readonly DataEvent: NetClass<DataEvent>;
+  readonly DatagramEvent: NetClass<DatagramEvent>;
+  readonly Registration: NetClass<Registration>;
+  readonly Lease: NetClass<Lease>;
 }

@@ -10,7 +10,7 @@
 // whenever they are writable, so a write-only grant ('w') is enforced by the grant itself: it denies
 // everything that observes what exists (reads, stat, directory listings, opening read-only).
 import { Data, FileHandle, DirHandle, FsGrant, issuerOf } from './handles.js';
-import { failure, own, joinPath, ioHandles, closedIo, shared, freeze, errors, settled, settling, seal } from './util.js';
+import { failure, own, joinPath, shared, freeze, errors, settled, settling, seal } from './util.js';
 import { bindDetail } from './errors.js';
 const { InvalidInput, BadHandle, PermissionDenied } = errors;
 class Stat extends Data {}
@@ -312,20 +312,25 @@ export default (native, { errno, detail, takeError }) => {
       // PermissionDenied (not granted), InvalidInput, or the native's failure.
       requestAsync(hint) {
         const io = own(hint, 'io');
-        if (io === undefined || io === null || typeof io !== 'object' || !ioHandles.has(io) || closedIo.has(io))
+        // A live `Io` of this realm (`api.io.create`): the runtime the grant runs its operations on.
+        let runtime;
+        try {
+          runtime = shared.ioRuntime(io);
+        } catch {
           return Promise.reject(failure(BadHandle));
+        }
         const grant = grantOf(spec, hint);
         if (typeof grant === 'number') return Promise.reject(failure(grant));
         if (!spec.async || native.fsAsync === undefined) return Promise.reject(failure(PermissionDenied));
         // `io.close()` tells the host, which then refuses the grants opened on that io as an authority.
-        shared.asyncFsClosed ??= handle => native.fsAsyncClosed(handle.id);
+        shared.asyncFsClosed ??= closed => native.fsAsyncClosed(closed);
         // A graph made before the first async grant could not get the natives that read through one.
         shared.graphAsyncOps?.();
         // The host opens the grant on the Rust runtime and builds the grant object from its answer.
         return settled(
           native.fsRequestAsync(
             native.fsAsync.request,
-            io.id,
+            runtime,
             grant.root === undefined || grant.root === '' ? '.' : grant.root,
             grant.access,
           ),

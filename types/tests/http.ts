@@ -1,4 +1,5 @@
 // Positive cases and `@ts-expect-error` negatives for api.http. Type-checked only, never run.
+import { SocketAddr } from 'origine:@std/net';
 import type {
   Api,
   ClientPool,
@@ -13,8 +14,8 @@ import type {
 export async function main(api: Api): Promise<void> {
   const io = api.io.create();
   const limits = { streams: 100, headers: 16384, window: 65535, connection: 1 << 20, batch: 4096 };
-  const listener = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
-  const plain = await api.net.connect(io, { port: listener.port, mode: 'pull' });
+  const listener = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
+  const plain = await io.tcp.connect(listener.localAddr);
   const accepted = await listener.accept();
 
   const client: ClientSession<'pull'> = api.http.session(plain, { role: 'client', mode: 'pull', limits });

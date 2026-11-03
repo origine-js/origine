@@ -50,14 +50,14 @@ Version*) so the editor and `tsc` agree. Hover docs come from the JSDoc on every
 | `api.d.ts` | `Api`, `BasicApi`, `Main` |
 | `fs.d.ts` | `api.fs`: `FsCap`, `SyncFs`/`AsyncFs` grants and their raw operations, `Access` (`'r' \| 'w' \| 'rw'`, required) |
 | `io.d.ts` | `api.io`: `IoCap`, `Io` (runtime handle: `run`, `sleep`, `timer`, ...) |
-| `net.d.ts` | `api.net`: `Socket<'event'>`/`Socket<'pull'>`, `Server<M, S>`, `listen`/`connect` with required `mode`, `end(side)`, `queued`/`direct`, `toEvent()`/`toPull()` |
+| `net.d.ts` | the network classes `io.tcp` / `io.udp` make: `TcpStreamUnshaped` and its shapes `PullTcpStream` / `EventTcpStream`, the listeners, the UDP sockets, `end(side)`, `queued`/`direct`, `toEvented()`/`toPulling()`; `api.net` holds the classes |
 | `isolate.d.ts`, `host.d.ts`, `env.d.ts`, `graph.d.ts`, `context.d.ts` | `api.isolate`, `api.host` (`HostCap`), `api.host.env`, `api.graph` (`ModuleGraph`, `ModuleReference`), `api.context` (`Context`) |
 | `errors.d.ts` | `IoError` and `HostError`, the `OrigineError` subclasses thrown or rejected, one per error domain |
 | `generated/errno.d.ts` | **Generated** from `src/api/errno_codes.zig`: `IoErrnoTable`/`HostErrnoTable` (and their `*Name`, `*Code`), `ErrnoTable` |
 | `std/*.d.ts` | `declare module` for `origine:@std/errno`, `io`, `fs`, `text`, `debug`, `quansync`, `transformer/oxc`, `graph/*` |
 | `globals.d.ts`, `repl.d.ts` | the hardened context's globals; the REPL's global `api` (opt in) |
 
-Things the types cannot say (they are in the JSDoc): a handle consumed by `toEvent()`/`toPull()` is
+Things the types cannot say (they are in the JSDoc): an object consumed by `pulling()`/`evented()`/`toEvented()`/`toPulling()` is
 still typed usable (it throws `BadHandle` at run time); the sync grant operations report failure
 through `errno[0]` and return `undefined`, so `IoError.check(fs, value)` is the typed way to get the
 value; `Date` is declared in full (from TypeScript's lib), but the runtime keeps only `Date.now()`, so every other `Date` constructor and method throws or is missing at run time (`-Dtemporal` replaces it with Temporal); `Temporal` and `console` exist in the context but are not declared (TypeScript 5.9 has no

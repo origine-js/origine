@@ -21,7 +21,7 @@ use crate::http;
 use crate::native::{Needs, RawNative, SideEffect};
 #[cfg(feature = "tls")]
 use crate::tls;
-use crate::{channel, fs, io, net, sub};
+use crate::{channel, fs, io, net, stream, udp};
 
 /// Every native, in registration order.
 pub(crate) static NATIVES: &[RawNative] = &[
@@ -36,10 +36,12 @@ pub(crate) static NATIVES: &[RawNative] = &[
     channel::NATIVE_CHANNEL_SEND,
     channel::NATIVE_CHANNEL_RECV,
     io::NATIVE_IO_CREATE,
-    io::NATIVE_IO_CLOSE,
-    io::NATIVE_IO_SLEEP,
-    io::NATIVE_IO_CANCEL_TIMER,
-    io::NATIVE_IO_NOW,
+    io::NATIVE_IO_RUNTIME,
+    io::CLASS_IO,
+    io::CLASS_IO_TIMER,
+    io::CLASS_TIMER,
+    io::CLASS_IO_TCP,
+    io::CLASS_IO_UDP,
     fs::NATIVE_FS_ASYNC_REQUEST,
     fs::NATIVE_FS_ASYNC_OPEN_FILE,
     fs::NATIVE_FS_ASYNC_OPEN_DIR,
@@ -70,25 +72,24 @@ pub(crate) static NATIVES: &[RawNative] = &[
     fs::NATIVE_FS_ASYNC_FILE_PWRITE_MOVE_ALL,
     fs::NATIVE_FS_ASYNC_FILE_SET_LENGTH,
     fs::NATIVE_FS_ASYNC_FILE_SYNC,
-    net::NATIVE_NET_LISTEN,
-    net::NATIVE_NET_ACCEPT,
-    net::NATIVE_NET_CONNECT,
-    net::NATIVE_NET_READ,
-    net::NATIVE_NET_READ_COPY,
-    net::NATIVE_NET_READ_INTO,
-    net::NATIVE_NET_CLOSE,
-    sub::NATIVE_NET_SUBSCRIBE,
-    sub::NATIVE_NET_START,
-    sub::NATIVE_NET_PAUSE,
-    sub::NATIVE_NET_RESUME,
-    sub::NATIVE_NET_TAKE,
-    sub::NATIVE_NET_RELEASE,
-    sub::NATIVE_NET_DIRECT_WRITE,
-    sub::NATIVE_NET_PUT,
-    sub::NATIVE_NET_QUEUED,
-    sub::NATIVE_NET_FLUSHED,
-    sub::NATIVE_NET_END,
-    sub::NATIVE_IO_RUN,
+    net::NATIVE_NET_LINK,
+    stream::NATIVE_NET_TAKE,
+    stream::NATIVE_NET_RELEASE,
+    udp::NATIVE_NET_TAKE_DATAGRAM,
+    stream::CLASS_TCP_STREAM_UNSHAPED,
+    stream::CLASS_PULL_TCP_STREAM,
+    stream::CLASS_EVENT_TCP_STREAM,
+    stream::CLASS_SEND_QUEUE,
+    stream::CLASS_DIRECT,
+    stream::CLASS_DATA_EVENT,
+    stream::CLASS_REGISTRATION,
+    stream::CLASS_TCP_LISTENER_UNSHAPED,
+    stream::CLASS_PULL_TCP_LISTENER,
+    stream::CLASS_EVENT_TCP_LISTENER,
+    udp::CLASS_UDP_SOCKET_UNSHAPED,
+    udp::CLASS_PULL_UDP_SOCKET,
+    udp::CLASS_EVENT_UDP_SOCKET,
+    udp::CLASS_DATAGRAM_EVENT,
     #[cfg(feature = "tls")]
     tls::CLASS_ROOT_PKI,
     #[cfg(feature = "tls")]
@@ -106,11 +107,7 @@ pub(crate) static NATIVES: &[RawNative] = &[
     #[cfg(feature = "tls")]
     tls::NATIVE_TLS_SERVER,
     #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_CONNECT,
-    #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_ACCEPT,
-    #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_PEER,
+    tls::NATIVE_TLS_INFO,
     #[cfg(feature = "http")]
     http::NATIVE_HTTP_SESSION,
     #[cfg(feature = "http")]
@@ -253,6 +250,8 @@ mod tests {
             ("fs", include_str!("fs.rs")),
             ("net", include_str!("net.rs")),
             ("sub", include_str!("sub.rs")),
+            ("stream", include_str!("stream.rs")),
+            ("udp", include_str!("udp.rs")),
             ("channel", include_str!("channel.rs")),
             #[cfg(feature = "tls")]
             ("tls", include_str!("tls.rs")),

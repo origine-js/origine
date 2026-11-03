@@ -1,16 +1,17 @@
-import type { HostError, IoError } from "./errors.d.ts";
+import type { SocketAddr } from 'origine:@std/net';
+import type { TcpListenerUnshaped, TcpStreamUnshaped, UdpSocketUnshaped } from './net.d.ts';
 
 /**
  * An I/O backend that runs (`'uring'` on Linux, `'kqueue'` on macOS and BSD, `'threaded'` everywhere). It is what
  * {@link Io.backend} reports, never `'auto'`; see {@link BackendChoice} for what `create` accepts.
  */
-export type Backend = "uring" | "kqueue" | "threaded";
+export type Backend = 'uring' | 'kqueue' | 'threaded';
 
 /**
  * The backend {@link IoCap.create} is asked for: `'auto'` (the default) picks the first allowed one that works,
  * and the resolved {@link Backend} is what the runtime reports.
  */
-export type BackendChoice = Backend | "auto";
+export type BackendChoice = Backend | 'auto';
 
 /** Options of {@link IoCap.create}. */
 export interface IoOptions {
@@ -28,7 +29,7 @@ export interface IoNarrow {
   readonly maxRuntimes?: number;
 }
 
-/** A cancellable timer: {@link Io.timer}. */
+/** A cancellable timer: {@link IoTimer.timer}. A frozen instance of a native class. */
 export interface Timer {
   /** Resolves when the delay has passed; rejects with a HostError whose errno is Canceled when cancelled. */
   readonly promise: Promise<void>;
@@ -40,42 +41,65 @@ export interface Timer {
   cancel(): boolean;
 }
 
+/** `io.timer`: sleeps and cancellable timers on the runtime's monotonic clock. Every method throws `BadHandle` once the runtime is closed. */
+export interface IoTimer {
+  /** Monotonic milliseconds since the host was created, shared by its runtimes; not a wall clock. */
+  now(): number;
+  /** A cancellable sleep of `ms` milliseconds (a finite number from 0 to 2147483647, fractions allowed; `TypeError` otherwise). */
+  timer(ms: number): Timer;
+  /** A cancellable sleep until `deadline`, a value derived from {@link IoTimer.now}. A past deadline is a zero-delay sleep. */
+  timerAt(deadline: number): Timer;
+  /** Resolves after `ms` milliseconds; a zero delay never resolves synchronously. Rejects `Canceled` when the runtime closes first. */
+  sleep(ms: number): Promise<void>;
+  /** Resolves at `deadline`, a value derived from {@link IoTimer.now}. */
+  sleepUntil(deadline: number): Promise<void>;
+}
+
 /**
- * An async I/O runtime made by `api.io.create()`: the thing sockets, timers and async fs grants
- * run on. A frozen value, not transferable across scopes. Closing it cancels everything in
- * flight (`Canceled`) and invalidates the sockets made with it.
+ * `io.tcp`: TCP. Addresses are `SocketAddr`s of `origine:@std/net` (IP literals; nothing is resolved) and must be
+ * allowed by the embedder's network ceiling (`PermissionDenied` with the address as `subject` otherwise).
  */
-export interface Io {
-  readonly kind: "io";
-  /** Numeric id of the runtime (not authority: every native re-checks ownership). */
-  readonly id: number;
+export interface IoTcp {
+  /** Binds and listens, synchronously (`listen` rules; port 0 asks the system for one, see `localAddr`). Throws `AddressInUse`, `PermissionDenied`, `BadHandle`. */
+  listen(addr: SocketAddr): TcpListenerUnshaped;
+  /** Connects to one address (`connect` rules). Never blocks: the loop finishes the handshake. Rejects `ConnectionRefused`, `PermissionDenied`, `BadHandle`, `Canceled`. */
+  connect(addr: SocketAddr): Promise<TcpStreamUnshaped>;
+}
+
+/** `io.udp`: datagram sockets. */
+export interface IoUdp {
+  /** Binds a datagram socket, synchronously (`listen` rules; port 0 picks one). */
+  bind(addr: SocketAddr): UdpSocketUnshaped;
+}
+
+/**
+ * An async I/O runtime made by `api.io.create()`: what sockets, timers and async fs grants run on. A frozen
+ * instance of a class defined natively (`new` throws, members are brand-checked); no id reaches the program.
+ * Closing it cancels everything in flight (`Canceled`) and closes the sockets made with it; the objects stay and
+ * answer `BadHandle` (or `closed === true`).
+ */
+export interface Io extends AsyncDisposable {
   /** The backend that runs: what `'auto'` resolved to, never `'auto'`. */
   readonly backend: Backend;
+  /** `true` once `close()` was called. */
+  readonly closed: boolean;
+  readonly timer: IoTimer;
+  readonly tcp: IoTcp;
+  readonly udp: IoUdp;
   /**
-   * Closes the runtime, cancelling every pending operation and timer. Every call returns the
-   * same promise, which settles once the runtime is really closed. Rejects a {@link HostError}
-   * (`BadHandle`) for a runtime that is not this scope's.
+   * Closes the runtime, cancelling every pending operation and timer and closing every socket made on it. Every
+   * call returns the same promise, which settles once the runtime is really closed.
    */
   close(): Promise<void>;
   /** The same as `close()`: `await using io = api.io.create()` closes the runtime at scope exit. */
   [Symbol.asyncDispose](): Promise<void>;
   /**
-   * Resolves once every socket or server of this runtime that started flowing (an event handler
-   * for `data` or `connection` was registered) has closed, immediately when there is none. Keeps
+   * Resolves once every object of this runtime that started flowing (an event handler for `data`,
+   * `connection` or `datagram` was registered) has closed, immediately when there is none. Keeps
    * the program alive while pending: `await io.run()` is how event-style programs wait. Rejects
    * `BadHandle` once the runtime is closed.
    */
   run(): Promise<void>;
-  /** Monotonic milliseconds since the host was created, shared by its runtimes; not a wall clock. Throws `BadHandle` once closed. */
-  now(): number;
-  /** A cancellable sleep of `ms` milliseconds (a finite number from 0 to 2147483647, fractions allowed; `TypeError` otherwise). */
-  timer(ms: number): Timer;
-  /** A cancellable sleep until `deadline`, a value derived from {@link Io.now}. A past deadline is a zero-delay sleep. */
-  timerAt(deadline: number): Timer;
-  /** Resolves after `ms` milliseconds; a zero delay never resolves synchronously. Rejects a {@link HostError} (`Canceled` when the runtime closes first, `BadHandle`). */
-  sleep(ms: number): Promise<void>;
-  /** Resolves at `deadline`, a value derived from {@link Io.now}. */
-  sleepUntil(deadline: number): Promise<void>;
 }
 
 /**

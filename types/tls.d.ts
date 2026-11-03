@@ -1,5 +1,4 @@
-import type { EventSocket, Mode, PullSocket, Socket } from './net.d.ts';
-import type { BytesLike } from './net.d.ts';
+import type { NativeStream, TcpStreamUnshaped } from './net.d.ts';
 
 /**
  * The authorities a peer is checked against. Built by a named constructor, which parses and validates:
@@ -63,7 +62,7 @@ export interface TlsServerOptions {
   alpn?: string[];
 }
 
-/** What the handshake of a socket made by {@link TlsClient.connect} / {@link TlsServer.accept} settled. */
+/** What the handshake of a stream made by {@link TlsClient.connect} / {@link TlsServer.accept} settled. */
 export interface TlsInfo {
   /** The negotiated ALPN protocol, or `undefined`. */
   readonly alpn: string | undefined;
@@ -76,32 +75,31 @@ export interface TlsInfo {
   readonly peer: Uint8Array[];
 }
 
-export interface TlsConnectOptions<M extends Mode = Mode> {
-  /** The name the certificate must be valid for (and the SNI sent). */
+export interface TlsConnectOptions {
+  /** The name the certificate must be valid for (and the SNI sent). A non-empty string. */
   servername: string;
-  /** The read mode of the socket the handshake makes. */
-  mode: M;
-  /** As for `api.net.connect`. */
-  queued?: { limit?: number };
 }
 
 /** An immutable client configuration. Rejects `CertificateRejected` (reason in `subject`), `TlsAlert`, `NoApplicationProtocol`, `ProtocolError`, `UnexpectedEof`. */
 export declare class TlsClient {
   private constructor();
   /**
-   * Handshakes over `socket`, which is consumed (a refused call leaves it usable; a failed handshake closes it), and
-   * resolves a new socket of the requested mode whose bytes are plaintext. Reads that hit a connection cut without
-   * `close_notify` fail `UnexpectedEof`; `end('write')` sends `close_notify` then the FIN. `queued.send` is the write
-   * path (`direct.write` always takes 0 bytes: there is no kernel lane under TLS).
+   * Handshakes over `stream`, a native stream nothing is using (no read pending, nothing queued, no handler, no
+   * side ended; `WouldBlock` / `Unsupported` otherwise), which is consumed (a refused call leaves it usable; a failed
+   * handshake closes it). The handshake runs natively, without entering JS, and resolves a new
+   * {@link TcpStreamUnshaped} whose bytes are plaintext: shape it with `pulling()` or `evented()`. Reads that hit a
+   * connection cut without `close_notify` fail `UnexpectedEof`; `end('write')` sends `close_notify` then the FIN.
+   * `queued.send` is the write path (`direct.write` always takes 0 bytes: there is no kernel lane under TLS).
    */
-  connect<M extends Mode>(socket: PullSocket, options: TlsConnectOptions<M>): Promise<Socket<M>>;
+  connect(stream: NativeStream, options: TlsConnectOptions): Promise<TcpStreamUnshaped>;
   release(): void;
 }
 
 /** An immutable server configuration. */
 export declare class TlsServer {
   private constructor();
-  accept<M extends Mode>(socket: PullSocket, options: { mode: M; queued?: { limit?: number } }): Promise<Socket<M>>;
+  /** Handshakes over `stream` (consumed) as the server; see {@link TlsClient.connect}. */
+  accept(stream: NativeStream): Promise<TcpStreamUnshaped>;
   release(): void;
 }
 
@@ -113,8 +111,8 @@ export interface TlsCap {
   readonly TlsSessions: typeof TlsSessions;
   readonly TlsClient: typeof TlsClient;
   readonly TlsServer: typeof TlsServer;
-  /** What the handshake of `socket` settled; `BadHandle` for a socket not made by `connect` / `accept`. */
-  info(socket: PullSocket | EventSocket): TlsInfo;
+  /** What the handshake of `stream` settled (any shape of a stream made by `connect` / `accept`); `BadHandle` for a plain or closed one. */
+  info(stream: NativeStream): TlsInfo;
   client(options: TlsClientOptions): TlsClient;
   server(options: TlsServerOptions): TlsServer;
 }

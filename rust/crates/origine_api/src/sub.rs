@@ -1,53 +1,34 @@
-//! Event-style sockets: `native.net.subscribe/start/pause/resume/take/release`, the write lanes
-//! (`directWrite`, `put`, `queued`, `flushed`, `end`) and `native.io.run`.
-//!
-//! A socket is *subscribed* with one JS dispatcher function. Rust never sees the guest's
-//! handlers: the glue keeps the table and registers a single `dispatch(kind, a, b)` function, and
-//! the host calls it once per event with small integers. No promise, resolver or `Global` is
-//! created per message.
+//! The event side of a conn: `register(event, handler)`, `pause`/`resume`, the pumps that feed it and the delivery
+//! of its events on the isolate thread.
 //!
 //! # Flow
-//! * `resume` spawns a **pump** task per stream (or listener): it re-arms `recv` (`accept`) after
-//!   every completion into a recycled native buffer and queues an [`Event`] on the host-wide
-//!   queue. The task never touches V8. It stops re-arming while [`MAX_QUEUED`] events are
-//!   undelivered, so a slow handler backpressures the peer through TCP.
-//! * [`crate::host::poll`] drains the queue on the isolate thread (`deliver`): it calls the
-//!   dispatcher inside the socket's context and runs a microtask checkpoint after each event.
-//! * The pump receives straight into **slabs**: [`SLAB`]-byte V8 backing stores (allocated by the
-//!   isolate's `ArrayBuffer` allocator, so inside the V8 sandbox when there is one) that no guest
-//!   object wraps while the loop owns a window of it. Each receive gets the next [`CHUNK`] bytes
-//!   of the current slab and keeps only the bytes that arrived, so small reads pack tightly.
-//!   `take` carves exactly those bytes out of the slab ([`pinned::carve`]) into a new
-//!   `ArrayBuffer` (a *lease*): `byteLength` is the chunk length, no other byte of the slab is
-//!   reachable through it and nothing is copied. The carved store holds a reference on its slab, so
-//!   the slab goes back to the allocator when its last lease is gone. `release` detaches the
-//!   `ArrayBuffer` (a retained view becomes empty) which drops that reference at once; a lease that
-//!   is never released is dropped by the garbage collector. Slabs are allocated on the isolate
-//!   thread ([`refill`]) because only it can allocate stores; the pump waits when none is ready.
-//! * Writes have two lanes that share one order. `directWrite` is a plain non-blocking
-//!   `write(2)` on the isolate thread: no copy, no buffer, it answers the bytes the kernel took and
-//!   answers 0 while the outbox is busy (the queue has priority). `put` tries the kernel first when
-//!   the outbox is idle, then copies what is left (at most `max` bytes) into the outbox, which a
-//!   writer task flushes in order. `flushed` is a promise for "everything accepted so far reached
-//!   the kernel"; the glue builds `queued.send` on it. A `Drain` event follows every time the
-//!   outbox becomes empty.
-//! * `pause` parks the socket's read-side events (in order) instead of dispatching them; `resume`
-//!   puts them back in front of the host queue. The pump keeps its [`MAX_QUEUED`] bound, so a paused
-//!   socket holds at most that many chunks and then stops reading. The write side is not paused:
-//!   `Drain` and `Failed` are always dispatched, because sends wait on them. See [`Pause`].
+//! * The handlers are held natively: a conn that is `register`ed gets a [`Hub`] in the Host (its handlers as
+//!   `Global<Function>`s, its context and its reused `DataEvent`), keyed by an internal id that never reaches JS.
+//! * The first handler of the event that makes the conn flow (`data`, `connection`, `datagram`) spawns a **pump**
+//!   task: it re-arms `recv` (`accept`) after every completion and queues an [`Event`] on the host-wide queue. The
+//!   task never touches V8. It stops re-arming while [`MAX_QUEUED`] events are undelivered, so a slow handler
+//!   backpressures the peer through TCP.
+//! * [`crate::host::poll`] drains the queue on the isolate thread ([`deliver`]): it calls the handlers inside the
+//!   hub's context and runs a microtask checkpoint after each event. A handler that throws goes to the `error`
+//!   handlers; with none (or when one of them throws) it becomes an unhandled rejection.
+//! * A stream's pump receives straight into **slabs**: [`SLAB`]-byte V8 backing stores (allocated by the isolate's
+//!   `ArrayBuffer` allocator, so inside the V8 sandbox when there is one) that no guest object wraps while the loop
+//!   owns a window of it. Each receive gets the next [`CHUNK`] bytes of the current slab and keeps only the bytes
+//!   that arrived. `DataEvent.buffer()` carves exactly those bytes out of the slab ([`pinned::carve`]) into a new
+//!   `ArrayBuffer` (a *lease*); nothing is copied, and the slab goes back to the allocator with its last lease.
+//! * `pause` parks the conn's read-side events (in order) instead of dispatching them; `resume` puts them back in
+//!   front of the queue. The pump keeps its bound, so a paused conn holds at most that many chunks. The write side
+//!   is not paused: `drain` is always dispatched. See [`Pause`].
 //!
 //! # Lifetime
-//! Subscriptions never keep the host alive by themselves: the pump task and its in-flight
-//! `recv`/`accept` are excluded from [`crate::HostState::live_items`] (the [`Idle`] counters).
-//! `native.io.run(io)` is a task that resolves once every resumed subscription of the runtime has
-//! delivered its `Close` event, so `await io.run()` keeps the program alive. Writer tasks and
-//! undelivered events count as live work. Closing the runtime drops the subscriptions without
-//! calling their handlers.
+//! Hubs never keep the host alive by themselves: the pump task and its in-flight `recv`/`accept` are excluded
+//! from [`crate::HostState::live_items`] (the [`Idle`] counters). `io.run()` resolves once every flowing conn of
+//! the runtime has delivered its `close` event. Closing the runtime drops the hubs without calling their handlers.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::future::{Future, poll_fn};
-use std::net::TcpStream;
+use std::future::poll_fn;
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
@@ -56,13 +37,12 @@ use origine_api_core::{NativeError, errno};
 use origine_io::Loop;
 use origine_io::rt::AbortHandle;
 
-use crate::HostState;
-use crate::decode::ArrayBufferArg;
+use crate::conn::{Conn, Kind};
 use crate::host::Task;
-use crate::native;
-use crate::native::{ScopeKey, host_mut, host_ref};
-use crate::net::{ADDR_CAP, Socket, prepare, stream_of};
-use crate::pinned;
+use crate::io::IoCore;
+use crate::native::host_mut;
+use crate::net::{ADDR_CAP, PEEK, SockAddr, Socket, prepare};
+use crate::{HostState, IntoJs, class, pinned};
 
 /// Bytes offered to one receive (the most a `data` event carries).
 pub(crate) const CHUNK: usize = 16 * 1024;
@@ -70,26 +50,62 @@ pub(crate) const CHUNK: usize = 16 * 1024;
 const SLAB: usize = 4 * CHUNK;
 /// Chunks start at multiples of this inside a slab.
 const ALIGN: usize = 8;
-/// Undelivered data/connection events after which a pump stops re-arming.
+/// Undelivered data/connection/datagram events after which a pump stops re-arming.
 const MAX_QUEUED: usize = 8;
-/// Fresh slabs a socket keeps ready.
+/// Fresh slabs a stream keeps ready.
 const SLAB_TARGET: usize = 2;
+/// The largest datagram received.
+const DATAGRAM: usize = 65535;
 
-/// `dispatch(kind, a, b)` kinds; `glue/net/core.js` uses the same numbers.
-const KIND_DATA: u32 = 0;
-const KIND_END: u32 = 1;
-const KIND_ERROR: u32 = 2;
-const KIND_DRAIN: u32 = 3;
-const KIND_CONNECTION: u32 = 4;
-const KIND_CLOSE: u32 = 5;
-const KIND_FAILED: u32 = 6;
+/// The events a guest registers for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Ev {
+    Data,
+    End,
+    Error,
+    Drain,
+    Close,
+    Connection,
+    Datagram,
+}
 
-/// What a subscription holds back.
-#[derive(Clone, Copy, PartialEq)]
+impl Ev {
+    /// `name` as an event of a conn of `kind`.
+    fn of(kind: Kind, name: &str) -> Option<Ev> {
+        let ev = match name {
+            "data" => Ev::Data,
+            "end" => Ev::End,
+            "error" => Ev::Error,
+            "drain" => Ev::Drain,
+            "close" => Ev::Close,
+            "connection" => Ev::Connection,
+            "datagram" => Ev::Datagram,
+            _ => return None,
+        };
+        let allowed = match kind {
+            Kind::Stream => matches!(ev, Ev::Data | Ev::End | Ev::Error | Ev::Drain | Ev::Close),
+            Kind::Listener => matches!(ev, Ev::Connection | Ev::Error | Ev::Close),
+            Kind::Datagram => matches!(ev, Ev::Datagram | Ev::Error | Ev::Close),
+        };
+        allowed.then_some(ev)
+    }
+
+    /// The event whose handlers make a conn of `kind` flow.
+    fn flows(kind: Kind) -> Ev {
+        match kind {
+            Kind::Stream => Ev::Data,
+            Kind::Listener => Ev::Connection,
+            Kind::Datagram => Ev::Datagram,
+        }
+    }
+}
+
+/// What a hub holds back.
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Pause {
     None,
-    /// No handler wants the data (the glue's `autoPaused`): chunks and connections wait for one, and
-    /// an `End` waits behind them; anything else has nothing to wait for and is dispatched.
+    /// No handler wants the data: chunks, connections and datagrams wait for one, and an `End` waits behind them;
+    /// anything else has nothing to wait for and is dispatched.
     NoHandler,
     /// The guest called `pause`: everything of the read side, in order.
     Explicit,
@@ -99,8 +115,8 @@ impl Pause {
     /// Whether `kind` is held back, given whether events already are.
     fn parks(self, kind: &EventKind, parked: bool) -> bool {
         match kind {
-            EventKind::Drain | EventKind::Failed(_) => false,
-            EventKind::Data { .. } | EventKind::Accept { .. } => self != Pause::None,
+            EventKind::Drain => false,
+            EventKind::Data { .. } | EventKind::Accept { .. } | EventKind::Datagram { .. } => self != Pause::None,
             EventKind::End => self == Pause::Explicit || (self == Pause::NoHandler && parked),
             EventKind::Error(_) | EventKind::Closed => self == Pause::Explicit,
         }
@@ -116,22 +132,23 @@ pub(crate) enum EventKind {
     },
     End,
     Error(u32),
-    /// The write side failed with this errno, ahead of the `Error` and `Closed` that a pause holds back.
-    Failed(u32),
     Drain,
     Accept {
         stream: TcpStream,
-        port: u32,
+    },
+    Datagram {
+        data: Vec<u8>,
+        from: SocketAddr,
     },
     Closed,
 }
 
 pub(crate) struct Event {
-    socket: u32,
+    hub: u32,
     kind: EventKind,
 }
 
-/// All sockets' events, in the order they happened.
+/// All hubs' events, in the order they happened.
 pub(crate) type Events = Rc<RefCell<VecDeque<Event>>>;
 
 /// A one-waiter wake-up cell.
@@ -153,7 +170,7 @@ impl Signal {
 /// Per-runtime counters: what keeps the runtime "busy" and what only listens.
 #[derive(Default)]
 pub(crate) struct Idle {
-    /// Resumed subscriptions that have not delivered `Close` yet (what `io.run` waits for).
+    /// Flowing hubs that have not delivered `close` yet (what `io.run` waits for).
     live: Cell<usize>,
     /// The pending `io.run` calls.
     waiters: RefCell<Vec<Waker>>,
@@ -161,6 +178,30 @@ pub(crate) struct Idle {
     pub(crate) pumps: Cell<usize>,
     /// Pump ops in flight (excluded from the host's live count).
     pub(crate) recving: Cell<usize>,
+}
+
+impl Idle {
+    /// Resolves once no flowing hub is left.
+    pub(crate) async fn run(self: Rc<Idle>) -> Result<(), NativeError> {
+        poll_fn(move |cx| {
+            if self.live.get() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let mut waiters = self.waiters.borrow_mut();
+            if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                waiters.push(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    fn finished(&self) {
+        self.live.set(self.live.get() - 1);
+        for waker in self.waiters.borrow_mut().drain(..) {
+            waker.wake();
+        }
+    }
 }
 
 /// Increments a counter for as long as it lives.
@@ -179,97 +220,69 @@ impl Drop for Count<'_> {
     }
 }
 
+/// The event side of a conn that lives with the conn (no V8 in it).
 #[derive(Default)]
-struct Outbox {
-    queue: VecDeque<Vec<u8>>,
-    /// Bytes in `queue`.
-    bytes: usize,
-    /// A writer task owns the queue.
-    writing: bool,
-    /// Bytes ever accepted (kernel or queue) and bytes that reached the kernel; `flushed` waits
-    /// for `sent >= accepted`.
-    accepted: u64,
-    sent: u64,
-    /// `end` was called: no more writes; FIN goes out once the queue is empty.
-    ended: bool,
-    /// The outbox failed (write error, peer gone, socket closed): the errno pending writes get.
-    failed: Option<u32>,
-    /// Pending `flushed` promises.
-    waiters: Vec<Waker>,
-}
-
-impl Outbox {
-    fn wake(&mut self) {
-        for waker in self.waiters.drain(..) {
-            waker.wake();
-        }
-    }
-}
-
-/// State shared between a subscription (host side) and its tasks.
-pub(crate) struct Shared {
-    socket: u32,
-    events: Events,
-    idle: Rc<Idle>,
+pub(crate) struct Flow {
+    /// The hub, once something was registered.
+    pub(crate) hub: Cell<Option<u32>>,
+    /// The pump was started.
+    pub(crate) started: Cell<bool>,
+    /// The pump counts in `Idle::live` until `close` is delivered.
+    counted: Cell<bool>,
+    /// Handlers of the flowing event, and why the conn is paused.
+    flowing: Cell<usize>,
+    user_paused: Cell<bool>,
+    auto_paused: Cell<bool>,
     /// Fresh slabs the pump may receive into (topped up by [`refill`]).
     slabs: RefCell<Vec<v8::SharedRef<v8::BackingStore>>>,
     /// The pump waits here for a slab.
     need: Signal,
-    /// Sockets whose slabs ran out; the host refills them (shared with `HostState`).
-    refill: Rc<RefCell<Vec<u32>>>,
+    /// Undelivered data/connection/datagram events, and where the pump waits for room.
     queued: Cell<usize>,
     space: Signal,
-    out: RefCell<Outbox>,
-    stop: Cell<bool>,
-    closed: Cell<bool>,
-    aborts: RefCell<Vec<AbortHandle>>,
+    stopped: Cell<bool>,
+    /// The guest closed the conn: a pause no longer holds its events back (its `close` goes through).
+    pub(crate) released: Cell<bool>,
+    /// The tasks of the conn (pumps, the writer), aborted when it closes.
+    pub(crate) aborts: RefCell<Vec<AbortHandle>>,
 }
 
-impl Shared {
-    fn push(&self, kind: EventKind) {
-        if matches!(kind, EventKind::Data { .. } | EventKind::Accept { .. }) {
+impl Flow {
+    pub(crate) fn push(&self, io: &IoCore, hub: u32, kind: EventKind) {
+        if matches!(kind, EventKind::Data { .. } | EventKind::Accept { .. } | EventKind::Datagram { .. }) {
             self.queued.set(self.queued.get() + 1);
         }
-        self.events.borrow_mut().push_back(Event { socket: self.socket, kind });
+        io.events.borrow_mut().push_back(Event { hub, kind });
     }
 
-    /// Fails the outbox once: drops the queue and rejects every pending `flushed` with `code`.
-    fn fail_out(&self, code: u32) {
-        let mut out = self.out.borrow_mut();
-        if out.failed.is_none() {
-            out.failed = Some(code);
-            out.queue.clear();
-            out.bytes = 0;
-            out.wake();
-        }
-    }
-
-    /// Queues the final event once.
-    fn push_closed(&self) {
-        self.fail_out(errno::CANCELED);
-        if !self.closed.replace(true) {
-            self.push(EventKind::Closed);
-        }
-    }
-
-    /// Stops the tasks and queues `Close` (the guest closed the socket).
-    pub(crate) fn close(&self) {
-        self.stop.set(true);
+    /// Stops the tasks (the conn closed).
+    pub(crate) fn stop(&self) {
+        self.stopped.set(true);
         let aborts = std::mem::take(&mut *self.aborts.borrow_mut());
         for handle in aborts {
             handle.abort();
         }
         self.space.wake();
-        self.push_closed();
+        self.need.wake();
     }
 
-    fn fail(&self, code: u32) {
-        self.fail_out(code);
-        if !self.closed.get() {
-            self.push(EventKind::Failed(code));
-        }
-        self.push(EventKind::Error(code));
-        self.push_closed();
+    /// Whether the conn holds its events back: after `pause()`, or while no handler of the flowing event listens.
+    pub(crate) fn paused(&self) -> bool {
+        self.user_paused.get() || self.flowing.get() == 0
+    }
+
+    /// Waits while the queue is full; false once the conn stopped.
+    async fn room(&self) -> bool {
+        poll_fn(|cx| {
+            if self.queued.get() < MAX_QUEUED || self.stopped.get() {
+                Poll::Ready(())
+            } else {
+                self.space.set(cx);
+                Poll::Pending
+            }
+        })
+        .await;
+        !self.stopped.get()
     }
 }
 
@@ -278,77 +291,248 @@ struct Current {
     slab: v8::SharedRef<v8::BackingStore>,
     offset: usize,
     n: usize,
-    /// `take` carved the chunk into a lease.
-    taken: bool,
+    /// The lease `DataEvent.buffer()` carved, the same for every call of one event.
+    lease: Option<v8::Global<v8::ArrayBuffer>>,
 }
 
-/// A subscribed socket.
-pub(crate) struct Sub {
-    dispatch: v8::Global<v8::Function>,
+struct Handler {
+    ev: Ev,
+    entry: u64,
+    function: v8::Global<v8::Function>,
+}
+
+/// The V8 side of a conn's events: kept in the Host (`HostState::hubs`), dropped when its `close` is delivered or
+/// its runtime closes.
+pub(crate) struct Hub {
+    conn: Rc<Conn>,
     context: v8::Global<v8::Context>,
-    shared: Rc<Shared>,
-    pub(crate) runtime: u32,
-    owner: ScopeKey,
-    /// Counted in `Idle::live`.
-    counted: bool,
-    started: bool,
-    current: Option<Current>,
-    /// What `pause` holds back; those events wait in `parked`.
-    pause: Pause,
+    /// The `DataEvent` of a stream, reused for every chunk.
+    data_event: Option<v8::Global<v8::Object>>,
+    handlers: Vec<Handler>,
+    next_entry: u64,
+    /// The pause the hub applies, and the events it holds back.
+    applied: Pause,
     parked: VecDeque<Event>,
+    current: Option<Current>,
 }
 
-impl HostState {
-    /// Marks the subscription of `id` (if any) closed by the guest.
-    pub(crate) fn sub_closed(&mut self, id: u32) {
-        if let Some(sub) = self.subs.get(&id) {
-            sub.shared.close();
+impl Hub {
+    /// Puts back in front of the queue, in order, the parked events the pause no longer holds back.
+    fn release(&mut self) {
+        let stopped = self.conn.flow.released.get();
+        let mut freed = Vec::new();
+        for event in std::mem::take(&mut self.parked) {
+            if !stopped && self.applied.parks(&event.kind, !self.parked.is_empty()) {
+                self.parked.push_back(event);
+            } else {
+                freed.push(event);
+            }
         }
+        let mut events = self.conn.io.events.borrow_mut();
+        while let Some(event) = freed.pop() {
+            events.push_front(event);
+        }
+    }
+
+    pub(crate) fn runtime(&self) -> u32 {
+        self.conn.io.runtime
     }
 }
 
-async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
-    let idle = Rc::clone(&shared.idle);
+impl HostState {
+    /// The hub of `conn`, made on first use.
+    fn hub_of(&mut self, scope_parts: Option<(v8::Global<v8::Context>, Option<v8::Global<v8::Object>>)>, conn: &Rc<Conn>) -> Option<u32> {
+        if let Some(id) = conn.flow.hub.get() {
+            return Some(id);
+        }
+        let (context, data_event) = scope_parts?;
+        let id = self.next_hub;
+        self.next_hub = self.next_hub.checked_add(1)?;
+        self.hubs.insert(
+            id,
+            Hub {
+                conn: Rc::clone(conn),
+                context,
+                data_event,
+                handlers: Vec::new(),
+                next_entry: 0,
+                applied: Pause::None,
+                parked: VecDeque::new(),
+                current: None,
+            },
+        );
+        conn.flow.hub.set(Some(id));
+        Some(id)
+    }
+
+    fn spawn_pump(&self, conn: &Conn, task: Task) -> Result<(), NativeError> {
+        let handle = self.spawn_detached(conn.io.runtime, task)?;
+        conn.flow.aborts.borrow_mut().push(handle);
+        Ok(())
+    }
+}
+
+/// Makes the hub of `conn` (with its context and, for a stream, its `DataEvent`) if it has none.
+fn ensure_hub(scope: &mut v8::PinScope<'_, '_>, conn: &Rc<Conn>) -> Result<u32, NativeError> {
+    if let Some(id) = conn.flow.hub.get() {
+        return Ok(id);
+    }
+    let current = scope.get_current_context();
+    let context = v8::Global::new(scope, current);
+    let data_event = if conn.kind == Kind::Stream {
+        let event = class::wrap(scope, crate::stream::DataEvent(Rc::clone(conn)))?;
+        let event = v8::Local::<v8::Object>::try_from(event).map_err(|_| NativeError::Errno(errno::UNEXPECTED))?;
+        Some(v8::Global::new(scope, event))
+    } else {
+        None
+    };
+    host_mut(scope)?.hub_of(Some((context, data_event)), conn).ok_or(NativeError::Errno(errno::UNSUPPORTED))
+}
+
+/// `register(event, handler)` of an event-mode object: see the module docs. Returns the `Registration`.
+pub(crate) fn register<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    conn: &Rc<Conn>,
+    event: &str,
+    handler: v8::Local<'s, v8::Function>,
+) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    if !conn.io.open(crate::native::host_ref(scope)?) {
+        return Err(NativeError::Errno(errno::BAD_HANDLE));
+    }
+    let ev = Ev::of(conn.kind, event).ok_or_else(|| NativeError::type_error(format!("unknown event: {event}")))?;
+    let id = ensure_hub(scope, conn)?;
+    let function = v8::Global::new(scope, handler);
+    let host = host_mut(scope)?;
+    let hub = host.hubs.get_mut(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
+    let entry = hub.next_entry;
+    hub.next_entry += 1;
+    hub.handlers.push(Handler { ev, entry, function });
+    let flows = ev == Ev::flows(conn.kind);
+    if flows {
+        conn.flow.flowing.set(conn.flow.flowing.get() + 1);
+        conn.flow.auto_paused.set(false);
+        start(scope, conn)?;
+        sync(host_mut(scope)?, conn);
+    }
+    class::wrap(scope, crate::stream::Registration { conn: Rc::clone(conn), hub: id, entry, flows })
+}
+
+/// Removes a handler; `true` if it was registered. Without a flowing handler the conn pauses itself.
+pub(crate) fn unregister(host: &mut HostState, conn: &Rc<Conn>, id: u32, entry: u64, flows: bool) -> bool {
+    let Some(hub) = host.hubs.get_mut(&id) else { return false };
+    let before = hub.handlers.len();
+    hub.handlers.retain(|handler| handler.entry != entry);
+    let removed = hub.handlers.len() != before;
+    if removed && flows && !conn.is_closed() {
+        conn.flow.flowing.set(conn.flow.flowing.get() - 1);
+        if conn.flow.flowing.get() == 0 {
+            conn.flow.auto_paused.set(true);
+            sync(host, conn);
+        }
+    }
+    removed
+}
+
+/// `pause()` / `resume()`.
+pub(crate) fn set_paused(scope: &mut v8::PinScope<'_, '_>, conn: &Rc<Conn>, paused: bool) -> Result<(), NativeError> {
+    conn.flow.user_paused.set(paused);
+    if paused {
+        ensure_hub(scope, conn)?;
+    }
+    sync(host_mut(scope)?, conn);
+    Ok(())
+}
+
+/// Leaves event mode: refused once the pump started (what it read belongs to the events). Drops the hub.
+pub(crate) fn unsubscribe(host: &mut HostState, conn: &Conn) -> Result<(), NativeError> {
+    if conn.flow.started.get() {
+        return Err(NativeError::Errno(errno::UNSUPPORTED));
+    }
+    if let Some(id) = conn.flow.hub.take() {
+        host.hubs.remove(&id);
+    }
+    conn.flow.flowing.set(0);
+    conn.flow.user_paused.set(false);
+    conn.flow.auto_paused.set(false);
+    Ok(())
+}
+
+/// Applies the pause state (explicit, or because no handler listens) to the hub.
+fn sync(host: &mut HostState, conn: &Conn) {
+    let flow = &conn.flow;
+    let want = if flow.user_paused.get() {
+        Pause::Explicit
+    } else if flow.auto_paused.get() {
+        Pause::NoHandler
+    } else {
+        Pause::None
+    };
+    let Some(id) = flow.hub.get() else { return };
+    let Some(hub) = host.hubs.get_mut(&id) else { return };
+    if want == hub.applied {
+        return;
+    }
+    hub.applied = want;
+    hub.release();
+}
+
+/// Starts the pump of `conn` (once): it reads (accepts, receives datagrams) and queues events from now on.
+fn start(scope: &mut v8::PinScope<'_, '_>, conn: &Rc<Conn>) -> Result<(), NativeError> {
+    if conn.flow.started.replace(true) {
+        return Ok(());
+    }
+    conn.flow.counted.set(true);
+    conn.io.idle.live.set(conn.io.idle.live.get() + 1);
+    if conn.kind == Kind::Stream {
+        let isolate: &mut v8::Isolate = scope;
+        top_up(isolate, &conn.flow);
+    }
+    let host = host_mut(scope)?;
+    let socket = conn.socket()?;
+    let lp = conn.io.lp(host)?;
+    let task: Task = match conn.kind {
+        Kind::Stream => Box::pin(read_pump(socket, lp, Rc::clone(conn))),
+        Kind::Listener => Box::pin(accept_pump(socket, lp, Rc::clone(conn))),
+        Kind::Datagram => Box::pin(datagram_pump(socket, lp, Rc::clone(conn))),
+    };
+    host.spawn_pump(conn, task)
+}
+
+async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, conn: Rc<Conn>) {
+    let idle = Rc::clone(&conn.io.idle);
     let _alive = Count::new(&idle.pumps);
+    let flow = &conn.flow;
     // The slab being filled and where its free part starts.
     let mut current: Option<(v8::SharedRef<v8::BackingStore>, usize)> = None;
     loop {
-        poll_fn(|cx| {
-            if shared.queued.get() < MAX_QUEUED || shared.stop.get() {
-                Poll::Ready(())
-            } else {
-                shared.space.set(cx);
-                Poll::Pending
-            }
-        })
-        .await;
-        if shared.stop.get() {
+        if !flow.room().await {
             return;
         }
         if current.as_ref().is_none_or(|(slab, used)| slab.byte_length() - used < CHUNK) {
             // The old slab stays alive through the leases carved from it.
-            current = Some((
-                poll_fn(|cx| {
-                    let spare = shared.slabs.borrow_mut().pop();
-                    match spare {
-                        Some(slab) => Poll::Ready(slab),
-                        None => {
-                            shared.refill.borrow_mut().push(shared.socket);
-                            shared.need.set(cx);
-                            Poll::Pending
+            let fresh = poll_fn(|cx| {
+                if flow.stopped.get() {
+                    return Poll::Ready(None);
+                }
+                let spare = flow.slabs.borrow_mut().pop();
+                match spare {
+                    Some(slab) => Poll::Ready(Some(slab)),
+                    None => {
+                        if let Some(hub) = flow.hub.get() {
+                            conn.io.refill.borrow_mut().push(hub);
                         }
+                        flow.need.set(cx);
+                        Poll::Pending
                     }
-                })
-                .await,
-                0,
-            ));
-            if shared.stop.get() {
-                return;
-            }
+                }
+            })
+            .await;
+            let Some(slab) = fresh else { return };
+            current = Some((slab, 0));
         }
         let Some((slab, used)) = current.as_mut() else { return };
         let Ok(buf) = pinned::region_over_slab(slab.clone(), *used, CHUNK) else {
-            shared.fail(errno::UNEXPECTED);
+            conn.fail(errno::UNEXPECTED);
             return;
         };
         let recving = Count::new(&idle.recving);
@@ -356,477 +540,195 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
         drop(recving);
         match read {
             Ok(0) => {
-                // The peer finished: the socket stays open (writable) until the guest closes it;
-                // the glue does that once the local write side has ended too.
-                shared.push(EventKind::End);
+                // The peer finished: the stream stays open (writable) until it settles or the guest closes it.
+                conn.push(EventKind::End);
                 return;
             }
             Ok(n) => match buf.into_window() {
                 Some((slab, offset)) => {
                     *used = offset + n.next_multiple_of(ALIGN);
-                    shared.push(EventKind::Data { slab, offset, n });
+                    conn.push(EventKind::Data { slab, offset, n });
                 }
                 None => {
-                    shared.fail(errno::UNEXPECTED);
+                    conn.fail(errno::UNEXPECTED);
                     return;
                 }
             },
             Err(error) => {
-                shared.fail(errno::errno_of(&error));
+                conn.fail(errno::errno_of(&error));
                 return;
             }
         }
     }
 }
 
-async fn accept_pump(listener: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
-    let idle = Rc::clone(&shared.idle);
+/// Accepts the next connection of `listener`: `None` once it is closed, `Err` when `accept(2)` failed, `Ok(None)`
+/// for a connection that could not be set up (it is closed; the listener keeps going).
+pub(crate) async fn accept_one(listener: &Socket, lp: &Loop) -> Option<Result<Option<TcpStream>, NativeError>> {
+    use std::future::Future;
+    let mut accepting = std::pin::pin!(lp.accept(listener.fd(), ADDR_CAP));
+    let accepted = poll_fn(|cx| {
+        // The op first: a connection it already accepted is not dropped here.
+        if let Poll::Ready(accepted) = accepting.as_mut().poll(cx) {
+            return Poll::Ready(Some(accepted));
+        }
+        if listener.closed.get() {
+            return Poll::Ready(None);
+        }
+        let mut closers = listener.closers.borrow_mut();
+        if !closers.iter().any(|waker| waker.will_wake(cx.waker())) {
+            closers.push(cx.waker().clone());
+        }
+        Poll::Pending
+    })
+    .await?;
+    Some(match accepted {
+        Err(error) => Err(NativeError::Errno(errno::errno_of(&error))),
+        Ok((fd, _peer)) => {
+            // SAFETY: `fd` was just returned by `accept` and nothing else owns it.
+            let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+            Ok(prepare(&stream).is_ok().then_some(stream))
+        }
+    })
+}
+
+async fn accept_pump(listener: Rc<Socket>, lp: Rc<Loop>, conn: Rc<Conn>) {
+    let idle = Rc::clone(&conn.io.idle);
     let _alive = Count::new(&idle.pumps);
     loop {
-        poll_fn(|cx| {
-            if shared.queued.get() < MAX_QUEUED || shared.stop.get() {
-                Poll::Ready(())
-            } else {
-                shared.space.set(cx);
-                Poll::Pending
-            }
-        })
-        .await;
-        if shared.stop.get() {
+        if !conn.flow.room().await {
             return;
         }
         let recving = Count::new(&idle.recving);
-        let accepted = lp.accept(listener.fd(), ADDR_CAP).await;
+        let accepted = accept_one(&listener, &lp).await;
         drop(recving);
-        let fd = match accepted {
-            Ok((fd, _peer)) => fd,
-            Err(error) => {
-                shared.fail(errno::errno_of(&error));
+        match accepted {
+            None => return,
+            Some(Ok(Some(stream))) => conn.push(EventKind::Accept { stream }),
+            Some(Ok(None)) => {}
+            Some(Err(error)) => {
+                if !listener.closed.get() {
+                    conn.fail(error.code().unwrap_or(errno::UNEXPECTED));
+                }
                 return;
             }
-        };
-        // SAFETY: `fd` was just returned by `accept` and nothing else owns it.
-        let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd as i32) });
-        let prepared = prepare(&stream).and_then(|()| stream.peer_addr().map_err(NativeError::from));
-        // A connection that cannot be set up is dropped (closed); the listener keeps going.
-        if let Ok(peer) = prepared {
-            shared.push(EventKind::Accept { stream, port: u32::from(peer.port()) });
         }
     }
 }
 
-/// Flushes the outbox of a socket whose kernel buffer was full, in order, then sends the FIN of a
-/// pending `end`.
-async fn write_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
+/// Waits for a datagram on `socket` and takes it: its bytes (at most `len`) and its source.
+pub(crate) async fn recv_from(socket: &Socket, lp: &Loop, len: usize) -> Result<(Vec<u8>, SocketAddr), NativeError> {
+    let udp = socket.udp().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
     loop {
-        let next = shared.out.borrow_mut().queue.pop_front();
-        let Some(mut chunk) = next else {
-            let fin = {
-                let mut out = shared.out.borrow_mut();
-                out.writing = false;
-                let fin = out.ended && out.failed.is_none();
-                out.wake();
-                fin
-            };
-            if fin {
-                socket.finish_write().await;
+        let mut data = vec![0u8; len.max(1)];
+        match udp.recv_from(&mut data) {
+            Ok((n, from)) => {
+                data.truncate(n.min(len));
+                return Ok((data, from));
             }
-            shared.push(EventKind::Drain);
-            return;
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                // Wait for the next datagram without taking it (a peek of one byte), then take it above.
+                let (waited, _) = lp.recv(socket.fd(), vec![0u8; 1], PEEK).await;
+                if let Err(error) = waited
+                    && error.kind() != std::io::ErrorKind::WouldBlock
+                {
+                    return Err(error.into());
+                }
+                if socket.closed.get() {
+                    return Err(NativeError::Errno(errno::CANCELED));
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Sends one datagram (to `to`, or to the connected peer), waiting while the kernel has no room.
+pub(crate) async fn send_to(socket: &UdpSocket, lp: &Loop, data: &[u8], to: Option<SocketAddr>) -> Result<usize, NativeError> {
+    loop {
+        let sent = match to {
+            Some(to) => socket.send_to(data, to),
+            None => socket.send(data),
         };
-        while !chunk.is_empty() {
-            let (result, buf) = socket.send(&lp, chunk).await;
-            chunk = buf;
-            let sent = match result {
-                Ok(0) => Err(errno::BROKEN_PIPE),
-                Ok(n) => Ok(n),
-                Err(error) => Err(errno::errno_of(&error)),
-            };
-            match sent {
-                Ok(n) => {
-                    chunk.drain(..n);
-                    let mut out = shared.out.borrow_mut();
-                    out.bytes -= n;
-                    out.sent += n as u64;
-                    out.wake();
+        match sent {
+            Ok(n) => return Ok(n),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                lp.timeout(std::time::Duration::from_millis(1)).await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+async fn datagram_pump(socket: Rc<Socket>, lp: Rc<Loop>, conn: Rc<Conn>) {
+    let idle = Rc::clone(&conn.io.idle);
+    let _alive = Count::new(&idle.pumps);
+    loop {
+        if !conn.flow.room().await {
+            return;
+        }
+        let recving = Count::new(&idle.recving);
+        let received = recv_from(&socket, &lp, DATAGRAM).await;
+        drop(recving);
+        match received {
+            Ok((data, from)) => conn.push(EventKind::Datagram { data, from }),
+            Err(error) => {
+                if !socket.closed.get()
+                    && let Some(code) = error.code()
+                {
+                    conn.fail(code);
                 }
-                Err(code) => {
-                    shared.out.borrow_mut().writing = false;
-                    shared.fail(code);
-                    return;
-                }
+                return;
             }
         }
     }
 }
 
-impl HostState {
-    fn spawn_pump(&self, runtime: u32, shared: &Shared, task: Task) -> Result<(), NativeError> {
-        let handle = self.spawn_detached(runtime, task)?;
-        shared.aborts.borrow_mut().push(handle);
-        Ok(())
-    }
-}
-
-/// `native.net.subscribe(id, dispatch)`: routes the socket's events to `dispatch(kind, a, b)`
-/// (see the module docs). `BadHandle` for an unknown, foreign or already subscribed socket.
-/// Nothing is read until `resume`.
-#[native(side_effect = "any", path = "net.subscribe", needs = "runtime")]
-fn net_subscribe<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    key: ScopeKey,
-    id: u32,
-    dispatch: v8::Local<'s, v8::Value>,
-) -> Result<(), NativeError> {
-    let function = v8::Local::<v8::Function>::try_from(dispatch).map_err(|_| NativeError::type_error("dispatch must be a function"))?;
-    let runtime = host_ref(scope)?.socket(key, id)?.0.runtime();
-    let dispatch = v8::Global::new(scope, function);
-    let current = scope.get_current_context();
-    let context = v8::Global::new(scope, current);
-    let host = host_mut(scope)?;
-    if host.subs.contains_key(&id) {
-        return Err(NativeError::Errno(errno::BAD_HANDLE));
-    }
-    let idle = host.idle_of(runtime);
-    let shared = Rc::new(Shared {
-        socket: id,
-        events: Rc::clone(&host.events),
-        idle,
-        slabs: RefCell::default(),
-        need: Signal::default(),
-        refill: Rc::clone(&host.refill),
-        queued: Cell::new(0),
-        space: Signal::default(),
-        out: RefCell::default(),
-        stop: Cell::new(false),
-        closed: Cell::new(false),
-        aborts: RefCell::default(),
-    });
-    host.subs.insert(
-        id,
-        Sub {
-            dispatch,
-            context,
-            shared,
-            runtime,
-            owner: key,
-            counted: false,
-            started: false,
-            current: None,
-            pause: Pause::None,
-            parked: VecDeque::new(),
-        },
-    );
-    Ok(())
-}
-
-/// Tops `shared` up to [`SLAB_TARGET`] fresh slabs (isolate thread only).
-fn top_up(isolate: &mut v8::Isolate, shared: &Shared) {
-    while shared.slabs.borrow().len() < SLAB_TARGET {
+/// Tops `flow` up to [`SLAB_TARGET`] fresh slabs (isolate thread only).
+fn top_up(isolate: &mut v8::Isolate, flow: &Flow) {
+    while flow.slabs.borrow().len() < SLAB_TARGET {
         let slab = v8::ArrayBuffer::new_backing_store(isolate, SLAB).make_shared();
-        shared.slabs.borrow_mut().push(slab);
+        flow.slabs.borrow_mut().push(slab);
     }
 }
 
-/// Refills the slabs of the sockets whose pump ran out of them, and wakes the pumps.
+/// Refills the slabs of the streams whose pump ran out of them, and wakes the pumps.
 pub(crate) fn refill(scope: &mut v8::PinScope<'_, '_, ()>) {
     let Some(host) = scope.get_slot::<HostState>() else { return };
     let ids = std::mem::take(&mut *host.refill.borrow_mut());
     if ids.is_empty() {
         return;
     }
-    let pools: Vec<Rc<Shared>> = ids.iter().filter_map(|id| host.subs.get(id).map(|sub| Rc::clone(&sub.shared))).collect();
+    let conns: Vec<Rc<Conn>> = ids.iter().filter_map(|id| host.hubs.get(id).map(|hub| Rc::clone(&hub.conn))).collect();
     let isolate: &mut v8::Isolate = scope;
-    for shared in pools {
-        top_up(isolate, &shared);
-        shared.need.wake();
+    for conn in conns {
+        top_up(isolate, &conn.flow);
+        conn.flow.need.wake();
     }
 }
 
-/// `native.net.start(id)`: starts reading a stream (`data`, `end`, `error`) or accepting on a
-/// listener (`connection`). A peer's FIN only delivers `end`; the stream stays open until the
-/// guest closes it. Idempotent.
-#[native(side_effect = "any", path = "net.start", needs = "runtime")]
-fn net_start(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+/// The bytes of the chunk being delivered on `conn`, if a `data` event is being dispatched: its length.
+pub(crate) fn current_length(host: &HostState, conn: &Conn) -> usize {
+    conn.flow.hub.get().and_then(|id| host.hubs.get(&id)).and_then(|hub| hub.current.as_ref()).map_or(0, |current| current.n)
+}
+
+/// The lease of the chunk being delivered on `conn`: an `ArrayBuffer` of exactly its bytes, carved out of the slab
+/// (no copy), the same on every call of one event. `TypeError` outside the event.
+pub(crate) fn take<'s>(scope: &mut v8::PinScope<'s, '_>, conn: &Conn) -> Result<v8::Local<'s, v8::ArrayBuffer>, NativeError> {
+    let over = || NativeError::type_error("the data event is over");
+    let id = conn.flow.hub.get().ok_or_else(over)?;
     let host = host_mut(scope)?;
-    let (socket, lp) = host.socket(key, id)?;
-    let sub = host.subs.get_mut(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    if sub.started {
-        return Ok(());
+    let current = host.hubs.get_mut(&id).and_then(|hub| hub.current.as_mut()).ok_or_else(over)?;
+    if let Some(lease) = current.lease.clone() {
+        return Ok(v8::Local::new(scope, lease));
     }
-    sub.started = true;
-    sub.counted = true;
-    let shared = Rc::clone(&sub.shared);
-    let runtime = sub.runtime;
-    shared.idle.live.set(shared.idle.live.get() + 1);
-    if !socket.is_listener() {
-        let isolate: &mut v8::Isolate = scope;
-        top_up(isolate, &shared);
-    }
-    let task: Task = if socket.is_listener() {
-        Box::pin(accept_pump(socket, lp, Rc::clone(&shared)))
-    } else {
-        Box::pin(read_pump(socket, lp, Rc::clone(&shared)))
-    };
-    host_mut(scope)?.spawn_pump(runtime, &shared, task)
-}
-
-/// `native.net.pause(id, noHandler)`: holds the socket's read-side events back from now on (see
-/// [`Pause`]; `noHandler` is the milder one). Events the new state no longer holds go back in front of
-/// the queue. Idempotent; `BadHandle` for an unknown, foreign or unsubscribed socket.
-#[native(side_effect = "any", path = "net.pause", needs = "runtime")]
-fn net_pause(host: &mut HostState, key: ScopeKey, id: u32, no_handler: bool) -> Result<(), NativeError> {
-    let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    sub.pause = if no_handler { Pause::NoHandler } else { Pause::Explicit };
-    let mut events = host.events.borrow_mut();
-    let mut freed = Vec::new();
-    for event in std::mem::take(&mut sub.parked) {
-        if sub.pause.parks(&event.kind, !sub.parked.is_empty()) {
-            sub.parked.push_back(event);
-        } else {
-            freed.push(event);
-        }
-    }
-    while let Some(event) = freed.pop() {
-        events.push_front(event);
-    }
-    Ok(())
-}
-
-/// `native.net.resume(id)`: dispatches the parked events again, in order, ahead of everything
-/// else queued. Idempotent.
-#[native(side_effect = "any", path = "net.resume", needs = "runtime")]
-fn net_resume(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    sub.pause = Pause::None;
-    let mut events = host.events.borrow_mut();
-    while let Some(event) = sub.parked.pop_back() {
-        events.push_front(event);
-    }
-    Ok(())
-}
-
-/// `native.net.take(id)`: an `ArrayBuffer` of exactly the bytes of the chunk, carved out of the
-/// slab it was received into (no copy; `byteLength` is the `data` dispatch's length and no other
-/// byte of the slab is reachable). Only valid inside the `data` dispatch, once per event
-/// (`StaleHandle` otherwise). Give it back with `release`.
-#[native(side_effect = "any", path = "net.take", needs = "runtime")]
-fn net_take<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32) -> Result<v8::Local<'s, v8::ArrayBuffer>, NativeError> {
-    let host = host_mut(scope)?;
-    let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let current = sub.current.as_mut().filter(|current| !current.taken).ok_or(NativeError::Errno(errno::STALE_HANDLE))?;
     let store = pinned::carve(&current.slab, current.offset, current.n)?;
-    current.taken = true;
-    Ok(v8::ArrayBuffer::with_backing_store(scope, &store))
-}
-
-/// `native.net.release(id, buffer)`: detaches a lease from `take`, which drops its hold on the slab
-/// at once (the slab is freed with its last lease). Idempotent for a detached buffer. Nothing is
-/// remembered per lease (an unreleased lease that is garbage collected has the same effect, later).
-/// `Unsupported` for a buffer that is shared or undetachable; the socket is not consulted.
-#[native(side_effect = "any", path = "net.release", needs = "runtime")]
-fn net_release<'s>(_scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
-    let _ = (key, id);
-    let buffer = v8::Local::<v8::ArrayBuffer>::try_from(buffer).map_err(|_| NativeError::type_error("buffer must be an ArrayBuffer"))?;
-    if buffer.was_detached() {
-        return Ok(());
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
+    let global = v8::Global::new(scope, buffer);
+    if let Some(current) = host_mut(scope)?.hubs.get_mut(&id).and_then(|hub| hub.current.as_mut()) {
+        current.lease = Some(global);
     }
-    let store = buffer.get_backing_store();
-    if store.is_shared() || store.is_resizable_by_user_javascript() || !buffer.is_detachable() {
-        return Err(NativeError::Errno(errno::UNSUPPORTED));
-    }
-    if buffer.detach(None) != Some(true) || !buffer.was_detached() {
-        return Err(NativeError::Errno(errno::UNEXPECTED));
-    }
-    Ok(())
-}
-
-/// A subscribed stream with what its write lanes need.
-struct Writer {
-    socket: Rc<Socket>,
-    lp: Rc<Loop>,
-    shared: Rc<Shared>,
-    runtime: u32,
-}
-
-/// The subscribed stream `id` with its writer plumbing; `BadHandle` for a closed one.
-fn writer_of(host: &HostState, key: ScopeKey, id: u32) -> Result<Writer, NativeError> {
-    let (socket, lp) = stream_of(host, key, id)?;
-    let sub = host.subs.get(&id).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    if sub.shared.closed.get() {
-        return Err(NativeError::Errno(errno::BAD_HANDLE));
-    }
-    Ok(Writer { socket, lp, shared: Rc::clone(&sub.shared), runtime: sub.runtime })
-}
-
-/// `native.net.directWrite(id, data)`: the direct lane. A plain non-blocking write; answers the
-/// bytes the kernel took, 0 when it would block or while the outbox is busy (queued bytes go
-/// first). A write error throws its errno and the socket emits `error` and closes; `BrokenPipe`
-/// after `end`.
-#[native(side_effect = "any", path = "net.directWrite", needs = "runtime")]
-fn net_direct_write(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_>) -> Result<usize, NativeError> {
-    let Writer { socket, shared, .. } = writer_of(host, key, id)?;
-    let out = shared.out.borrow();
-    if out.ended {
-        return Err(NativeError::Errno(errno::BROKEN_PIPE));
-    }
-    if let Some(code) = out.failed {
-        return Err(NativeError::Errno(code));
-    }
-    if out.writing {
-        return Ok(0);
-    }
-    drop(out);
-    match data.with_bytes(|bytes| socket.try_write(bytes)) {
-        Ok(n) => Ok(n),
-        Err(error) => {
-            let code = errno::errno_of(&error);
-            shared.fail(code);
-            Err(NativeError::Errno(code))
-        }
-    }
-}
-
-/// `native.net.put(id, data, max)`: the queued lane. When the outbox is idle the kernel is tried
-/// first; what it does not take is copied into the outbox, at most `max` bytes of it (the caller's
-/// room). Answers the bytes accepted (kernel plus queue). A write error throws its errno and the
-/// socket emits `error` and closes; `BrokenPipe` after `end`.
-#[native(side_effect = "any", path = "net.put", needs = "runtime")]
-fn net_put(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_>, max: u64) -> Result<usize, NativeError> {
-    let Writer { socket, lp, shared, runtime } = writer_of(host, key, id)?;
-    let max = usize::try_from(max).unwrap_or(usize::MAX);
-    let mut out = shared.out.borrow_mut();
-    if out.ended {
-        return Err(NativeError::Errno(errno::BROKEN_PIPE));
-    }
-    if let Some(code) = out.failed {
-        return Err(NativeError::Errno(code));
-    }
-    let len = data.len();
-    if out.writing {
-        let take = len.min(max);
-        if take > 0 {
-            out.queue.push_back(data.with_bytes(|bytes| bytes[..take].to_vec()));
-            out.bytes += take;
-            out.accepted += take as u64;
-        }
-        return Ok(take);
-    }
-    let (kernel, rest) =
-        match data.with_bytes(|bytes| socket.try_write(bytes).map(|n| (n, bytes[n..bytes.len().min(n.saturating_add(max))].to_vec()))) {
-            Ok(pair) => pair,
-            Err(error) => {
-                drop(out);
-                let code = errno::errno_of(&error);
-                shared.fail(code);
-                return Err(NativeError::Errno(code));
-            }
-        };
-    out.accepted += kernel as u64;
-    out.sent += kernel as u64;
-    if rest.is_empty() {
-        return Ok(kernel);
-    }
-    let queued = rest.len();
-    out.bytes += queued;
-    out.accepted += queued as u64;
-    out.queue.push_back(rest);
-    out.writing = true;
-    drop(out); // the writer polls once at spawn and takes the same borrow
-    if let Err(error) = host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared)))) {
-        // No writer will ever drain the outbox: undo the queueing, or every later write would
-        // only append to it and `writing` would stay set forever.
-        let mut out = shared.out.borrow_mut();
-        out.queue.clear();
-        out.bytes = 0;
-        out.accepted -= queued as u64;
-        out.writing = false;
-        return Err(error);
-    }
-    Ok(kernel + queued)
-}
-
-/// `native.net.queued(id)`: bytes waiting in the outbox.
-#[native(side_effect = "none", path = "net.queued", needs = "runtime")]
-fn net_queued(host: &mut HostState, key: ScopeKey, id: u32) -> Result<usize, NativeError> {
-    let sub = host.subs.get(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    Ok(sub.shared.out.borrow().bytes)
-}
-
-/// `native.net.flushed(id)`: Promise<void> that resolves once every byte accepted so far reached
-/// the kernel; rejects with the outbox's errno (a write error, `Canceled` when the socket closed
-/// first).
-#[native(side_effect = "any", path = "net.flushed", needs = "runtime", promise)]
-fn net_flushed(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-) -> Result<native::Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
-    let sub = host.subs.get(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let (shared, runtime) = (Rc::clone(&sub.shared), sub.runtime);
-    let target = shared.out.borrow().accepted;
-    Ok(native::Op::new(
-        runtime,
-        poll_fn(move |cx| {
-            let mut out = shared.out.borrow_mut();
-            if out.sent >= target {
-                Poll::Ready(Ok(()))
-            } else if let Some(code) = out.failed {
-                Poll::Ready(Err(NativeError::Errno(code)))
-            } else {
-                out.waiters.push(cx.waker().clone());
-                Poll::Pending
-            }
-        }),
-    ))
-}
-
-/// `native.net.end(id)`: no more writes; the FIN goes out once the outbox is empty (now when it
-/// already is). Idempotent.
-#[native(side_effect = "any", path = "net.end", needs = "runtime")]
-fn net_end(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    let Writer { socket, lp, shared, runtime } = writer_of(host, key, id)?;
-    let mut out = shared.out.borrow_mut();
-    if !std::mem::replace(&mut out.ended, true) && !out.writing && out.failed.is_none() {
-        if !socket.is_tls() {
-            socket.shutdown_write();
-            return Ok(());
-        }
-        // `close_notify` then the FIN take the loop: the write pump does both once the outbox is empty.
-        out.writing = true;
-        drop(out);
-        if let Err(error) = host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared)))) {
-            shared.out.borrow_mut().writing = false;
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
-/// `native.io.run(io)`: Promise<void> that resolves once every resumed subscription of the
-/// runtime has delivered its `close` event (immediately when there is none). While it is pending
-/// the program stays alive.
-#[native(side_effect = "any", path = "io.run", needs = "runtime", promise)]
-fn io_run(
-    host: &mut HostState,
-    key: ScopeKey,
-    io: u32,
-) -> Result<native::Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
-    host.loop_of(key, io)?;
-    let idle = host.idle_of(io);
-    Ok(native::Op::new(
-        io,
-        poll_fn(move |cx| {
-            if idle.live.get() == 0 {
-                return Poll::Ready(Ok(()));
-            }
-            let mut waiters = idle.waiters.borrow_mut();
-            if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
-                waiters.push(cx.waker().clone());
-            }
-            Poll::Pending
-        }),
-    ))
+    Ok(buffer)
 }
 
 /// Delivers every queued event (handlers may queue more); returns how many.
@@ -839,86 +741,208 @@ pub(crate) fn deliver_all(scope: &mut v8::PinScope<'_, '_, ()>) -> usize {
     delivered
 }
 
-/// Delivers one event to its socket's dispatcher (isolate thread). Events for a socket that is
-/// gone (runtime closed) are dropped.
+/// What a handler is called with.
+enum Arg {
+    None,
+    DataEvent,
+    Error(u32),
+    Accepted(TcpStream),
+    Datagram(Vec<u8>, SocketAddr),
+}
+
+/// Delivers one event to its hub's handlers (isolate thread). Events of a hub that is gone (runtime closed) are
+/// dropped.
 fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
-    let id = event.socket;
+    let id = event.hub;
     let Some(host) = scope.get_slot_mut::<HostState>() else { return };
-    let Some(sub) = host.subs.get(&id) else { return };
-    let (shared, owner, runtime) = (Rc::clone(&sub.shared), sub.owner, sub.runtime);
-    // A paused socket holds its events back, in order. A socket the guest closed does not: its
-    // `Close` (and nothing before it) goes through.
-    if sub.pause.parks(&event.kind, !sub.parked.is_empty()) && !shared.stop.get() {
-        if let Some(sub) = host.subs.get_mut(&id) {
-            sub.parked.push_back(event);
-        }
+    let Some(hub) = host.hubs.get_mut(&id) else { return };
+    let conn = Rc::clone(&hub.conn);
+    let flow = &conn.flow;
+    // A paused conn holds its events back, in order. A conn the guest closed does not: its `close` (and nothing
+    // before it) goes through.
+    if hub.applied.parks(&event.kind, !hub.parked.is_empty()) && !flow.released.get() {
+        hub.parked.push_back(event);
         return;
     }
-    let (kind, a, b) = match event.kind {
+    let (ev, arg) = match event.kind {
         EventKind::Data { slab, offset, n } => {
-            shared.queued.set(shared.queued.get() - 1);
-            shared.space.wake();
-            if let Some(sub) = host.subs.get_mut(&id) {
-                sub.current = Some(Current { slab, offset, n, taken: false });
-            }
-            (KIND_DATA, n as u32, 0)
-        }
-        EventKind::End => (KIND_END, 0, 0),
-        EventKind::Error(code) => (KIND_ERROR, code, 0),
-        EventKind::Failed(code) => (KIND_FAILED, code, 0),
-        EventKind::Drain => (KIND_DRAIN, 0, 0),
-        EventKind::Accept { stream, port } => {
-            shared.queued.set(shared.queued.get() - 1);
-            shared.space.wake();
-            // The guest closed the listener: nothing would take this connection. Dropping `stream` closes it.
-            if shared.stop.get() {
+            flow.queued.set(flow.queued.get() - 1);
+            flow.space.wake();
+            if conn.read_ended.get() || conn.is_closed() {
                 return;
             }
-            let accepted =
-                host.reserve_socket().and_then(|new| host.insert_socket(new, Socket::accepted(owner, runtime, stream)).map(|()| new));
-            match accepted {
-                Ok(new) => (KIND_CONNECTION, new, port),
-                Err(_) => return, // table full or runtime closing: the connection is closed with `stream`
-            }
+            hub.current = Some(Current { slab, offset, n, lease: None });
+            (Ev::Data, Arg::DataEvent)
         }
-        EventKind::Closed => {
-            if let Some(socket) = host.sockets_remove(id) {
-                socket.shutdown();
+        EventKind::End => {
+            let fire = !conn.read_ended.get() && !conn.is_closed();
+            if !fire {
+                conn.peer_end();
+                return;
             }
-            (KIND_CLOSE, 0, 0)
+            (Ev::End, Arg::None)
         }
+        EventKind::Error(code) => (Ev::Error, Arg::Error(code)),
+        EventKind::Drain => (Ev::Drain, Arg::None),
+        EventKind::Accept { stream } => {
+            flow.queued.set(flow.queued.get() - 1);
+            flow.space.wake();
+            // The guest closed the listener: nothing would take this connection. Dropping `stream` closes it.
+            if flow.stopped.get() {
+                return;
+            }
+            (Ev::Connection, Arg::Accepted(stream))
+        }
+        EventKind::Datagram { data, from } => {
+            flow.queued.set(flow.queued.get() - 1);
+            flow.space.wake();
+            if flow.stopped.get() {
+                return;
+            }
+            (Ev::Datagram, Arg::Datagram(data, from))
+        }
+        EventKind::Closed => (Ev::Close, Arg::None),
     };
-    let Some(sub) = host.subs.get(&id) else { return };
-    let (dispatch, context) = (sub.dispatch.clone(), sub.context.clone());
-    call(scope, &dispatch, &context, [kind, a, b]);
+    let context = hub.context.clone();
+    let context = v8::Local::new(scope, context);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let value: Option<v8::Local<v8::Value>> = match arg {
+        Arg::None => None,
+        Arg::DataEvent => scope
+            .get_slot::<HostState>()
+            .and_then(|host| host.hubs.get(&id))
+            .and_then(|hub| hub.data_event.clone())
+            .map(|event| v8::Local::new(scope, event).into()),
+        Arg::Error(code) => Some(class::guest_error(scope, NativeError::Errno(code))),
+        Arg::Accepted(stream) => {
+            let accepted = Conn::new(&conn.io, Kind::Stream, Socket::stream(stream));
+            let value = class::wrap(scope, crate::stream::TcpStreamUnshaped::new(Rc::clone(&accepted)));
+            match value {
+                Ok(value) => {
+                    // A connection nobody handles is closed.
+                    if !fire(scope, id, ev, Some(value)) {
+                        accepted.close();
+                    }
+                    scope.perform_microtask_checkpoint();
+                    return;
+                }
+                Err(_) => {
+                    accepted.close();
+                    return;
+                }
+            }
+        }
+        Arg::Datagram(data, from) => class::wrap(scope, crate::udp::DatagramEvent::new(data, from)).ok(),
+    };
+    fire(scope, id, ev, value);
+    scope.perform_microtask_checkpoint();
 
     let Some(host) = scope.get_slot_mut::<HostState>() else { return };
-    if kind == KIND_DATA {
-        // A chunk the handler did not take is dropped here, and its slab reference with it.
-        if let Some(sub) = host.subs.get_mut(&id) {
-            sub.current = None;
+    match ev {
+        Ev::Data => {
+            // A chunk the handlers did not take is dropped here, and its slab reference with it.
+            if let Some(hub) = host.hubs.get_mut(&id) {
+                hub.current = None;
+            }
         }
-    } else if kind == KIND_CLOSE
-        && let Some(sub) = host.subs.remove(&id)
-        && sub.counted
-    {
-        let idle = &sub.shared.idle;
-        idle.live.set(idle.live.get() - 1);
-        for waker in idle.waiters.borrow_mut().drain(..) {
-            waker.wake();
+        Ev::End => conn.peer_end(),
+        Ev::Close => {
+            host.hubs.remove(&id);
+            conn.flow.hub.set(None);
+            if conn.flow.counted.replace(false) {
+                conn.io.idle.finished();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `{ data: Uint8Array, addr: SocketAddr }`, frozen.
+pub(crate) fn datagram_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    data: Vec<u8>,
+    from: SocketAddr,
+) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let object = crate::encode::new_object(scope);
+    crate::encode::set(scope, object, "data", data)?;
+    let addr = SockAddr(from).into_js(scope)?;
+    crate::encode::set(scope, object, "addr", addr)?;
+    crate::encode::freeze(scope, object)
+}
+
+/// Calls the handlers of `ev` of hub `id` with `arg`; false when there is none. A handler that throws goes to the
+/// `error` handlers; with none (or from one of them) it becomes an unhandled rejection. A promise a handler returns
+/// is not awaited (its rejection is the guest's to handle): backpressure is the bounded number of chunks a pump keeps
+/// undelivered, and `pause()`.
+fn fire(scope: &mut v8::PinScope<'_, '_>, id: u32, ev: Ev, arg: Option<v8::Local<'_, v8::Value>>) -> bool {
+    let functions = handlers(scope, id, ev);
+    if functions.is_empty() {
+        return false;
+    }
+    for function in functions {
+        if let Err(exception) = call(scope, &function, arg) {
+            fail(scope, id, ev, exception);
+        }
+    }
+    true
+}
+
+fn handlers(scope: &mut v8::PinScope<'_, '_>, id: u32, ev: Ev) -> Vec<v8::Global<v8::Function>> {
+    scope
+        .get_slot::<HostState>()
+        .and_then(|host| host.hubs.get(&id))
+        .map(|hub| hub.handlers.iter().filter(|handler| handler.ev == ev).map(|handler| handler.function.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Calls `function(arg)`; the exception it threw, if any.
+fn call(
+    scope: &mut v8::PinScope<'_, '_>,
+    function: &v8::Global<v8::Function>,
+    arg: Option<v8::Local<'_, v8::Value>>,
+) -> Result<(), v8::Global<v8::Value>> {
+    v8::tc_scope!(let tc, scope);
+    let function = v8::Local::new(tc, function);
+    let receiver: v8::Local<v8::Value> = v8::undefined(tc).into();
+    let args: Vec<v8::Local<v8::Value>> = arg.map(|arg| v8::Local::new(tc, arg)).into_iter().collect();
+    match function.call(tc, receiver, &args) {
+        Some(_) => Ok(()),
+        None => {
+            let exception = tc.exception().unwrap_or_else(|| v8::undefined(tc).into());
+            Err(v8::Global::new(tc, exception))
         }
     }
 }
 
-/// Calls `dispatch(...args)` in `context`, then runs the microtasks it queued. A throw that
-/// escapes the glue's own handling is dropped.
-fn call(scope: &mut v8::PinScope<'_, '_, ()>, dispatch: &v8::Global<v8::Function>, context: &v8::Global<v8::Context>, args: [u32; 3]) {
-    let context = v8::Local::new(scope, context);
-    let scope = &mut v8::ContextScope::new(scope, context);
-    v8::tc_scope!(let tc, scope);
-    let function = v8::Local::new(tc, dispatch);
-    let receiver: v8::Local<v8::Value> = v8::undefined(tc).into();
-    let args: Vec<v8::Local<v8::Value>> = args.iter().map(|value| v8::Integer::new_from_unsigned(tc, *value).into()).collect();
-    let _ = function.call(tc, receiver, &args);
-    tc.perform_microtask_checkpoint();
+fn fail(scope: &mut v8::PinScope<'_, '_>, id: u32, ev: Ev, exception: v8::Global<v8::Value>) {
+    let errors = if ev == Ev::Error { Vec::new() } else { handlers(scope, id, Ev::Error) };
+    if errors.is_empty() {
+        unhandled(scope, &exception);
+        return;
+    }
+    let value = v8::Local::new(scope, &exception);
+    for function in errors {
+        if let Err(thrown) = call(scope, &function, Some(value)) {
+            unhandled(scope, &thrown);
+        }
+    }
+}
+
+/// Reports `exception` the way an unhandled promise rejection is reported.
+fn unhandled(scope: &mut v8::PinScope<'_, '_>, exception: &v8::Global<v8::Value>) {
+    let value = v8::Local::new(scope, exception);
+    if let Some(resolver) = v8::PromiseResolver::new(scope) {
+        resolver.reject(scope, value);
+    }
+}
+
+/// Drops every hub of `runtime` without calling its handlers (the runtime is closing).
+pub(crate) fn drop_hubs(host: &mut HostState, runtime: u32) {
+    host.hubs.retain(|_, hub| {
+        let keep = hub.runtime() != runtime;
+        if !keep {
+            hub.conn.flow.hub.set(None);
+        }
+        keep
+    });
 }

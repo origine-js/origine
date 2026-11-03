@@ -5,12 +5,14 @@ const m = @import("@managed");
 const t = std.testing;
 
 const prelude =
+    \\import * as stdNet from 'origine:@std/net';
+    \\const at = (host, port) => stdNet.SocketAddr.parse(host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`);
     \\const outcome = promise => promise.then(() => 'ok', e => e.name);
     \\const detail = promise => promise.then(() => undefined, e => e.subject);
     \\const throws = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };
     \\const subject = f => { try { f(); return undefined; } catch (e) { return e.subject; } };
     \\// An allowed address that nobody answers either hangs or is refused, never denied: give it 150 ms.
-    \\const allowed = async (timers, promise) => (await Promise.race([outcome(promise), timers.sleep(150).then(() => 'hang')])) !== 'PermissionDenied';
+    \\const allowed = async (timers, promise) => (await Promise.race([outcome(promise), timers.timer.sleep(150).then(() => 'hang')])) !== 'PermissionDenied';
     \\
 ;
 
@@ -22,20 +24,24 @@ test "net grant: the default ceiling is loopback only" {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create();
         \\  const timers = api.io.create();
-        \\  const mode = { mode: 'pull', socketMode: 'pull' };
-        \\  out.loopback = throws(() => api.net.listen(io, { ...mode, host: '127.0.0.1', port: 0 })) === 'ok' && throws(() => api.net.listen(io, { ...mode, host: '::1', port: 0 })) === 'ok'
-        \\    && throws(() => api.net.listen(io, { ...mode, host: 'localhost', port: 0 })) === 'ok';
-        \\  out.any = throws(() => api.net.listen(io, { ...mode, host: '0.0.0.0', port: 0 }));
-        \\  out.anySubject = subject(() => api.net.listen(io, { ...mode, host: '0.0.0.0', port: 0 }));
-        \\  out.any6 = throws(() => api.net.listen(io, { ...mode, host: '::', port: 0 }));
-        \\  out.lan = await outcome(api.net.connect(io, { host: '10.0.0.1', port: 80, mode: 'pull' }));
-        \\  out.lanSubject = await detail(api.net.connect(io, { host: '10.0.0.1', port: 80, mode: 'pull' }));
-        \\  // A name is refused whatever it would resolve to: resolve it with api.dns and pass the address.
-        \\  out.name = await outcome(api.net.connect(io, { host: 'example.com', port: 80, mode: 'pull' }));
-        \\  out.nameSubject = await detail(api.net.connect(io, { host: 'example.com', port: 80, mode: 'pull' }));
+        \\  const listen = (host, port) => io.tcp.listen(at(host, port));
+        \\  const connect = (host, port) => io.tcp.connect(at(host, port));
+        \\  out.loopback = throws(() => listen('127.0.0.1', 0)) === 'ok' && throws(() => listen('::1', 0)) === 'ok' && throws(() => io.udp.bind(at('127.0.0.1', 0))) === 'ok';
+        \\  out.any = throws(() => listen('0.0.0.0', 0));
+        \\  out.anySubject = subject(() => listen('0.0.0.0', 0));
+        \\  out.any6 = throws(() => listen('::', 0));
+        \\  out.udpAny = throws(() => io.udp.bind(at('0.0.0.0', 0)));
+        \\  out.lan = await outcome(connect('10.0.0.1', 80));
+        \\  out.lanSubject = await detail(connect('10.0.0.1', 80));
+        \\  // A datagram cannot reach what a connection could not.
+        \\  const udp = io.udp.bind(at('127.0.0.1', 0)).pulling();
+        \\  out.udpLan = await outcome(udp.sendTo(Uint8Array.of(1), at('10.0.0.1', 53)));
+        \\  out.udpConnect = throws(() => udp.connect(at('10.0.0.1', 53)));
+        \\  // A name is not an address: resolve it with api.dns and pass the address.
+        \\  out.name = throws(() => stdNet.SocketAddr.parse('example.com:80'));
         \\  // An IPv4-mapped address is checked as the IPv4 address it stands for.
-        \\  out.mapped = await outcome(api.net.connect(io, { host: '::ffff:10.0.0.1', port: 80, mode: 'pull' }));
-        \\  out.mappedLoopback = await allowed(timers, api.net.connect(io, { host: '::ffff:127.0.0.1', port: 1, mode: 'pull' }));
+        \\  out.mapped = await outcome(connect('::ffff:10.0.0.1', 80));
+        \\  out.mappedLoopback = await allowed(timers, connect('::ffff:127.0.0.1', 1));
         \\  // DNS servers are connections too.
         \\  const { DnsServer } = api.dns;
         \\  const { IpAddr } = await import('origine:@std/net');
@@ -48,7 +54,7 @@ test "net grant: the default ceiling is loopback only" {
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.loopback && report.any === 'PermissionDenied' && report.anySubject === '0.0.0.0:0' && report.any6 === 'PermissionDenied' && report.lan === 'PermissionDenied' && report.lanSubject === '10.0.0.1:80' && report.name === 'PermissionDenied' && report.nameSubject === 'example.com' && report.mapped === 'PermissionDenied' && report.mappedLoopback && report.dnsLan === 'PermissionDenied' && report.dnsLoopback === 'ok'");
+    try check(p.scope, "report.loopback && report.any === 'PermissionDenied' && report.anySubject === '0.0.0.0:0' && report.any6 === 'PermissionDenied' && report.lan === 'PermissionDenied' && report.lanSubject === '10.0.0.1:80' && report.udpAny === 'PermissionDenied' && report.udpLan === 'PermissionDenied' && report.udpConnect === 'PermissionDenied' && report.name === 'TypeError' && report.mapped === 'PermissionDenied' && report.mappedLoopback && report.dnsLan === 'PermissionDenied' && report.dnsLoopback === 'ok'");
 }
 
 test "net grant: rules widen or narrow what is reachable" {
@@ -59,8 +65,8 @@ test "net grant: rules widen or narrow what is reachable" {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create();
         \\  const timers = api.io.create();
-        \\  const mode = { mode: 'pull', socketMode: 'pull' };
-        \\  const connect = (host, port) => api.net.connect(io, { host, port, mode: 'pull' });
+        \\  const listen = (host, port) => io.tcp.listen(at(host, port));
+        \\  const connect = (host, port) => io.tcp.connect(at(host, port));
         \\  // connect: 192.0.2.0/24 port 80 only; 2001:db8::/32 any port. listen: loopback v4 any port. Not loopback connect.
         \\  out.range = await allowed(timers, connect('192.0.2.5', 80));
         \\  out.otherPort = await outcome(connect('192.0.2.5', 81));
@@ -69,9 +75,9 @@ test "net grant: rules widen or narrow what is reachable" {
         \\  out.v6Other = await outcome(connect('2001:db9::1', 9));
         \\  out.mappedInRange = await allowed(timers, connect('::ffff:192.0.2.9', 80));
         \\  out.noLoopbackConnect = await outcome(connect('127.0.0.1', 1));
-        \\  out.listen = throws(() => api.net.listen(io, { ...mode, host: '127.0.0.1', port: 0 }));
-        \\  out.listenOther = throws(() => api.net.listen(io, { ...mode, host: '::1', port: 0 }));
-        \\  out.listenWide = throws(() => api.net.listen(io, { ...mode, host: '0.0.0.0', port: 0 }));
+        \\  out.listen = throws(() => listen('127.0.0.1', 0));
+        \\  out.listenOther = throws(() => listen('::1', 0));
+        \\  out.listenWide = throws(() => listen('0.0.0.0', 0));
         \\  // DNS servers follow the connect rules (address and port), checked when the resolver is made.
         \\  const { DnsServer } = api.dns;
         \\  const { IpAddr, SocketAddr } = await import('origine:@std/net');
@@ -97,9 +103,9 @@ test "net grant: empty rules allow nothing, even loopback" {
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create();
-        \\  out.listen = throws(() => api.net.listen(io, { mode: 'pull', socketMode: 'pull', host: '127.0.0.1', port: 0 }));
-        \\  out.connect = await outcome(api.net.connect(io, { host: '127.0.0.1', port: 1, mode: 'pull' }));
-        \\  out.localhost = await outcome(api.net.connect(io, { host: 'localhost', port: 1, mode: 'pull' }));
+        \\  out.listen = throws(() => io.tcp.listen(at('127.0.0.1', 0)));
+        \\  out.connect = await outcome(io.tcp.connect(at('127.0.0.1', 1)));
+        \\  out.localhost = await outcome(io.tcp.connect(at('::1', 1)));
         \\  const { SocketAddr } = await import('origine:@std/net');
         \\  out.dns = throws(() => api.dns.resolver(io, { servers: [api.dns.DnsServer.tcp([SocketAddr.parse('127.0.0.1:53')])], dnssec: 'off', timeout: 100, tries: 1 }));
         \\  await io.close();

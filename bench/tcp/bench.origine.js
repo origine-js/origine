@@ -5,6 +5,7 @@
 // The guest has no high-resolution clock (only `Date.now()`), so this prints throughput and mean
 // round-trip latency (conns / rps) but not p50/p99.
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
@@ -24,9 +25,10 @@ export async function main(api) {
   const io = api.io.create({ backend: /** @type {NonNullable<import('@origine/types').IoOptions['backend']>} */ (backend) });
 
   if (eventsMode) {
-    const server = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'event' });
+    const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).evented();
     // Echo over events: lease the chunk, send it back, give the lease back.
-    server.register('connection', conn => {
+    server.register('connection', stream => {
+      const conn = stream.evented();
       conn.register('data', ev => {
         const buf = ev.buffer();
         if (conn.queued.put(buf) !== buf.length) throw new Error('send queue full'); // copied: the lease can go back
@@ -35,7 +37,7 @@ export async function main(api) {
     });
     const running = io.run(); // handlers alone do not keep the program alive
     const clients = [];
-    for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port, mode: 'event' }));
+    for (let i = 0; i < CONNS; i++) clients.push((await io.tcp.connect(server.localAddr)).evented());
     const start = Date.now();
     const warmEnd = start + WARM;
     const end = warmEnd + MEAS;
@@ -88,7 +90,7 @@ export async function main(api) {
     return;
   }
 
-  const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+  const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
 
   // A reusable read buffer per connection. 'copy' keeps one Uint8Array (readCopy copies into it);
   // 'into' gets the detached buffer back from readInto each time and wraps it in a new view.
@@ -108,7 +110,7 @@ export async function main(api) {
   };
 
   const echo = async () => {
-    const conn = await server.accept();
+    const conn = (await server.accept()).pulling();
     const reader = makeReader(Math.max(SIZE, 1024));
     try {
       for (;;) {
@@ -125,7 +127,7 @@ export async function main(api) {
   for (let i = 0; i < CONNS; i++) echo();
 
   const clients = [];
-  for (let i = 0; i < CONNS; i++) clients.push(await api.net.connect(io, { port: server.port, mode: 'pull' }));
+  for (let i = 0; i < CONNS; i++) clients.push((await io.tcp.connect(server.localAddr)).pulling());
 
   const start = Date.now();
   const warmEnd = start + WARM;

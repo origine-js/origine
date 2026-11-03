@@ -40,6 +40,7 @@ const prelude = tls_prelude ++
     \\};
     \\const sendOn = (s, data) => ('queued' in s ? s.queued.send(data) : s.send(data));
     \\const framed = async s => {
+    \\  if (typeof s.pulling === 'function') s = s.pulling();
     \\  try {
     \\    for (;;) {
     \\      const head = await readExact(s, 2);
@@ -49,10 +50,11 @@ const prelude = tls_prelude ++
     \\    }
     \\  } catch { /* the client went away */ }
     \\};
+    \\// A loopback listener handing each connection (unshaped) to `handle`.
     \\const listen = (api, io, handle) => {
-    \\  const listener = api.net.listen(io, { mode: 'pull', socketMode: 'pull', port: 0 });
+    \\  const listener = io.tcp.listen(local(api, 0)).pulling();
     \\  (async () => { for (;;) { let s; try { s = await listener.accept(); } catch { return; } handle(s); } })();
-    \\  return listener;
+    \\  return { port: listener.localAddr.port, close: () => listener.close() };
     \\};
     \\const local = (api, port) => SocketAddr.new(IpAddr.v4(127, 0, 0, 1), port);
     \\const options = { dnssec: 'off', timeout: 2000, tries: 1 };
@@ -221,7 +223,7 @@ test "dns: DNS over TLS" {
         \\  const { tls, dns } = api;
         \\  const roots = tls.RootPki.fromPem(bytes(CA));
         \\  const serverTls = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none() });
-        \\  const dot = listen(api, io, async plain => { try { framed(await serverTls.accept(plain, { mode: 'pull' })); } catch { /* a failed handshake */ } });
+        \\  const dot = listen(api, io, async plain => { try { framed(await serverTls.accept(plain)); } catch { /* a failed handshake */ } });
         \\  const resolver = dns.resolver(io, { servers: [dns.DnsServer.tls('localhost', [local(api, dot.port)])], roots, ...options });
         \\  out.dot = show(await resolver.lookup('web.test', { family: 'any' })) === '2001:db8::7,192.0.2.7';
         \\  out.missing = await outcome(resolver.lookup('missing.test', { family: 'any' }));
@@ -319,7 +321,7 @@ test "dns: cache honours TTL clamps and is opt-in" {
         \\  const second = show(await ask(cached));
         \\  out.hit = first === '192.0.2.7' && second === first && stats.queries === before + 1;
         \\  // The zone's records say 60 s; the resolver's max clamp is 400 ms.
-        \\  await io.sleep(600);
+        \\  await io.timer.sleep(600);
         \\  await ask(cached);
         \\  out.expired = stats.queries === before + 2;
         \\  // Every lookup asks without a cache option.
@@ -473,7 +475,7 @@ test "dns: a truncated datagram answer is asked again over TCP, at the same addr
             \\  const out = globalThis.report = {};
             \\  const io = api.io.create();
             \\  const { DnsServer } = api.dns;
-            \\  const listener = api.net.listen(io, { mode: 'pull', socketMode: 'pull', port: UDP_PORT });
+            \\  const listener = io.tcp.listen(local(api, UDP_PORT)).pulling();
             \\  (async () => { for (;;) { let s; try { s = await listener.accept(); } catch { return; } framed(s); } })();
             \\  const resolver = api.dns.resolver(io, { servers: [DnsServer.udp([local(api, UDP_PORT)])], ...options });
             \\  out.a = show(await resolver.lookup('web.test', { family: 'ipv4' })) === '192.0.2.7';

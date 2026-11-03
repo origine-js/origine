@@ -196,7 +196,7 @@ test "http: connect and serve" {
         \\  out.tls = (await collect(secure.open({ method: 'GET', scheme: 'https', authority: 'localhost', path: '/secure' }))).text === 'you asked for /secure';
         \\  out.noAlpn = await outcome(api.http.connect(io, { port: secureServer.port, tls: tls.client({ roots }), servername: 'localhost', mode: 'pull', limits }));
         \\  out.wrongName = await outcome(api.http.connect(io, { port: secureServer.port, tls: tls.client({ roots, alpn: ['h2'] }), servername: 'example.com', mode: 'pull', limits }));
-        \\  await timers.sleep(50);
+        \\  await timers.timer.sleep(50);
         \\  out.dropped = secureServer.dropped >= 1;
         \\  await secure.close();
         \\  await secureServer.close();
@@ -293,7 +293,7 @@ const client_prelude = prelude ++
     \\      ex.finish(headersOf(api, [['x-done', 'yes']]));
     \\    };
     \\    const redirect = (status, to) => reply(status, [['location', to]], new Uint8Array(0));
-    \\    if (path === '/slow') await io.sleep(100);
+    \\    if (path === '/slow') await io.timer.sleep(100);
     \\    if (path === '/big') return reply(200, [], new Uint8Array(300000).fill(1));
     \\    if (path === '/xorigin') return redirect(302, `http://localhost:${port}/echo`);
     \\    if (path === '/loop') return redirect(302, '/loop');
@@ -305,15 +305,16 @@ const client_prelude = prelude ++
     \\  return { handle };
     \\};
     \\const listen = async (api, io, limitsOf = limits) => {
-    \\  const listener = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    \\  const listener = io.tcp.listen(stdNet.SocketAddr.parse('127.0.0.1:0')).pulling();
+    \\  const port = listener.localAddr.port;
     \\  const sessions = [];
     \\  const { handle } = app(api, io);
     \\  (async () => { try { for (;;) {
     \\    const session = api.http.session(await listener.accept(), { role: 'server', mode: 'pull', limits: limitsOf });
     \\    sessions.push(session);
-    \\    (async () => { try { for await (const ex of session) handle(ex, listener.port).catch(() => {}); } catch {} })();
+    \\    (async () => { try { for await (const ex of session) handle(ex, port).catch(() => {}); } catch {} })();
     \\  } } catch {} })();
-    \\  return { port: listener.port, sessions, close: () => listener.close() };
+    \\  return { port, sessions, close: () => listener.close() };
     \\};
     \\const readAll = async response => { let n = 0; const parts = []; for await (const chunk of response.body) { n += chunk.length; if (parts.length < 200) parts.push(...chunk.subarray(0, 64)); } return { n, text: text(parts) }; };
     \\
@@ -345,11 +346,11 @@ test "http: pool reuses sessions, opens another at the peer's stream limit, drop
         \\  // A graceful close from the peer (GOAWAY) and a closed connection are noticed; the next request dials a new session.
         \\  const before = server.sessions.length;
         \\  for (const s of server.sessions) await s.end();
-        \\  await clock.sleep(100);
+        \\  await clock.timer.sleep(100);
         \\  const after = await collect(await pool.open(target, head('/echo')));
         \\  out.goaway = after.status === 200 && server.sessions.length === before + 1;
         \\  await server.sessions.at(-1).close();
-        \\  await clock.sleep(100);
+        \\  await clock.timer.sleep(100);
         \\  const again = await collect(await pool.open(target, head('/echo')));
         \\  out.dead = again.status === 200 && server.sessions.length === before + 2;
         \\  // Another origin (a different servername) is another key.
@@ -361,7 +362,7 @@ test "http: pool reuses sessions, opens another at the peer's stream limit, drop
         \\  const brief = api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 1, perKey: 1, idle: 40, queue: 0 } });
         \\  await collect(await brief.open(target, head('/echo')));
         \\  out.held = brief.size === 1;
-        \\  await clock.sleep(250);
+        \\  await clock.timer.sleep(250);
         \\  out.idle = brief.size === 0;
         \\  const tight = api.http.pool(io, { mode: 'pull', limits, sessions: { limit: 1, perKey: 1, idle: 30000, queue: 0 } });
         \\  await collect(await tight.open(target, head('/echo')));

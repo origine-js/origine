@@ -1,44 +1,36 @@
-//! `native.net.*`: loopback TCP on the io loop.
+//! The socket engine under `io.tcp` and `io.udp`: descriptors on the io loop, the network ceiling, and the
+//! conversion of `origine:@std/net` `SocketAddr`s.
 //!
-//! Sockets are non-blocking, `TCP_NODELAY`, no SIGPIPE, and live in the Host's socket table,
-//! bound to the runtime they were created on. `accept`, `connect` and `read` run on that
-//! runtime's loop (`Loop::accept/connect/recv/send`), so they never block the isolate thread:
+//! Sockets are non-blocking, no SIGPIPE, and streams are `TCP_NODELAY`. `accept`, `connect`, `recv` and `send`
+//! run on the runtime's loop (`Loop::accept/connect/recv/send`), so they never block the isolate thread:
 //! `connect` creates a raw non-blocking `socket(2)` and lets the loop finish the handshake.
-//! Only loopback destinations are allowed (`PermissionDenied` otherwise): there is no embedder
-//! permission for wider network access yet. IP literals are used as given; `localhost` never
-//! reaches the system resolver (RFC 6761): `connect` tries `127.0.0.1` then `::1`, `listen`
-//! binds `127.0.0.1`.
 //!
-//! An operation in flight holds an `Rc<Socket>`, so `close` can never free a descriptor under a
-//! running `recv`; closing a stream shuts it down so a pending read completes with 0 bytes. No
-//! system call wakes an `accept` on every platform, so closing a listener wakes its pending accepts
-//! directly: they cancel their op, reject `Canceled` and let go of the descriptor.
+//! A socket belongs to the [`crate::conn::Conn`] that the guest's object fronts; an operation in flight holds
+//! its own `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. Closing a stream shuts it
+//! down so a pending read completes with 0 bytes. No system call wakes an `accept` on every platform, so closing
+//! a listener wakes its pending accepts directly ([`Socket::closers`]): they cancel their op and let go.
 
 use std::cell::{Cell, RefCell};
-use std::future::{Future, poll_fn};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::pin::pin;
 use std::rc::Rc;
-use std::task::{Poll, Waker};
+use std::task::Waker;
 
-use origine_api_core::{NativeError, errno, pin};
+use origine_api_core::{ArgError, NativeError, errno};
 
-use crate::HostState;
-use crate::decode::ArrayBufferArg;
-use crate::fs::{AllocRead, ReadInto};
-use crate::native;
-use crate::native::{Op, ScopeKey, host_mut};
-use crate::pinned;
+use crate::{FromJs, HostState, IntoJs, native};
 
 /// `MSG_NOSIGNAL` on Linux; macOS has none (the socket gets `SO_NOSIGPIPE` instead).
 pub(crate) const SEND_FLAGS: u32 = if cfg!(target_os = "linux") { 0x4000 } else { 0 };
-/// Pending-connection queue and peer-address capacity for `accept`.
+/// `MSG_PEEK`: how a datagram socket waits for a datagram without taking it.
+pub(crate) const PEEK: u32 = 2;
+/// Peer-address capacity for `accept`.
 pub(crate) const ADDR_CAP: usize = 128;
 
 enum Endpoint {
     Listener(TcpListener),
     Stream(TcpStream),
+    Datagram(UdpSocket),
     /// A TLS stream over a plain stream socket (its handshake done): reads and writes carry plaintext.
     #[cfg(feature = "tls")]
     Tls(TlsConn),
@@ -51,44 +43,80 @@ struct TlsConn {
     inner: Rc<Socket>,
 }
 
-/// A socket of the Host table.
+/// One descriptor (or a TLS stream over one).
 pub struct Socket {
-    owner: ScopeKey,
-    runtime: u32,
     endpoint: Endpoint,
     /// The guest closed it: what a pending `accept` looks at when `closers` wakes it.
-    closed: Cell<bool>,
+    pub(crate) closed: Cell<bool>,
     /// The pending `accept`s of a listener.
-    closers: RefCell<Vec<Waker>>,
+    pub(crate) closers: RefCell<Vec<Waker>>,
+    /// Told when an operation let go of its reference (what closing a listener waits for).
+    pub(crate) released: Rc<Released>,
+}
+
+/// Wakes who waits for the other references of a socket to be dropped.
+#[derive(Default)]
+pub(crate) struct Released(RefCell<Vec<Waker>>);
+
+impl Released {
+    pub(crate) fn wake(&self) {
+        for waker in self.0.borrow_mut().drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// Resolves once `socket` is the last reference to its socket (and then drops it, closing the descriptor).
+    pub(crate) async fn wait_alone(&self, socket: Rc<Socket>) {
+        std::future::poll_fn(|cx| {
+            if Rc::strong_count(&socket) == 1 {
+                return std::task::Poll::Ready(());
+            }
+            self.0.borrow_mut().push(cx.waker().clone());
+            std::task::Poll::Pending
+        })
+        .await;
+    }
 }
 
 impl Socket {
-    pub(crate) fn owner(&self) -> ScopeKey {
-        self.owner
+    fn new(endpoint: Endpoint) -> Socket {
+        Socket { endpoint, closed: Cell::new(false), closers: RefCell::default(), released: Rc::default() }
     }
 
-    pub(crate) fn runtime(&self) -> u32 {
-        self.runtime
+    /// A connected stream socket.
+    pub(crate) fn stream(stream: TcpStream) -> Socket {
+        Socket::new(Endpoint::Stream(stream))
+    }
+
+    pub(crate) fn listener(listener: TcpListener) -> Socket {
+        Socket::new(Endpoint::Listener(listener))
+    }
+
+    pub(crate) fn datagram(socket: UdpSocket) -> Socket {
+        Socket::new(Endpoint::Datagram(socket))
+    }
+
+    /// A TLS socket over `inner`.
+    #[cfg(feature = "tls")]
+    pub(crate) fn over_tls(stream: origine_tls::TlsStream<crate::sockstream::SocketTransport>, inner: Rc<Socket>) -> Socket {
+        Socket::new(Endpoint::Tls(TlsConn { stream, inner }))
     }
 
     pub(crate) fn fd(&self) -> isize {
         match &self.endpoint {
             Endpoint::Listener(l) => l.as_raw_fd() as isize,
             Endpoint::Stream(s) => s.as_raw_fd() as isize,
+            Endpoint::Datagram(d) => d.as_raw_fd() as isize,
             #[cfg(feature = "tls")]
             Endpoint::Tls(t) => t.inner.fd(),
         }
     }
 
-    pub(crate) fn is_listener(&self) -> bool {
-        matches!(self.endpoint, Endpoint::Listener(_))
-    }
-
-    /// The TLS stream and the plain socket under it, for a stream socket made by `tls.connect` / `tls.accept`.
+    /// The TLS stream, for a stream made by `tls.connect` / `tls.accept`.
     #[cfg(feature = "tls")]
-    pub(crate) fn tls(&self) -> Option<(&origine_tls::TlsStream<crate::sockstream::SocketTransport>, &Rc<Socket>)> {
+    pub(crate) fn tls(&self) -> Option<&origine_tls::TlsStream<crate::sockstream::SocketTransport>> {
         match &self.endpoint {
-            Endpoint::Tls(t) => Some((&t.stream, &t.inner)),
+            Endpoint::Tls(t) => Some(&t.stream),
             _ => None,
         }
     }
@@ -99,6 +127,14 @@ impl Socket {
         return matches!(self.endpoint, Endpoint::Tls(_));
         #[cfg(not(feature = "tls"))]
         false
+    }
+
+    /// The datagram socket of a UDP endpoint.
+    pub(crate) fn udp(&self) -> Option<&UdpSocket> {
+        match &self.endpoint {
+            Endpoint::Datagram(d) => Some(d),
+            _ => None,
+        }
     }
 
     /// One read into `buf`: the bytes received (0 = end of stream; for TLS, after the peer's `close_notify`).
@@ -177,28 +213,19 @@ impl Socket {
         }
     }
 
-    /// A TLS socket of `owner` on `runtime` over `inner`.
-    #[cfg(feature = "tls")]
-    pub(crate) fn over_tls(
-        owner: ScopeKey,
-        runtime: u32,
-        stream: origine_tls::TlsStream<crate::sockstream::SocketTransport>,
-        inner: Rc<Socket>,
-    ) -> Socket {
-        Socket::new(owner, runtime, Endpoint::Tls(TlsConn { stream, inner }))
+    /// The local and peer addresses (the peer is `None` for a listener and an unconnected datagram socket).
+    pub(crate) fn addrs(&self) -> (Option<SocketAddr>, Option<SocketAddr>) {
+        match &self.endpoint {
+            Endpoint::Listener(l) => (l.local_addr().ok(), None),
+            Endpoint::Stream(s) => (s.local_addr().ok(), s.peer_addr().ok()),
+            Endpoint::Datagram(d) => (d.local_addr().ok(), d.peer_addr().ok()),
+            #[cfg(feature = "tls")]
+            Endpoint::Tls(t) => t.inner.addrs(),
+        }
     }
 
-    /// A stream socket (accepted by a subscription's pump) of `owner` on `runtime`.
-    pub(crate) fn accepted(owner: ScopeKey, runtime: u32, stream: TcpStream) -> Socket {
-        Socket::new(owner, runtime, Endpoint::Stream(stream))
-    }
-
-    fn new(owner: ScopeKey, runtime: u32, endpoint: Endpoint) -> Socket {
-        Socket { owner, runtime, endpoint, closed: Cell::new(false), closers: RefCell::default() }
-    }
-
-    /// Wakes pending reads (they complete with 0 bytes) and accepts (they reject `Canceled`) when the
-    /// guest closes the socket.
+    /// Wakes pending reads (they complete with 0 bytes) and accepts (they reject `Canceled`) when the guest
+    /// closes the socket.
     pub(crate) fn shutdown(&self) {
         self.closed.set(true);
         for waker in self.closers.borrow_mut().drain(..) {
@@ -210,64 +237,52 @@ impl Socket {
             }
             #[cfg(feature = "tls")]
             Endpoint::Tls(t) => t.inner.shutdown(),
-            Endpoint::Listener(_) => {}
+            Endpoint::Listener(_) | Endpoint::Datagram(_) => {}
         }
     }
 }
 
-/// `{ id, port }`: a new socket and its (local for a listener, remote for a stream) port.
-#[derive(crate::IntoJs)]
-pub struct Opened {
-    id: u32,
-    port: u32,
-}
-
 #[cfg(target_os = "macos")]
-fn no_sigpipe(stream: &TcpStream) {
+fn no_sigpipe(fd: i32) {
     unsafe extern "C" {
         fn setsockopt(fd: i32, level: i32, name: i32, value: *const std::ffi::c_void, len: u32) -> i32;
     }
     const SOL_SOCKET: i32 = 0xffff;
     const SO_NOSIGPIPE: i32 = 0x1022;
     let one: i32 = 1;
-    // SAFETY: `fd` is a live socket owned by `stream`; `one` is a valid 4-byte option value that
-    // outlives the call, and `len` is its size.
-    unsafe { setsockopt(stream.as_raw_fd(), SOL_SOCKET, SO_NOSIGPIPE, std::ptr::from_ref(&one).cast(), 4) };
+    // SAFETY: `fd` is a live socket of the caller; `one` is a valid 4-byte option value that outlives the call,
+    // and `len` is its size.
+    unsafe { setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, std::ptr::from_ref(&one).cast(), 4) };
 }
 
 #[cfg(not(target_os = "macos"))]
-fn no_sigpipe(_: &TcpStream) {}
+fn no_sigpipe(_: i32) {}
 
 /// Non-blocking, no-delay, no SIGPIPE.
 pub(crate) fn prepare(stream: &TcpStream) -> Result<(), NativeError> {
     stream.set_nonblocking(true)?;
     stream.set_nodelay(true)?;
-    no_sigpipe(stream);
+    no_sigpipe(stream.as_raw_fd());
     Ok(())
 }
 
-/// The addresses `host:port` names, each kept only if the network ceiling allows it (`listen`: to listen on, else to
-/// connect to). An IP literal is used as given; `localhost` is 127.0.0.1 then ::1 and is never looked up (RFC 6761).
-/// A name that is not a literal is refused: `api.net` does not resolve, so look it up with `api.dns` and pass the
-/// address, which is what the ceiling is checked against (a name could lead anywhere). `PermissionDenied` when
-/// nothing is allowed, with the address (or the name) as the detail.
-pub(crate) fn allowed(host: &HostState, name: &str, port: u32, listen: bool) -> Result<Vec<SocketAddr>, NativeError> {
-    let port = u16::try_from(port).map_err(|_| NativeError::Errno(errno::INVALID_INPUT))?;
-    let ips = if name.eq_ignore_ascii_case("localhost") {
-        vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
-    } else {
-        match name.parse::<IpAddr>() {
-            Ok(ip) => vec![ip],
-            Err(_) => return Err(NativeError::Errno(errno::PERMISSION_DENIED).with_subject(name.to_owned())),
-        }
+/// What the ceiling is asked about an address.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Use {
+    /// Listening on it (`io.tcp.listen`, `io.udp.bind`).
+    Listen,
+    /// Reaching it (`io.tcp.connect`, a datagram's destination).
+    Connect,
+}
+
+/// `addr` if the embedder's network ceiling allows `what` on it, else `PermissionDenied` with the address as the
+/// detail. The ceiling canonicalises (`::ffff:a.b.c.d` is `a.b.c.d`) and is about addresses, never names.
+pub(crate) fn allowed(host: &HostState, addr: SocketAddr, what: Use) -> Result<SocketAddr, NativeError> {
+    let permitted = match what {
+        Use::Listen => host.net.allows_listen(&addr),
+        Use::Connect => host.net.allows_connect(&addr),
     };
-    let candidates: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
-    let permitted = |addr: &SocketAddr| if listen { host.net.allows_listen(addr) } else { host.net.allows_connect(addr) };
-    let kept: Vec<SocketAddr> = candidates.iter().copied().filter(permitted).collect();
-    if kept.is_empty() {
-        return Err(NativeError::Errno(errno::PERMISSION_DENIED).with_subject(candidates[0].to_string()));
-    }
-    Ok(kept)
+    if permitted { Ok(addr) } else { Err(NativeError::Errno(errno::PERMISSION_DENIED).with_subject(addr.to_string())) }
 }
 
 unsafe extern "C" {
@@ -281,7 +296,7 @@ const SOCK_DGRAM: i32 = 2;
 /// Linux creates close-on-exec sockets atomically; macOS has no such flag.
 const SOCK_CLOEXEC: i32 = if cfg!(target_os = "linux") { 0x80000 } else { 0 };
 
-/// A fresh non-blocking stream socket for `addr`'s family (no SIGPIPE, no-delay), not connected.
+/// A fresh non-blocking stream socket for `addr`'s family (no SIGPIPE), not connected.
 pub(crate) fn new_stream(addr: &SocketAddr) -> Result<TcpStream, NativeError> {
     new_socket(addr, SOCK_STREAM).map(TcpStream::from)
 }
@@ -290,28 +305,8 @@ pub(crate) fn new_stream(addr: &SocketAddr) -> Result<TcpStream, NativeError> {
 #[cfg(feature = "dns")]
 pub(crate) fn new_datagram(addr: &SocketAddr) -> Result<OwnedFd, NativeError> {
     let fd = new_socket(addr, SOCK_DGRAM)?;
-    set_nonblocking(&fd)?;
+    UdpSocket::from(fd.try_clone()?).set_nonblocking(true)?;
     Ok(fd)
-}
-
-#[cfg(feature = "dns")]
-fn set_nonblocking(fd: &OwnedFd) -> Result<(), NativeError> {
-    unsafe extern "C" {
-        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-    }
-    const F_GETFL: i32 = 3;
-    const F_SETFL: i32 = 4;
-    const O_NONBLOCK: i32 = if cfg!(target_os = "linux") { 0x800 } else { 0x4 };
-    // SAFETY: `fd` is a live descriptor owned by the caller; F_GETFL takes no argument.
-    let flags = unsafe { fcntl(fd.as_raw_fd(), F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // SAFETY: as above; F_SETFL takes the new flags as an int.
-    if unsafe { fcntl(fd.as_raw_fd(), F_SETFL, flags | O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
 }
 
 fn new_socket(addr: &SocketAddr, kind: i32) -> Result<OwnedFd, NativeError> {
@@ -327,10 +322,18 @@ fn new_socket(addr: &SocketAddr, kind: i32) -> Result<OwnedFd, NativeError> {
         // `set_nodelay` fails on an unconnected socket on some systems; the option is applied after connect.
         let stream = TcpStream::from(owned);
         stream.set_nonblocking(true)?;
-        no_sigpipe(&stream);
+        no_sigpipe(stream.as_raw_fd());
         return Ok(OwnedFd::from(stream));
     }
     Ok(owned)
+}
+
+/// A bound, non-blocking datagram socket on `addr`.
+pub(crate) fn bind_datagram(addr: SocketAddr) -> Result<UdpSocket, NativeError> {
+    let socket = UdpSocket::bind(addr)?;
+    socket.set_nonblocking(true)?;
+    no_sigpipe(socket.as_raw_fd());
+    Ok(socket)
 }
 
 /// The platform's native `sockaddr_in` / `sockaddr_in6` bytes for `addr`.
@@ -361,202 +364,96 @@ pub(crate) fn sockaddr_bytes(addr: &SocketAddr) -> Vec<u8> {
     bytes
 }
 
-/// A stream socket of the table (not a listener) with its loop; `BadHandle` otherwise.
-pub(crate) fn stream_of(host: &HostState, key: ScopeKey, id: u32) -> Result<(Rc<Socket>, Rc<origine_io::Loop>), NativeError> {
-    let (socket, lp) = host.socket(key, id)?;
-    if socket.is_listener() { Err(NativeError::Errno(errno::BAD_HANDLE)) } else { Ok((socket, lp)) }
+/// Connects a fresh stream socket to `addr` on `lp` (the loop finishes the handshake).
+pub(crate) async fn connect_stream(lp: &origine_io::Loop, addr: SocketAddr) -> Result<TcpStream, NativeError> {
+    let stream = new_stream(&addr)?;
+    lp.connect(stream.as_raw_fd() as isize, sockaddr_bytes(&addr)).await.map_err(|error| NativeError::Errno(errno::errno_of(&error)))?;
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
 }
 
-/// `native.net.listen(io, host, port)`: binds and listens on a loopback address (`port` 0 picks
-/// one) and returns `{ id, port }` with the actual port. Throws `PermissionDenied` (not loopback),
-/// `BadHandle` (unknown or closed `io`), `AddressInUse`, ...
-#[native(side_effect = "any", path = "net.listen", needs = "runtime")]
-fn net_listen(host: &mut HostState, key: ScopeKey, io: u32, addr: String, port: u32) -> Result<Opened, NativeError> {
-    host.loop_of(key, io)?;
-    let listener = TcpListener::bind(allowed(host, &addr, port, true)?[0])?;
-    listener.set_nonblocking(true)?;
-    let port = u32::from(listener.local_addr()?.port());
-    let id = host.reserve_socket()?;
-    host.insert_socket(id, Socket::new(key, io, Endpoint::Listener(listener)))?;
-    Ok(Opened { id, port })
+// ---- `origine:@std/net` addresses ----
+//
+// `SocketAddr` is a sealed JS class of the glue (`glue/addr.js`), whose state is private. The glue registers two
+// converters per realm (`net.link`): one gives `[octets, port, scopeId]` of a genuine `SocketAddr` (anything else:
+// `undefined`), the other makes a `SocketAddr` from them. No text crosses.
+
+const TO_NATIVE: &str = "origine:net.addrParts";
+const FROM_NATIVE: &str = "origine:net.addrMake";
+
+fn private<'s>(scope: &mut v8::PinScope<'s, '_>, name: &str) -> Option<v8::Local<'s, v8::Private>> {
+    let name = v8::String::new(scope, name)?;
+    Some(v8::Private::for_api(scope, Some(name)))
 }
 
-/// `native.net.accept(id)`: Promise `{ id, port }` of the next connection (`port` = the peer's).
-/// Rejects `Canceled` when the listener is closed first.
-#[native(side_effect = "any", path = "net.accept", needs = "runtime", promise)]
-fn net_accept(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-) -> Result<Op<'static, impl Future<Output = Result<Opened, NativeError>> + use<>>, NativeError> {
-    let (listener, lp) = host.socket(key, id)?;
-    if !listener.is_listener() {
-        return Err(NativeError::Errno(errno::BAD_HANDLE));
+fn converter<'s>(scope: &mut v8::PinScope<'s, '_>, name: &str) -> Option<v8::Local<'s, v8::Function>> {
+    let key = private(scope, name)?;
+    let global = scope.get_current_context().global(scope);
+    global.get_private(scope, key).and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+}
+
+/// `native.net.link(toParts, fromParts)`: the realm's `SocketAddr` converters (see above). Called once per realm.
+#[native(side_effect = "any", path = "net.link", needs = "runtime")]
+fn net_link<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    to_parts: v8::Local<'s, v8::Function>,
+    from_parts: v8::Local<'s, v8::Function>,
+) -> Result<(), NativeError> {
+    let global = scope.get_current_context().global(scope);
+    for (name, function) in [(TO_NATIVE, to_parts), (FROM_NATIVE, from_parts)] {
+        let key = private(scope, name).ok_or(NativeError::Errno(errno::UNEXPECTED))?;
+        global.set_private(scope, key, function.into());
     }
-    let runtime = listener.runtime();
-    let new_id = host.reserve_socket()?;
-    let slot: Rc<RefCell<Option<TcpStream>>> = Rc::default();
-    let filled = Rc::clone(&slot);
-    let future = async move {
-        let mut accepting = pin!(lp.accept(listener.fd(), ADDR_CAP));
-        let accepted = poll_fn(|cx| {
-            // The op first: a connection it already accepted is not dropped here.
-            if let Poll::Ready(accepted) = accepting.as_mut().poll(cx) {
-                return Poll::Ready(Some(accepted));
-            }
-            if listener.closed.get() {
-                return Poll::Ready(None);
-            }
-            let mut closers = listener.closers.borrow_mut();
-            if !closers.iter().any(|waker| waker.will_wake(cx.waker())) {
-                closers.push(cx.waker().clone());
-            }
-            Poll::Pending
-        })
-        .await;
-        let (fd, _peer) = accepted.ok_or(NativeError::Errno(errno::CANCELED))??;
-        // SAFETY: `fd` was just returned by `accept` and nothing else owns it.
-        let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd as i32) });
-        prepare(&stream)?;
-        let port = u32::from(stream.peer_addr()?.port());
-        *filled.borrow_mut() = Some(stream);
-        Ok(Opened { id: new_id, port })
-    };
-    let hook = Box::new(move |scope: &mut v8::PinScope<'_, '_>| {
-        let stream = slot.borrow_mut().take().ok_or(NativeError::Errno(errno::CANCELED))?;
-        host_mut(scope)?.insert_socket(new_id, Socket::accepted(key, runtime, stream))
-    });
-    Ok(Op::new(runtime, future).with_hook(hook))
-}
-
-/// `native.net.connect(io, host, port)`: Promise `{ id, port }`. Loopback only (see the module
-/// docs). Nothing blocks: the socket is created here and the loop completes the handshake; for
-/// `localhost` each address is tried in turn, and the last error is reported when all fail.
-#[native(side_effect = "any", path = "net.connect", needs = "runtime", promise)]
-fn net_connect(
-    host: &mut HostState,
-    key: ScopeKey,
-    io: u32,
-    addr: String,
-    port: u32,
-) -> Result<Op<'static, impl Future<Output = Result<Opened, NativeError>> + use<>>, NativeError> {
-    let lp = host.loop_of(key, io)?;
-    let candidates = allowed(host, &addr, port, false)?;
-    let id = host.reserve_socket()?;
-    let slot: Rc<RefCell<Option<TcpStream>>> = Rc::default();
-    let filled = Rc::clone(&slot);
-    let future = async move {
-        let mut last = NativeError::Errno(errno::UNEXPECTED);
-        for candidate in candidates {
-            let stream = match new_stream(&candidate) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    last = error;
-                    continue;
-                }
-            };
-            if let Err(error) = lp.connect(stream.as_raw_fd() as isize, sockaddr_bytes(&candidate)).await {
-                last = NativeError::Errno(errno::errno_of(&error));
-                continue;
-            }
-            let _ = stream.set_nodelay(true);
-            let port = u32::from(stream.peer_addr()?.port());
-            *filled.borrow_mut() = Some(stream);
-            return Ok(Opened { id, port });
-        }
-        Err(last)
-    };
-    let hook = Box::new(move |scope: &mut v8::PinScope<'_, '_>| {
-        let stream = slot.borrow_mut().take().ok_or(NativeError::Errno(errno::CANCELED))?;
-        host_mut(scope)?.insert_socket(id, Socket::accepted(key, io, stream))
-    });
-    Ok(Op::new(io, future).with_hook(hook))
-}
-
-/// `native.net.read(id, len)`: Promise `Uint8Array` of 1..=`len` bytes read once from the stream
-/// (empty at end of stream). `len` is capped like `fileReadAlloc` (256 MiB, else `FileTooLarge`).
-#[native(side_effect = "any", path = "net.read", needs = "runtime", promise)]
-fn net_read(
-    scope: &mut v8::PinScope<'_, '_>,
-    key: ScopeKey,
-    id: u32,
-    len: u32,
-) -> Result<Op<'static, impl Future<Output = Result<AllocRead, NativeError>> + use<>>, NativeError> {
-    let len = pin::check_alloc_len(len as usize)?;
-    let (socket, lp) = stream_of(host_mut(scope)?, key, id)?;
-    let runtime = socket.runtime();
-    let isolate: &mut v8::Isolate = scope;
-    let buf = pinned::alloc_for_read(isolate, len)?;
-    Ok(Op::new(runtime, async move {
-        if len == 0 {
-            return Ok(AllocRead::new(0, None));
-        }
-        let (read, buf) = socket.recv(&lp, buf).await;
-        Ok(AllocRead::new(read?, buf.into_store()))
-    }))
-}
-
-/// `native.net.readCopy(id, buffer)`: Promise of the byte count (0 = end of stream) read once
-/// into the guest's `buffer` (an ArrayBuffer or view). The read goes to a native scratch `Vec`
-/// and is copied into the buffer at completion, so nothing is detached and the guest can reuse
-/// the same buffer for every read; no V8 object is created per read. `StaleHandle` if the buffer
-/// was detached meanwhile.
-#[native(side_effect = "any", path = "net.readCopy", needs = "runtime", promise)]
-fn net_read_copy<'s>(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-    buffer: ArrayBufferArg<'s>,
-) -> Result<Op<'s, impl Future<Output = Result<usize, NativeError>> + 'static + use<>>, NativeError> {
-    let (socket, lp) = stream_of(host, key, id)?;
-    let runtime = socket.runtime();
-    let len = buffer.len();
-    Ok(Op::reading(
-        runtime,
-        async move {
-            if len == 0 {
-                return Ok(Vec::new());
-            }
-            let (read, mut data) = socket.recv(&lp, vec![0u8; len]).await;
-            data.truncate(read?);
-            Ok(data)
-        },
-        buffer,
-    ))
-}
-
-/// `native.net.readInto(id, buffer)`: reads once straight into the guest's `buffer` (an
-/// ArrayBuffer or view): the buffer is detached for the duration (the loop owns its bytes, no
-/// copy) and the promise resolves `{ bytes, buffer }` with `buffer` a new ArrayBuffer over the
-/// same memory; `bytes` is 0 at end of stream. A buffer that cannot be detached (shared,
-/// resizable, WebAssembly memory) is refused with `Unsupported` before anything is touched.
-/// After a failed read the buffer stays detached (see `pinned`).
-#[native(side_effect = "any", path = "net.readInto", needs = "runtime", promise)]
-fn net_read_into<'s>(
-    host: &mut HostState,
-    key: ScopeKey,
-    id: u32,
-    buffer: ArrayBufferArg<'s>,
-) -> Result<Op<'s, impl Future<Output = Result<ReadInto, NativeError>> + 'static + use<>>, NativeError> {
-    let (socket, lp) = stream_of(host, key, id)?;
-    let runtime = socket.runtime();
-    let (buf, copied) = pinned::pin_for_read(&buffer)?;
-    if copied {
-        return Err(NativeError::Errno(errno::UNSUPPORTED));
-    }
-    Ok(Op::new(runtime, async move {
-        let (read, buf) = socket.recv(&lp, buf).await;
-        let bytes = read?;
-        let store = buf.into_store().ok_or(NativeError::Errno(errno::UNEXPECTED))?;
-        Ok(ReadInto::Pinned { bytes, store })
-    }))
-}
-
-/// `native.net.close(id)`: releases the socket now. Streams are shut down so a pending read
-/// completes. `BadHandle` for an unknown, foreign or already closed id.
-#[native(side_effect = "any", path = "net.close", needs = "runtime")]
-fn net_close(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    host.remove_socket(key, id)?.shutdown();
-    host.sub_closed(id);
     Ok(())
+}
+
+/// An `origine:@std/net` `SocketAddr` argument or result.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SockAddr(pub(crate) SocketAddr);
+
+/// `[octets, port, scopeId]` as an address.
+fn from_parts<'s>(scope: &mut v8::PinScope<'s, '_>, parts: v8::Local<'s, v8::Value>) -> Option<SocketAddr> {
+    let parts = v8::Local::<v8::Array>::try_from(parts).ok()?;
+    let octets = parts.get_index(scope, 0)?;
+    let octets = v8::Local::<v8::Uint8Array>::try_from(octets).ok()?;
+    let mut bytes = [0u8; 16];
+    let len = octets.byte_length();
+    if len != 4 && len != 16 {
+        return None;
+    }
+    octets.copy_contents(&mut bytes[..len]);
+    let number = |scope: &mut v8::PinScope<'s, '_>, at: u32| parts.get_index(scope, at).and_then(|v| v.uint32_value(scope));
+    let port = u16::try_from(number(scope, 1)?).ok()?;
+    let scope_id = number(scope, 2)?;
+    Some(if len == 4 {
+        SocketAddr::from((std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]), port))
+    } else {
+        SocketAddr::V6(std::net::SocketAddrV6::new(std::net::Ipv6Addr::from(bytes), port, 0, scope_id))
+    })
+}
+
+impl<'s> FromJs<'s> for SockAddr {
+    fn from_js(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, index: usize) -> Result<Self, ArgError> {
+        let expected = || ArgError::new(index, "a SocketAddr");
+        let to_parts = converter(scope, TO_NATIVE).ok_or_else(expected)?;
+        v8::tc_scope!(let tc, scope);
+        let undefined = v8::undefined(tc).into();
+        let parts = to_parts.call(tc, undefined, &[value]).ok_or_else(expected)?;
+        from_parts(tc, parts).map(SockAddr).ok_or_else(expected)
+    }
+}
+
+impl<'s> IntoJs<'s> for SockAddr {
+    fn into_js(self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        let make = converter(scope, FROM_NATIVE).ok_or(NativeError::Errno(errno::UNEXPECTED))?;
+        let (octets, scope_id) = match self.0 {
+            SocketAddr::V4(v4) => (v4.ip().octets().to_vec(), 0),
+            SocketAddr::V6(v6) => (v6.ip().octets().to_vec(), v6.scope_id()),
+        };
+        let octets = octets.into_js(scope)?;
+        let port = v8::Integer::new_from_unsigned(scope, u32::from(self.0.port())).into();
+        let scope_id = v8::Integer::new_from_unsigned(scope, scope_id).into();
+        let undefined = v8::undefined(scope).into();
+        make.call(scope, undefined, &[octets, port, scope_id]).ok_or(NativeError::Errno(errno::UNEXPECTED))
+    }
 }

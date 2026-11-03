@@ -12,6 +12,7 @@ use std::future::Future;
 use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::rc::Weak;
 use std::time::{Duration, Instant};
 
 use origine_api_core::slab::Slab;
@@ -21,9 +22,9 @@ use origine_io::fs::Dir;
 use origine_io::rt::Runtime;
 use origine_io::{Loop, Mode, Options};
 
+use crate::conn::Conn;
 use crate::native::{Hook, ScopeKey, Wrap, finish};
-use crate::net::Socket;
-use crate::sub::{Events, Idle, Sub};
+use crate::sub::{Events, Hub, Idle};
 use crate::sys::{self, WakeRx};
 
 /// Settles a promise on the isolate thread: finished async natives queue one of these.
@@ -96,6 +97,8 @@ struct RuntimeEntry {
     state: RtState,
     /// Grants of a draining runtime, released after its tasks are gone.
     held: Vec<Rc<GrantRecord>>,
+    /// The descriptors made on it (shared with its `IoCore`), closed with it.
+    conns: Rc<RefCell<Vec<Weak<Conn>>>>,
 }
 
 impl RuntimeEntry {
@@ -114,11 +117,15 @@ pub struct HostState {
     next_runtime: u32,
     grants: BTreeMap<u32, Rc<GrantRecord>>,
     next_grant: u32,
-    sockets: BTreeMap<u32, Rc<Socket>>,
-    next_socket: u32,
     #[cfg(feature = "http")]
     pub(crate) http: crate::http::HttpState,
-    pub(crate) subs: BTreeMap<u32, Sub>,
+    /// The event hubs of the conns that have handlers (`sub.rs`), by an id that never reaches JS.
+    pub(crate) hubs: BTreeMap<u32, Hub>,
+    pub(crate) next_hub: u32,
+    /// The promise of each runtime's `close()`, which every later call returns.
+    pub(crate) closings: BTreeMap<u32, v8::Global<v8::Promise>>,
+    /// What the glue asked to be told when a runtime starts closing (`native.io.create`'s `onClose`).
+    pub(crate) close_hooks: BTreeMap<u32, (v8::Global<v8::Function>, v8::Global<v8::Context>)>,
     pub(crate) events: Events,
     pub(crate) refill: Rc<RefCell<Vec<u32>>>,
     idle: BTreeMap<u32, Rc<Idle>>,
@@ -150,12 +157,12 @@ impl HostState {
             next_runtime: 1,
             grants: BTreeMap::new(),
             next_grant: 1,
-            sockets: BTreeMap::new(),
-            next_socket: 1,
-            #[cfg(feature = "tls")]
             #[cfg(feature = "http")]
             http: crate::http::HttpState::default(),
-            subs: BTreeMap::new(),
+            hubs: BTreeMap::new(),
+            next_hub: 1,
+            closings: BTreeMap::new(),
+            close_hooks: BTreeMap::new(),
             events: Rc::default(),
             refill: Rc::default(),
             idle: BTreeMap::new(),
@@ -212,7 +219,7 @@ impl HostState {
         let lp = Rc::new(lp);
         let rt = Runtime::new(Rc::clone(&lp));
         self.next_runtime = next;
-        self.runtimes.insert(id, RuntimeEntry { lp, rt: Some(rt), owner, state: RtState::Open, held: Vec::new() });
+        self.runtimes.insert(id, RuntimeEntry { lp, rt: Some(rt), owner, state: RtState::Open, held: Vec::new(), conns: Rc::default() });
         Ok((id, running))
     }
 
@@ -295,8 +302,12 @@ impl HostState {
         drop(rt); // cancels every task; the loop runs once to deliver the cancellations
         self.timers.retain(|(runtime, _), _| *runtime != id);
         let canceled = self.pending.take_where(|pending| pending.runtime == id);
-        self.sockets.retain(|_, socket| socket.runtime() != id);
-        self.subs.retain(|_, sub| sub.runtime != id);
+        crate::sub::drop_hubs(self, id);
+        let conns = self.runtimes.get(&id).map(|entry| std::mem::take(&mut *entry.conns.borrow_mut())).unwrap_or_default();
+        for conn in conns.iter().filter_map(Weak::upgrade) {
+            conn.close();
+        }
+        self.close_hooks.remove(&id);
         let grant_ids: Vec<u32> = self.grants.iter().filter(|(_, record)| record.runtime == id).map(|(grant, _)| *grant).collect();
         if let Some(entry) = self.runtimes.get_mut(&id) {
             entry.state = RtState::Draining { close_op: None, grants_released: false };
@@ -452,39 +463,16 @@ impl HostState {
         Ok(())
     }
 
-    // ---- sockets ------------------------------------------------------------------------
+    // ---- network ------------------------------------------------------------------------
 
     /// The loop of the open runtime `io` of `owner`; `BadHandle` for an unknown, foreign or closing one.
     pub(crate) fn loop_of(&self, owner: ScopeKey, io: u32) -> Result<Rc<Loop>, NativeError> {
         Ok(Rc::clone(&self.open_runtime(owner, io)?.lp))
     }
 
-    /// The socket `id` of `owner`, its loop and its runtime; `BadHandle` if unknown, foreign or
-    /// its runtime is closing.
-    pub(crate) fn socket(&self, owner: ScopeKey, id: u32) -> Result<(Rc<Socket>, Rc<Loop>), NativeError> {
-        let socket = self.sockets.get(&id).filter(|socket| socket.owner() == owner).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-        let lp = self.loop_of(owner, socket.runtime())?;
-        Ok((Rc::clone(socket), lp))
-    }
-
-    /// A fresh socket id (not yet addressable until [`HostState::insert_socket`]).
-    pub(crate) fn reserve_socket(&mut self) -> Result<u32, NativeError> {
-        let id = self.next_socket;
-        self.next_socket = id.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
-        Ok(id)
-    }
-
-    /// Makes `socket` addressable as `id`. `Canceled` if its runtime went away meanwhile.
-    pub(crate) fn insert_socket(&mut self, id: u32, socket: Socket) -> Result<(), NativeError> {
-        self.open_runtime(socket.owner(), socket.runtime()).map_err(|_| NativeError::Errno(errno::CANCELED))?;
-        self.sockets.insert(id, Rc::new(socket));
-        Ok(())
-    }
-
-    /// Takes socket `id` out of the table; operations in flight keep the descriptor alive.
-    /// Drops socket `id` from the table without an owner check (a subscription ending).
-    pub(crate) fn sockets_remove(&mut self, id: u32) -> Option<Rc<Socket>> {
-        self.sockets.remove(&id)
+    /// The descriptors of runtime `runtime` (shared with its `IoCore`).
+    pub(crate) fn conns_of(&self, runtime: u32) -> Rc<RefCell<Vec<Weak<Conn>>>> {
+        self.runtimes.get(&runtime).map(|entry| Rc::clone(&entry.conns)).unwrap_or_default()
     }
 
     /// The idle counters of runtime `runtime`.
@@ -502,20 +490,15 @@ impl HostState {
         Ok(handle.spawn_eager(task).abort_handle())
     }
 
-    pub(crate) fn remove_socket(&mut self, owner: ScopeKey, id: u32) -> Result<Rc<Socket>, NativeError> {
-        match self.sockets.get(&id) {
-            Some(socket) if socket.owner() == owner => Ok(self.sockets.remove(&id).expect("just found")),
-            _ => Err(NativeError::Errno(errno::BAD_HANDLE)),
-        }
-    }
-
     // ---- teardown ----------------------------------------------------------------------
 
     /// Drops every pending promise and queued completion (they own V8 `Global`s, which must be
     /// released while the isolate is alive), cancels every runtime and runs the loops until quiet
     /// (bounded). Idempotent. The detach function calls it before `Runtime.destroy`.
     pub fn drop_all(&mut self) {
-        self.subs.clear();
+        self.hubs.clear();
+        self.closings.clear();
+        self.close_hooks.clear();
         #[cfg(feature = "http")]
         self.http.clear();
         self.events.borrow_mut().clear();
@@ -539,8 +522,7 @@ impl HostState {
         // Whatever is still not quiet is destroyed with its loop (which fires the callbacks).
         self.runtimes.clear();
         self.grants.clear();
-        self.sockets.clear();
-        self.subs.clear();
+        self.hubs.clear();
         self.idle.clear();
         self.pending.clear();
     }

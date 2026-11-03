@@ -56,15 +56,17 @@ pub const prelude =
     \\`;
     \\const bytes = s => Uint8Array.from(s, c => c.charCodeAt(0));
     \\const text = b => String.fromCharCode(...b);
+    \\import * as stdNet from 'origine:@std/net';
+    \\// Two ends of a loopback connection, unshaped.
     \\const pair = async (api, io) => {
-    \\  const listener = api.net.listen(io, { mode: 'pull', socketMode: 'pull', port: 0 });
-    \\  const plain = await api.net.connect(io, { mode: 'pull', port: listener.port });
+    \\  const listener = io.tcp.listen(stdNet.SocketAddr.parse('127.0.0.1:0')).pulling();
+    \\  const plain = await io.tcp.connect(listener.localAddr);
     \\  return { plain, accepted: await listener.accept(), listener };
     \\};
     \\const secure = async (api, io, client, server, servername = 'localhost') => {
     \\  const { plain, accepted, listener } = await pair(api, io);
-    \\  const [a, b] = await Promise.all([client.connect(plain, { servername, mode: 'pull' }), server.accept(accepted, { mode: 'pull' })]);
-    \\  return { a, b, plain, accepted, listener };
+    \\  const [a, b] = await Promise.all([client.connect(plain, { servername }), server.accept(accepted)]);
+    \\  return { a: a.pulling(), b: b.pulling(), plain, accepted, listener };
     \\};
     \\const outcome = promise => promise.then(() => 'resolved', e => e.name);
     \\
@@ -83,7 +85,7 @@ test "tls: a handshake, data both ways, a clean close and a cut connection" {
         \\  const { a, b, plain } = await secure(api, io, client, server);
         \\  out.negotiated = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2' && tls.info(a).version === 'tls1.3' && tls.info(a).servername === 'localhost' && tls.info(b).servername === 'localhost';
         \\  out.peer = tls.info(a).peer.length === 1 && tls.info(b).peer.length === 0;
-        \\  out.consumed = plain.closed && await outcome(plain.read(1)) === 'BadHandle';
+        \\  out.consumed = plain.closed && (() => { try { plain.pulling(); return 'no'; } catch (e) { return e.name; } })() === 'BadHandle';
         \\  await a.queued.send(bytes('hello'));
         \\  out.up = text(await b.read(64));
         \\  await b.queued.send(bytes('world'));
@@ -130,7 +132,7 @@ test "tls: refused certificates, bad inputs and what is not there yet" {
         \\  const fine = tls.server({ identities: [good], clientAuth: tls.ClientAuth.none() });
         \\  const handshake = async (client, server, servername) => {
         \\    const { plain, accepted } = await pair(api, io);
-        \\    const [c, s] = await Promise.allSettled([client.connect(plain, { servername, mode: 'pull' }), server.accept(accepted, { mode: 'pull' })]);
+        \\    const [c, s] = await Promise.allSettled([client.connect(plain, { servername }), server.accept(accepted)]);
         \\    return [c.status === 'fulfilled' ? 'ok' : c.reason.name, s.status === 'fulfilled' ? 'ok' : s.reason.name];
         \\  };
         \\  out.unknownIssuer = (await handshake(client, rogue, 'localhost'))[0];
@@ -144,16 +146,17 @@ test "tls: refused certificates, bad inputs and what is not there yet" {
         \\  out.badPem = throws(() => tls.RootPki.fromPem(bytes('not a certificate')));
         \\  out.mismatch = throws(() => tls.Identity.fromPem(bytes(SERVER), bytes(ROGUE_KEY)));
         \\  out.types = throws(() => tls.client({ roots: {} })) === 'TypeError' && throws(() => new tls.RootPki()) === 'TypeError';
-        \\  // A missing mode is refused before anything is touched.
+        \\  // A missing servername is refused before anything is touched: the stream stays usable.
         \\  const { plain } = await pair(api, io);
-        \\  out.stillUsable = !plain.closed;
-        \\  out.noMode = await outcome(client.connect(plain, { servername: 'localhost' }));
+        \\  out.noMode = await outcome(client.connect(plain, {}));
+        \\  out.stillUsable = !plain.closed && plain.pulling() instanceof api.net.PullTcpStream;
+        \\  out.notAStream = await outcome(client.connect({ read() {} }, { servername: 'localhost' }));
         \\  await io.close();
         \\}
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.unknownIssuer === 'CertificateRejected' && report.wrongName === 'CertificateRejected' && report.fine === 'ok,ok' && report.noClientCert && report.badPem === 'InvalidData' && report.mismatch === 'InvalidData' && report.types && report.stillUsable && report.noMode === 'TypeError'");
+    try check(p.scope, "report.unknownIssuer === 'CertificateRejected' && report.wrongName === 'CertificateRejected' && report.fine === 'ok,ok' && report.noClientCert && report.badPem === 'InvalidData' && report.mismatch === 'InvalidData' && report.types && report.stillUsable && report.noMode === 'TypeError' && report.notAStream === 'TypeError'");
 }
 
 test "tls: event-mode sockets deliver plaintext, send and end with close_notify" {
@@ -167,8 +170,10 @@ test "tls: event-mode sockets deliver plaintext, send and end with close_notify"
         \\  const client = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)) });
         \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none() });
         \\  const { plain, accepted } = await pair(api, io);
-        \\  const [a, b] = await Promise.all([client.connect(plain, { servername: 'localhost', mode: 'event' }), server.accept(accepted, { mode: 'event' })]);
-        \\  out.kinds = a instanceof api.net.EventSocket && b instanceof api.net.EventSocket;
+        \\  const [ua, ub] = await Promise.all([client.connect(plain, { servername: 'localhost' }), server.accept(accepted)]);
+        \\  out.unshaped = ua instanceof api.net.TcpStreamUnshaped && tls.info(ua).alpn === undefined;
+        \\  const a = ua.evented(), b = ub.evented();
+        \\  out.kinds = out.unshaped && a instanceof api.net.EventTcpStream && b instanceof api.net.EventTcpStream;
         \\  out.info = tls.info(a).version === 'tls1.3' && tls.info(b).servername === 'localhost';
         \\  const big = Uint8Array.from({ length: 200000 }, (_, i) => i % 251);
         \\  const expected = big.reduce((x, v) => x + v, 0);
@@ -225,7 +230,7 @@ test "tls: the value classes are Rust-defined classes, frozen and brand-checked"
         \\    Object.getPrototypeOf(roots) === tls.RootPki.prototype && Object.keys(roots).length === 0;
         \\  out.receiver = throws(() => tls.RootPki.prototype.release.call(client)) === 'TypeError' && throws(() => tls.RootPki.prototype.release.call({})) === 'TypeError' &&
         \\    throws(() => Object.create(tls.RootPki.prototype).release()) === 'TypeError';
-        \\  out.wrongConnect = await outcome(tls.TlsClient.prototype.connect.call(server, {}, { servername: 'x', mode: 'pull' }));
+        \\  out.wrongConnect = await outcome(tls.TlsClient.prototype.connect.call(server, {}, { servername: 'x' }));
         \\  out.args = throws(() => tls.RootPki.fromPem('pem')) === 'TypeError' && throws(() => tls.TlsSessions.create({ limit: 0 })) === 'TypeError' &&
         \\    throws(() => tls.server({ identities: [], clientAuth: tls.ClientAuth.none() })) === 'TypeError' && throws(() => tls.client({ roots, alpn: [''] })) === 'TypeError' &&
         \\    throws(() => tls.server({ identities: [roots], clientAuth: tls.ClientAuth.none() })) === 'TypeError';
@@ -255,7 +260,7 @@ test "tls: native values are freed with their wrappers and what was built from t
         \\  for (let i = 0; i < 300; i++) tls.RootPki.bundled();
         \\  for (let i = 0; i < 3; i++) { %CollectGarbage(null); await Promise.resolve(); }
         \\  const { plain, accepted } = await pair(api, io);
-        \\  const [a, b] = await Promise.all([client.connect(plain, { servername: 'localhost', mode: 'pull' }), server.accept(accepted, { mode: 'pull' })]);
+        \\  const [a, b] = await Promise.all([client.connect(plain, { servername: 'localhost' }), server.accept(accepted)]);
         \\  out.survives = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2';
         \\  // Releasing by hand makes the value unusable but not what was built from it.
         \\  const spare = tls.RootPki.bundled();

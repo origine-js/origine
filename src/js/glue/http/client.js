@@ -205,7 +205,7 @@ export default k => {
       if (slot.active === 0) {
         if (slot.draining || this.#policy.idle === 0 || slot.session.closed) this.#drop(slot);
         else {
-          const timer = this.#io.timer(this.#policy.idle);
+          const timer = this.#io.timer.timer(this.#policy.idle);
           slot.timer = timer;
           timer.promise.then(
             () => {

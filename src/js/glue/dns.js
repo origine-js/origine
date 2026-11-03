@@ -3,7 +3,7 @@
 // `Resolver` (a class defined in Rust) over an ordered list of them; `resolver.lookup(name, { family })` resolves a name to `IpAddr`s
 // (`origine:@std/net`; not re-exported here).
 // Every server address is checked against the embedder's network ceiling (the sockets are not `api.net` sockets).
-import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, hostError } from './util.js';
+import { freeze, freezeMethods, own, failure, errors, hostError, shared } from './util.js';
 import { provide } from './handles.js';
 import { IpAddr, SocketAddr } from './addr.js';
 import { constants } from './errors.js';
@@ -29,8 +29,9 @@ const parseUrl = url => {
 export default native => {
   const token = {};
   const ioId = io => {
-    if (io === null || typeof io !== 'object' || !ioHandles.has(io) || closedIo.has(io)) throw failure(BadHandle);
-    return io.id;
+    // An `Io` of this realm; the native checks it is open.
+    if (!(io instanceof shared.Io)) throw failure(BadHandle);
+    return io;
   };
   // An `IpAddr` means the transport's default port; a `SocketAddr` names the port.
   const addrsOf = (kind, servers, port = DEFAULT_PORT[kind]) => {

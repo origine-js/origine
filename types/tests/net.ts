@@ -1,20 +1,38 @@
-// Positive cases and `@ts-expect-error` negatives for api.net. Type-checked only, never run.
-import type { Api, EventServer, EventSocket, PullServer, PullSocket, Socket } from "@origine/types";
+// Positive cases and `@ts-expect-error` negatives for io.tcp / io.udp and api.net. Type-checked only, never run.
+import { SocketAddr } from 'origine:@std/net';
+import type {
+  Api,
+  DataEvent,
+  DatagramEvent,
+  EventTcpListener,
+  EventTcpStream,
+  EventUdpSocket,
+  Lease,
+  PullTcpListener,
+  PullTcpStream,
+  PullUdpSocket,
+  TcpListenerUnshaped,
+  TcpStreamUnshaped,
+} from '@origine/types';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 const assertType = <_T extends true>() => {};
 
 export async function main(api: Api): Promise<void> {
   const io = api.io.create();
+  const any = SocketAddr.parse('127.0.0.1:0');
 
-  // --- pull mode -------------------------------------------------------------------------
-  const server = api.net.listen(io, { port: 0, mode: "pull", socketMode: "pull" });
-  assertType<Equal<typeof server, PullServer<"pull">>>();
-  const client = await api.net.connect(io, { port: server.port, mode: "pull" });
-  assertType<Equal<typeof client, PullSocket>>();
-  assertType<Equal<typeof client, Socket<"pull">>>();
-  const conn = await server.accept();
-  assertType<Equal<typeof conn, PullSocket>>();
+  // --- pull ------------------------------------------------------------------------------
+  const unshaped = io.tcp.listen(any);
+  assertType<Equal<typeof unshaped, TcpListenerUnshaped>>();
+  const server = unshaped.pulling();
+  assertType<Equal<typeof server, PullTcpListener>>();
+  const port: number = server.localAddr.port;
+  const raw = await io.tcp.connect(server.localAddr);
+  assertType<Equal<typeof raw, TcpStreamUnshaped>>();
+  const client = raw.pulling({ queued: { limit: 4096 } });
+  assertType<Equal<typeof client, PullTcpStream>>();
+  const conn = (await server.accept()).pulling();
   const sent: Promise<void> = client.queued.send(new Uint8Array([1, 2, 3]));
   await sent;
   const chunk: Uint8Array = await conn.read(4096);
@@ -23,105 +41,101 @@ export async function main(api: Api): Promise<void> {
   const taken: number = client.queued.put(chunk);
   const wrote: number = client.direct.write(new ArrayBuffer(4));
   client.queued.limit = 1024;
-  await client.end("write");
-  await client.end("both");
+  const peer: SocketAddr = client.peerAddr;
+  await client.end('write');
+  await client.end('both');
   await client.close();
-  await using _owned = await api.net.connect(io, { port: server.port, mode: "pull", host: "localhost", queued: { limit: 4096 } });
-  void [bytes, buffer, copied, taken, wrote];
+  for await (const part of conn) void part.length;
+  for await (const accepted of server) assertType<Equal<typeof accepted, TcpStreamUnshaped>>();
+  await using _owned = (await io.tcp.connect(server.localAddr)).pulling();
+  void [port, bytes, buffer, copied, taken, wrote, peer];
 
-  // --- event mode ------------------------------------------------------------------------
-  const evServer = api.net.listen(io, { mode: "event", socketMode: "event" });
-  assertType<Equal<typeof evServer, EventServer<"event">>>();
-  evServer.register("connection", socket => {
-    assertType<Equal<typeof socket, EventSocket>>();
-    socket.register("data", event => {
+  // --- event -----------------------------------------------------------------------------
+  const evServer = io.tcp.listen(any).evented();
+  assertType<Equal<typeof evServer, EventTcpListener>>();
+  evServer.register('connection', stream => {
+    assertType<Equal<typeof stream, TcpStreamUnshaped>>();
+    const socket = stream.evented();
+    socket.register('data', async (event: DataEvent) => {
       using lease = event.buffer();
+      assertType<Equal<typeof lease, Lease>>();
       const n: number = event.length;
-      const first: number | undefined = lease[0];
-      socket.pause();
-      void socket.queued.send(lease).then(() => socket.resume());
-      void [n, first];
+      await socket.queued.send(lease);
+      void n;
     });
-    socket.register("end", () => void socket.end("write"));
-    socket.register("error", (error: unknown) => void error);
-    socket.register("drain", () => {});
-    const registration = socket.register("close", () => {});
+    socket.register('end', () => void socket.end('write'));
+    socket.register('error', (error: unknown) => void error);
+    socket.register('drain', () => {});
+    const registration = socket.register('close', () => {});
     const removed: boolean = registration.unregister();
     void removed;
   });
-  const evClient = await api.net.connect(io, { port: evServer.port, mode: "event" });
-  assertType<Equal<typeof evClient, EventSocket>>();
+  const evClient = (await io.tcp.connect(evServer.localAddr)).evented();
+  assertType<Equal<typeof evClient, EventTcpStream>>();
   await io.run();
 
-  // A server's socketMode types what it hands out.
-  const mixed = api.net.listen(io, { mode: "pull", socketMode: "event" });
-  const accepted = await mixed.accept();
-  assertType<Equal<typeof accepted, EventSocket>>();
-  assertType<Equal<ReturnType<typeof mixed.toEvent>, EventServer<"event">>>();
+  // Transfers consume the old object and give the other shape.
+  const asPull: PullTcpStream = evClient.toPulling();
+  const asEvent: EventTcpStream = asPull.toEvented();
+  void asEvent;
 
-  // Transfers consume the old handle and give the other type.
-  const asEvent: EventSocket = client.toEvent();
-  const asPull: PullSocket = asEvent.toPull();
-  const evFromPullServer: EventServer<"pull"> = api.net.listen(io, { mode: "pull", socketMode: "pull" }).toEvent();
-  void [asPull, evFromPullServer];
+  // --- udp -------------------------------------------------------------------------------
+  const udp = io.udp.bind(any).pulling();
+  assertType<Equal<typeof udp, PullUdpSocket>>();
+  const sentBytes: number = await udp.sendTo(new Uint8Array(1), any);
+  const { data, addr }: { readonly data: Uint8Array; readonly addr: SocketAddr } = await udp.recvFrom(1500);
+  udp.connect(addr);
+  await udp.sendTo(data);
+  const evUdp = io.udp.bind(any).evented();
+  assertType<Equal<typeof evUdp, EventUdpSocket>>();
+  evUdp.register('datagram', (event: DatagramEvent) => {
+    using lease = event.buffer();
+    const from: SocketAddr = event.from;
+    void [lease.length, from];
+  });
+  void sentBytes;
 
-  // A dynamic mode gives the union, which has only the shared write side.
-  const dynamic = await api.net.connect(io, { port: 1, mode: Math.random() > 0.5 ? "pull" : "event" });
-  void dynamic.queued.bytes;
-  if ("read" in dynamic) void dynamic.read(1);
-  else void dynamic.pause();
+  // --- timers ----------------------------------------------------------------------------
+  await io.timer.sleep(1);
+  const timer = io.timer.timerAt(io.timer.now() + 5);
+  const canceled: boolean = timer.cancel();
+  void canceled;
 
   // --- negatives -------------------------------------------------------------------------
 
-  // @ts-expect-error `mode` is required when connecting
-  await api.net.connect(io, { port: 1 });
-  // @ts-expect-error `mode` is required when listening
-  api.net.listen(io, { socketMode: "pull" });
-  // @ts-expect-error `socketMode` is required when listening
-  api.net.listen(io, { mode: "pull" });
-  // @ts-expect-error `port` is required when connecting
-  await api.net.connect(io, { mode: "pull" });
-  // @ts-expect-error unknown mode
-  await api.net.connect(io, { port: 1, mode: "push" });
-  // @ts-expect-error misspelled option key
-  await api.net.connect(io, { port: 1, mode: "pull", sendQueueLimt: 10 });
-  // @ts-expect-error misspelled option key (listen)
-  api.net.listen(io, { mode: "pull", socketMode: "pull", prot: 0 });
-  // @ts-expect-error no allowHalfOpen option: the call says it, end('write')
-  api.net.listen(io, { mode: "pull", socketMode: "pull", allowHalfOpen: true });
+  // @ts-expect-error an address is a SocketAddr, not a string
+  io.tcp.listen('127.0.0.1:0');
+  // @ts-expect-error nothing is resolved: no host/port options
+  await io.tcp.connect({ host: 'localhost', port: 80 });
   // @ts-expect-error `end` needs a side
   await client.end();
   // @ts-expect-error not a side
-  await client.end("send");
-  // @ts-expect-error `read` is a pull method: an event socket has no read
+  await client.end('send');
+  // @ts-expect-error `read` is a pull method: an event stream has no read
   void evClient.read(10);
-  // @ts-expect-error `register` is an event method: a pull socket has no register
-  client.register("data", () => {});
-  // @ts-expect-error `pause` does not exist on a pull socket
-  client.pause();
-  // @ts-expect-error `accept` does not exist on an event server
+  // @ts-expect-error `register` is an event method: a pull stream has no register
+  client.register('data', () => {});
+  // @ts-expect-error an unshaped stream flows nothing
+  void raw.read(1);
+  // @ts-expect-error `accept` does not exist on an event listener
   await evServer.accept();
-  // @ts-expect-error `toPull` does not exist on a pull socket
-  client.toPull();
-  // @ts-expect-error `toEvent` does not exist on an event socket
-  evClient.toEvent();
+  // @ts-expect-error `toPulling` does not exist on a pull stream
+  client.toPulling();
   // @ts-expect-error `send` takes bytes, not a string
-  await client.queued.send("hello");
-  // @ts-expect-error `send` takes bytes, not a number
-  await client.queued.send(42);
+  await client.queued.send('hello');
   // @ts-expect-error `put` returns the number of bytes taken, not a boolean
   const fit: boolean = client.queued.put(chunk);
-  // @ts-expect-error `direct.write` takes bytes
-  client.direct.write("x");
-  // @ts-expect-error `read` takes a length
-  await conn.read();
   // @ts-expect-error unknown event name
-  evClient.register("message", () => {});
+  evClient.register('message', () => {});
   // @ts-expect-error the `data` handler gets a DataEvent, not bytes
-  evClient.register("data", (bytes: Uint8Array) => bytes.length);
+  evClient.register('data', (bytes: Uint8Array) => bytes.length);
   // @ts-expect-error `queued.bytes` is read-only
   client.queued.bytes = 0;
   // @ts-expect-error `closed` is read-only
   client.closed = true;
+  // @ts-expect-error the network objects have no public constructor
+  new api.net.PullTcpStream();
+  // @ts-expect-error misspelled option key
+  raw.pulling({ queued: { limt: 1 } });
   void fit;
 }

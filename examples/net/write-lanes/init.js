@@ -1,18 +1,18 @@
 // Run: zig build run -- examples/net/write-lanes/init.js   (or: zig-out/bin/origine examples/net/write-lanes/init.js)
 // A socket has two write lanes that share one order. `direct.write` is one unbuffered write(2): it takes what the kernel
 // takes and never queues. `queued` holds what does not fit, up to `queued.limit`, and `drained()` resolves when the queue
-// is empty. `end('read')` stops reading on this side; the server's handle can also be turned into an event server and back.
+// is empty. `end('read')` stops reading on this side. An unshaped listener takes one shape, and so does every connection.
 //
 // Prints (stderr):
 //   direct.write took 6 bytes (unbuffered)
 //   queued.put took 10 bytes with limit 1024 ; drained: queued.bytes is 0
 //   server read 16 bytes: "direct" + "0123456789"
 //   end('read') on the client: resolves ; reads after it are empty: true
-//   server toEvent: connection event delivered: true
-//   toPull after a connection handler started: Unsupported
-//   toPull without a handler: accept works: true
+//   event listener: connection event delivered unshaped: true
+//   a consumed unshaped listener: BadHandle
 import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 
 /** Reads exactly `n` bytes from a pull socket and returns them as text. */
 const readText = async (socket, n) => {
@@ -25,9 +25,10 @@ const readText = async (socket, n) => {
 export async function main(api) {
   const io = api.io.create({});
   try {
-    const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
-    const client = await api.net.connect(io, { port: server.port, mode: 'pull' });
-    const conn = await server.accept();
+    const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
+    const accepting = server.accept();
+    const client = (await io.tcp.connect(server.localAddr)).pulling();
+    const conn = (await accepting).pulling();
 
     // direct: one write(2). The kernel takes the bytes or part of them; the count is returned, nothing is kept.
     const direct = client.direct.write(encodeUtf8('direct'));
@@ -46,33 +47,25 @@ export async function main(api) {
     const afterwards = await client.read(8);
     eprintln(`end('read') on the client: resolves ; reads after it are empty: ${afterwards.length === 0}`);
 
-    // A server can be moved to event mode: each connection then arrives as an event. Once a connection handler has
-    // started the flow, toPull() is refused (Unsupported); a server with no handler yet can go back to pull mode.
-    const events = server.toEvent();
+    // A listener is shaped once: evented() gives connection events, each connection unshaped (it takes its own shape).
+    const unshaped = io.tcp.listen(SocketAddr.parse('127.0.0.1:0'));
+    const events = unshaped.evented();
     const connected = new Promise(resolve => events.register('connection', resolve));
-    const peer = await api.net.connect(io, { port: server.port, mode: 'pull' });
+    const peer = await io.tcp.connect(events.localAddr);
     const accepted = await connected;
-    eprintln('server toEvent: connection event delivered:', accepted !== undefined);
+    eprintln('event listener: connection event delivered unshaped:', accepted instanceof api.net.TcpStreamUnshaped);
     try {
-      events.toPull();
+      unshaped.pulling();
     } catch (e) {
-      eprintln(`toPull after a connection handler started: ${e.name}`);
+      eprintln(`a consumed unshaped listener: ${/** @type {any} */ (e).name}`);
     }
-    await events.close();
 
-    const idle = api.net.listen(io, { port: 0, mode: 'event', socketMode: 'pull' });
-    const pull = idle.toPull();
-    const second = api.net.connect(io, { port: pull.port, mode: 'pull' });
-    const next = await pull.accept();
-    await second.then(s => s.close());
-    eprintln('toPull without a handler: accept works:', next !== undefined);
-
-    await next.close();
     await accepted.close();
     await peer.close();
+    await events.close();
     await client.close();
     await conn.close();
-    await pull.close();
+    await server.close();
   } finally {
     await io.close();
   }

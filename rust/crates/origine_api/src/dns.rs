@@ -23,6 +23,7 @@ use origine_io::Loop;
 use origine_io::rt::Handle;
 use origine_transport::Transport;
 
+use crate::io::Io;
 use crate::native::{Op, ScopeKey};
 use crate::net::{SEND_FLAGS, Socket, new_datagram, new_stream, sockaddr_bytes};
 use crate::sockstream::SocketTransport;
@@ -32,8 +33,6 @@ use crate::{HostState, class, native};
 const DATAGRAM: usize = 4096;
 
 struct NetExchange {
-    key: ScopeKey,
-    runtime: u32,
     /// Weak: a resolver (owned by the garbage collector) must never be what keeps an event loop alive, or tears one
     /// down when it is collected. Once the runtime is closed a query fails.
     lp: Weak<Loop>,
@@ -76,7 +75,7 @@ impl NetExchange {
         let stream = new_stream(&addr).map_err(to_io)?;
         lp.connect(stream.as_raw_fd() as isize, sockaddr_bytes(&addr)).await?;
         let _ = stream.set_nodelay(true);
-        Ok(SocketTransport { socket: Rc::new(Socket::accepted(self.key, self.runtime, stream)), lp })
+        Ok(SocketTransport { socket: Rc::new(Socket::stream(stream)), lp })
     }
 
     /// RFC 8484: one HTTP/2 connection over TLS, one POST of the query, the body of the answer. The connection
@@ -309,7 +308,7 @@ type Roots<'s> = &'s crate::tls::RootPki;
 #[cfg(not(feature = "tls"))]
 type Roots<'s> = v8::Local<'s, v8::Value>;
 
-/// `native.dns.resolver(io, spec, roots, timeout, tries, entries, min, max, negative_min, negative_max)`: a resolver
+/// `native.dns.resolver(io, spec, roots, timeout, tries, entries, min, max, negative_min, negative_max)` (`io` an `Io`): a resolver
 /// over the servers in `spec`, one per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>`,
 /// `https <authority> <path> <addrs>` (`addrs` are `ip:port`, comma-separated; the authority is the host and a
 /// `:port` that is not 443) or `system` (the nameservers, search list and hosts file of this machine, read
@@ -321,7 +320,7 @@ type Roots<'s> = v8::Local<'s, v8::Value>;
 fn dns_resolver(
     host: &mut HostState,
     key: ScopeKey,
-    io: u32,
+    io: &Io,
     spec: String,
     roots: Option<Roots<'_>>,
     timeout: u32,
@@ -332,7 +331,11 @@ fn dns_resolver(
     negative_min: u64,
     negative_max: u64,
 ) -> Result<ResolverHandle, NativeError> {
-    let lp = host.loop_of(key, io)?;
+    if io.0.owner != key {
+        return Err(NativeError::Errno(errno::BAD_HANDLE));
+    }
+    let lp = io.0.lp(host)?;
+    let io = io.0.runtime;
     let net = host.net.clone();
     let mut servers = Vec::new();
     let (mut search, mut ndots, mut hosts) = (Vec::new(), None, Hosts::new());
@@ -419,8 +422,6 @@ fn dns_resolver(
         config.cache = Some(cache);
     }
     let exchange = NetExchange {
-        key,
-        runtime: io,
         lp: Rc::downgrade(&lp),
         net,
         #[cfg(feature = "tls")]

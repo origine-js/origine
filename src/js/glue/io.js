@@ -1,20 +1,35 @@
-// `api.io`: the async runtime capability factory. An ES module factory used by index.js:
-// Its default export imports the per-realm native and shared helpers. `makeIoCap(state)` returns a frozen `{ create, narrow }`.
-// A runtime is created by the Rust native `native.io.create` (the ceiling is the embedder's
-// `Config.runtime`); the glue only adds the narrowing the init asked for. A handle is frozen
-// data `{ kind: 'io', id, backend }` plus `close()`; it is not transferable across scopes
-// and `api.fs.requestAsync` takes it as `io`.
-import { Data } from './handles.js';
-import { freeze, own, failure, ioHandles, closedIo, ioClosers, shared, errors, seal } from './util.js';
-class Timer extends Data {}
-class IoHandle extends Data {}
-seal(Timer, IoHandle);
-const { Unsupported, BadHandle, Canceled } = errors;
+// `api.io`: the async runtime capability factory. An ES module factory used by index.js: its default export takes the
+// per-realm native and returns `makeIoCap(state)`, which returns a frozen `{ create, narrow }`.
+// A runtime is created by the Rust native `native.io.create` (the ceiling is the embedder's `Config.runtime`); the
+// glue only adds the narrowing the init asked for. The result is an `Io`, a class defined in Rust
+// (rust/crates/origine_api/src/io.rs) with its tables `io.timer`, `io.tcp` and `io.udp`; no runtime id reaches the
+// guest. `api.fs.requestAsync` takes it as `io`.
+import { freeze, own, failure, shared, errors, hostError } from './util.js';
+const { Unsupported } = errors;
 export default native => {
   const BACKENDS = freeze(['auto', 'uring', 'kqueue', 'threaded']);
+  let installed = false;
+  // The classes, installed when the capability is bound (index.js `late`): `[Symbol.asyncDispose]` is the only JS
+  // member (`await using io = api.io.create()` closes the runtime on scope exit).
+  const install = () => {
+    if (installed) return;
+    installed = true;
+    shared.Io = native.io.Io(hostError, {
+      [Symbol.asyncDispose]() {
+        return this.close();
+      },
+    });
+    native.io.IoTimer(hostError);
+    native.io.Timer(hostError);
+    native.io.IoTcp(hostError);
+    native.io.IoUdp(hostError);
+    // For `api.fs.requestAsync` and `api.dns`: the runtime number of a live `Io` (`BadHandle` otherwise).
+    shared.ioRuntime = io => native.io.runtime(io);
+  };
 
   // `state` = { parent, backends: string[] | undefined, max, live }: one record per narrowing.
   function makeIoCap(state) {
+    install();
     const chain = [];
     for (let s = state; s !== null; s = s.parent) chain.push(s);
 
@@ -22,76 +37,23 @@ export default native => {
       const request = { backend };
       const entries = own(opts, 'entries');
       if (entries !== undefined) request.entries = entries;
-      const made = native.io.create(request);
-      let handle;
-      let nextTimer = 0;
-      // Every call returns the same promise, which settles when the runtime is really closed. The
-      // handle is marked closed (new work is refused) as soon as the first close starts, but the
-      // narrowing slots are only given back once it settles.
-      let closing;
-      const close = () => {
-        if (closing !== undefined) return closing;
-        closedIo.add(handle);
-        shared.asyncFsClosed?.(handle);
-        for (const closer of ioClosers.get(handle) ?? []) closer(failure(Canceled));
-        closing = (async () => {
-          try {
-            await native.io.close(made.id);
-          } finally {
-            for (const s of chain) s.live--;
-          }
-        })();
-        return closing;
+      // Called when `close()` starts: the narrowing slots are given back once it settles, and the async fs grants
+      // opened on the runtime stop being an authority.
+      const closing = (promise, runtime) => {
+        shared.asyncFsClosed?.(runtime);
+        const release = () => {
+          for (const s of chain) s.live--;
+        };
+        promise.then(release, release);
       };
-      // Resolves once every flowing socket or server of this runtime has closed (immediately when
-      // none is): `await io.run()` keeps the program alive for event-style handlers.
-      const run = () => {
-        if (closedIo.has(handle)) return Promise.reject(failure(BadHandle));
-        return native.io.run(made.id);
-      };
-      const now = () => {
-        if (closedIo.has(handle)) throw failure(BadHandle);
-        return native.io.now(made.id);
-      };
-      const timer = ms => {
-        if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0 || ms > 2147483647)
-          throw new TypeError('milliseconds must be finite and between 0 and 2147483647');
-        if (closedIo.has(handle)) throw failure(BadHandle);
-        if (nextTimer > 0xffffffff) throw failure(Unsupported);
-        const token = nextTimer++;
-        const promise = native.io.sleep(made.id, token, ms);
-        const cancel = () => (closedIo.has(handle) ? false : native.io.cancelTimer(made.id, token));
-        return new Timer({ promise, cancel });
-      };
-      const timerAt = deadline => {
-        if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline < 0)
-          throw new TypeError('deadline must be a finite non-negative monotonic time');
-        return timer(Math.max(0, deadline - now()));
-      };
-      const sleep = ms => timer(ms).promise;
-      const sleepUntil = deadline => timerAt(deadline).promise;
-      handle = new IoHandle({
-        kind: 'io',
-        id: made.id,
-        backend: made.backend,
-        close,
-        run,
-        now,
-        timer,
-        timerAt,
-        sleep,
-        sleepUntil,
-        // `await using io = api.io.create()` closes the runtime on scope exit, like `close()`.
-        [Symbol.asyncDispose]: close,
-      });
-      ioHandles.add(handle);
+      const io = native.io.create(request, closing);
       for (const s of chain) s.live++;
-      return handle;
+      return io;
     }
 
     return freeze({
-      // Synchronous; throws an `OrigineError` subclass instance (InvalidInput for bad options, Unsupported
-      // when the backend or the runtime count is not allowed or available).
+      // Synchronous; throws an `OrigineError` subclass instance (Unsupported when the backend or the runtime count is
+      // not allowed or available) or a TypeError for bad options.
       create(opts) {
         if (opts !== undefined && (opts === null || typeof opts !== 'object')) throw new TypeError('options must be an object');
         const backend = own(opts, 'backend');

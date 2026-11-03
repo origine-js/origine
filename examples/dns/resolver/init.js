@@ -64,10 +64,11 @@ export async function main(api) {
   const queries = { count: 0 };
   try {
     // The fake server: each connection carries length-prefixed messages (2 bytes, big endian) until it ends.
-    const server = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
     (async () => {
-      for await (const socket of server) {
-        for (let prefix; (prefix = await readExact(socket, 2)); ) {
+      for await (const stream of server) {
+        const socket = stream.pulling();
+        for (let prefix; (prefix = await readExact(socket, 2));) {
           const query = await readExact(socket, (prefix[0] << 8) | prefix[1]);
           const reply = answer(query, queries);
           await socket.queued.send(Uint8Array.from([reply.length >> 8, reply.length & 0xff, ...reply]));
@@ -77,7 +78,7 @@ export async function main(api) {
     })();
 
     const resolver = api.dns.resolver(io, {
-      servers: [api.dns.DnsServer.tcp([SocketAddr.parse(`127.0.0.1:${server.port}`)])],
+      servers: [api.dns.DnsServer.tcp([server.localAddr])],
       dnssec: 'off',
       timeout: 2000,
       tries: 2,
@@ -86,10 +87,14 @@ export async function main(api) {
 
     const show = addresses => addresses.map(String).join(', ') || '(none)';
     eprintln(`example.test (ipv4): ${show(await resolver.lookup('example.test', { family: 'ipv4' }))} ; server queries: ${queries.count}`);
-    eprintln(`again: ${show(await resolver.lookup('example.test', { family: 'ipv4' }))} ; server queries: ${queries.count} (answered from the cache)`);
+    eprintln(
+      `again: ${show(await resolver.lookup('example.test', { family: 'ipv4' }))} ; server queries: ${queries.count} (answered from the cache)`,
+    );
     eprintln(`example.test (any): ${show(await resolver.lookup('example.test', { family: 'any' }))} (IPv6 answers: none)`);
     const before = queries.count;
-    eprintln(`localhost: ${show(await resolver.lookup('localhost', { family: 'ipv4' }))} ; server queries unchanged: ${queries.count === before}`);
+    eprintln(
+      `localhost: ${show(await resolver.lookup('localhost', { family: 'ipv4' }))} ; server queries unchanged: ${queries.count === before}`,
+    );
     eprintln(`1.2.3.4 is itself: ${show(await resolver.lookup('1.2.3.4', { family: 'ipv4' }))}`);
     await resolver.lookup('missing.test', { family: 'ipv4' }).catch(e => eprintln(`missing.test: ${e.name}`));
     await resolver.close();

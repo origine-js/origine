@@ -1,6 +1,7 @@
 // Run: zig build run -- examples/tls/loopback/init.js   (or: zig-out/bin/origine examples/tls/loopback/init.js)
-// TLS over a pull-mode api.net socket. The client and server consume their plain sockets and return TLS sockets
-// that are ordinary api.net sockets: read, queued.send, end('write'), close. The certificates are test material from
+// TLS over a native stream. The client and server consume their plain (unshaped) streams and return TLS streams,
+// unshaped again: shape them with pulling() or evented() and use read, queued.send, end('write'), close. The handshake
+// runs natively, without entering JS. The certificates are test material from
 // examples/tls/fixtures (a CA and a server certificate for localhost; never trust them anywhere else).
 //
 // Prints (stderr):
@@ -12,10 +13,11 @@
 import { fs } from 'origine:@std/fs';
 import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 
-/** Connects a plain socket to `port` and accepts it on the other side. */
+/** Connects a plain stream to the listener and accepts it on the other side (both unshaped). */
 const plainPair = async (api, io, listener) => {
-  const [client, server] = await Promise.all([api.net.connect(io, { port: listener.port, mode: 'pull' }), listener.accept()]);
+  const [client, server] = await Promise.all([io.tcp.connect(listener.localAddr), listener.accept()]);
   return { client, server };
 };
 
@@ -35,23 +37,27 @@ export async function main(api) {
 
   const io = api.io.create({});
   try {
-    const listener = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    const listener = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
 
-    // The handshake runs on both ends at once. Each side consumes its plain socket and gets a TLS socket back.
+    // The handshake runs on both ends at once. Each side consumes its plain stream and gets a TLS stream back.
     const plain = await plainPair(api, io, listener);
-    const [secureClient, secureServer] = await Promise.all([
-      client.connect(plain.client, { servername: 'localhost', mode: 'pull' }),
-      server.accept(plain.server, { mode: 'pull' }),
+    const [tlsClient, tlsServer] = await Promise.all([
+      client.connect(plain.client, { servername: 'localhost' }),
+      server.accept(plain.server),
     ]);
+    const secureClient = tlsClient.pulling();
+    const secureServer = tlsServer.pulling();
 
     await secureServer.queued.send(encodeUtf8('hello over tls'));
     eprintln(`client got "${decodeUtf8(await secureClient.read(64))}" from the server`);
     await secureClient.queued.send(encodeUtf8('hello, server'));
     eprintln(`server got "${decodeUtf8(await secureServer.read(64))}" from the client`);
 
-    // tls.info describes what the handshake settled. It works on the TLS socket, not on the plain one.
+    // tls.info describes what the handshake settled. It works on the TLS stream (any shape), not on the plain one.
     const info = tls.info(secureClient);
-    eprintln(`tls.info: version=${info.version} servername=${info.servername} peer certificates=${info.peer.length} resumed=${info.resumed}`);
+    eprintln(
+      `tls.info: version=${info.version} servername=${info.servername} peer certificates=${info.peer.length} resumed=${info.resumed}`,
+    );
 
     // The name the client asks for must be in the certificate. A wrong one fails the handshake on the client.
     const wrongName = await handshakeOutcome(api, io, listener, client, { servername: 'example.com' }, server);
@@ -73,10 +79,7 @@ export async function main(api) {
 /** One fresh connection: runs both handshakes and names the client's error (or 'connected'). */
 const handshakeOutcome = async (api, io, listener, tlsClient, options, tlsServer) => {
   const plain = await plainPair(api, io, listener);
-  const [clientSide, serverSide] = await Promise.allSettled([
-    tlsClient.connect(plain.client, { mode: 'pull', ...options }),
-    tlsServer.accept(plain.server, { mode: 'pull' }),
-  ]);
+  const [clientSide, serverSide] = await Promise.allSettled([tlsClient.connect(plain.client, options), tlsServer.accept(plain.server)]);
   if (serverSide.status === 'fulfilled') await serverSide.value.close();
   return clientSide.status === 'fulfilled' ? 'connected' : `${clientSide.reason.name} (${clientSide.reason.subject})`;
 };

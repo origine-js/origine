@@ -1,4 +1,4 @@
-import type { Mode, PullSocket, BytesLike, Registration } from './net.d.ts';
+import type { Mode, NativeStream, BytesLike, Registration } from './net.d.ts';
 import type { Io } from './io.d.ts';
 import type { TlsClient, TlsServer } from './tls.d.ts';
 
@@ -357,10 +357,10 @@ export interface HttpCap {
   readonly ClientPool: typeof ClientPool;
   readonly FetchResponse: typeof FetchResponse;
   /**
-   * Starts an HTTP/2 session over `socket` (a pull-mode `api.net` socket: plain for cleartext h2c, or one made by `api.tls` for h2), which it consumes. Synchronous. A session keeps the program alive until it is closed or its connection ends.
+   * Starts an HTTP/2 session over `socket` (a native stream nothing is using: plain for cleartext h2c, or one made by `api.tls` for h2), which it consumes. Synchronous. A session keeps the program alive until it is closed or its connection ends.
    */
-  session<M extends Mode>(socket: PullSocket, options: SessionOptions<'client', M>): ClientSession<M>;
-  session<M extends Mode>(socket: PullSocket, options: SessionOptions<'server', M>): ServerSessionOf<M>;
+  session<M extends Mode>(socket: NativeStream, options: SessionOptions<'client', M>): ClientSession<M>;
+  session<M extends Mode>(socket: NativeStream, options: SessionOptions<'server', M>): ServerSessionOf<M>;
   /** Dials and resolves a client session once the peer's SETTINGS arrived. */
   connect<M extends Mode>(io: Io, options: HttpConnectOptions<M>): Promise<ClientSession<M>>;
   /** Binds, listens and serves HTTP/2 to every client. */

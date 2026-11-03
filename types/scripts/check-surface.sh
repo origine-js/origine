@@ -54,11 +54,16 @@ missing "ops key" "$here/std/io.d.ts" $(awk '/^export const ops = freeze\(\{/ {o
 # shellcheck disable=SC2046
 missing "fs operation" "$here/fs.d.ts" $(rg -o '^      ((dir|file)[A-Z]\w*)\(' -r '$1' "$js/glue/fs.js" | sort -u)
 
-# The members of the net classes and the cap.
+# The net classes (defined in Rust) and their members: every `#[class(path = "net.X")]` and every fn of those impl
+# blocks under its JS name (an explicit `name = "..."` or the camelCase of the fn; setters pair with their getter).
+rust=$here/../rust/crates/origine_api/src
+net_rs() { cat "$rust/stream.rs" "$rust/udp.rs" "$rust/io.rs"; }
 # shellcheck disable=SC2046
-missing "net member" "$here/net.d.ts" $(cat "$js/glue/net/send.js" "$js/glue/net/server.js" "$js/glue/net/socket.js" | rg -o '^    (?:get |set |static )?([a-zA-Z]\w*)\(' -r '$1' | rg -v '^(constructor|if|for|while|switch|catch|return)$' | sort -u)
+missing "net class" "$here/net.d.ts" $(net_rs | rg -o 'class\(path = "net\.(\w+)"' -r '$1' | sort -u)
 # shellcheck disable=SC2046
-missing "net cap member" "$here/net.d.ts" listen connect Handle Server PullServer EventServer Socket PullSocket EventSocket
+missing "net member" "$here/net.d.ts" $(cat "$rust/stream.rs" "$rust/udp.rs" | awk '/^#\[class\(/ {on=1; next} on && /^}/ {on=0} on' | rg -o '^    fn (\w+)' -r '$1' | perl -pe 's/_(\w)/\U$1/g' | rg -v '^set[A-Z]' | sort -u)
+# shellcheck disable=SC2046
+missing "io member" "$here/io.d.ts" $(cat "$rust/io.rs" | awk '/^#\[class\(/ {on=1; next} on && /^}/ {on=0} on' | rg -o '^    fn (\w+)' -r '$1' | perl -pe 's/_(\w)/\U$1/g' | sort -u)
 
 # Capabilities of api.*.
 missing "api capability" "$here/api.d.ts" fs host graph context isolate io net

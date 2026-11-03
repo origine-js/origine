@@ -8,6 +8,7 @@
 //   second handshake: resumed=false (server got "round 2"): the server issues no tickets, so nothing is resumed
 import { fs } from 'origine:@std/fs';
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 
 /** @param {import('@origine/types').Api} api */
@@ -23,13 +24,15 @@ export async function main(api) {
 
   const io = api.io.create({});
   try {
-    const listener = api.net.listen(io, { port: 0, mode: 'pull', socketMode: 'pull' });
+    const listener = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
     for (let round = 1; round <= 2; round++) {
-      const [plainClient, plainServer] = await Promise.all([api.net.connect(io, { port: listener.port, mode: 'pull' }), listener.accept()]);
-      const [secureClient, secureServer] = await Promise.all([
-        client.connect(plainClient, { servername: 'localhost', mode: 'pull' }),
-        server.accept(plainServer, { mode: 'pull' }),
+      const [plainClient, plainServer] = await Promise.all([io.tcp.connect(listener.localAddr), listener.accept()]);
+      const [tlsClient, tlsServer] = await Promise.all([
+        client.connect(plainClient, { servername: 'localhost' }),
+        server.accept(plainServer),
       ]);
+      const secureClient = tlsClient.pulling();
+      const secureServer = tlsServer.pulling();
       await secureClient.queued.send(encodeUtf8(`round ${round}`));
       const got = decodeUtf8(await secureServer.read(64));
       eprintln(`${round === 1 ? 'first' : 'second'} handshake: resumed=${tls.info(secureClient).resumed} (server got "${got}")`);

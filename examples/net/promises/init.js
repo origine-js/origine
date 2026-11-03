@@ -1,16 +1,19 @@
 // Run: zig build run -- examples/net/promises/init.js
 import { encodeUtf8, decodeUtf8 } from 'origine:@std/text';
 import { eprintln } from 'origine:@std/debug';
+import { SocketAddr } from 'origine:@std/net';
 
 /** @param {import('@origine/types').Api} api */
 export async function main(api) {
   const io = api.io.create();
   try {
-    // Port 0 chooses a free port. api.net currently allows loopback hosts only.
-    const server = api.net.listen(io, { host: '127.0.0.1', port: 0, mode: 'pull', socketMode: 'pull' });
-    eprintln('listening on 127.0.0.1:' + server.port);
-    const client = await api.net.connect(io, { port: server.port, mode: 'pull' });
-    const peer = await server.accept();
+    // Port 0 chooses a free port. The network ceiling allows loopback addresses by default. The factories return
+    // unshaped objects; pulling() gives the promise-read shape.
+    const server = io.tcp.listen(SocketAddr.parse('127.0.0.1:0')).pulling();
+    eprintln('listening on ' + server.localAddr);
+    const accepting = server.accept();
+    const client = (await io.tcp.connect(server.localAddr)).pulling();
+    const peer = (await accepting).pulling();
     await server.close(); // This demo accepts just one client.
 
     const echo = async () => {

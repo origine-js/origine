@@ -50,6 +50,7 @@ enum Kind {
     Static,
     Method,
     Getter,
+    Setter,
 }
 
 /// One member: its kind and options, parsed from (and stripped of) its attribute.
@@ -60,7 +61,7 @@ struct MemberOptions {
     promise: bool,
 }
 
-const MEMBER_ATTRS: [&str; 3] = ["static_method", "method", "getter"];
+const MEMBER_ATTRS: [&str; 4] = ["static_method", "method", "getter", "setter"];
 
 fn member_options(func: &mut ImplItemFn) -> Result<Option<MemberOptions>> {
     let mut found = None;
@@ -71,9 +72,9 @@ fn member_options(func: &mut ImplItemFn) -> Result<Option<MemberOptions>> {
             continue;
         };
         if found.is_some() {
-            return Err(syn::Error::new(attr.span(), "a member takes one of #[static_method], #[method] or #[getter]"));
+            return Err(syn::Error::new(attr.span(), "a member takes one of #[static_method], #[method], #[getter] or #[setter]"));
         }
-        let kind = [Kind::Static, Kind::Method, Kind::Getter][kind];
+        let kind = [Kind::Static, Kind::Method, Kind::Getter, Kind::Setter][kind];
         let mut options = MemberOptions { kind, name: None, side_effect: None, promise: false };
         if let Meta::List(_) = &attr.meta {
             let metas = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
@@ -84,7 +85,7 @@ fn member_options(func: &mut ImplItemFn) -> Result<Option<MemberOptions>> {
                         options.name = Some(text.value());
                     }
                     Meta::NameValue(nv) if nv.path.is_ident("side_effect") => options.side_effect = Some(side_effect_of(nv)?),
-                    Meta::Path(path) if path.is_ident("promise") && kind != Kind::Getter => options.promise = true,
+                    Meta::Path(path) if path.is_ident("promise") && !matches!(kind, Kind::Getter | Kind::Setter) => options.promise = true,
                     other => {
                         return Err(syn::Error::new(
                             other.span(),
@@ -162,10 +163,12 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             (Kind::Static, Some(receiver)) => {
                 return Err(syn::Error::new(receiver.span(), "a #[static_method] takes no `self`"));
             }
-            (Kind::Method | Kind::Getter, None) => {
-                return Err(syn::Error::new(sig.span(), "a method or getter takes `&self`"));
+            (Kind::Method | Kind::Getter | Kind::Setter, None) => {
+                return Err(syn::Error::new(sig.span(), "a method, getter or setter takes `&self`"));
             }
-            (Kind::Method | Kind::Getter, Some(receiver)) if receiver.reference.is_none() || receiver.mutability.is_some() => {
+            (Kind::Method | Kind::Getter | Kind::Setter, Some(receiver))
+                if receiver.reference.is_none() || receiver.mutability.is_some() =>
+            {
                 return Err(syn::Error::new(
                     receiver.span(),
                     "a member takes `&self`: the value is shared with the garbage collector, so mutation goes through a Cell/RefCell",
@@ -190,6 +193,9 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         let params = parameters(&sig.inputs, &what, false)?;
         if member.kind == Kind::Getter && js_length(&params) != 0 {
             return Err(syn::Error::new(sig.inputs.span(), "a getter takes no JS arguments"));
+        }
+        if member.kind == Kind::Setter && js_length(&params) != 1 {
+            return Err(syn::Error::new(sig.inputs.span(), "a setter takes exactly one JS argument"));
         }
 
         let rust_name = &sig.ident;
@@ -221,6 +227,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 Kind::Static => "Static",
                 Kind::Method => "Method",
                 Kind::Getter => "Getter",
+                Kind::Setter => "Setter",
             }
         );
         let side_effect =
@@ -325,6 +332,23 @@ mod tests {
     }
 
     #[test]
+    fn setters_pair_with_getters_by_name() {
+        let out = text(
+            quote!(path = "net.SendQueue", side_effect = "any"),
+            quote! {
+                impl SendQueue {
+                    #[getter]
+                    fn limit(&self) -> u32 { 1 }
+                    #[setter(name = "limit")]
+                    fn set_limit(&self, value: u32) {}
+                }
+            },
+        );
+        assert!(out.contains("MemberKind :: Setter"), "{out}");
+        assert_eq!(out.matches("name : \"limit\"").count(), 2, "{out}");
+    }
+
+    #[test]
     fn promise_members_and_names() {
         let out = text(
             quote!(path = "dns.Resolver", side_effect = "any"),
@@ -362,6 +386,8 @@ mod tests {
         assert!(error(attr(), quote! { impl T { fn f(&self, key: ScopeKey) {} } }).contains("ScopeKey"));
         assert!(error(attr(), quote! { impl T { async fn f(&self) {} } }).contains("promise"));
         assert!(error(attr(), quote! { impl T { #[method] #[getter] fn f(&self) {} } }).contains("one of"));
+        assert!(error(attr(), quote! { impl T { #[setter] fn s(&self) {} } }).contains("exactly one"));
+        assert!(error(attr(), quote! { impl T { #[setter(promise)] fn s(&self, x: u32) {} } }).contains("expected"));
     }
 
     #[test]

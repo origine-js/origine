@@ -106,7 +106,7 @@ closed by `using` (sync) or `await using` (async) at scope exit, also when the s
 ```js
 export async function main(api) {
   await using io = api.io.create({});
-  await io.sleep(100);
+  await io.timer.sleep(100);
 }   // the runtime is closed here
 ```
 

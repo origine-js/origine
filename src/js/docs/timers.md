@@ -9,11 +9,11 @@ uring uses native timeout operations.
 export async function main(api) {
   const io = api.io.create();
   try {
-    await io.sleep(10);
-    const deadline = io.now() + 100;
-    await io.sleepUntil(deadline);
+    await io.timer.sleep(10);
+    const deadline = io.timer.now() + 100;
+    await io.timer.sleepUntil(deadline);
 
-    const timer = io.timer(60_000);
+    const timer = io.timer.timer(60_000);
     const result = timer.promise.catch(error => error.name);
     timer.cancel();
     // await result === 'Canceled'; the underlying timeout was canceled too.
@@ -26,11 +26,11 @@ export async function main(api) {
 
 | Method | Result |
 | --- | --- |
-| `io.now()` | Monotonic milliseconds since host creation, shared by its runtimes; unrelated to wall-clock timestamps. |
-| `io.sleep(ms)` | `Promise<void>` that resolves after the delay. |
-| `io.timer(ms)` | Frozen `{ promise, cancel }`; `promise` has the same behavior as `sleep`. |
-| `io.sleepUntil(deadline)` | Sleeps until an absolute time produced from `io.now()`. Past deadlines are asynchronous zero-delay sleeps. |
-| `io.timerAt(deadline)` | Cancellable version of `sleepUntil`. |
+| `io.timer.now()` | Monotonic milliseconds since host creation, shared by its runtimes; unrelated to wall-clock timestamps. |
+| `io.timer.sleep(ms)` | `Promise<void>` that resolves after the delay. |
+| `io.timer.timer(ms)` | A frozen `Timer` (`promise`, `cancel()`), an instance of a native class; `promise` has the same behavior as `sleep`. |
+| `io.timer.sleepUntil(deadline)` | Sleeps until an absolute time produced from `io.timer.now()`. Past deadlines are asynchronous zero-delay sleeps. |
+| `io.timer.timerAt(deadline)` | Cancellable version of `sleepUntil`. |
 
 Delays accept finite numbers from `0` through `2147483647` milliseconds, including
 fractions. Invalid values throw `TypeError`; values are not coerced or silently

@@ -11,7 +11,8 @@ Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, an
 | `api.dns` | Built: `system`, `udp`, `tcp`, DoT, DoH, resolver cache, presets (`origine:@std/dns/presets`) |
 | `origine:@std/net` | Built: `IpAddr`, `SocketAddr` |
 | Network ceiling | Built, see [net-grant.md](net-grant.md) |
-| QUIC, HTTP/3, DoQ, `api.net.udp` | Planned: [quic-design.md](quic-design.md) |
+| `io` in native | Built (stage 1 of the io/http redesign): `Io` class, `io.timer` / `io.tcp` / `io.udp`, unshaped and shaped native objects, native event hub, `Transport` bridge; see [io in native](#io-in-native) |
+| QUIC, HTTP/3, DoQ | Planned: [quic-design.md](quic-design.md) (datagrams are `io.udp.bind`) |
 | DNSSEC, HTTP/1.x, WebSocket, cookies, caching, decompression, `RootPki.system()`, `URL` | Not built (see [Not built](#not-built)) |
 
 ## Decisions
@@ -35,11 +36,11 @@ Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, an
   api.dns   Resolver · DnsServer                origine_dns   (hickory-proto codec + resolver logic)
   api.http  session · connect · serve · pool · fetch   origine_h2    (nghttp2 + session state machine + async driver)
   api.tls   client · server                     origine_tls   (rustls over a Transport)
-  api.net   TCP                                 origine_transport   (the Transport trait)
+  io.tcp · io.udp  (api.net: the classes)       origine_transport   (the Transport trait; sockstream.rs bridges native streams)
                        oio loop (io_uring · kqueue · threaded)
 ```
 
-Each protocol is an internal Rust crate; the natives (`rust/crates/origine_api`) and the DNS resolver sit on the same crates, so a lookup over DoT or DoH never goes through JS: `origine_api` implements the resolver's `Exchange` over UDP, TCP, `origine_tls` and `origine_h2` directly, and `api.http` is not involved in DoH. `api.tls` and `api.http` take an `api.net` socket, so the same code paths serve TCP, TLS and h2. TLS values and sockets of `api.tls` are `api.net` sockets (a TLS endpoint lives in the socket table), which is why everything `api.net` offers works on a TLS socket.
+Each protocol is an internal Rust crate; the natives (`rust/crates/origine_api`) and the DNS resolver sit on the same crates, so a lookup over DoT or DoH never goes through JS: `origine_api` implements the resolver's `Exchange` over UDP, TCP, `origine_tls` and `origine_h2` directly, and `api.http` is not involved in DoH. `api.tls` and `api.http` take a native stream (a `TcpStreamUnshaped`, or an idle shaped stream) and consume it: the engine reads and writes its socket in Rust (`sockstream.rs`, the `Transport` bridge) without entering JS. A TLS handshake makes a new `TcpStreamUnshaped` over the TLS stream, which is why everything a stream offers works on a TLS one. There is no socket table: every network object is a cppgc instance (see [io in native](#io-in-native)).
 
 ### Build flags
 
@@ -63,10 +64,33 @@ A flag selects a Rust feature of `origine_native` and what Zig builds. With a fl
 - Early release is explicit and visible: `release()` on the TLS values, `close()` / `await using` on a `Resolver` (lookups in flight finish). Sockets, servers and sessions are not GC-owned: they are handles that keep the program alive and are closed explicitly.
 - Not every class is Rust-defined: `HeaderList`, `DnsServer`, `IpAddr` and `SocketAddr` are plain JS values with no native state.
 
+## io in native
+
+The whole io layer is native and owned by the cppgc heap; the JS glue only installs the classes and adds the few
+members that need JS (async iterators, `Symbol.asyncDispose`, `buffer()` making a `Lease`).
+
+- **`Io` holds factories and loop-wide operations.** `api.io.create()` returns an `Io` (Rust class) with `run()`,
+  `close()`, `backend`, `closed` and its tables as frozen properties: `io.timer` (sleeps, timers, `now`), `io.tcp`
+  (`listen`, `connect`), `io.udp` (`bind`). A function lives on the object whose state it needs; no integer id
+  reaches the guest (the glue reads a runtime's number for the async fs natives only).
+- **Unshaped, then shaped** (replaces `mode` / `socketMode`): a factory returns an unshaped object owning the
+  descriptor and flowing nothing; `.pulling()` / `.evented()` consume it into the shaped class. An accepted
+  connection is unshaped again. An unshaped stream is already a stream for a native engine.
+- **`close()` frees, collection drops.** `close()` (the object's or the runtime's) frees the descriptor and cancels
+  what waits (`Canceled`); the object stays allocated until it is collected and answers `BadHandle`. There is no
+  socket table: the runtime keeps a weak list of its conns to close them with it.
+- **Handlers are held natively** (`Global<Function>` in the Host's hubs) and called from the loop, one event at a
+  time, in order; a returned promise is not awaited (backpressure is the bounded read-ahead and `pause()`).
+- **The `Transport` bridge** (`sockstream.rs`): an engine given a native stream (recognised by its cppgc `TypeId`)
+  takes its socket and does its I/O in Rust; `api.tls` and `api.http.session` work this way. Duck-typed JS streams
+  are not accepted yet (`TypeError`).
+- **Addresses** are `SocketAddr`s, crossing as octets, port and scope id; nothing is resolved, and the network
+  ceiling is checked at `listen` / `bind` / `connect` and on every datagram destination.
+
 ## `api.tls`
 
 - **Explicit trust and sessions.** `roots` is required (no default trust; `RootPki.bundled()` is the Mozilla set compiled in), resumption exists only with a `TlsSessions` the caller passes, a server needs `clientAuth` (`none()` or `require(roots)`). A server presents the first identity valid for the client's SNI name, else its first; the client then refuses it (`NotValidForName`), so a wrong name fails on the client, not silently.
-- **`connect` / `accept` consume the plain socket** and return a new `api.net` socket of the requested `mode`. Consuming makes the transfer of ownership visible and rules out two readers on one stream; a socket with a read pending, bytes queued, or a subscription is refused before it is touched. There is no kernel lane under TLS, so `direct.write` always takes 0 and `queued` is the way to send.
+- **`connect` / `accept` consume the native stream** and return a new `TcpStreamUnshaped` over TLS, which takes its shape like any stream. Consuming makes the transfer of ownership visible and rules out two readers on one stream; a stream with a read pending, bytes queued, a handler or an ended side is refused before it is touched. There is no kernel lane under TLS, so `direct.write` always takes 0 and `queued` is the way to send.
 - **Truncation is an error.** `read` is empty only after `close_notify`; a connection cut earlier is `UnexpectedEof`, also during the handshake. `end('write')` sends `close_notify` and is a half close.
 - **Errors keep one meaning each**: `CertificateRejected` (with the reason as `subject`), `TlsAlert`, `NoApplicationProtocol`, `ProtocolError`, `UnexpectedEof`, `InvalidData` (bad certificate or key), `InvalidInput` (bad server name).
 - Backpressure comes from rustls' bounded buffers (16 KiB plaintext, 64 KiB output); a cancelled write that already handed a record to the transport poisons the stream.

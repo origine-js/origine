@@ -19,9 +19,9 @@ listen  <cidr> [ports]
   of a family. An IPv4-mapped rule (`::ffff:192.0.2.0/120`) is the IPv4 rule it stands for and needs a prefix of at
   least 96.
 - `ports` is `*` (the default), a port, a range `8000-8100`, or a comma-separated list of those (`80,443,8000-8100`).
-- `connect` covers `api.net.connect`, everything built on it (`api.tls`, `api.http`), and the servers of every
+- `connect` covers `io.tcp.connect`, every datagram destination of `io.udp` (`sendTo`, `connect`), everything built on them (`api.tls`, `api.http`), and the servers of every
   `api.dns` resolver (UDP, TCP and TLS, checked when the resolver is made and again before each query).
-  `listen` covers `api.net.listen` (and `api.http.serve`). Accepted connections need no rule of their own.
+  `listen` covers `io.tcp.listen` and `io.udp.bind` (and `api.http.serve`). Accepted connections and received datagrams need no rule of their own.
 - Listening on port 0 (the system picks one) is allowed by a rule that allows every port (`*`), not by a rule that
   names ports.
 
@@ -38,11 +38,7 @@ connect 2001:db8::/32
 
 ## What a program sees
 
-A refused address is `PermissionDenied` with the address (`10.0.0.1:80`) as the error's `subject`. `api.net` does not
-resolve names: a host that is not an IP literal (or `localhost`, which is never looked up, RFC 6761) is
-`PermissionDenied` with the name as the subject. Resolve it with `api.dns` (whose servers are subject to the same
-ceiling) and pass the address, which is what the rules are checked against; `api.http.connect`'s `host` is such an
-address too.
+A refused address is `PermissionDenied` with the address (`10.0.0.1:80`) as the error's `subject`. `io.tcp` and `io.udp` take `SocketAddr` values (`origine:@std/net`), never names: a name is not a `SocketAddr`. Resolve it with `api.dns` (whose servers are subject to the same ceiling) and pass the address, which is what the rules are checked against; `api.http.connect`'s `host` is such an address too (it maps `localhost` to `127.0.0.1` and refuses any other name with `PermissionDenied`).
 
 ## Giving it
 

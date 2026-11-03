@@ -1,7 +1,7 @@
-# Natives (`native.io.*`, `native.fsAsync.*`, `native.net.*`)
+# Natives (`native.io.*`, `native.fsAsync.*`, `native.net.*`, ...)
 
 Reference for the Rust natives registered into the Zig `native` table (see
-[README.md](README.md) for how registration works). Code: `src/io.rs`, `src/fs.rs`, `src/net.rs`; fs semantics in
+[README.md](README.md) for how registration works). Code: `src/io.rs`, `src/fs.rs`, `src/net.rs`, `src/conn.rs`, `src/stream.rs`, `src/udp.rs`, `src/sub.rs`; fs semantics in
 `rust/crates/origine_api_fs/src/lib.rs`. Planned/changing behaviour is specified in
 [`docs/async-host-contract.md`](../../../../docs/async-host-contract.md); this page describes the
 code as it is.
@@ -14,7 +14,7 @@ code as it is.
   | JS | Rust fn / C symbol suffix |
   |---|---|
   | `native.io.create` | `io_create` |
-  | `native.io.close` | `io_close` |
+  | `native.io.runtime` | `io_runtime` |
   | `native.fsAsync.request` | `fs_async_request` |
   | `native.fsAsync.<op>` | `fs_async_<snake_op>` (e.g. `openFile` -> `fs_async_open_file`) |
 
@@ -34,20 +34,26 @@ code as it is.
 
 ## `native.io`
 
-| Native | Signature | Result |
+The runtime is a Rust-defined class (`io.Io`, see [Rust-defined classes](#rust-defined-classes-class)) owning an
+`IoCore` (the scope that made it, the runtime's number, a weak loop, the weak list of the conns made on it) in the
+cppgc heap. Its tables are frozen data properties, each an instance of its own class over the same core. No runtime
+number reaches the guest.
+
+| Native / member | Signature | Result |
 |---|---|---|
-| `create` | `(opts?: { backend?, entries? })` | JS `IoHandle` instance with read-only kind, id, and backend fields (sync). Throws an `OrigineError` subclass: `Unsupported` (backend excluded or unavailable), `PermissionDenied` (runtime ceiling), `TypeError` for bad options. |
-| `close` | `(id: u32)` | `Promise<void>`: cancels the runtime's ops (their promises reject `Canceled`), drains, releases its grants, destroys the loop. Rejects `BadHandle` for unknown/foreign/closing ids. |
-| `sleep` | `(runtime: u32, token: u32, ms: number)` | `Promise<void>` resolving after a monotonic timeout. Finite delays from 0 through 2147483647 ms only; fractions allowed. Tokens are unique per JS runtime handle. Unknown/foreign/closed runtimes reject `BadHandle`. |
-| `cancelTimer` | `(runtime: u32, token: u32)` | Boolean; cancels a pending timer task and backend timeout, rejects its promise with `Canceled`, and returns true. False for a settled/unknown token; throws `BadHandle` for an unknown/foreign/closed runtime. |
-| `now` | `(runtime: u32)` | Monotonic milliseconds since host creation. Throws `BadHandle` for an unknown/foreign/closed runtime. |
+| `create` | `(opts?: { backend?, entries? }, onClose?: (promise, runtime) => void)` | an `Io` (sync, frozen). `onClose` is the glue's: called when `close()` starts, with its promise (narrowing slots, async fs). Throws `Unsupported` (backend excluded or unavailable), `PermissionDenied` (runtime ceiling), `TypeError`. |
+| `runtime` | `(io: Io)` | the runtime's number, for the async fs natives the glue calls; `BadHandle` once closing |
+| `Io` | installer | `backend`, `closed`, `run()` (Promise resolving once every flowing conn of the runtime delivered `close`), `close()` (cancels the runtime's ops, which reject `Canceled`, closes its conns, drains, releases its grants, destroys the loop; every call returns the same promise), `timer`, `tcp`, `udp` |
+| `IoTimer` | installer | `now()` (monotonic ms since host creation), `sleep(ms)`, `sleepUntil(deadline)`, `timer(ms)` / `timerAt(deadline)` (a frozen `Timer` with `promise` and `cancel()`). `ms`: finite, 0 to 2147483647 (`TypeError`); `BadHandle` once closed. |
+| `IoTcp` | installer | `listen(addr)` (sync, `TcpListenerUnshaped`), `connect(addr)` (Promise `TcpStreamUnshaped`; non-blocking, the loop's `connect`) |
+| `IoUdp` | installer | `bind(addr)` (sync, `UdpSocketUnshaped`) |
 
 Guest-facing timer and deadline helpers are documented in
 [`src/js/docs/timers.md`](../../../../src/js/docs/timers.md).
 
 ## `native.fsAsync`
 
-`request(ioId, root, access)` creates a grant; every other op takes `(fs, id)` handles. Order of
+`request(runtime, root, access)` (the glue reads `runtime` with `native.io.runtime(io)`) creates a grant; every other op takes `(fs, id)` handles. Order of
 checks, like Zig: path validation (`InvalidInput` for NUL, `PermissionDenied` for `..`, absolute and `__codecache__`), then the grant's access (`PermissionDenied`: a mutation on a read-only grant, an observation on a write-only one), then
 the handles (`BadHandle` unknown/closed, `StaleHandle` closing), then the OS. These checks run
 synchronously, so a bad call returns a rejected promise without starting a task.
@@ -94,33 +100,48 @@ operation releases its guard.
 Buffer semantics (pin/detach, lifetime invariant): [README](README.md#buffers-pinning).
 `fileRead`/`filePread` remain copying (they allocate `buffer.length` bytes per call).
 
-## `net.*` (TCP, `needs = "runtime"`)
+## The network classes (`needs = "runtime"`)
 
-Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, bound to the runtime they were created on and checked against the calling scope on every call (`BadHandle` otherwise). `accept`/`read`/`write` run on the runtime's loop; `connect` creates a raw non-blocking `socket(2)` and lets the loop's `connect` op finish the handshake, so nothing blocks the isolate thread. The destination is checked against the embedder's network ceiling ([net-grant.md](../../../../docs/net-grant.md), `HostState::net`): IP literals are used as given, `localhost` is never resolved (RFC 6761: `connect` tries `127.0.0.1` then `::1`, `listen` binds `127.0.0.1`), each address the ceiling does not allow is dropped, and when none is left (or the host is any other name) the call is `PermissionDenied` with the address or name as the detail.
+Source: [`net.rs`](../src/net.rs) (the socket engine, the ceiling, `SocketAddr`), [`conn.rs`](../src/conn.rs) (the
+state of one descriptor and its write lanes), [`stream.rs`](../src/stream.rs) (TCP), [`udp.rs`](../src/udp.rs),
+[`sub.rs`](../src/sub.rs) (events). Guest surface: [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
 
-| native | args | result |
+There is no socket table. Every network object is a Rust-defined class instance owning a `Front` over an
+`Rc<Conn>`; a transfer (`pulling()`, `toEvented()`, a TLS handshake) takes the conn out of the old object, which
+answers `BadHandle` from then on. A `Conn` holds the `Rc<Socket>` (taken out and shut down by `close()`), the
+outbox, the read/write state and the event `Flow`; its runtime keeps a weak list of its conns so `io.close()` closes
+their descriptors. An operation in flight holds its own `Rc<Socket>`, so closing never frees a descriptor under a
+running `recv`. The engine is `Socket::recv/send/try_write/finish_write` (plain or TLS) and the pumps of `sub.rs`.
+
+- **Addresses** cross as `SocketAddr` objects of the glue: `native.net.link(toParts, fromParts)` registers two
+  converters per realm (private on the realm's global), `toParts(addr)` gives `[octets, port, scopeId]` of a genuine
+  `SocketAddr` and `fromParts(octets, port, scopeId)` makes one; no text is parsed. `FromJs`/`IntoJs for SockAddr`.
+- **Ceiling**: `listen` / `bind` against the `listen` rules, `connect` and every datagram destination against the
+  `connect` rules (`net::allowed`), `PermissionDenied` with the address as `subject`.
+- **Writes** (`conn.rs`): `direct.write` is one non-blocking write on the isolate thread (0 while the outbox is busy
+  or sends wait); `queued.put` tries the kernel first, then copies at most the room under `limit` into the outbox
+  that a writer task flushes; `queued.send` copies its bytes at the call, takes a ticket and is admitted in call
+  order once it fits; `drained()` waits for no ticket and an empty outbox; `end('write')` takes a ticket, then sends
+  the FIN (`close_notify` first under TLS) after the outbox. A failure rejects every waiter with its errno; `close()`
+  with `Canceled`.
+- **Events** (`sub.rs`): `register` makes the conn's `Hub` in the Host (`HostState::hubs`, by an internal id): the
+  handlers as `Global<Function>`, the context, the reused `DataEvent`. The first handler of the flowing event spawns
+  the pump (read into slabs, accept, receive datagrams), which queues events on the host-wide queue and stops
+  re-arming while 8 are undelivered; `deliver` calls the handlers in the hub's context with a microtask checkpoint per
+  event. A throw goes to the `error` handlers, else is an unhandled rejection; a returned promise is not awaited.
+  `pause`/`resume` park and release the read-side events in order; the guest's `close()` lets `close` through a pause.
+  Pumps and their receives are excluded from `live_items`; `io.run()` waits for every counted hub's `close`.
+
+| Native | Args | Result |
 |---|---|---|
-| `net.listen` | `io, host, port` | `{ id, port }` (sync); port 0 picks one |
-| `net.accept` | `id` | Promise `{ id, port }` (port = the peer's) |
-| `net.connect` | `io, host, port` | Promise `{ id, port }`; non-blocking (loop `connect`); `ConnectionRefused` etc. map through `errno_of` (for `localhost`, the last attempt's error) |
-| `net.read` | `id, len` | Promise `Uint8Array` of 1..=`len` bytes (empty at end of stream); host-allocated like `fileReadAlloc` (same compaction of short reads, 256 MiB cap) |
-| `net.readCopy` | `id, buffer` | Promise byte count (0 = end of stream) read once into the guest's buffer via a native scratch `Vec` copied at completion: nothing is detached or allocated in V8, so one buffer can be reused for every read |
-| `net.readInto` | `id, buffer` | Promise `{ bytes, buffer }`: reads straight into the guest's buffer, which is detached meanwhile (pin protocol) and handed back as a new ArrayBuffer; `Unsupported` for a buffer that cannot be detached (checked before touching it); zero-copy, wins for large reads |
-| `net.close` | `id` | sync; streams are shut down so pending reads finish with 0 bytes |
-| `net.subscribe` | `id, dispatch` | sync; routes the socket's events to `dispatch(kind, a, b)` (0 data/length, 1 end, 2 error/errno, 3 drain, 4 connection/new id, port, 5 close); nothing is read yet |
-| `net.start` | `id` | sync; starts the read (accept) pump task of a subscribed socket; it and its receive are not counted by `live_items`. A peer's FIN only delivers `end`: the stream stays open (writes work, `io.run` keeps waiting) until `net.close` |
-| `net.take` | `id` | sync; ArrayBuffer lease of exactly the chunk's bytes, carved out of the slab they were received into (a V8 store from the isolate's allocator, so inside the sandbox) with a refcounted deleter; no copy, nothing else of the slab reachable (only inside the `data` dispatch, once per event) |
-| `net.release` | `id, buffer` | sync; detaches a lease, dropping its hold on the slab (the slab is freed with its last lease) |
-| `net.pause` | `id, noHandler` | sync; parks the socket's read-side events (in order) instead of dispatching them; `noHandler` holds only chunks and connections (and an `end` behind them); `drain` and write failures always pass; idempotent |
-| `net.resume` | `id` | sync; puts the parked events back in front of the host queue; idempotent |
-| `net.directWrite` | `id, data` | sync byte count; one non-blocking write on the isolate thread, 0 when it would block or the outbox is busy; `BrokenPipe` after `net.end` |
-| `net.put` | `id, data, max` | sync byte count; idle outbox: tries the kernel first, then copies the rest (at most `max` bytes) into the outbox flushed by a writer task; busy: copies at most `max` bytes. A write error throws its errno and the socket emits `error` and closes |
-| `net.queued` | `id` | sync byte count waiting in the outbox |
-| `net.flushed` | `id` | Promise<void> resolving once every byte accepted so far reached the kernel; rejects with the outbox's errno (`Canceled` if the socket closed first) |
-| `net.end` | `id` | sync; no more writes, the FIN goes out once the outbox is empty; idempotent |
-| `io.run` | `io` | Promise<void> resolving once every resumed subscription of the runtime has delivered `close` |
+| `net.link` | `toParts, fromParts` | sync; the realm's `SocketAddr` converters |
+| `net.take` | `event: DataEvent` | the chunk's `ArrayBuffer`, carved out of its slab (no copy; the same one within one event; `TypeError` once over); the glue's `DataEvent.prototype.buffer` wraps it in a `Lease` |
+| `net.takeDatagram` | `event: DatagramEvent` | the datagram's bytes as a new `ArrayBuffer` (one copy into V8 memory), once (`StaleHandle` afterwards; the glue keeps the lease) |
+| `net.release` | `buffer` | sync; detaches a lease, dropping its hold on the slab |
+| `net.<Class>` installers | `hostError, members?` | `TcpStreamUnshaped`, `PullTcpStream`, `EventTcpStream`, `TcpListenerUnshaped`, `PullTcpListener`, `EventTcpListener`, `UdpSocketUnshaped`, `PullUdpSocket`, `EventUdpSocket`, `SendQueue`, `Direct`, `DataEvent`, `DatagramEvent`, `Registration`; the glue adds `[Symbol.asyncDispose]`, the async iterators and `buffer()` |
 
-An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. Closing a listener rejects its pending `accept`s with `Canceled`, which lets go of the descriptor. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
+Datagrams: the loop has no `recvfrom`, so a receive waits with a one-byte `MSG_PEEK` `recv` on the loop and takes the
+datagram with a non-blocking `recvfrom(2)`; a send that would block retries after 1 ms.
 
 ## Adding a native
 
@@ -163,21 +184,22 @@ collected. The brand check is the unwrap: a member called on anything else throw
   returns the constructor after freezing it like `freezeMethods` (every member, the prototype, the constructor).
   `hostError` is kept for the realm, so members, which the guest calls directly, throw and reject the realm's
   `IoError` / `HostError` instances like the glue-wrapped natives. `members` are the few JS members that need the
-  glue's own objects (`TlsClient.connect` takes and makes `api.net` sockets); they are defined on the prototype
-  before it is frozen.
+  glue's own objects (`Symbol.asyncDispose`, async iterators, `DataEvent.buffer` making a `Lease`); they are
+  defined on the prototype before it is frozen.
 * **Releasing.** `class::Releasable<T>` holds a value that `release()` can drop before the instance is collected
   (`BadHandle` afterwards); what was built from it keeps its own copy.
 * **Rules for a class type:** `'static`, self-contained. Its `Drop` runs inside a collection, so it must not touch
   `HostState`, V8 or a scope table. Members take `&self` (shared with the collector; mutation goes through a
   `Cell`/`RefCell`) and cannot take a `ScopeKey` (a member is not bound to a scope; keep the owner in the value).
-  Handles that keep the program alive (sockets, servers, sessions) stay in the Host tables and are closed
-  explicitly.
+  The network objects own their descriptor this way too (`conn.rs`); what holds V8 handles for them (event
+  handlers) lives in the Host (`HostState::hubs`), never in the cppgc value. HTTP/2 sessions still live in a Host
+  table.
 
 See [`docs/cppgc-research.md`](../../../../docs/cppgc-research.md) for the heap and why there is no JS wrapper class.
 
 ## `tls.*` (TLS, `needs = "runtime"`, feature `tls`)
 
-Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values are the classes `RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient` and `TlsServer` (see above; installed as `native.tls.<Class>`); stream ids come from their own counter and are never reused. `connect` / `accept` take a plain stream socket **out of the socket table** and run the handshake on its runtime over a `SocketTransport` (`lp.recv` / `lp.send` on the descriptor); `close` shuts the transport down so pending operations end. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
+Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values are the classes `RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient` and `TlsServer` (see above; installed as `native.tls.<Class>`). `TlsClient.connect(stream, { servername })` / `TlsServer.accept(stream)` are native members: they take a native stream (`sockstream::StreamArg`: a `TcpStreamUnshaped`, or an idle `PullTcpStream` / `EventTcpStream`, recognised by its cppgc `TypeId`), take its socket out (the object is consumed) and run the handshake on its runtime over a `SocketTransport` (`Socket::recv` / `send`, so it works over a TLS socket too), without entering JS. The result is a new `TcpStreamUnshaped` over `Socket::over_tls`. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
 
 | Native | Args | Returns |
 |---|---|---|
@@ -185,20 +207,18 @@ Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/doc
 | `tls.Identity` | installer | class: `fromPem(cert, key)`, `fromDer({ cert[], key })` (`InvalidData` for a bad pair), `release()` |
 | `tls.ClientAuth` | installer | class: `none()`, `require(roots)` |
 | `tls.TlsSessions` | installer | class: `create({ limit })` (a positive integer), `release()` |
-| `tls.TlsClient` / `tls.TlsServer` | installer, glue members | classes: `release()`; `connect` / `accept` come from the glue |
+| `tls.TlsClient` / `tls.TlsServer` | installer | classes: `connect(stream, { servername })` / `accept(stream)` (Promise `TcpStreamUnshaped`), `release()` |
 | `tls.client` | `{ roots, identity?, alpn?: string[], sessions? }` | a `TlsClient` |
 | `tls.server` | `{ identities (at least one), clientAuth, alpn?: string[] }` | a `TlsServer` |
-| `tls.connect` | `io, client, socket, servername` | Promise `{ id (a new api.net socket), alpn, version (12/13), servername, resumed }`; consumes `socket` |
-| `tls.accept` | `io, server, socket` | Promise, same shape |
-| `tls.peer` | `socket` | `[u32 LE length \| DER]*`, leaf first |
+| `tls.info` | `stream` (any shape) | frozen `{ alpn, version ('tls1.2' \| 'tls1.3'), servername, resumed, peer: Uint8Array[] }`; `BadHandle` for a plain or closed stream |
 
 ## `http.*` (HTTP/2, `needs = "runtime"`, feature `http`)
 
-Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../../../../src/js/docs/http.md). A session is `origine_h2::Connection` plus the task that runs its `Driver` on the socket's runtime, over a plain stream socket or a TLS stream, either of which `http.session` takes out of its table (`SocketTransport` in [`sockstream.rs`](../src/sockstream.rs), shared with `tls.*`). Streams are `Exchange`s in the session's table by stream id; a header list crosses as one packed buffer (`name_len u16 \| value_len u32 \| name \| value`, re-validated on entry). The driver's pending read counts as work, so a session keeps the program alive until `destroy`. Errors: stream/session over `BrokenPipe`, bad field `InvalidInput`, protocol breaks `ProtocolError` (detail in `subject`), a dead transport its own errno with the message as `subject`.
+Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../../../../src/js/docs/http.md). A session is `origine_h2::Connection` plus the task that runs its `Driver` on the socket's runtime, over a plain stream socket or a TLS stream, either of which `http.session` takes out of a native stream object (`StreamArg` and `SocketTransport` in [`sockstream.rs`](../src/sockstream.rs), shared with `tls.*`). Streams are `Exchange`s in the session's table by stream id; a header list crosses as one packed buffer (`name_len u16 \| value_len u32 \| name \| value`, re-validated on entry). The driver's pending read counts as work, so a session keeps the program alive until `destroy`. Errors: stream/session over `BrokenPipe`, bad field `InvalidInput`, protocol breaks `ProtocolError` (detail in `subject`), a dead transport its own errno with the message as `subject`.
 
 | Native | Args | Returns |
 |---|---|---|
-| `http.session` | `io, id (plain or TLS socket), role (0 client, 1 server), streams, headers, window, connection, batch` | session id; consumes the socket |
+| `http.session` | `stream (a native stream, plain or TLS), role (0 client, 1 server), streams, headers, window, connection, batch` | session id; consumes the stream |
 | `http.ready` / `http.ping` | `session` | Promise (void / round trip in ms) |
 | `http.goaway` / `http.destroy` | `session` | sync; graceful close / end now |
 | `http.peer` | `session` | the peer's concurrent-stream limit (`2**32 - 1` when unset; valid after `ready`), or -1 when no new stream can be opened (GOAWAY received or connection ended) |
@@ -220,6 +240,6 @@ Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/doc
 | Native | Args | Returns |
 |---|---|---|
 | `dns.Resolver` | installer, glue members | class (`ResolverHandle`): `closed` getter, `close()`; `lookup`, `io` and `Symbol.asyncDispose` come from the glue |
-| `dns.resolver` | `io, spec, roots (a RootPki, undefined none), timeout (ms), tries, entries (0 none), min, max, negative_min, negative_max (ms)` | a `Resolver`. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>`, `https <authority> <path> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
+| `dns.resolver` | `io (an Io), spec, roots (a RootPki, undefined none), timeout (ms), tries, entries (0 none), min, max, negative_min, negative_max (ms)` | a `Resolver`. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>`, `https <authority> <path> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
 | `dns.lookup` | `resolver, name, family (0 both, 4, 6)` | Promise of `[4 \| 6, octets]*`; `BadHandle` for a closed resolver or another scope's |
 

@@ -4,7 +4,6 @@
 // relative(), and a function layer. The sources are in memory and served by fromLoader, so no fs grant.
 //
 // Prints (stderr), with the modules' own lines in between:
-//   handler.native: false
 //   plan: [...]  (which layers and hooks run in JS)
 //   app:/main.js: util -> app:/lib/util-v2.js
 //   app:/main.js: ./legacy/old.js -> app:/legacy/old.js
@@ -46,7 +45,6 @@ export async function main(api) {
       .layer(async ({ specifier }) => (specifier.startsWith('virtual:') ? { id: `app:/virtual/${specifier.slice(8)}.js` } : undefined)),
     hooks: [fromLoader(id => sources[id])],
   });
-  eprintln('handler.native:', handler.native);
   // handler.plan says which elements enter JS: the import map and relative() are native, the function layer is not.
   eprintln('plan:', JSON.stringify(handler.plan));
 

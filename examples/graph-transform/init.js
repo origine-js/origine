@@ -6,8 +6,6 @@
 // A function transformer is (source, id) => string | { source, map }; it runs in this realm, so this
 // example needs no oxc. Prints (stderr):
 //   transformers: plain 0 stamped 1
-//   native: source false handler false
-//   recipe.native: false
 //   plan: ...
 //   Hello from a text file | build build-42
 import { ModuleRecipe, ModuleSource } from 'origine:@std/graph/module';
@@ -37,12 +35,8 @@ export async function main(api) {
   const plain = ModuleSource.file('main.js', { fs: src });
   const stamped = plain.withTransformer(stampBuild);
   eprintln('transformers: plain', plain.transformers.length, 'stamped', stamped.transformers.length);
-  // `native` is true only when no chained transformer is a function: these are functions, so false.
-  eprintln('native: source', stamped.native, 'handler', handler.native);
 
-  // A recipe with a JS transformer in it is not plain data, so it cannot be cloned to a child isolate.
   const recipe = ModuleRecipe({ source: stamped, import: handler });
-  eprintln('recipe.native:', recipe.native);
   eprintln('plan:', JSON.stringify(handler.plan));
 
   using ctx = await api.context.create({

@@ -17,7 +17,7 @@ for every member (without `ok`, which is 0). Use them through
 TypeScript types are generated from them.
 
 - **`io`**: everything Rust's [`std::io::ErrorKind`](https://doc.rust-lang.org/std/io/enum.ErrorKind.html)
-  has a name for, with Rust's names (so the same failure has the same name from the sync Zig `std.Io`
+  has a name for, with Rust's names (so the same failure has the same name from the sync Zig fs layer
   and the async Rust fs), plus the two OS errors Rust leaves uncategorized (`TooManyOpenFiles`, `Io`).
   Raised by fs and net.
 - **`host`**: origine's own runtime concepts, which Rust has no name for. Any native can raise them.
@@ -50,6 +50,11 @@ the draft stage). `0` is "no error" and is never a member.
 | `BadHandle` | 2 | never issued, closed, or from another grant, scope or runtime |
 | `StaleHandle` | 3 | a handle that is closing, or a buffer already detached |
 | `Canceled` | 4 | an async operation was canceled: its io runtime closed |
+| `CertificateRejected` | 5 | the peer's TLS certificate was refused; `subject` says why (`UnknownIssuer`, `Expired`, `NotValidForName`, ...) |
+| `TlsAlert` | 6 | the peer sent a fatal TLS alert; `subject` is its name |
+| `NoApplicationProtocol` | 7 | TLS found no ALPN protocol both sides offer |
+| `ProtocolError` | 8 | the peer broke a protocol (TLS, HTTP/2); `subject` says what |
+| `ServerFailure` | 9 | a DNS server answered with a failure (`SERVFAIL`, `REFUSED`, ...); `subject` is the response code |
 
 ### `ERRNO.io`
 
@@ -69,6 +74,7 @@ the draft stage). `0` is "no error" and is never a member.
 | `Unsupported` | 23 | |
 | `InvalidInput` | 30 | a bad argument: a NUL in a path, an empty entry name, a missing or unknown `access`, a bad open mode (also a missing or mistyped native argument) |
 | `InvalidData` | 31 | also a scope source that does not compile |
+| `UnexpectedEof` | 32 | a stream ended before its protocol allowed (TLS without `close_notify`) |
 | `StorageFull` | 40 | |
 | `FileTooLarge` | 41 | |
 | `QuotaExceeded` | 42 | `EDQUOT` |

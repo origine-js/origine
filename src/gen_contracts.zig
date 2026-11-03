@@ -238,7 +238,8 @@ fn cType(comptime T: type) []const u8 {
         void => "void",
         u32 => "uint32_t",
         usize => "size_t",
-        ?[*]const u8 => "const uint8_t *",
+        ?[*]const u8, [*]const u8 => "const uint8_t *",
+        [*]u8 => "uint8_t *",
         *oxc.CResult => "OxcResult *",
         ?*const oxc.COptions => "const OxcOptions *",
         bool => "bool",
@@ -371,6 +372,7 @@ fn apiAbiCheck(w: *std.Io.Writer) !void {
     try cProto(w, "origine_api_attach_isolate", api.origine_api_attach_isolate);
     try cProto(w, "origine_api_detach_isolate", api.origine_api_detach_isolate);
     try cProto(w, "origine_api_configure", api.origine_api_configure);
+    try cProto(w, "origine_api_net_rules_check", api.origine_api_net_rules_check);
     try cProto(w, "origine_api_poll", api.origine_api_poll);
     try cProto(w, "origine_api_has_work", api.origine_api_has_work);
     try cProto(w, "origine_api_pollable", api.origine_api_pollable);

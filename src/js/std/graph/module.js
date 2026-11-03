@@ -26,8 +26,6 @@ const own = (object, key) => {
 /// A transformer is a function `(source, id) => string | { source, map } | Promise`, or a host
 /// descriptor of kind `transformer` (run natively, see `Transform`).
 const isTransformer = value => typeof value === 'function' || value instanceof h.Transformer;
-/// Whether a descriptor or function runs without entering JS.
-const isNative = value => typeof value !== 'function' && value?.native !== false;
 
 /// `'evaluation'`, `'source'` or `'defer'`: which phase an import asks for (`import x`,
 /// `import source x`, `import defer * as x`). Only `Evaluation` is implemented by the engine.
@@ -60,8 +58,6 @@ class Source {
     } else this.text = content;
     this.map = map;
     this.transformers = freeze(transformers);
-    /// True when no transformer of the chain needs the JS realm.
-    this.native = transformers.every(isNative);
     return new h.ModuleSource({ ...this, withTransformer: Source.prototype.withTransformer });
   }
 
@@ -123,9 +119,6 @@ const make = options => {
     name,
     /// `null`: the import handler's `codeCache` applies.
     codeCache: codeCache ?? null,
-    /// True when neither the source's transformers nor the import handler need the JS realm, which
-    /// lets the host run its pipeline without calling back into this realm.
-    native: source.native && handler.native,
   });
   return recipe;
 };

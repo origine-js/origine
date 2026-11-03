@@ -1,9 +1,11 @@
-//! The natives registry: every `#[native(path = "namespace.name")]` fn, in one table that Zig
+//! The natives registry: every `#[native(path = "namespace.name")]` fn and the installer of every
+//! `#[class(path = "namespace.Class")]` (a native that returns the class), in one table that Zig
 //! iterates (`origine_api_natives_count` / `origine_api_natives_get`, `include/origine_api.h`) to
 //! build the `native` object the glue consumes. Zig has no list of its own.
 //!
 //! CONTRACT (docs/contracts.md, surface B): a new native is `#[native(path = "ns.name", ..)]` plus
-//! one line in [`NATIVES`]. The test below fails when a `#[native]` fn is missing from the table (it
+//! one line in [`NATIVES`] (`CLASS_<NAME>` for a class). The test below fails when a `#[native]` fn or a
+//! `#[class]` is missing from the table (it
 //! scans the module sources), when a path is duplicated, or when a path is not `namespace.name`.
 //! The JS side (`src/js/glue/*.js`) must use exactly these names; `src/tests/managed/api.zig`
 //! checks that every registered native is reachable from the glue's `native.<ns>.<name>` uses.
@@ -12,7 +14,13 @@ use std::ffi::{CString, c_int};
 use std::sync::OnceLock;
 
 use crate::abi_gen::{self, origine_api_native};
+#[cfg(feature = "dns")]
+use crate::dns;
+#[cfg(feature = "http")]
+use crate::http;
 use crate::native::{Needs, RawNative, SideEffect};
+#[cfg(feature = "tls")]
+use crate::tls;
 use crate::{channel, fs, io, net, sub};
 
 /// Every native, in registration order.
@@ -81,6 +89,66 @@ pub(crate) static NATIVES: &[RawNative] = &[
     sub::NATIVE_NET_FLUSHED,
     sub::NATIVE_NET_END,
     sub::NATIVE_IO_RUN,
+    #[cfg(feature = "tls")]
+    tls::CLASS_ROOT_PKI,
+    #[cfg(feature = "tls")]
+    tls::CLASS_IDENTITY,
+    #[cfg(feature = "tls")]
+    tls::CLASS_CLIENT_AUTH,
+    #[cfg(feature = "tls")]
+    tls::CLASS_TLS_SESSIONS,
+    #[cfg(feature = "tls")]
+    tls::CLASS_TLS_CLIENT,
+    #[cfg(feature = "tls")]
+    tls::CLASS_TLS_SERVER,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_CLIENT,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_SERVER,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_CONNECT,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_ACCEPT,
+    #[cfg(feature = "tls")]
+    tls::NATIVE_TLS_PEER,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_SESSION,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_READY,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_PING,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_PEER,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_GOAWAY,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_DESTROY,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_OPEN,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_ACCEPT,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_NEXT,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_CONSUME,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_RESPOND,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_SEND,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_QUEUED,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_FINISH,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_RESET,
+    #[cfg(feature = "http")]
+    http::NATIVE_HTTP_RELEASE,
+    #[cfg(feature = "dns")]
+    dns::CLASS_RESOLVER_HANDLE,
+    #[cfg(feature = "dns")]
+    dns::NATIVE_DNS_RESOLVER,
+    #[cfg(feature = "dns")]
+    dns::NATIVE_DNS_LOOKUP,
 ];
 
 // The Rust enums are written out in the header's numbers.
@@ -153,20 +221,58 @@ mod tests {
         names
     }
 
+    /// The registry constant of every `#[class(...)]` impl block of `source` (`CLASS_ROOT_PKI`).
+    fn class_constants(source: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut lines = source.lines();
+        while let Some(line) = lines.next() {
+            if line.trim_start().starts_with("#[class(") {
+                let decl = lines.by_ref().find(|l| l.trim_start().starts_with("impl ")).expect("impl after #[class]");
+                let ident = decl.trim_start()["impl ".len()..].split([' ', '<', '{']).next().unwrap().trim();
+                let mut constant = String::from("CLASS_");
+                let mut previous_lower = false;
+                for ch in ident.chars() {
+                    if ch.is_ascii_uppercase() && previous_lower {
+                        constant.push('_');
+                    }
+                    previous_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+                    constant.push(ch.to_ascii_uppercase());
+                }
+                names.push(constant);
+            }
+        }
+        names
+    }
+
     #[test]
     fn every_native_fn_is_registered_once() {
         let registry = include_str!("registry.rs");
         let mut found = 0;
-        for (module, source) in
-            [("io", include_str!("io.rs")), ("fs", include_str!("fs.rs")), ("net", include_str!("net.rs")), ("sub", include_str!("sub.rs")), ("channel", include_str!("channel.rs"))]
-        {
+        for (module, source) in [
+            ("io", include_str!("io.rs")),
+            ("fs", include_str!("fs.rs")),
+            ("net", include_str!("net.rs")),
+            ("sub", include_str!("sub.rs")),
+            ("channel", include_str!("channel.rs")),
+            #[cfg(feature = "tls")]
+            ("tls", include_str!("tls.rs")),
+            #[cfg(feature = "http")]
+            ("http", include_str!("http.rs")),
+            #[cfg(feature = "dns")]
+            ("dns", include_str!("dns.rs")),
+        ] {
             for name in native_fns(source) {
                 let entry = format!("{module}::NATIVE_{},", name.to_uppercase());
                 assert_eq!(registry.matches(&entry).count(), 1, "{name} must be listed exactly once in NATIVES");
                 found += 1;
             }
+            for constant in class_constants(source) {
+                let entry = format!("{module}::{constant},");
+                assert_eq!(registry.matches(&entry).count(), 1, "{constant} must be listed exactly once in NATIVES");
+                found += 1;
+            }
         }
-        assert_eq!(found, NATIVES.len(), "NATIVES lists something that is not a #[native] fn");
+        assert_eq!(found, NATIVES.len(), "NATIVES lists something that is not a #[native] fn or a #[class]");
     }
 
     #[test]

@@ -11,8 +11,8 @@ import { Dir, File, FileKind, IoError, Limit, ops } from 'origine:@std/io';
 ## The `io` argument
 
 As in Zig, every `Dir`/`File` method takes `io` first. Here `io` is the fs object from the
-host's `api`: `api.fs.requestSync({ root, access })` (blocks; throws an `IoError` value; failures
-go through the shared `errno` cell, `IoError.check`) or `await api.fs.requestAsync({ io, root, access })`
+host's `api`: `api.fs.requestSync({ root, access, handle })` (blocks; throws an `IoError` value; failures
+go through the shared `errno` cell, `IoError.check`) or `await api.fs.requestAsync({ io, root, access, handle })`
 (returns promises that reject with an `IoError` or `HostError` instance; never touches the errno cell;
 operations run on the `api.io` runtime `io`). Each method dispatches on `io.kind`
 (`'sync' | 'async'`). The async arm has the same operation names and result shapes.
@@ -27,7 +27,7 @@ every mutation (`PermissionDenied`). Native handles are always readable when wri
 exists, namely opening for read (the default mode), `readStreaming`/`readPositional`/`readAll`/
 `readInto`/`readAlloc`, `stat`/`statFile`/`access`/`length`, and `iterate`. It allows creating
 and writing files (`createFile`, `openFile(path, { mode: 'write_only' })`, `writeFile`,
-`write*`, `setLength`, `sync`), directories, deletes and renames. There is no `narrow`: the embedder's `Config`
+`write*`, `setLength`, `sync`), directories (`openDir` too, to write through the handle), deletes and renames. Writing necessarily tells what exists (`AlreadyExists`, `NotFound`): it denies reading, it does not hide names. There is no `narrow`: the embedder's `Config`
 is the only ceiling.
 
 ### Buffers
@@ -109,7 +109,7 @@ descriptor, `Dir.is(value)` tests one. Descriptors are frozen `DirHandle` instan
 - **`ops`** — the underlying [quansync](quansync.md) operations, each `(io, self, ...args)`,
   for composing in other std modules: `yield* ops.openFile(io, dir, path, flags)` or
   `ops.openFile[io.kind](...)`. `flags` is the raw glue open-mode string
-  (`'r' 'rw' 'r+' 'w' 'w+' 'x' 'x+' 'c' 't'`, see [glue/fs.js](../glue/fs.js)). Names: `openFile openDir
+  (`'r' 'rw' 'w' 'x' 'c' 't'`, see [glue/fs.js](../glue/fs.js)). Names: `openFile openDir
   closeDir stat symlinkStat access createDir createDirPath createDirPathOpen deleteFile deleteDir deleteTree
   rename readDir readFile writeFile fileClose fileStat fileLength fileRead filePread fileReadAll
   fileReadInto filePreadInto fileReadAlloc filePreadAlloc fileWrite fileWriteAll filePwriteAll fileWriteMove fileWriteMoveAll filePwriteMoveAll fileSetLength fileSync fileReadPositionalAll`.

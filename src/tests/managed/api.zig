@@ -176,7 +176,7 @@ test "api: ES module glue imports once and retains separate module code caches" 
         defer api.deinit();
         try exposeApi(scope, api);
         try check(scope,
-            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,isolate,io,net' &&
+            \\Object.isFrozen(api) && Object.keys(api).join(',') === 'fs,host,graph,context,isolate,io,net,tls,http,dns' &&
             \\Object.values(Object.getOwnPropertyDescriptors(api)).every(d =>
             \\  typeof d.get === 'function' && Object.isFrozen(d.get) && d.set === undefined && !d.configurable)
         );
@@ -427,7 +427,7 @@ test "api: errno is one native-backed array and open modes are python-style" {
         \\  try { structuredClone(a.errno.buffer, { transfer: [a.errno.buffer] }); } catch { out.pinned = true; }
         \\  const s = a, cwd = Dir.cwd();
         \\  const bits = [];
-        \\  for (const mode of ['w+', 'x', 'x+', 'rw', 'r+', 'bogus', 42, {}]) {
+        \\  for (const mode of ['w', 'x', 'x+', 'rw', 'r+', 'bogus', 42, {}]) {
         \\    const f = s.dirOpenFile(cwd, 'm.txt', mode);
         \\    bits.push(a.errno[0]);
         \\    a.errno[0] = 0;
@@ -438,8 +438,8 @@ test "api: errno is one native-backed array and open modes are python-style" {
     , true, &.{});
     defer fx.deinit();
     try fx.run();
-    // w+ creates (0); x/x+ hit the existing file (AlreadyExists 11); rw/r+ open it; junk is InvalidInput 30.
-    try check(fx.scope, "report.shared && report.pinned && report.codes === '0,11,11,0,0,30,30,30'");
+    // w creates (0); x hits the existing file (AlreadyExists 11); rw opens it; the old aliases and junk are InvalidInput 30.
+    try check(fx.scope, "report.shared && report.pinned && report.codes === '0,11,30,0,30,30,30,30'");
 }
 
 test "api: host.threading.parallelism is a positive integer" {
@@ -808,7 +808,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\import { ImportResolver } from 'origine:@std/graph/resolve';
         \\import { relative, origine, importMap } from 'origine:@std/graph/resolve/layers';
         \\import { origineProvider, fsProvider, json, fromLoader } from 'origine:@std/graph/providers';
-        \\import { ImportCache, ResolveCache, CodeCache } from 'origine:@std/graph/cache';
+        \\import { ImportCache, CodeCache } from 'origine:@std/graph/cache';
         \\const invalid = f => { try { f(); } catch (e) { return e.name === 'InvalidInput' && typeof e.message === 'string'; } return false; };
         \\export async function main() {
         \\  const out = globalThis.report = {};
@@ -817,7 +817,7 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  // sources: immutable chain, the receiver never changes
         \\  const file = ModuleSource.file('./a.ts', { fs: src });
         \\  const chained = file.withTransformer(js).withTransformer(Transform.byExtension({ '.ts': js }));
-        \\  out.chain = file.transformers.length === 0 && chained.transformers.length === 2 && file.native && !chained.native;
+        \\  out.chain = file.transformers.length === 0 && chained.transformers.length === 2;
         \\  out.sourceFrozen = Object.isFrozen(file) && Object.isFrozen(chained.transformers) && ModuleSource.is(file);
         \\  out.sourceBad = invalid(() => ModuleSource.file('', { fs: src })) && invalid(() => ModuleSource.file('a\0b', { fs: src })) && invalid(() => ModuleSource.text(1))
         \\    && invalid(() => file.withTransformer(42)) && invalid(() => ModuleSource.file('x')) && invalid(() => ModuleSource.file('x', { fs: 1 }));
@@ -836,24 +836,24 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({}) }),
         \\    cache: ImportCache.native({ retain: 'used' }),
         \\  });
-        \\  out.native = native.native === true && native.plan.every(e => e.kind === 'native') && native.plan.length === 3 + 3 + 1 + 1 + 1
+        \\  out.native = native.native === undefined && native.plan.every(e => e.kind === 'native') && native.plan.length === 3 + 3 + 1 + 1 + 1
         \\    && native.plan[0].stage === 'resolver' && native.plan[0].name === 'relative' && native.plan[3].name === 'origine' && Object.isFrozen(native.plan);
         \\  const mixed = ImportHandler.make({ resolver, hooks: async () => ImportHook.next(), meta: ({ id }) => ({ url: id }) });
-        \\  out.mixed = mixed.native === false && mixed.plan.filter(e => e.kind === 'js').length === 2 && mixed.hooks.length === 1 && typeof mixed.meta === 'function';
+        \\  out.mixed = mixed.plan.filter(e => e.kind === 'js').length === 2 && mixed.hooks.length === 1 && typeof mixed.meta === 'function';
         \\  out.defaults = mixed.cache.retain === 'all' && mixed.maker.host === 'maker' && native.meta === null;
         \\  out.handlerBad = invalid(() => ImportHandler.make({ resolver, hooks: [] }) && ImportHandler.make({ resolver: ImportResolver.layered(), hooks: [] }))
         \\    && invalid(() => ImportHandler.make({ resolver })) && invalid(() => ImportHandler.make({ resolver, hooks: [42] }))
-        \\    && invalid(() => ImportHandler.make({ resolver, hooks: [], maker: () => 1 })) && invalid(() => ImportHandler.make({ resolver, hooks: [], cache: ResolveCache.native() }))
+        \\    && invalid(() => ImportHandler.make({ resolver, hooks: [], maker: () => 1 })) && invalid(() => ImportHandler.make({ resolver, hooks: [], cache: CodeCache.memory() }))
         \\    && ImportHandler.make({ resolver, hooks: [] }) !== undefined;
         \\  const customMaker = ImportHandler.make({ resolver, hooks: [], maker: MakeRecipe.fn(() => ({})) });
-        \\  out.customMaker = !customMaker.native && customMaker.plan.some(e => e.stage === 'maker' && e.kind === 'js');
+        \\  out.customMaker = customMaker.plan.some(e => e.stage === 'maker' && e.kind === 'js');
         \\  out.makerImport = MakeRecipe.inherit({ import: native }).import === native && invalid(() => MakeRecipe.inherit({ import: {} })) && invalid(() => MakeRecipe.fn(1));
         \\  // recipes: the name defaults to the path, text needs one, native follows the parts
         \\  const recipe = ModuleRecipe({ source: ModuleSource.file('./main.js', { fs: src }), import: native });
         \\  const text = ModuleRecipe({ source: ModuleSource.text('export {}'), import: native, name: 'inline', codeCache: CodeCache.none });
         \\  const tainted = ModuleRecipe({ source: ModuleSource.file('./m.ts', { fs: src }).withTransformer(js), import: native });
-        \\  out.recipe = recipe.name === './main.js' && recipe.native === true && recipe.codeCache === null && text.native && text.codeCache.host === 'codeCacheNone'
-        \\    && !tainted.native && !ModuleRecipe({ source: file, import: mixed }).native && Object.isFrozen(recipe) && ModuleRecipe.is(recipe) && ImportHandler.is(native);
+        \\  out.recipe = recipe.name === './main.js' && recipe.native === undefined && file.native === undefined && recipe.codeCache === null && text.codeCache.host === 'codeCacheNone'
+        \\    && tainted.source.transformers.length > 0 && Object.isFrozen(recipe) && ModuleRecipe.is(recipe) && ImportHandler.is(native);
         \\  out.recipeBad = invalid(() => ModuleRecipe({ source: ModuleSource.text(''), import: native })) && invalid(() => ModuleRecipe({ source: file }))
         \\    && invalid(() => ModuleRecipe({ import: native })) && invalid(() => ModuleRecipe({ source: file, import: native, name: '' })) && invalid(() => ModuleRecipe({ source: file, import: native, codeCache: {} }));
         \\  // option bags are read as data: a getter is ignored, so the required option is missing
@@ -885,7 +885,6 @@ test "graph: recipes, sources, resolvers, import handlers, providers and caches 
         \\  // caches
         \\  out.caches = ImportCache.native({ retain: 'all' }).retain === 'all' && !('entries' in ImportCache.native({ retain: 'all' }))
         \\    && invalid(() => ImportCache.native({})) && invalid(() => ImportCache.native({ retain: 'some' })) && invalid(() => ImportCache.native({ retain: 'all', entries: 10 })) && invalid(() => ImportCache.native({ retain: 'used', entries: 0 }))
-        \\    && ResolveCache.native({ entries: 8 }).entries === 8 && ResolveCache.native().host === 'resolveCache'
         \\    && CodeCache.memory({ limits: { size: 1024 } }).limits.size === 1024 && CodeCache.dir({ fs: src, path: 'c' }).path === 'c' && invalid(() => CodeCache.dir(null)) && invalid(() => CodeCache.dir({ fs: src })) && invalid(() => CodeCache.memory({ limits: { size: -5 } }));
         \\  const custom = CodeCache.custom({ load: () => undefined, store: () => {} });
         \\  out.custom = custom.kind === 'codeCache' && custom.native === false && invalid(() => CodeCache.custom({ load: () => {} })) && Object.isFrozen(CodeCache);
@@ -915,7 +914,7 @@ test "graph: a native handler reads, links and evaluates modules without enterin
         \\  const src = api.fs.requestSync({ handle: 'plain', access: 'r' });
         \\  const graph = api.graph.create();
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [fsProvider({ fs: src, read: 'copy' })] });
-        \\  out.native = handler.native;
+        \\  out.native = handler.plan.every(e => e.kind === 'native');
         \\  const recipe = ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: handler });
         \\  const ref = graph.declare(recipe);
         \\  out.declared = ref.status + ':' + graph.requests(ref);
@@ -1117,7 +1116,7 @@ test "graph: JS layers, hooks, makers and transformers run in the creating realm
         \\    maker: MakeRecipe.fn(({ id }) => ({ transformer: text => text + `\n/* made ${id} */` })),
         \\    meta: ({ id }) => ({ id, n: 7, nested: { ok: true } }),
         \\  });
-        \\  out.mixed = handler.native === false;
+        \\  out.mixed = handler.plan.some(e => e.kind === 'js');
         \\  const graph = api.graph.root;
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const text = (name, source) => graph.declare(ModuleRecipe({ source: ModuleSource.text(source), import: handler, name }));
@@ -1278,7 +1277,7 @@ test "graph: origineProvider serves an allowlist and JS cannot forge origine: mo
         \\  const text = origineProvider({ std: { include: ['text'] } });
         \\  const forging = make([async resolved => (resolved.id === 'origine:evil' || resolved.id === 'origine:@std/text' ? ImportHook.source(ModuleSource.text('export const encodeUtf8 = () => ({ length: 99 }); export const x = 1;')) : ImportHook.next())]);
         \\  const handler = make([text]);
-        \\  out.native = handler.native;
+        \\  out.native = handler.plan.every(e => e.kind === 'native');
         \\  const run = async (h, name, source) => {
         \\    const ctx = await api.context.create({ graph: api.graph.root, import: h });
         \\    return api.graph.root.evaluate(api.graph.root.declare(ModuleRecipe({ source: ModuleSource.text(source), import: h, name })), ctx).then(() => 'ok', e => e.message);
@@ -1636,7 +1635,7 @@ test "graph: an async fs grant serves source files on its io runtime without ent
         \\  const src = await api.fs.requestAsync({ handle: 'plain', io, access: 'r' });
         \\  const graph = api.graph.create();
         \\  const handler = ImportHandler.make({ resolver: ImportResolver.layered().layer(relative()), hooks: [json({ fs: src }), fsProvider({ fs: src, read: 'copy' })] });
-        \\  out.native = handler.native;
+        \\  out.native = handler.plan.every(e => e.kind === 'native');
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const main = graph.declare(ModuleRecipe({ source: ModuleSource.file('main.js', { fs: src }), import: handler }));
         \\  await graph.load(main);
@@ -1951,7 +1950,7 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
         \\    hooks: [json({ fs: src }), fsProvider({ fs: src, read: 'mmap' })],
         \\    maker: MakeRecipe.inherit({ transformer: Transform.byExtension({ '.ts': ts() }) }),
         \\  });
-        \\  out.native = handler.native + ':' + handler.plan.map(e => e.kind).join(',');
+        \\  out.native = handler.plan.map(e => e.kind).join(',');
         \\  const ctx = await api.context.create({ import: handler, graph });
         \\  const main = graph.declare(ModuleRecipe({ source: ModuleSource.file('main.ts', { fs: src }).withTransformer(ts()), import: handler }));
         \\  out.recipeNative = main.status;
@@ -1968,7 +1967,7 @@ test "graph: native plans with oxc, json, import maps and accept never enter JS"
     try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "data.json", .data = "{\"k\": 1}" });
     try fx.tmp.dir.writeFile(t.io, .{ .sub_path = "main.ts", .data = "import { n } from './a.ts'; import { k } from 'dep'; import data from './data.json' with { type: 'json' }; const total: number = n + k + data.k; globalThis.answer = total;" });
     try fx.run();
-    try check(fx.scope, "report.native === 'true:native,native,native,native,native,native,native'");
+    try check(fx.scope, "report.native === 'native,native,native,native,native,native,native'");
     try check(fx.scope, "report.requests === './a.ts=a.ts,dep=app:/dep.js,./data.json=data.json' && report.evaluated === 'evaluated'");
     try check(fx.rt.scopes.items[1], "answer === 42");
     try t.expectEqual(@as(usize, 0), fx.host.driver_calls);
@@ -3265,8 +3264,8 @@ const zero_copy_source =
     \\  const s2 = await sf.readInto(fs, new Uint8Array(4));
     \\  out.streamByob = text(s1.buffer) === '0123' && text(s2.buffer) === '4567';
     \\  const shared = sab ? new Uint8Array(new SharedArrayBuffer(4)) : new Uint8Array(new ArrayBuffer(4, { maxByteLength: 8 }));
-    \\  const sh = await rf.readInto(fs, shared, 1);
-    \\  out.byobFallback = sh.bytes === 4 && text(sh.buffer) === '1234' && text(shared) === '1234' && shared.buffer.byteLength === 4;
+    \\  // No silent copy: refused like `net.readInto`, with the buffer untouched.
+    \\  out.byobRefused = (await rf.readInto(fs, shared, 1).then(() => false, e => IoError.is(e, IoError.Unsupported))) && shared.buffer.byteLength === 4;
     \\  await sf.close(fs);
     \\
     \\  // Host-allocated reads: exactly the bytes read.
@@ -3327,7 +3326,7 @@ test "api: async buffers are pinned and detached, BYOB and host-allocated reads 
         try check(fx.scope, "report.rustDetached && report.rustString && report.copied && report.copiedSync");
         try check(fx.scope, "report.copyFallbackAll");
         try check(fx.scope, "report.byob && report.byobDead && report.subView && report.u16 && report.dataView && report.bareBuffer");
-        try check(fx.scope, "report.shortByob && report.eofByob && report.emptyByob && report.streamByob && report.byobFallback");
+        try check(fx.scope, "report.shortByob && report.eofByob && report.emptyByob && report.streamByob && report.byobRefused");
         try check(fx.scope, "report.alloc && report.allocShort && report.allocCompact && report.allocEof && report.allocZero && report.allocStream === '012345:4'");
         try check(fx.scope, "report.syncUnsupported && report.validation === '30,30,30,30,30,30,30,30,30,30' && report.validationUntouched && report.rawOk && report.rawFrozen && report.afterClose");
     }
@@ -3481,7 +3480,7 @@ const net_source =
     \\  let have = 0;
     \\  while (have < message.length) have += await client.readCopy(reuse.subarray(have));
     \\  out.readCopy = have === message.length && String.fromCharCode(...reuse.subarray(0, have)) === 'ping-pong' && reuse.buffer.byteLength === 32 &&
-    \\    (await client.readCopy(new Uint8Array(0))) === 0 &&
+    \\    (await client.readCopy(new Uint8Array(0)).then(() => false, e => e instanceof TypeError)) &&
     \\    (await client.readCopy({}).then(() => false, e => e instanceof TypeError));
     \\
     \\  // readInto: the buffer is detached and handed back as a new ArrayBuffer; undetachable buffers are refused untouched.
@@ -3737,7 +3736,7 @@ const flow_source =
     \\  const sleep = () => io.sleep(30);
     \\
     \\  // Queue state and the two lanes: a peer that does not read fills the kernel, then the queue.
-    \\  const [pulled, peer] = await pair({ sendQueueLimit: 65536 });
+    \\  const [pulled, peer] = await pair({ queued: { limit: 65536 } });
     \\  const client = pulled.toEvent();
     \\  let drains = 0;
     \\  client.register('drain', () => { drains++; });
@@ -3781,7 +3780,7 @@ const flow_source =
     \\  await peer.close();
     \\
     \\  // Closing rejects what is queued and what waits.
-    \\  const [c2, p2] = await pair({ sendQueueLimit: 1024 });
+    \\  const [c2, p2] = await pair({ queued: { limit: 1024 } });
     \\  while (c2.direct.write(chunk) > 0);
     \\  const inflight = c2.queued.send(new Uint8Array(1 << 25));
     \\  const waiting = c2.queued.send(enc('more'));
@@ -3945,8 +3944,8 @@ const modes_source =
     \\  const sideAccept = sides.accept();
     \\  const mine = await api.net.connect(io, { port: sides.port, mode: 'pull' });
     \\  const theirs = await sideAccept;
-    \\  out.sideRequired = (() => { try { mine.end(); return false; } catch (e) { return e instanceof TypeError; } })() &&
-    \\    (() => { try { mine.end('bogus'); return false; } catch (e) { return e instanceof TypeError; } })();
+    \\  out.sideRequired = (await mine.end().then(() => false, e => e instanceof TypeError)) &&
+    \\    (await mine.end('bogus').then(() => false, e => e instanceof TypeError));
     \\  await mine.end('read');
     \\  await theirs.queued.send(enc('ignored'));
     \\  out.endRead = (await mine.read(8)).length === 0 && !mine.closed && (await mine.queued.send(enc('still'))) === undefined &&

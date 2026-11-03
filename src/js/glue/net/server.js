@@ -86,10 +86,28 @@ export default k => {
     accept() {
       try {
         const core = live(this);
-        return core.track(
+        const accepting = core.track(
           native.net.accept(core.id).then(r => k.makeSocket(core.socketMode, r.id, core.io, r.port, core.limit)),
           () => false,
         );
+        const done = () => core.accepts.delete(accepting);
+        core.accepts.add(accepting);
+        accepting.then(done, done);
+        return accepting;
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    /**
+     * Releases the listener; a pending `accept()` rejects `Canceled`. Resolves once the port is
+     * free (those accepts were what kept it open). Idempotent.
+     */
+    close() {
+      try {
+        const core = coreOf(this);
+        const accepts = core === null ? [] : [...core.accepts];
+        const closing = super.close();
+        return accepts.length === 0 ? closing : closing.then(() => Promise.allSettled(accepts)).then(() => undefined);
       } catch (e) {
         return Promise.reject(e);
       }

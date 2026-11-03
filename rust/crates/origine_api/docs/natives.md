@@ -78,7 +78,7 @@ synchronously, so a bad call returns a rejected promise without starting a task.
 | `fileWriteMove` | `fs, fileId, data` | as `fileWrite`, moving like `writeMoveAll`. |
 | `filePwriteAll` | `fs, fileId, data, offset: u64` | `undefined`. Copies like `writeAll`. |
 | `filePwriteMoveAll` | `fs, fileId, data, offset: u64` | as `filePwriteAll`, moving like `writeMoveAll`. |
-| `fileReadInto` | `fs, fileId, buffer` | `{ bytes, buffer: ArrayBuffer }`: one read at the position into `buffer`'s window; pinned = new ArrayBuffer over the same store (original dead), else the guest's own buffer after copy-out. |
+| `fileReadInto` | `fs, fileId, buffer` | `{ bytes, buffer: ArrayBuffer }`: one read at the position into `buffer`'s window; a new ArrayBuffer over the same store (original dead). `Unsupported`, untouched, for a buffer that cannot be detached; an empty one comes back as it is. |
 | `filePreadInto` | `fs, fileId, buffer, offset: u64` | as `fileReadInto` at `offset`. |
 | `fileReadAlloc` | `fs, fileId, len: u64` | `Uint8Array` of the bytes read (<= `len`, empty at EOF) over a V8-allocated buffer of `len` bytes (or an exact-size copy when at most half of a >= 4 KiB buffer was used); `len` > 256 MiB rejects `FileTooLarge`. |
 | `filePreadAlloc` | `fs, fileId, len: u64, offset: u64` | as `fileReadAlloc` at `offset`. |
@@ -91,12 +91,12 @@ the in-flight ones, closes the descriptor, then marks it `Closed` so the slot ma
 are `1..` per table (files and directories have separate tables); a dropped (cancelled)
 operation releases its guard.
 
-Buffer semantics (pin/detach, copy fallback, lifetime invariant): [README](README.md#buffers-pinning-and-copy-fallback).
+Buffer semantics (pin/detach, lifetime invariant): [README](README.md#buffers-pinning).
 `fileRead`/`filePread` remain copying (they allocate `buffer.length` bytes per call).
 
-## `net.*` (loopback TCP, `needs = "runtime"`)
+## `net.*` (TCP, `needs = "runtime"`)
 
-Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, bound to the runtime they were created on and checked against the calling scope on every call (`BadHandle` otherwise). `accept`/`read`/`write` run on the runtime's loop; `connect` creates a raw non-blocking `socket(2)` and lets the loop's `connect` op finish the handshake, so nothing blocks the isolate thread. The destination is restricted to loopback: IP literals that are loopback are used as given, `localhost` is never resolved (RFC 6761: `connect` tries `127.0.0.1` then `::1`, `listen` binds `127.0.0.1`), anything else is `PermissionDenied`.
+Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, bound to the runtime they were created on and checked against the calling scope on every call (`BadHandle` otherwise). `accept`/`read`/`write` run on the runtime's loop; `connect` creates a raw non-blocking `socket(2)` and lets the loop's `connect` op finish the handshake, so nothing blocks the isolate thread. The destination is checked against the embedder's network ceiling ([net-grant.md](../../../../docs/net-grant.md), `HostState::net`): IP literals are used as given, `localhost` is never resolved (RFC 6761: `connect` tries `127.0.0.1` then `::1`, `listen` binds `127.0.0.1`), each address the ceiling does not allow is dropped, and when none is left (or the host is any other name) the call is `PermissionDenied` with the address or name as the detail.
 
 | native | args | result |
 |---|---|---|
@@ -111,7 +111,7 @@ Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, boun
 | `net.start` | `id` | sync; starts the read (accept) pump task of a subscribed socket; it and its receive are not counted by `live_items`. A peer's FIN only delivers `end`: the stream stays open (writes work, `io.run` keeps waiting) until `net.close` |
 | `net.take` | `id` | sync; ArrayBuffer lease of exactly the chunk's bytes, carved out of the slab they were received into (a V8 store from the isolate's allocator, so inside the sandbox) with a refcounted deleter; no copy, nothing else of the slab reachable (only inside the `data` dispatch, once per event) |
 | `net.release` | `id, buffer` | sync; detaches a lease, dropping its hold on the slab (the slab is freed with its last lease) |
-| `net.pause` | `id` | sync; parks the socket's events (in order) instead of dispatching them; idempotent |
+| `net.pause` | `id, noHandler` | sync; parks the socket's read-side events (in order) instead of dispatching them; `noHandler` holds only chunks and connections (and an `end` behind them); `drain` and write failures always pass; idempotent |
 | `net.resume` | `id` | sync; puts the parked events back in front of the host queue; idempotent |
 | `net.directWrite` | `id, data` | sync byte count; one non-blocking write on the isolate thread, 0 when it would block or the outbox is busy; `BrokenPipe` after `net.end` |
 | `net.put` | `id, data, max` | sync byte count; idle outbox: tries the kernel first, then copies the rest (at most `max` bytes) into the outbox flushed by a writer task; busy: copies at most `max` bytes. A write error throws its errno and the socket emits `error` and closes |
@@ -120,7 +120,7 @@ Source: [`net.rs`](../src/net.rs). Sockets live in the Host's socket table, boun
 | `net.end` | `id` | sync; no more writes, the FIN goes out once the outbox is empty; idempotent |
 | `io.run` | `io` | Promise<void> resolving once every resumed subscription of the runtime has delivered `close` |
 
-An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. A pending `accept` keeps its listener open until the runtime closes. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
+An operation in flight holds an `Rc<Socket>`, so closing never frees a descriptor under a running `recv`. Closing a listener rejects its pending `accept`s with `Canceled`, which lets go of the descriptor. The guest surface (the `Handle`/`Server`/`Socket` classes) is in [`src/js/docs/net.md`](../../../../src/js/docs/net.md).
 
 ## Adding a native
 
@@ -131,3 +131,95 @@ An operation in flight holds an `Rc<Socket>`, so closing never frees a descripto
 2. Add `<module>::NATIVE_<FN_NAME>,` to `NATIVES` in `src/registry.rs` (Zig installs the registry; the
    JS glue must use the same `native.<namespace>.<name>`; `just check-contracts` verifies both).
 3. Keep V8-free logic in `origine_api_core` / `origine_api_fs` so Miri covers it.
+
+## Errors are enums
+
+A Rust failure is a value of an enum with one variant per cause, never a `String` built where it happens. Reuse the
+enums of the crates underneath (`io::ErrorKind`, `rustls::Error` through `origine_tls::TlsError`, `hickory_proto`'s
+errors through `origine_dns::DnsError`) and box large payloads so `Result` stays small. The text is written once, in
+the enum's `fmt::Display` (plus `std::error::Error::source` when it wraps another error), and the enum converts into
+`NativeError` with one `match` (`From<ClassError> for NativeError` in [`class.rs`](../src/class.rs), `tls_error` in
+`tls.rs`, `dns_error` in `dns.rs`). A bad argument is an `ArgError` (`argument N: expected X`, `X` a constant).
+
+## Rust-defined classes (`#[class]`)
+
+Values a guest holds for a long time and that are not tied to a handle's lifetime (TLS roots, identities, client
+authentication, session caches, configurations; DNS resolvers) are **instances of classes defined in Rust**. A
+`#[class(path = "ns.Name", side_effect = "..", needs = "..")]` impl block ([macro reference](../../origine_api_macros/docs/README.md#class))
+gives the type its own `FunctionTemplate` per isolate ([`class.rs`](../src/class.rs), made on first use, never in a
+snapshot): the class name, a constructor that throws (`new Name()` is a `TypeError`), `#[static_method]`s on the
+constructor, `&self` methods and `#[getter]`s on the prototype (non-enumerable). An instance is made from the
+template's instance template, so `instanceof` works, and owns its Rust value in the isolate's cppgc heap
+([`gc.rs`](../src/gc.rs), `Object::wrap`, one tag, a `TypeId` inside): the value is dropped when the instance is
+collected. The brand check is the unwrap: a member called on anything else throws `ClassError::Receiver` (a
+`TypeError`), and a `&Name` argument rejects anything but a `Name` (`argument N: expected a Name`).
+
+* **Arguments and results.** A `#[class]` type is `IntoJs` (a new instance in the current realm) and `&T` is
+  `FromJs` for any class `T` (also inside `Option`, `Vec` and `derive(FromJs)` structs with a lifetime, such as
+  `struct ClientConfig<'s> { roots: &'s RootPki }`). The borrow lasts for the call: a `promise` native or member clones
+  what it keeps (the values are `Arc`-backed), which is what holds a value alive across an `await`.
+* **Installation.** `#[class]` registers an installer native at its path (`CLASS_<NAME>` in `NATIVES`). The glue
+  calls `native.ns.Name(hostError, members?)` once per realm when the capability is bound (index.js `late`): it
+  returns the constructor after freezing it like `freezeMethods` (every member, the prototype, the constructor).
+  `hostError` is kept for the realm, so members, which the guest calls directly, throw and reject the realm's
+  `IoError` / `HostError` instances like the glue-wrapped natives. `members` are the few JS members that need the
+  glue's own objects (`TlsClient.connect` takes and makes `api.net` sockets); they are defined on the prototype
+  before it is frozen.
+* **Releasing.** `class::Releasable<T>` holds a value that `release()` can drop before the instance is collected
+  (`BadHandle` afterwards); what was built from it keeps its own copy.
+* **Rules for a class type:** `'static`, self-contained. Its `Drop` runs inside a collection, so it must not touch
+  `HostState`, V8 or a scope table. Members take `&self` (shared with the collector; mutation goes through a
+  `Cell`/`RefCell`) and cannot take a `ScopeKey` (a member is not bound to a scope; keep the owner in the value).
+  Handles that keep the program alive (sockets, servers, sessions) stay in the Host tables and are closed
+  explicitly.
+
+See [`docs/cppgc-research.md`](../../../../docs/cppgc-research.md) for the heap and why there is no JS wrapper class.
+
+## `tls.*` (TLS, `needs = "runtime"`, feature `tls`)
+
+Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values are the classes `RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient` and `TlsServer` (see above; installed as `native.tls.<Class>`); stream ids come from their own counter and are never reused. `connect` / `accept` take a plain stream socket **out of the socket table** and run the handshake on its runtime over a `SocketTransport` (`lp.recv` / `lp.send` on the descriptor); `close` shuts the transport down so pending operations end. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
+
+| Native | Args | Returns |
+|---|---|---|
+| `tls.RootPki` | installer | class: `bundled()`, `fromPem(pem)`, `fromDer(certs[])` (`InvalidData` when none parse), `release()` |
+| `tls.Identity` | installer | class: `fromPem(cert, key)`, `fromDer({ cert[], key })` (`InvalidData` for a bad pair), `release()` |
+| `tls.ClientAuth` | installer | class: `none()`, `require(roots)` |
+| `tls.TlsSessions` | installer | class: `create({ limit })` (a positive integer), `release()` |
+| `tls.TlsClient` / `tls.TlsServer` | installer, glue members | classes: `release()`; `connect` / `accept` come from the glue |
+| `tls.client` | `{ roots, identity?, alpn?: string[], sessions? }` | a `TlsClient` |
+| `tls.server` | `{ identities (at least one), clientAuth, alpn?: string[] }` | a `TlsServer` |
+| `tls.connect` | `io, client, socket, servername` | Promise `{ id (a new api.net socket), alpn, version (12/13), servername, resumed }`; consumes `socket` |
+| `tls.accept` | `io, server, socket` | Promise, same shape |
+| `tls.peer` | `socket` | `[u32 LE length \| DER]*`, leaf first |
+
+## `http.*` (HTTP/2, `needs = "runtime"`, feature `http`)
+
+Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../../../../src/js/docs/http.md). A session is `origine_h2::Connection` plus the task that runs its `Driver` on the socket's runtime, over a plain stream socket or a TLS stream, either of which `http.session` takes out of its table (`SocketTransport` in [`sockstream.rs`](../src/sockstream.rs), shared with `tls.*`). Streams are `Exchange`s in the session's table by stream id; a header list crosses as one packed buffer (`name_len u16 \| value_len u32 \| name \| value`, re-validated on entry). The driver's pending read counts as work, so a session keeps the program alive until `destroy`. Errors: stream/session over `BrokenPipe`, bad field `InvalidInput`, protocol breaks `ProtocolError` (detail in `subject`), a dead transport its own errno with the message as `subject`.
+
+| Native | Args | Returns |
+|---|---|---|
+| `http.session` | `io, id (plain or TLS socket), role (0 client, 1 server), streams, headers, window, connection, batch` | session id; consumes the socket |
+| `http.ready` / `http.ping` | `session` | Promise (void / round trip in ms) |
+| `http.goaway` / `http.destroy` | `session` | sync; graceful close / end now |
+| `http.peer` | `session` | the peer's concurrent-stream limit (`2**32 - 1` when unset; valid after `ready`), or -1 when no new stream can be opened (GOAWAY received or connection ended) |
+| `http.open` | `session, method, scheme, authority, path, fields, body (0 none, 1 stream)` | stream id |
+| `http.accept` | `session` | Promise of the next request stream id, `undefined` when over |
+| `http.next` | `session, stream` | Promise `{ kind (0 headers, 1 data, 2 end, 3 closed), head (0 request, 1 response, 2 trailers), status, method, scheme, authority, path, fields, last, endStream, data, code }`, `undefined` after the last |
+| `http.consume` | `session, stream, bytes` | sync; window credit |
+| `http.respond` | `session, stream, status, fields, body` | sync |
+| `http.send` | `session, stream, data` | Promise; `data` copied now, waits while a window's worth is queued |
+| `http.queued` | `session, stream` | sync byte count |
+| `http.finish` | `session, stream, trailers (empty for none)` | sync |
+| `http.reset` | `session, stream, code` | sync |
+| `http.release` | `session, stream` | sync; forgets the stream |
+
+## `dns.*` (address lookups, `needs = "runtime"`, feature `dns`)
+
+Source: [`dns.rs`](../src/dns.rs); semantics and the guest surface: [`src/js/docs/dns.md`](../../../../src/js/docs/dns.md). A resolver is an `origine_dns::Resolver` whose `Exchange` opens one socket per query on the resolver's runtime: a connected UDP socket (datagrams not carrying our id are skipped), or a stream (RFC 1035 length-prefixed, over TLS for DoT with the `origine_tls` client built from the roots at creation), or DoH: one `origine_h2` client connection over TLS (ALPN `h2`, features `tls` and `http`; `Unsupported` without them or when the server does not negotiate `h2`) and one POST per query, its driver polled by the query itself (never spawned, so an idle resolver keeps nothing alive), all inside the per-attempt timeout. Server addresses are checked against the network ceiling's `connect` rules, at creation and again per query.
+
+| Native | Args | Returns |
+|---|---|---|
+| `dns.Resolver` | installer, glue members | class (`ResolverHandle`): `closed` getter, `close()`; `lookup`, `io` and `Symbol.asyncDispose` come from the glue |
+| `dns.resolver` | `io, spec, roots (a RootPki, undefined none), timeout (ms), tries, entries (0 none), min, max, negative_min, negative_max (ms)` | a `Resolver`. `spec` is one server per line: `udp <addrs>`, `tcp <addrs>`, `tls <name> <addrs>`, `https <authority> <path> <addrs>` (`addrs` are comma-separated `ip:port`) or `system` |
+| `dns.lookup` | `resolver, name, family (0 both, 4, 6)` | Promise of `[4 \| 6, octets]*`; `BadHandle` for a closed resolver or another scope's |
+

@@ -1,0 +1,48 @@
+// Positive cases and `@ts-expect-error` negatives for api.dns. Type-checked only, never run.
+import type { Api } from '@origine/types';
+import { IpAddr, SocketAddr } from 'origine:@std/net';
+
+export async function main(api: Api, pem: Uint8Array): Promise<void> {
+  const { dns } = api;
+  const io = api.io.create();
+  const server = SocketAddr.new(IpAddr.v4(127, 0, 0, 1), 5353);
+  const resolver = dns.resolver(io, {
+    servers: [
+      dns.DnsServer.udp([server]),
+      dns.DnsServer.tcp([IpAddr.parse('::1')]),
+      dns.DnsServer.tls('dns.test', [server]),
+      dns.DnsServer.https('https://dns.test/dns-query', [server]),
+      dns.DnsServer.system(),
+    ],
+    roots: api.tls.RootPki.fromPem(pem),
+    dnssec: 'off',
+    timeout: 2000,
+    tries: 2,
+    cache: { limit: 512, ttl: { min: 1000, max: 3_600_000 }, negative: { min: 0, max: 60_000 } },
+  });
+  const addresses: IpAddr[] = await resolver.lookup('example.test', { family: 'any' });
+  const text: string = addresses[0]!.toString();
+  const loopback: boolean = addresses[0]!.toCanonical().isLoopback();
+  void [text, loopback];
+
+  // @ts-expect-error every number is required: no hidden defaults
+  dns.resolver(io, { servers: [], dnssec: 'off' });
+  // @ts-expect-error a family is required
+  await resolver.lookup('example.test', {});
+  // @ts-expect-error addresses are made by named constructors
+  new IpAddr();
+  // @ts-expect-error api.dns does not re-export the address types: one place, origine:@std/net
+  dns.IpAddr;
+  dns.resolver(io, {
+    servers: [],
+    dnssec: 'off',
+    timeout: 1,
+    tries: 1,
+    // @ts-expect-error every number of the cache is required
+    cache: { limit: 1, ttl: { min: 0 }, negative: { min: 0, max: 0 } },
+  });
+  // @ts-expect-error a URL is a string
+  dns.DnsServer.https(new URL('https://dns.test/dns-query'), [server]);
+  // @ts-expect-error servers are IpAddr or SocketAddr, not strings
+  dns.DnsServer.udp(['127.0.0.1']);
+}

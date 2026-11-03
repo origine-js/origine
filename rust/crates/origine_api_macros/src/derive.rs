@@ -5,11 +5,23 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Field, Fields, LitStr, Result, spanned::Spanned};
 
-/// The named fields of a non-generic struct.
-fn named_fields(input: &DeriveInput) -> Result<&syn::punctuated::Punctuated<Field, syn::Token![,]>> {
-    if !input.generics.params.is_empty() {
-        return Err(syn::Error::new(input.generics.span(), "FromJs/IntoJs structs cannot be generic"));
+/// The one lifetime parameter of a `FromJs` struct (`struct Options<'s> { roots: &'s RootPki }`), if any.
+fn lifetime(input: &DeriveInput) -> Result<Option<syn::Lifetime>> {
+    let params: Vec<_> = input.generics.params.iter().collect();
+    match params.as_slice() {
+        [] => Ok(None),
+        [syn::GenericParam::Lifetime(param)] if param.bounds.is_empty() && input.generics.where_clause.is_none() => {
+            Ok(Some(param.lifetime.clone()))
+        }
+        _ => Err(syn::Error::new(
+            input.generics.span(),
+            "FromJs structs take at most one lifetime parameter (the arguments' handle scope); IntoJs structs cannot be generic",
+        )),
     }
+}
+
+/// The named fields of a struct (its generics are checked by the caller).
+fn named_fields(input: &DeriveInput) -> Result<&syn::punctuated::Punctuated<Field, syn::Token![,]>> {
     match &input.data {
         syn::Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => Ok(&fields.named),
@@ -38,8 +50,13 @@ fn js_name(field: &Field) -> Result<String> {
 
 pub fn from_js(input: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
+    let lifetime = lifetime(&input)?;
     let fields = named_fields(&input)?;
     let name = &input.ident;
+    let (s, target) = match &lifetime {
+        Some(lifetime) => (quote!(#lifetime), quote!(#name<#lifetime>)),
+        None => (quote!('s), quote!(#name)),
+    };
     let mut reads = Vec::new();
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
@@ -47,10 +64,10 @@ pub fn from_js(input: TokenStream) -> Result<TokenStream> {
         reads.push(quote! { #ident: ::origine_api::decode::property(scope, object, #key, index)? });
     }
     Ok(quote! {
-        impl<'s> ::origine_api::FromJs<'s> for #name {
+        impl<#s> ::origine_api::FromJs<#s> for #target {
             fn from_js(
-                scope: &mut ::origine_api::v8::PinScope<'s, '_>,
-                value: ::origine_api::v8::Local<'s, ::origine_api::v8::Value>,
+                scope: &mut ::origine_api::v8::PinScope<#s, '_>,
+                value: ::origine_api::v8::Local<#s, ::origine_api::v8::Value>,
                 index: usize,
             ) -> ::core::result::Result<Self, ::origine_api::ArgError> {
                 let object = ::origine_api::decode::object_arg(value, index)?;
@@ -62,6 +79,9 @@ pub fn from_js(input: TokenStream) -> Result<TokenStream> {
 
 pub fn into_js(input: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(input.generics.span(), "IntoJs structs cannot be generic"));
+    }
     let fields = named_fields(&input)?;
     let name = &input.ident;
     let mut writes = Vec::new();
@@ -114,5 +134,14 @@ mod tests {
         assert!(from_js(quote! { enum E { A } }).is_err());
         assert!(into_js(quote! { struct G<T> { x: T } }).is_err());
         assert!(from_js(quote! { struct Bad { #[js(rename = "x")] a: u32 } }).is_err());
+        assert!(from_js(quote! { struct G<T> { x: T } }).is_err());
+        assert!(from_js(quote! { struct Two<'a, 'b> { x: &'a u32, y: &'b u32 } }).is_err());
+    }
+
+    #[test]
+    fn from_js_borrows_for_its_lifetime() {
+        let out = text(from_js(quote! { struct Opts<'a> { roots: &'a RootPki } }));
+        assert!(out.contains("impl < 'a > :: origine_api :: FromJs < 'a > for Opts < 'a >"), "{out}");
+        assert!(out.contains("PinScope < 'a , '_ >"), "{out}");
     }
 }

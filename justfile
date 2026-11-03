@@ -27,13 +27,20 @@ patch-v8:
 test:
     zig build test
 
+# The networking crates' tests (origine_tls, origine_h2, origine_dns). origine_h2 links the Zig-built nghttp2;
+# rustls links the Zig-built AWS-LC (docs/aws-lc.md).
+test-net:
+    cd lib/nghttp2 && zig build -Doptimize=ReleaseFast -p ../../zig-out/nghttp2
+    zig build aws-lc-prefix
+    cd rust && ORIGINE_NGHTTP2_LIB="$PWD/../zig-out/nghttp2/lib" ORIGINE_AWS_LC_PREFIX="$PWD/../zig-out" cargo test --offline --locked -p origine_tls -p origine_h2 -p origine_dns
+
 # Exercise the REPL in a real pseudo-terminal (Tab, suggestions, history, colors).
 test-repl:
     zig build
     uv run --no-project src/repl/tests/terminal_smoke.py
 
 # Everything CI-style: cross-language contracts, Rust lints + Miri, then formatting and JS/TS lint.
-check: check-contracts check-rust check-format check-types
+check: check-contracts check-rust check-format check-types check-size
 
 oxlint := "oxlint@1.89.0"
 oxfmt := "oxfmt@0.74.0"
@@ -46,9 +53,17 @@ tsc := typescript
 # tests. origine_api (the V8 glue) cannot run under Miri because it links V8; its pure-Rust logic
 # lives in origine_api_core, which is Miri-tested. Miri runs origine_io against its pure-Rust fake of the C API (cfg(miri)).
 check-rust:
-    # Through zig: the `v8` crate's build script needs the V8_ZIG_* environment (rust/scripts/cargo-v8.sh).
-    zig build clippy -Dcargo-offline=true
+    # Through zig: the `v8` crate's build script needs the V8_ZIG_* environment (rust/scripts/cargo-env.py).
+    zig build clippy -Drust_cargo_offline=true
     cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_repl -p origine_api_core -p origine_api_fs -p origine_api_macros
+
+# The default release build stays within the binary budget (docs/http-design.md): 70 MB, stripped
+# (Bun's size). `limit` is in MB (10^6 bytes). Builds into zig-out/size-check, not the install prefix.
+check-size limit="70":
+    zig build -Doptimize=small -Drust_cargo_offline=true -p zig-out/size-check
+    cp zig-out/size-check/bin/origine zig-out/size-check/origine.stripped
+    strip -S -x zig-out/size-check/origine.stripped
+    size=$(wc -c < zig-out/size-check/origine.stripped); echo "origine (small, stripped): $size bytes"; test "$size" -le $(( {{limit}} * 1000000 ))
 
 # Formatting (rustfmt, zig fmt, oxfmt) and JS/TS lint (oxlint, configured in .oxlintrc.json).
 check-format:
@@ -60,7 +75,7 @@ check-format:
 # Regenerate the committed files derived from another language's declarations (bindgen over the C
 # headers, errno table and oxc ABI check from Zig). See docs/contracts.md.
 gen-contracts:
-    rust/scripts/contracts.sh gen
+    uv run --no-cache --script rust/scripts/contracts.py gen
 
 # Fail when a generated contract file is stale, or when Zig/C/Rust declarations of the same ABI
 # differ: regenerates into a temp tree and diffs, compiles the Zig-generated oxc check with clang,
@@ -68,7 +83,7 @@ gen-contracts:
 # backend.zig with origine_io.h. (The Rust-side comparisons are compile-time checks in
 # `check-rust`.)
 check-contracts:
-    rust/scripts/contracts.sh check
+    uv run --no-cache --script rust/scripts/contracts.py check
     zig build test-io -Dtypescript=false
 
 # TypeScript: the declarations of `types/` (@origine/types) against their own tests (positive cases and

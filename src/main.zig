@@ -64,8 +64,44 @@ fn run(init: std.process.Init.Minimal) !void {
     else
         try v8.ArrayBuffer.Allocator.fromZig(alloc);
     defer buffer_allocator.deinit();
-    if (args.len > 1) return runInit(alloc, environ, engine, args, &trace, buffer_allocator, snapshot);
-    return runRepl(alloc, environ, engine, &trace, buffer_allocator, snapshot);
+    // Network flags come first; the init path follows them. `args[first - 1]` stands in for the program name.
+    var rules: std.ArrayList(u8) = .empty;
+    defer rules.deinit(alloc);
+    try rules.appendSlice(alloc, m.Api.loopback_rules);
+    var first: usize = 1;
+    while (first < args.len and try netFlag(alloc, &rules, args[first])) first += 1;
+    var detail: [256]u8 = undefined;
+    if (m.Api.checkNetRules(rules.items, &detail)) |why| {
+        m.stderr.print("error: network rules: {s}\n", .{why});
+        return error.InvalidNetRules;
+    }
+    const net: m.Api.NetConfig = .{ .rules = rules.items };
+    if (args.len > first) return runInit(alloc, environ, engine, args[first - 1 ..], net, &trace, buffer_allocator, snapshot);
+    return runRepl(alloc, environ, engine, net, &trace, buffer_allocator, snapshot);
+}
+
+/// `--net-connect=<cidr>[@ports]` and `--net-listen=<cidr>[@ports]` add a rule to the loopback default (the
+/// grammar is `docs/net-grant.md`); `<cidr>` may be `any` (both families, everywhere). False when `arg` is not
+/// a network flag, which is where the init path begins.
+fn netFlag(alloc: std.mem.Allocator, rules: *std.ArrayList(u8), arg: []const u8) !bool {
+    const kinds = [_]struct { flag: []const u8, rule: []const u8 }{
+        .{ .flag = "--net-connect=", .rule = "connect" },
+        .{ .flag = "--net-listen=", .rule = "listen" },
+    };
+    for (kinds) |kind| {
+        if (!std.mem.startsWith(u8, arg, kind.flag)) continue;
+        const spec = arg[kind.flag.len..];
+        const at = std.mem.indexOfScalar(u8, spec, '@');
+        const cidr = if (at) |i| spec[0..i] else spec;
+        const ports = if (at) |i| spec[i + 1 ..] else "*";
+        if (std.mem.eql(u8, cidr, "any")) {
+            try rules.print(alloc, "{s} 0.0.0.0/0 {s}\n{s} ::/0 {s}\n", .{ kind.rule, ports, kind.rule, ports });
+        } else {
+            try rules.print(alloc, "{s} {s} {s}\n", .{ kind.rule, cidr, ports });
+        }
+        return true;
+    }
+    return false;
 }
 
 /// Background workers of the V8 platform (garbage collection, compilation): `ORIGINE_V8_WORKERS=n`.
@@ -84,12 +120,13 @@ fn createHost(
     user_args: []const []const u8,
     env: []m.Api.EnvPair,
     cwd: m.sys.Dir,
+    net: m.Api.NetConfig,
     isolates: m.Api.IsolateConfig,
 ) !*m.Api.Host {
     const keys = environ.keys();
     const values = environ.values();
     for (keys, values, env) |key, value, *out| out.* = .{ .name = key, .value = value };
-    return m.Api.Host.create(alloc, .{ .args = user_args, .env = env, .fs = .{ .root = cwd }, .runtime = .{}, .isolates = isolates });
+    return m.Api.Host.create(alloc, .{ .args = user_args, .env = env, .fs = .{ .root = cwd }, .net = net, .runtime = .{}, .isolates = isolates });
 }
 
 /// Starts the REPL with the same host API as an init module: `api` is a global and `import`
@@ -98,6 +135,7 @@ fn runRepl(
     alloc: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
     engine: Engine,
+    net: m.Api.NetConfig,
     trace: *StartupTrace,
     buffer_allocator: v8.ArrayBuffer.Allocator,
     engine_snapshot: ?[]align(16) const u8,
@@ -106,7 +144,7 @@ fn runRepl(
     defer alloc.free(env);
     var cwd = try m.sys.Dir.cwd().openDir(".", .{ .iterate = true });
     defer cwd.close();
-    const host = try createHost(alloc, environ, &.{}, env, cwd, .{ .platform = engine.platform, .array_buffer_allocator = buffer_allocator, .engine_snapshot = engine_snapshot });
+    const host = try createHost(alloc, environ, &.{}, env, cwd, net, .{ .platform = engine.platform, .array_buffer_allocator = buffer_allocator, .engine_snapshot = engine_snapshot });
     var rt: ?*m.Runtime = null;
     // The host releases V8 handles, so it goes before the runtime.
     defer {
@@ -147,6 +185,7 @@ fn runInit(
     environ: *const std.process.Environ.Map,
     engine: Engine,
     args: []const [:0]const u8,
+    net: m.Api.NetConfig,
     trace: *StartupTrace,
     buffer_allocator: v8.ArrayBuffer.Allocator,
     engine_snapshot: ?[]align(16) const u8,
@@ -158,7 +197,7 @@ fn runInit(
     defer alloc.free(env);
     var cwd = try m.sys.Dir.cwd().openDir(".", .{ .iterate = true });
     defer cwd.close();
-    const host = try createHost(alloc, environ, user_args, env, cwd, .{ .platform = engine.platform, .array_buffer_allocator = buffer_allocator, .engine_snapshot = engine_snapshot });
+    const host = try createHost(alloc, environ, user_args, env, cwd, net, .{ .platform = engine.platform, .array_buffer_allocator = buffer_allocator, .engine_snapshot = engine_snapshot });
     // The host releases V8 handles, so it goes before the runtime; the snapshot image backs
     // the runtime's heap, so it goes after.
     var image: ?m.init_snapshot.Image = null;

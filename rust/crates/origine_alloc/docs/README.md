@@ -29,7 +29,7 @@ Following upstream's [getting the best performance](https://github.com/microsoft
 
 The crate declares the symbols and **links nothing itself**: the Zig build links the archive into the final
 executable. `build.rs` makes the crate's own tests link it when `V8_ZIG_MIMALLOC` is set (exported by
-`rust/scripts/cargo-v8.sh`), which turns on `cfg(mimalloc_linked)`; without it a bare `cargo test` skips the
+`rust/scripts/cargo-env.py`), which turns on `cfg(mimalloc_linked)`; without it a bare `cargo test` skips the
 tests that call mimalloc.
 
 ```sh

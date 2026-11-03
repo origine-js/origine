@@ -9,9 +9,9 @@
 //!   `ArrayBuffer.prototype.transfer()`), and the store's `SharedRef<BackingStore>` becomes the
 //!   owner of an [`origine_io::RawRegion`] over the captured `(byte_offset, byte_length)` window.
 //!   The kernel or a worker then reads or writes the guest's bytes in place; or
-//! * **copied**: reads fall back to a host `Vec<u8>` that is copied out into the guest's buffer at
-//!   completion by the native's [`crate::native::Wrap`] when the buffer is not pinnable. Writes
-//!   choose explicitly: the plain ones always copy the window at call time ([`copy_for_write`]) and
+//! * **refused**: [`pin_for_read`] reports a buffer that is not pinnable and its zero-copy readers
+//!   (`fileReadInto`, `net.readInto`) fail `Unsupported` before anything is touched. Writes choose
+//!   explicitly: the plain ones always copy the window at call time ([`copy_for_write`]) and
 //!   never touch the guest's buffer; the `*Move` ones pin it ([`pin_for_move`]) and fail
 //!   `Unsupported` instead of copying when they cannot.
 //!

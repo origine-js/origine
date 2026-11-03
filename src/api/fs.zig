@@ -58,6 +58,55 @@ pub fn cleanPath(path: []const u8) !void {
     }
 }
 
+/// Most symlinks one path may pass through, like the OS's own limit (`FilesystemLoop` above it).
+const max_symlink_hops = 40;
+
+/// `symlinks: 'confined'`: walks `path` below `parent` as the OS would and fails `PermissionDenied` when a
+/// symlink's target is absolute or climbs above `parent`, so `parent` is the limit for the directory a call
+/// names. A final symlink counts when the operation follows it (`follow_final`). The walk stops at what does
+/// not exist: there is no link further on, and the operation reports it. It is a check made before the
+/// operation, not part of it: a process that changes links at the same moment can get past it. The Rust twin
+/// is `confine` in rust/crates/origine_api_fs.
+pub fn confine(alloc: std.mem.Allocator, parent: sys.Dir, path: []const u8, follow_final: bool) !void {
+    // A trailing slash makes the OS follow the last component whatever the operation.
+    const follow = follow_final or std.mem.endsWith(u8, path, "/");
+    var resolved: std.ArrayList(u8) = .empty;
+    defer resolved.deinit(alloc);
+    var pending = try alloc.dupe(u8, path);
+    defer alloc.free(pending);
+    var rest: []const u8 = pending;
+    var hops: u32 = 0;
+    var target_buffer: [sys.max_path_bytes]u8 = undefined;
+    while (rest.len != 0) {
+        const slash = std.mem.indexOfScalar(u8, rest, '/');
+        const part = rest[0 .. slash orelse rest.len];
+        rest = if (slash) |at| rest[at + 1 ..] else "";
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            if (resolved.items.len == 0) return error.PermissionDenied;
+            resolved.shrinkRetainingCapacity(std.mem.lastIndexOfScalar(u8, resolved.items, '/') orelse 0);
+            continue;
+        }
+        if (rest.len == 0 and !follow) return;
+        const kept = resolved.items.len;
+        if (kept != 0) try resolved.append(alloc, '/');
+        try resolved.appendSlice(alloc, part);
+        const target = parent.readLink(resolved.items, &target_buffer) catch |err| switch (err) {
+            error.NotLink => continue,
+            error.FileNotFound, error.NotDir => return,
+            else => |other| return other,
+        };
+        resolved.shrinkRetainingCapacity(kept);
+        if (target.len != 0 and target[0] == '/') return error.PermissionDenied;
+        hops += 1;
+        if (hops > max_symlink_hops) return error.SymLinkLoop;
+        const next = try std.mem.concat(alloc, u8, &.{ target, "/", rest });
+        alloc.free(pending);
+        pending = next;
+        rest = pending;
+    }
+}
+
 /// True when `path` names the grant root itself (empty or only `.` components).
 fn namesRoot(path: []const u8) bool {
     var parts = std.mem.splitScalar(u8, path, '/');
@@ -147,6 +196,8 @@ pub const FsGrant = struct {
     /// Handles are read/write natively, so a write-only grant is enforced here: see `readable`.
     read: bool,
     write: bool,
+    /// `symlinks: 'confined'`: every path is walked first, see `confine`.
+    confined: bool = false,
     files: std.ArrayList(?sys.File) = .empty,
     dirs: std.ArrayList(?sys.Dir) = .empty,
 
@@ -202,6 +253,11 @@ pub const FsGrant = struct {
         return self.files.items[ref.id - 1] orelse error.BadHandle;
     }
 
+    /// `path` as `parent` resolves it, when this grant checks symlinks; see the free `confine`.
+    pub fn check(self: *FsGrant, parent: sys.Dir, path: []const u8, follow_final: bool) !void {
+        if (self.confined) try confine(self.allocator(), parent, path, follow_final);
+    }
+
     fn storeFile(self: *FsGrant, value: sys.File) !u32 {
         // IDs are never reused: an old JS reference must not name a newly opened resource.
         try self.files.append(self.host.allocator, value);
@@ -221,6 +277,8 @@ pub const FsGrant = struct {
 /// in src/js/glue/fs.js).
 const access_read: u32 = 1;
 const access_write: u32 = 2;
+/// `symlinks: 'confined'`.
+const access_confined: u32 = 4;
 
 /// `native.fsRequest(root?, access)`: opens a sync grant over the host directory (or a
 /// subdirectory of it) and returns the grant the host built: its operations, `kind`, `id` and the secret
@@ -231,16 +289,18 @@ const access_write: u32 = 2;
 pub fn request(state: *ScopeState, call: *Call, root: ?Path, access: u32) !v8.Value {
     const host = state.host;
     const alloc = host.allocator;
-    if (access == 0 or access > (access_read | access_write)) return error.InvalidInput;
+    if (access & (access_read | access_write) == 0 or access > (access_read | access_write | access_confined)) return error.InvalidInput;
     const config = host.fs orelse return error.PermissionDenied;
     if (!config.sync) return error.PermissionDenied;
     if (access & access_write != 0 and !config.write) return error.PermissionDenied;
     const sub = if (root) |path| path.bytes else "";
+    const confined = access & access_confined != 0;
+    if (confined) try confine(alloc, config.root, sub, true);
     const opened = try config.root.openDir(if (sub.len == 0) "." else sub, .{ .iterate = true });
     errdefer opened.close();
     const grant = try alloc.create(FsGrant);
     errdefer alloc.destroy(grant);
-    grant.* = .{ .host = host, .owner = state, .id = host.next_fs_id, .root = opened, .read = access & access_read != 0, .write = access & access_write != 0 };
+    grant.* = .{ .host = host, .owner = state, .id = host.next_fs_id, .root = opened, .read = access & access_read != 0, .write = access & access_write != 0, .confined = confined };
     try host.grants.append(alloc, grant);
     host.next_fs_id += 1;
     const env = call.env();
@@ -292,7 +352,7 @@ pub const AsyncRequest = struct {
 pub fn requestAsync(state: *ScopeState, call: *Call, request_fn: v8.Function, io: u32, root: []const u8, access: u32) !v8.Promise {
     const host = state.host;
     const alloc = host.allocator;
-    if (access == 0 or access > (access_read | access_write)) return error.InvalidInput;
+    if (access & (access_read | access_write) == 0 or access > (access_read | access_write | access_confined)) return error.InvalidInput;
     const undef = eu.v.undefined_value(call.isolate).value;
     const args = [_]v8.Value{ eu.v.num_u32(call.isolate, io).numeric.primitive.value, binding.string(call.isolate, root), eu.v.num_u32(call.isolate, access).numeric.primitive.value };
     const answer = request_fn.call(call.ctx, undef, &args) orelse return error.JavaScriptException;
@@ -417,6 +477,7 @@ pub fn syncGrantOf(state: *ScopeState, id: u32) !*FsGrant {
 fn openFile(g: *FsGrant, dir: DirRef, path: EntryPath, bits: u32) !u32 {
     if (bits & 0b1111 != 0) try g.writable() else try g.readable();
     const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, true);
     const opened = if (bits & 2 != 0)
         try parent.createFile(path.bytes, .{ .read = true, .truncate = bits & 4 != 0, .exclusive = bits & 8 != 0 })
     else
@@ -427,6 +488,7 @@ fn openFile(g: *FsGrant, dir: DirRef, path: EntryPath, bits: u32) !u32 {
 
 fn openDir(g: *FsGrant, dir: DirRef, path: Path) !u32 {
     const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, true);
     const opened = try parent.openDir(if (path.bytes.len == 0) "." else path.bytes, .{ .iterate = true });
     errdefer opened.close();
     return g.storeDir(opened);
@@ -446,6 +508,7 @@ fn symlinkStat(g: *FsGrant, dir: DirRef, path: Path) !Stat {
 fn statOf(g: *FsGrant, dir: DirRef, path: Path, follow: bool) !Stat {
     try g.readable();
     const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, follow);
     const info = if (path.bytes.len == 0) try parent.stat() else parent.statFile(path.bytes, .{ .follow_symlinks = follow }) catch |err| switch (err) {
         error.FileNotFound => return missing(g, parent, path.bytes),
         else => |other| return other,
@@ -471,12 +534,16 @@ fn missing(_: *FsGrant, parent: sys.Dir, path: []const u8) error{ NotDir, FileNo
 
 fn createDir(g: *FsGrant, dir: DirRef, path: EntryPath) !void {
     try g.writable();
-    try (try g.dir(dir)).createDir(path.bytes, .default_dir);
+    const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, false);
+    try parent.createDir(path.bytes, .default_dir);
 }
 
 fn deleteFile(g: *FsGrant, dir: DirRef, path: EntryPath) !void {
     try g.writable();
-    try (try g.dir(dir)).deleteFile(path.bytes);
+    const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, false);
+    try parent.deleteFile(path.bytes);
 }
 
 /// Returns a flat array `[name0, kind0, name1, kind1, ...]`.
@@ -532,22 +599,32 @@ fn closeDir(g: *FsGrant, dir: DirRef) !void {
 
 fn createDirPath(g: *FsGrant, dir: DirRef, path: SubPath) !void {
     try g.writable();
-    try (try g.dir(dir)).createDirPath(path.bytes);
+    const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, true);
+    try parent.createDirPath(path.bytes);
 }
 
 fn deleteDir(g: *FsGrant, dir: DirRef, path: SubPath) !void {
     try g.writable();
-    try (try g.dir(dir)).deleteDir(path.bytes);
+    const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, false);
+    try parent.deleteDir(path.bytes);
 }
 
 fn deleteTree(g: *FsGrant, dir: DirRef, path: SubPath) !void {
     try g.writable();
-    try (try g.dir(dir)).deleteTree(path.bytes);
+    const parent = try g.dir(dir);
+    try g.check(parent, path.bytes, false);
+    try parent.deleteTree(path.bytes);
 }
 
 fn rename(g: *FsGrant, dir: DirRef, old_path: SubPath, new_dir: DirRef, new_path: SubPath) !void {
     try g.writable();
-    try sys.Dir.rename(try g.dir(dir), old_path.bytes, try g.dir(new_dir), new_path.bytes);
+    const from = try g.dir(dir);
+    const to = try g.dir(new_dir);
+    try g.check(from, old_path.bytes, false);
+    try g.check(to, new_path.bytes, false);
+    try sys.Dir.rename(from, old_path.bytes, to, new_path.bytes);
 }
 
 fn fileStat(g: *FsGrant, file_ref: FileRef) !Stat {
@@ -619,14 +696,12 @@ pub const FileHandle = struct {
 };
 
 /// Python-style open modes -> native bits (write 1, create 2, truncate 4, exclusive 8). Handles always allow
-/// reading when writable, so `x` and `x+` (and `w`/`w+`, `r+`/`rw`) are equivalent natively; `c` and `t`
-/// extend Python's set for Rust-style options. Undefined is `r`; anything unknown is `InvalidInput`.
+/// reading when writable, so there is no `+` spelling; `c` and `t` extend Python's set for Rust-style options. Undefined is `r`; anything unknown is `InvalidInput`.
 pub const OpenMode = struct {
     bits: u32,
 
     const table = [_]struct { []const u8, u32 }{
-        .{ "r", 0 },   .{ "rw", 1 }, .{ "r+", 1 }, .{ "w", 7 }, .{ "w+", 7 }, .{ "x", 11 },
-        .{ "x+", 11 }, .{ "c", 3 },  .{ "c+", 3 }, .{ "t", 5 }, .{ "t+", 5 },
+        .{ "r", 0 }, .{ "rw", 1 }, .{ "w", 7 }, .{ "x", 11 }, .{ "c", 3 }, .{ "t", 5 },
     };
 
     pub fn decode(call: *Call, index: usize) !OpenMode {

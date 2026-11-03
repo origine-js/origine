@@ -5,6 +5,12 @@
 members = ["crates/*"]
 resolver = "3"
 
+[patch.crates-io]
+# Vendored next to the Zig build that compiles AWS-LC (lib/aws-lc, docs/aws-lc.md). They live outside this
+# workspace, so clippy -D warnings never runs over upstream code; aws-lc-sys is patched to link the Zig build.
+aws-lc-rs = { path = "../lib/aws-lc/aws-lc-rs" }
+aws-lc-sys = { path = "../lib/aws-lc/aws-lc-sys" }
+
 [workspace.package]
 edition = "2024"
 
@@ -22,6 +28,10 @@ oxc_transformer = "=0.155.0"
 origine_oxc = { path = "crates/origine_oxc" }
 origine_repl = { path = "crates/origine_repl" }
 origine_io = { path = "crates/origine_io" }
+origine_transport = { path = "crates/origine_transport" }
+origine_tls = { path = "crates/origine_tls" }
+origine_h2 = { path = "crates/origine_h2" }
+origine_dns = { path = "crates/origine_dns" }
 origine_alloc = { path = "crates/origine_alloc" }
 origine_api_core = { path = "crates/origine_api_core" }
 origine_api_fs = { path = "crates/origine_api_fs" }
@@ -59,9 +69,15 @@ origine_api.workspace = true
 origine_repl.workspace = true
 
 [features]
-default = ["typescript"]
+default = ["typescript", "http", "tls", "dns", "quic"]
 # oxc-based TypeScript/JSX transformer (`zig build -Dtypescript=false` turns it off).
 typescript = ["dep:origine_oxc", "origine_repl/typescript"]
+# Networking APIs (docs/http-design.md); `zig build -Dhttp=false` etc. turn them off. They gate nothing yet:
+# the crates that implement them (origine_tls, origine_h2, origine_dns) will hang off these.
+http = ["origine_api/http"]
+tls = ["origine_api/tls"]
+dns = ["origine_api/dns"]
+quic = ["tls"]
 
 # Size first: everything is optimized for size (no loop unrolling) except the crates that sit on
 # a hot path (parsing, traversal, codegen, byte scanning), which get -O3. Add a crate here when

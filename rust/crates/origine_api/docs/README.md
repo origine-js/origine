@@ -132,7 +132,7 @@ Settling a promise (`native::finish`) enters the context saved with the op, runs
 `Hook` (only for success; an error from it rejects instead), converts the value with `IntoJs` and
 resolves, or builds the error value (`error_value`) and rejects.
 
-## Buffers: pinning and copy fallback
+## Buffers: pinning
 
 Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions in
 `origine_api_core::pin` (Miri-tested). A guest buffer is an `ArrayBuffer` or a view over one.
@@ -142,8 +142,9 @@ Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions 
   detached and the detach verified (`was_detached()`; `detach` can return `Some(true)` without
   detaching). The store becomes the owner of an `origine_io::RawRegion` over the window; the loop
   reads/writes the guest memory in place. All guest views become length 0.
-* **Copy** (SharedArrayBuffer, resizable, non-detachable such as WebAssembly memory, a detach that
-  did not take effect): reads use a host `Vec` and a `Wrap` copies the result into the guest
+* **Refused** (SharedArrayBuffer, resizable, non-detachable such as WebAssembly memory, a detach that
+  did not take effect): `fileReadInto`, `filePreadInto` and `net.readInto` fail `Unsupported` with the
+  buffer untouched. The reads that copy by name (`fileRead`, `filePread`, `net.readCopy`) fill the guest's
   buffer at completion (`StaleHandle` if it was detached/shrunk meanwhile).
 * **Writes choose explicitly.** The plain writes (`writeAll`, `fileWrite`, `filePwriteAll`) ALWAYS
   copy at call time (`pinned::copy_for_write`) and never detach the guest's buffer. The `*Move`
@@ -198,7 +199,7 @@ Code: `src/pinned.rs` (module docs hold the soundness argument), pure decisions 
 
 Plain `cargo build -p origine_api` does not work: the vendored `v8` crate's `build.rs` needs the
 `V8_ZIG_*` environment (`V8_ZIG_ARCHIVE`, `V8_ZIG_MIMALLOC`, `V8_ZIG_ICU`, `V8_ZIG_V8_ROOT`, `V8_ZIG_GN_OUT`,
-`V8_ZIG_BINDING`) pointing at the exact V8 archive Zig builds and links. `rust/scripts/cargo-v8.sh`
+`V8_ZIG_BINDING`) pointing at the exact V8 archive Zig builds and links. `rust/scripts/cargo-env.py`
 sets them (plus `LIBCLANG_PATH` for bindgen on macOS when it is unset) and `cd`s to `rust/` so the
 toolchain pin applies; `build.zig`'s `cargoCommand` calls it with the V8 dependency's paths.
 

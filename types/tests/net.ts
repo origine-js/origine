@@ -26,7 +26,7 @@ export async function main(api: Api): Promise<void> {
   await client.end("write");
   await client.end("both");
   await client.close();
-  await using _owned = await api.net.connect(io, { port: server.port, mode: "pull", host: "localhost", sendQueueLimit: 4096 });
+  await using _owned = await api.net.connect(io, { port: server.port, mode: "pull", host: "localhost", queued: { limit: 4096 } });
   void [bytes, buffer, copied, taken, wrote];
 
   // --- event mode ------------------------------------------------------------------------

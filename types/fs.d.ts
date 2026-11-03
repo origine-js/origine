@@ -35,11 +35,11 @@ export interface DirEntryData {
 
 /**
  * The raw open mode strings of the fs operations (Python-style, plus Rust-style `c` and `t`):
- * `r` read only (the default); `rw`/`r+` read and write an existing file; `w`/`w+` create or
- * truncate; `x`/`x+` create, failing when it exists; `c`/`c+` create keeping the contents; `t`/`t+`
+ * `r` read only (the default); `rw` read and write an existing file; `w` create or
+ * truncate; `x` create, failing when it exists; `c` create keeping the contents; `t`
  * truncate without creating. Writable handles are always readable natively.
  */
-export type OpenFlags = "r" | "rw" | "r+" | "w" | "w+" | "x" | "x+" | "c" | "c+" | "t" | "t+";
+export type OpenFlags = "r" | "rw" | "w" | "x" | "c" | "t";
 
 /** A JS class directory reference of one grant with read-only kind, fs, and id fields. It confers no authority by itself. */
 export interface DirHandle {
@@ -156,6 +156,9 @@ export interface AsyncFs extends AsyncFsOps {
 /** Either grant: the `io` argument of the `origine:@std/io` methods. */
 export type Fs = SyncFs | AsyncFs;
 
+/** How a grant treats symlinks: see {@link FsRequest.symlinks}. */
+export type SymlinkMode = "follow" | "confined";
+
 /** What a request names. */
 export interface FsRequest {
   /** What the grant may do. Required: a missing or unknown value is `InvalidInput`; above the host's ceiling it is `PermissionDenied`. */
@@ -164,6 +167,13 @@ export interface FsRequest {
   readonly handle: HandleMode;
   /** A directory below the host's root to confine the grant to (lexically: no `..`, no absolute path). */
   readonly root?: string;
+  /**
+   * What a symlink on a path may do. `'follow'` (the default): anything, so a link can leave the root.
+   * `'confined'`: a target that is absolute or climbs above the directory the call names is `PermissionDenied`.
+   * Costs a stat per path component and a `readlink` per symlink (a short blocking call on an async grant). A check
+   * before the operation, so a process changing links at the same moment can get past it. An unknown value is `InvalidInput`.
+   */
+  readonly symlinks?: SymlinkMode;
 }
 
 /** An async request also names the runtime its operations run on. */

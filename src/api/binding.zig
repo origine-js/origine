@@ -104,7 +104,7 @@ pub fn statePointer(comptime T: type, data: v8.Value) *T {
 // ---- rebindable natives (startup snapshots) --------------------------------
 
 /// Modules whose natives can be built for a snapshot.
-pub const max_rebind = 16;
+pub const max_rebind = 32;
 /// Only the addresses matter: a native built for a snapshot carries `&rebind_markers[i]` as its
 /// External data (static, so snapshot-safe and registered as an external reference) in place of
 /// a state pointer.
@@ -608,7 +608,7 @@ pub fn decode(comptime T: type, call: *Call, index: usize) !T {
     if (T == u64) {
         if (!arg.isNumber()) return error.InvalidArgument;
         const number = arg.numberValue(call.ctx) orelse return error.InvalidArgument;
-        if (!(number >= 0) or number > 9007199254740991.0) return error.InvalidArgument;
+        if (!(number >= 0) or number > 9007199254740991.0 or number != @trunc(number)) return error.InvalidArgument;
         return @intFromFloat(number);
     }
     if (T == f64) {

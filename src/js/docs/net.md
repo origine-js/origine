@@ -1,6 +1,6 @@
-# `api.net`: loopback TCP
+# `api.net`: TCP
 
-`api.net` exists wherever `api.io` does (the embedder's runtime ceiling). Every socket belongs to the `io` runtime it was created with; closing the runtime invalidates its sockets. **Only loopback addresses are allowed** (`127.0.0.1`, `localhost`, `::1`); other hosts reject with `PermissionDenied`. There is no embedder permission for wider network access yet.
+`api.net` exists wherever `api.io` does (the embedder's runtime ceiling). Every socket belongs to the `io` runtime it was created with; closing the runtime invalidates its sockets. **Which addresses are reachable is the embedder's [network ceiling](../../../docs/net-grant.md)**: loopback only by default (`127.0.0.1`, `localhost`, `::1`), wider when the embedder says so (the shell's `--net-connect` and `--net-listen`). An address no rule allows rejects with `PermissionDenied`, the address as the error's `subject`.
 
 ```js
 const io = api.io.create();
@@ -31,10 +31,10 @@ The write side (`direct`, `queued`, `end`, `close`, `closed`, `io`) is the same 
 
 ```ts
 type Mode = 'event' | 'pull';
-interface SocketOptions { host?: string; port?: number; sendQueueLimit?: number }
+interface SocketOptions { host?: string; port?: number; queued?: { limit?: number } }
 declare class Handle { readonly io: Io; readonly closed: boolean; close(): Promise<void>; [Symbol.asyncDispose](): Promise<void> }
 declare class Socket<M extends Mode> extends Handle {            // Socket<'pull'> = PullSocket, Socket<'event'> = EventSocket
-  readonly remotePort: number; readonly queued: SendQueue; readonly direct: DirectWriter; end(): Promise<void>;
+  readonly remotePort: number; readonly queued: SendQueue; readonly direct: DirectWriter; end(side: 'write' | 'read' | 'both'): Promise<void>;
 }
 declare class PullSocket extends Socket<'pull'> {
   read(length: number): Promise<Uint8Array>; readInto(buffer: ArrayBuffer | ArrayBufferView): Promise<{ bytes: number; buffer: ArrayBuffer }>;
@@ -67,18 +67,18 @@ Handles are instances of classes the guest cannot construct (`TypeError`), whose
 | `PullServer extends Server` | `accept(): Promise<PullSocket \| EventSocket>` (by the server's `socketMode`), `toEvent(): EventServer`, and `for await (const socket of server)`: the connections until the server is closed |
 | `EventServer extends Server` | `register`, `pause()`, `resume()`, `paused`, `toPull(): PullServer` |
 | `Socket extends Handle` | base of sockets, the write side: `remotePort`, `queued` and `direct` (the two write lanes, below), `end(side): Promise<void>` (see [Closing](#closing)) |
-| `PullSocket extends Socket` | `read(length): Promise<Uint8Array>` (1 to 2^28 bytes), `readInto(buffer): Promise<{ bytes, buffer }>` (zero-copy: your buffer is detached while the read runs and comes back as a new ArrayBuffer; `Unsupported` if it cannot be detached; best for large reads), `readCopy(buffer): Promise<number>` (copies into your buffer without detaching it, so one buffer serves every read; best for small reads; 0 = end of stream), `toEvent(): EventSocket`, and `for await (const chunk of socket)`: `read(65536)` until the end of the stream |
+| `PullSocket extends Socket` | `read(length): Promise<Uint8Array>` (1 to 2^28 bytes), `readInto(buffer): Promise<{ bytes, buffer }>` (zero-copy: your buffer is detached while the read runs and comes back as a new ArrayBuffer; `Unsupported` if it cannot be detached; best for large reads), `readCopy(buffer): Promise<number>` (`buffer` not empty; copies into your buffer without detaching it, so one buffer serves every read; best for small reads; 0 = end of stream), `toEvent(): EventSocket`, and `for await (const chunk of socket)`: `read(65536)` until the end of the stream |
 | `EventSocket extends Socket` | `register`, `pause()`, `resume()`, `paused`, `toPull(): PullSocket` |
-| `api.net.listen(io, { mode, socketMode, host?, port?, sendQueueLimit? })` | `PullServer` or `EventServer` by `mode`; `socketMode` (`'event'` \| `'pull'`, required) is the mode of the sockets it accepts. Throws `TypeError` for a missing or unknown `mode`/`socketMode`, an `OrigineError` subclass (`AddressInUse`, `PermissionDenied`, `BadHandle`, ...) otherwise |
-| `api.net.connect(io, { mode, port, host?, sendQueueLimit? })` | `Promise<PullSocket \| EventSocket>` by `mode`; `port` is required (`TypeError` without it); rejects `ConnectionRefused`, ... |
+| `api.net.listen(io, { mode, socketMode, host?, port?, queued?: { limit? } })` | `PullServer` or `EventServer` by `mode`; `socketMode` (`'event'` \| `'pull'`, required) is the mode of the sockets it accepts. Throws `TypeError` for a missing or unknown `mode`/`socketMode`, an `OrigineError` subclass (`AddressInUse`, `PermissionDenied`, `BadHandle`, ...) otherwise |
+| `api.net.connect(io, { mode, port, host?, queued?: { limit? } })` | `Promise<PullSocket \| EventSocket>` by `mode`; `port` is required (`TypeError` without it); rejects `ConnectionRefused`, ... |
 
 ### Hosts
 
-Only loopback is reachable. An IP literal (`127.0.0.1`, `::1`, any loopback address) is used exactly as given. `localhost` is a name and is **never** looked up in the system resolver (RFC 6761): `connect` tries `127.0.0.1`, then `::1` if that fails, one after the other; `listen` binds `127.0.0.1` (pass `'::1'` to listen on IPv6). Any other host rejects with `PermissionDenied`. `connect` never blocks: the socket is created non-blocking and the loop finishes the handshake.
+An IP literal is used exactly as given and checked against the [ceiling](../../../docs/net-grant.md) (by default only loopback passes); an IPv4-mapped literal is checked as the IPv4 address it stands for. `localhost` is a name and is **never** looked up in the system resolver (RFC 6761): `connect` tries `127.0.0.1`, then `::1` if that fails, one after the other; `listen` binds `127.0.0.1` (pass `'::1'` to listen on IPv6); the addresses the ceiling does not allow are dropped from that list. Any other host, **a name included** (`api.net` does not resolve: look it up with `api.dns` and pass the address), rejects with `PermissionDenied`. `connect` never blocks: the socket is created non-blocking and the loop finishes the handshake.
 
 ### Closing
 
-The runtime **never closes a socket just because the peer sent its FIN**: that only fires `end` (pull mode: a read resolves empty) and the socket stays open and writable. `socket.end(side)` ends your side; `side` is required (`TypeError` without it, or for anything else) and follows `shutdown(2)`:
+The runtime **never closes a socket just because the peer sent its FIN**: that only fires `end` (pull mode: a read resolves empty) and the socket stays open and writable. `socket.end(side)` ends your side; `side` is required (rejects `TypeError` without it, or for anything else) and follows `shutdown(2)`:
 
 - `'write'`: once everything queued (and waiting sends) is out, sends the FIN; resolves when it is sent. Later writes fail with `BrokenPipe`.
 - `'read'`: stops reading and discards what arrives: reads started afterwards resolve empty, no more `data`/`end` events. The kernel side stays open (the runtime drains the socket until the peer's FIN), because a `shutdown(SHUT_RD)` makes some systems reset the connection when the peer sends.
@@ -107,7 +107,7 @@ await running;
 | `EventSocket` | `data` (`ev.length`, `ev.buffer()`), `end` (peer finished), `error` (`OrigineError` subclass), `drain` (the send queue became empty), `close` |
 | `EventServer` | `connection` (a socket of the server's `socketMode`), `error`, `close` |
 
-- `handle.register(event, fn)` returns `{ unregister() }` (`true` if it was registered). Handlers of one event run in registration order. The first `data` (or `connection`) handler starts reading. When the last one is unregistered the handle pauses itself, so nothing is read just to be dropped; registering one again resumes it. After `close` the handlers are dropped; `register` on a closed handle throws `BadHandle`.
+- `handle.register(event, fn)` returns `{ unregister() }` (`true` if it was registered). Handlers of one event run in registration order. The first `data` (or `connection`) handler starts reading. When the last one is unregistered the handle pauses itself, so nothing is read just to be dropped; registering one again resumes it. This pause holds only the chunks (connections), and an `end` behind them: with none held `end` fires, and `error` and `close` always do. After `close` the handlers are dropped; `register` on a closed handle throws `BadHandle`.
 - A socket that failed (`error`) is closed by the runtime, then `close` fires; a peer's FIN only fires `end` (see [Closing](#closing)). `close()` on your side fires `close` once and nothing else.
 - A handler that throws goes to the `error` handlers (the other handlers still run); with none, or if one of those throws, it becomes an unhandled rejection.
 - `ev` is valid only while its handlers run. `ev.buffer()` returns the same **lease** within one event: a `Uint8Array` over an ArrayBuffer of **exactly** the received bytes (`lease.buffer.byteLength === lease.length`, `byteOffset` 0). The bytes are received into slabs of the V8 sandbox's allocator and the buffer is carved out of the slab without a copy; no other byte of the socket's memory (earlier chunks, neighbouring chunks) is reachable through it. A handler that never calls `buffer()` costs nothing. Give a lease back with `unref()` or `using` (`Symbol.dispose`): that detaches its ArrayBuffer (a view you kept becomes empty) and frees its hold on the slab, which is freed with its last lease. A lease you never release is garbage collected like any buffer.
@@ -125,15 +125,15 @@ A socket has two write lanes that share **one order**: bytes leave in the order 
 | Sends waiting | Returns 0 | Returns 0 | Waits behind them (FIFO) |
 
 - "Sent" means accepted by the kernel (`write(2)` returned), not received by the peer.
-- `socket.queued` also has `bytes` (waiting in the queue), `waiting` (sends not admitted yet), `limit` (settable; default 1 MiB, or `sendQueueLimit` at `connect`/`listen`; accepted sockets inherit it) and `drained(): Promise<void>` (the queue is empty and nothing waits). A `send` into an empty queue is always admitted, whatever its size; otherwise it is admitted when `bytes + data.byteLength <= limit`. Waiting sends are admitted in order each time the queue empties.
+- `socket.queued` also has `bytes` (waiting in the queue), `waiting` (sends not admitted yet), `limit` (settable; default 1 MiB, or `queued: { limit }` at `connect`/`listen`; accepted sockets inherit it) and `drained(): Promise<void>` (the queue is empty and nothing waits). A `send` into an empty queue is always admitted, whatever its size; otherwise it is admitted when `bytes + data.byteLength <= limit`. Waiting sends are admitted in order each time the queue empties.
 - `put` and `direct.write` copy nothing they do not queue; `send` reads `data` when it is admitted (at once unless the queue is full), so leave `data` untouched until the promise settles. A `put` is copied; the buffer can be reused right after it returns.
 - The `drain` event fires every time the queue becomes empty, after the sends it settles. To wait for room with `put`, wait for `drain` (or `await queued.drained()`).
-- A write error rejects every pending `send`, throws from `put`/`direct.write`, and the socket emits `error` once and closes. `close()` discards the queue and rejects pending and waiting sends with `Canceled`.
+- A write error rejects every pending `send`, throws from `put`/`direct.write`, and the socket emits `error` once and closes. `close()` and `io.close()` discard the queue and reject pending and waiting sends and `drained()` with `Canceled`.
 - `socket.end('write')` stops sending once everything queued (and waiting) is out: the peer reads end of stream, this side keeps reading. Later writes fail with `BrokenPipe`. See [Closing](#closing) for `'read'`, `'both'` and the auto-close rule.
 
 ### Reading
 
-- `pause()` / `resume()` / `paused` (event sockets and servers; idempotent). After `pause()` returns no `data`, `end` or `error` (for a server, `connection`) event is dispatched; what already arrived is held in order and dispatched first on `resume()`. A paused socket holds at most 8 undelivered chunks (128 KiB) and then stops reading, so the peer is held back through TCP; a paused server stops accepting and connections wait in the kernel backlog. `close()` works while paused, and `io.run()` waits for a paused socket to close.
+- `pause()` / `resume()` / `paused` (event sockets and servers; idempotent). After `pause()` returns no `data`, `end`, `error` or `close` (for a server, `connection`) event is dispatched; what already arrived is held in order and dispatched first on `resume()`. Pausing is about the read side: `drain` still fires, waiting sends are still admitted, and a write error still rejects them. A paused socket holds at most 8 undelivered chunks (128 KiB) and then stops reading, so the peer is held back through TCP; a paused server stops accepting and connections wait in the kernel backlog. `close()` works while paused, and `io.run()` waits for a paused socket to close.
 - A handler that needs to do asynchronous work per chunk pauses first (see the example above): the runtime does not wait for a handler's promise.
 - While 8 chunks are undelivered the runtime stops reading anyway, so a slow handler backpressures the peer even without `pause()`.
 
@@ -144,7 +144,7 @@ Registrations never keep the program alive on their own, so a program that regis
 ## Notes
 
 - `closed` is true after `close()` or once the `io` runtime is closed; later calls reject with `BadHandle`.
-- Closing a `Socket` shuts it down, so a pending `read` resolves with an empty array. Closing a `Server` with a pending `accept` leaves that accept (and the listener) pending until the runtime closes.
+- Closing a `Socket` shuts it down, so a pending `read` resolves with an empty array. Closing a `PullServer` rejects a pending `accept` with `Canceled`, and its promise resolves once the port is free.
 - `read` allocates its result (zero-initialised `length` bytes, compacted to the bytes read when that is at most half of a 4 KiB+ buffer).
 - Backends: sockets work on `uring`, `kqueue` and `threaded` (the threaded backend waits for readiness on its workers).
-- The Rust side: [natives.md](../../../rust/crates/origine_api/docs/natives.md#net-loopback-tcp-needs--runtime).
+- The Rust side: [natives.md](../../../rust/crates/origine_api/docs/natives.md#net-tcp-needs--runtime).

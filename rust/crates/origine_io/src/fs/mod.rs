@@ -383,6 +383,23 @@ impl Dir {
         self.lp().stat_at_dir(self.h.get()?, path, true).await.map(Metadata::new)
     }
 
+    /// The target of the symlink `path`. The loop has no such op, so this is a blocking `readlinkat` on
+    /// the calling thread: a short call on an inode the caller just stat'ed, not a read of file data.
+    pub fn read_link(&self, path: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
+        unsafe extern "C" {
+            fn readlinkat(fd: i32, path: *const std::ffi::c_char, buffer: *mut std::ffi::c_char, size: usize) -> isize;
+        }
+        let path = sanitize(path.as_ref())?;
+        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let mut buffer = vec![0u8; 4096];
+        // SAFETY: `path` is a NUL-terminated string and `buffer` has `buffer.len()` writable bytes, both
+        // alive for the call; the descriptor is this directory's.
+        let count = unsafe { readlinkat(self.h.get()? as i32, path.as_ptr(), buffer.as_mut_ptr().cast(), buffer.len()) };
+        let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
+        buffer.truncate(count);
+        Ok(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(buffer).into())
+    }
+
     /// `Ok(false)` only for `NotFound`; other errors (permissions, invalid path) are returned.
     pub async fn try_exists(&self, path: impl AsRef<Path>) -> io::Result<bool> {
         match self.metadata(path).await {

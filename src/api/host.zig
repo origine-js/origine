@@ -10,6 +10,7 @@
 //! fetched once by the glue). A failing native writes a non-zero `Errno` into element 0
 //! and returns undefined; every native clears it on entry.
 const std = @import("std");
+const origine_config = @import("origine_config");
 const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("binding.zig");
@@ -48,6 +49,7 @@ const OriginCfg = abi.OriginCfg;
 const origine_api_attach_isolate = abi.origine_api_attach_isolate;
 const origine_api_detach_isolate = abi.origine_api_detach_isolate;
 const origine_api_configure = abi.origine_api_configure;
+const origine_api_net_rules_check = abi.origine_api_net_rules_check;
 const origine_api_poll = abi.origine_api_poll;
 const origine_api_has_work = abi.origine_api_has_work;
 const origine_api_pollable = abi.origine_api_pollable;
@@ -55,6 +57,29 @@ const origine_api_wake = abi.origine_api_wake;
 
 /// What the host grants to `fs.requestSync` / `fs.requestAsync`. `root` is borrowed and must
 /// outlive the Host.
+/// `-Dtls`: whether `api.tls` and its natives are built in (without it the capability is refused with `PermissionDenied`).
+pub const tls_enabled = origine_config.tls;
+/// `-Dhttp`: whether `api.http` and its natives are built in (without it the capability is refused with `PermissionDenied`).
+pub const http_enabled = origine_config.http;
+/// `-Ddns`: whether `api.dns` and its natives are built in (without it the capability is refused with `PermissionDenied`).
+pub const dns_enabled = origine_config.dns;
+
+/// What the program may reach on the network: rules like `connect 10.0.0.0/8 80,443` and `listen 127.0.0.1 *`,
+/// one per line (the grammar is `rust/crates/origine_api_core/src/net_rules.rs`). Nothing is allowed that no rule
+/// allows, and rules are about addresses, not names. The default is loopback only, both ways. Borrowed until
+/// `destroy`; check text you did not write with `checkNetRules`.
+pub const NetConfig = struct {
+    rules: []const u8 = loopback_rules,
+};
+
+pub const loopback_rules = "connect 127.0.0.0/8\nconnect ::1/128\nlisten 127.0.0.0/8\nlisten ::1/128\n";
+
+/// Null when `rules` parses, else why it does not (a message in `buffer`).
+pub fn checkNetRules(rules: []const u8, buffer: []u8) ?[]const u8 {
+    const n = origine_api_net_rules_check(rules.ptr, rules.len, buffer.ptr, buffer.len);
+    return if (n == 0) null else buffer[0..n];
+}
+
 pub const FsConfig = struct {
     root: sys.Dir,
     write: bool = true,
@@ -117,6 +142,8 @@ pub const Config = struct {
     args: []const []const u8 = &.{},
     env: []const env_api.Pair = &.{},
     fs: ?FsConfig = null,
+    /// The network ceiling for `api.net`, the resolvers and what is built on them.
+    net: NetConfig = .{},
     /// Ceiling for `api.io` (async runtimes); null removes `api.io` and the async fs.
     runtime: ?RuntimeConfig = null,
     /// Embedded `origine:` modules the init scope serves. Static storage, borrowed until
@@ -221,6 +248,7 @@ pub const Host = struct {
     args: []const []const u8,
     env: []const env_api.Pair,
     fs: ?FsConfig,
+    net: NetConfig,
     runtime: ?RuntimeConfig,
     modules: []const module_api.Module,
     transformers: transformer_api.Registry,
@@ -251,6 +279,8 @@ pub const Host = struct {
     /// How many times a context called into the JS driver of the module graph. A handler with no JS
     /// function in it never does (tests assert it).
     driver_calls: usize = 0,
+    /// Modules whose source V8 reads in place from a mapped file (`read: 'mmap'`); tests assert it.
+    mapped_sources: usize = 0,
     next_fs_id: u32 = 1,
     isolates: ?IsolateConfig = null,
     link: ?ParentLink = null,
@@ -271,7 +301,7 @@ pub const Host = struct {
     /// address. Release all V8 handles it made (`destroy`) before `Runtime.destroy`.
     pub fn create(allocator: std.mem.Allocator, config: Config) !*Host {
         const host = try allocator.create(Host);
-        host.* = .{ .allocator = allocator, .args = config.args, .env = config.env, .fs = config.fs, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers }, .isolates = config.isolates, .link = config.link };
+        host.* = .{ .allocator = allocator, .args = config.args, .env = config.env, .fs = config.fs, .net = config.net, .runtime = config.runtime, .modules = config.modules, .transformers = .{ .entries = config.transformers }, .isolates = config.isolates, .link = config.link };
         return host;
     }
 
@@ -430,6 +460,8 @@ pub const Host = struct {
             .fs_root_fd = if (self.fs) |config| @intCast(config.root.handle) else -1,
             .fs_write = if (self.fs) |config| @intFromBool(config.write) else 0,
             .fs_async = if (self.fs != null and self.runtime != null and self.fs.?.async) 1 else 0,
+            .net_rules = self.net.rules.ptr,
+            .net_rules_len = self.net.rules.len,
         };
         origine_api_configure(isolate.handle, &cfg);
     }
@@ -697,7 +729,7 @@ pub const Host = struct {
         const host = state.host;
         const env = call.env();
         const part = switch (module) {
-            .common, .util, .errors, .handle, .handles, .errno, .@"net/event", .@"net/send", .@"net/core", .@"net/server", .@"net/socket", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
+            .common, .util, .errors, .handle, .handles, .errno, .addr, .@"http/client", .@"net/event", .@"net/send", .@"net/core", .@"net/server", .@"net/socket", .@"graph/data", .@"graph/source", .@"graph/handlers", .@"graph/driver", .@"graph/reference" => return error.InvalidInput,
             .host => try call.object(ScopeState, state, .{
                 .env = .{
                     .args = func(env_api.args, .{ .side_effect = .none }),
@@ -744,8 +776,6 @@ pub const Host = struct {
                         .utf8 = func(graph_api.utf8, .{ .side_effect = .any }),
                         .sourceHash = func(graph_api.sourceHash, .{ .side_effect = .any }),
                         .jsonModule = func(graph_api.jsonModule, .{ .side_effect = .any }),
-                        .pipelineResolve = func(graph_api.pipelineResolve, .{ .side_effect = .any }),
-                        .pipelineLoad = func(graph_api.pipelineLoad, .{ .side_effect = .any }),
                         .handlerPin = func(graph_api.handlerPin, .{ .side_effect = .any }),
                         .handlerUnpin = func(graph_api.handlerUnpin, .{ .side_effect = .any }),
                         .handlersFreed = func(graph_api.handlersFreed, .{ .side_effect = .any }),
@@ -791,7 +821,7 @@ pub const Host = struct {
                     },
                 });
             },
-            .io, .net => eu.v.object(env.isolate),
+            .io, .net, .tls, .http, .dns => eu.v.object(env.isolate),
         };
         const keys: []const []const u8 = switch (module) {
             .host => &.{ "env", "threading", "snapshot" },
@@ -806,6 +836,9 @@ pub const Host = struct {
         const rust_namespace: ?[]const u8 = switch (module) {
             .fs => if (host.runtime != null and host.fs != null and host.fs.?.async) "fsAsync" else null,
             .io, .net => if (host.runtime != null) name else return error.PermissionDenied,
+            .tls => if (host.runtime != null and tls_enabled) name else return error.PermissionDenied,
+            .http => if (host.runtime != null and http_enabled) name else return error.PermissionDenied,
+            .dns => if (host.runtime != null and dns_enabled) name else return error.PermissionDenied,
             else => null,
         };
         if (rust_namespace) |namespace| {

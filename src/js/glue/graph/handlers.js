@@ -1,5 +1,5 @@
 // `api.graph` import handlers: the registry that flattens a handler to the host and frees it again. Built by graph.js.
-import { HookHost, CodeCacheHost, CodeCacheKind, ImportHandler, ReadMode } from '../handles.js';
+import { HookHost, CodeCacheHost, CodeCacheKind, ImportHandler } from '../handles.js';
 import { freeze } from '../util.js';
 export default g => {
   const { native, take, host, invalid, grantOf, customCaches } = g;
@@ -72,7 +72,7 @@ export default g => {
       if (grant.async) throw invalid('CodeCache.dir needs a sync fs grant made by api.fs');
     }
     const kind = cache.native === false ? CodeCacheKind.Custom : cache.host === CodeCacheHost.Dir ? CodeCacheKind.Dir : CodeCacheKind.Memory;
-    const id = host(native.graph.codeCacheCreate, kind, cache.limits?.size ?? 0, grant?.raw, cache.path ?? '');
+    const id = host(native.graph.codeCacheCreate, kind, cache.limits?.size ?? Infinity, grant?.raw, cache.path ?? '');
     codeCacheIds.set(cache, id);
     if (kind === CodeCacheKind.Custom) customCaches.set(id, cache);
     return id;
@@ -115,9 +115,9 @@ export default g => {
           hook.host === HookHost.Origine
             ? { host: HookHost.Origine, std: hook.std }
             : hook.host === HookHost.Fs
-              ? { host: HookHost.Fs, read: hook.read, fs: { async: hookGrants.at(-1).async, id: hookGrants.at(-1).id } }
+              ? { host: HookHost.Fs, read: hook.read, missing: hook.missing, fs: { async: hookGrants.at(-1).async, id: hookGrants.at(-1).id } }
               : hook.host === HookHost.Json
-                ? { host: HookHost.Json, fs: { async: hookGrants.at(-1).async, id: hookGrants.at(-1).id } }
+                ? { host: HookHost.Json, missing: hook.missing, fs: { async: hookGrants.at(-1).async, id: hookGrants.at(-1).id } }
                 : { host: hook.host },
         );
         hookFns.push(null);
@@ -160,9 +160,6 @@ export default g => {
       hookHosts,
       hookGrants,
       transformerFns,
-      native: handler.native,
-      /// An async grant is read by the host's chain (or this realm's loop), never by a synchronous native step.
-      reads: hookGrants.some(grant => grant !== null && grant.async) ? ReadMode.Async : ReadMode.Sync,
     });
     handlers.set(handler, record);
     byId.set(id, record);

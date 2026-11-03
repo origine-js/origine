@@ -21,7 +21,6 @@ const freezeAll = Object.freeze;
 export const ModuleStatus = freezeAll({
   Declared: 'declared',
   Loaded: 'loaded',
-  Instantiated: 'instantiated',
   Evaluating: 'evaluating',
   Evaluated: 'evaluated',
   Errored: 'errored',
@@ -58,8 +57,6 @@ export const SourceMapKind = freezeAll({ None: 'none', Url: 'url', Text: 'text' 
 export const SourceKind = freezeAll({ File: 'file', Text: 'text' });
 /// `Provider.host` of the host's own hooks (the names `parseHandler` in `src/api/graph.zig` reads).
 export const HookHost = freezeAll({ Origine: 'origine', Fs: 'fs', Json: 'json' });
-/// How a handler's native steps read files: `Sync` ones are read by the host at once, `Async` ones need this realm's loop.
-export const ReadMode = freezeAll({ Sync: 'sync', Async: 'async' });
 
 // A file or directory of one fs grant: `fs` is the grant's id, `id` the resource inside it. `fs` 0, `id` 0
 // is the sentinel each grant resolves to its own root.

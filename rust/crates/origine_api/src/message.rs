@@ -87,9 +87,19 @@ pub fn brand_of<'s>(scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::
 }
 
 /// Marks `object` as a port over the handles `tx`/`rx` with read mode `mode`.
-pub fn brand<'s>(scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::Object>, tx: u32, rx: u32, mode: u32) -> Result<(), NativeError> {
+pub fn brand<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    tx: u32,
+    rx: u32,
+    mode: u32,
+) -> Result<(), NativeError> {
     let key = brand_key(scope)?;
-    let elements = [v8::Number::new(scope, f64::from(tx)).into(), v8::Number::new(scope, f64::from(rx)).into(), v8::Number::new(scope, f64::from(mode)).into()];
+    let elements = [
+        v8::Number::new(scope, f64::from(tx)).into(),
+        v8::Number::new(scope, f64::from(rx)).into(),
+        v8::Number::new(scope, f64::from(mode)).into(),
+    ];
     let array = v8::Array::new_with_elements(scope, &elements);
     object.set_private(scope, key, array.into());
     Ok(())
@@ -122,7 +132,12 @@ impl v8::ValueSerializerImpl for Writer {
         Some(brand_of(scope, object).is_some())
     }
 
-    fn write_host_object<'s>(&self, scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::Object>, helper: &dyn v8::ValueSerializerHelper) -> Option<bool> {
+    fn write_host_object<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        object: v8::Local<'s, v8::Object>,
+        helper: &dyn v8::ValueSerializerHelper,
+    ) -> Option<bool> {
         let Some((tx, rx, _)) = brand_of(scope, object) else { return Some(false) };
         match self.ports.iter().find(|(_, t, r)| *t == tx && *r == rx) {
             Some((index, _, _)) => {
@@ -150,12 +165,20 @@ struct Reader {
 }
 
 impl v8::ValueDeserializerImpl for Reader {
-    fn get_shared_array_buffer_from_id<'s>(&self, scope: &mut v8::PinScope<'s, '_>, id: u32) -> Option<v8::Local<'s, v8::SharedArrayBuffer>> {
+    fn get_shared_array_buffer_from_id<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        id: u32,
+    ) -> Option<v8::Local<'s, v8::SharedArrayBuffer>> {
         let store = self.shared.get(usize::try_from(id).ok()?)?;
         Some(v8::SharedArrayBuffer::with_backing_store(scope, store))
     }
 
-    fn read_host_object<'s>(&self, scope: &mut v8::PinScope<'s, '_>, helper: &dyn v8::ValueDeserializerHelper) -> Option<v8::Local<'s, v8::Object>> {
+    fn read_host_object<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        helper: &dyn v8::ValueDeserializerHelper,
+    ) -> Option<v8::Local<'s, v8::Object>> {
         let mut index = 0u32;
         if !helper.read_uint32(&mut index) {
             return None;
@@ -171,19 +194,26 @@ impl v8::ValueDeserializerImpl for Reader {
 /// (shared, resizable, wasm memory), a `TypeError` for an item that is neither a buffer nor a port, a
 /// port named twice, a port in `value` that is not listed, or a value that cannot be cloned (a
 /// function, a symbol); `BadHandle` for a closed port.
-pub fn encode<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, transfer: &[v8::Local<'s, v8::Value>]) -> Result<Message, NativeError> {
+pub fn encode<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    transfer: &[v8::Local<'s, v8::Value>],
+) -> Result<Message, NativeError> {
     let identity = scope.get_slot::<HostState>().map_or(0, |host| host.identity);
     let shared = Rc::new(RefCell::new(Vec::new()));
     let refusal = Rc::new(RefCell::new(None));
     let mut buffers = Vec::new();
     let mut ports = Vec::new();
     for (index, item) in transfer.iter().enumerate() {
-        let object = v8::Local::<v8::Object>::try_from(*item).map_err(|_| NativeError::type_error("the transfer list holds only ArrayBuffers and ports"))?;
+        let object = v8::Local::<v8::Object>::try_from(*item)
+            .map_err(|_| NativeError::type_error("the transfer list holds only ArrayBuffers and ports"))?;
         if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(*item) {
             if !buffer.is_detachable() {
                 return Err(NativeError::Errno(errno::UNSUPPORTED));
             }
-            if buffers.iter().any(|(_, earlier): &(usize, v8::Local<v8::ArrayBuffer>)| std::ptr::eq(&*earlier.get_backing_store(), &*buffer.get_backing_store())) {
+            if buffers.iter().any(|(_, earlier): &(usize, v8::Local<v8::ArrayBuffer>)| {
+                std::ptr::eq(&*earlier.get_backing_store(), &*buffer.get_backing_store())
+            }) {
                 return Err(NativeError::type_error("the transfer list names a buffer twice"));
             }
             buffers.push((index, buffer));
@@ -197,10 +227,12 @@ pub fn encode<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Val
             return Err(NativeError::type_error("the transfer list holds only ArrayBuffers and ports"));
         }
     }
-    let serializer = v8::ValueSerializer::new(scope, Box::new(Writer { shared: shared.clone(), refusal: refusal.clone(), ports: ports.clone() }));
+    let serializer =
+        v8::ValueSerializer::new(scope, Box::new(Writer { shared: shared.clone(), refusal: refusal.clone(), ports: ports.clone() }));
     serializer.write_header();
     for (index, buffer) in &buffers {
-        serializer.transfer_array_buffer(u32::try_from(*index).map_err(|_| NativeError::range_error("too many items to transfer"))?, *buffer);
+        serializer
+            .transfer_array_buffer(u32::try_from(*index).map_err(|_| NativeError::range_error("too many items to transfer"))?, *buffer);
     }
     let context = scope.get_current_context();
     if serializer.write_value(context, value) != Some(true) {
@@ -214,7 +246,8 @@ pub fn encode<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Val
         if let Some((_, buffer)) = buffers.iter().find(|(at, _)| *at == index) {
             items.push(Item::Buffer(buffer.get_backing_store()));
         } else if let Some((_, tx, rx)) = ports.iter().find(|(at, _, _)| *at == index) {
-            let mode = v8::Local::<v8::Object>::try_from(*item).ok().and_then(|object| brand_of(scope, object)).map_or(0, |(_, _, mode)| mode);
+            let mode =
+                v8::Local::<v8::Object>::try_from(*item).ok().and_then(|object| brand_of(scope, object)).map_or(0, |(_, _, mode)| mode);
             let (new_tx, new_rx) = channel::move_out(*tx, *rx)?;
             items.push(Item::Port(Port { tx: new_tx, rx: new_rx, mode, live: true }));
         }
@@ -260,7 +293,8 @@ pub fn decode<'s>(scope: &mut v8::PinScope<'s, '_>, message: Message) -> Result<
                 ];
                 let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
                 let built = function.call(scope, undefined, &args).ok_or_else(|| NativeError::error("the port factory failed"))?;
-                let object = v8::Local::<v8::Object>::try_from(built).map_err(|_| NativeError::error("the port factory must return an object"))?;
+                let object =
+                    v8::Local::<v8::Object>::try_from(built).map_err(|_| NativeError::error("the port factory must return an object"))?;
                 ports.push((index, v8::Global::new(scope, object)));
                 transfer.push(built);
             }

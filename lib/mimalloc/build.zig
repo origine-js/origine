@@ -29,9 +29,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const patch = b.addRunArtifact(patch_tool);
-    patch.addDirectoryArg(b.dependency("source", .{}).path(""));
-    const source = patch.addOutputDirectoryArg("mimalloc");
-    for (patches) |name| patch.addFileArg(b.path(b.fmt("patches/{s}", .{name})));
+    patch.addDirectoryArg2(b.dependency("source", .{}).path(""), .{});
+    const source = patch.addOutputDirectoryArg2("mimalloc", .{});
+    for (patches) |name| patch.addFileArg2(b.path(b.fmt("patches/{s}", .{name})), .{});
 
     const c_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .pic = true });
     c_module.addIncludePath(source.path(b, "include"));

@@ -78,8 +78,8 @@ export interface Handle extends AsyncDisposable {
   readonly closed: boolean;
   /**
    * Releases the handle and discards what is still queued; pending reads finish with end of
-   * stream and pending sends reject `Canceled`. Idempotent. Closing a server with an
-   * `accept()` pending leaves that accept pending until the runtime closes.
+   * stream, pending sends and a pending `accept()` reject `Canceled`. Idempotent. Closing a
+   * `PullServer` resolves once its port is free.
    */
   close(): Promise<void>;
 }
@@ -96,7 +96,7 @@ export interface SendQueue {
   /** Sends that wait for room (their bytes are not in the queue yet). */
   readonly waiting: number;
   /**
-   * Bytes the queue may hold. Default 1 MiB, or the `sendQueueLimit` of `connect`/`listen`
+   * Bytes the queue may hold. Default 1 MiB, or the `queued.limit` of `connect`/`listen`
    * (accepted sockets inherit it). A positive integer (`TypeError` otherwise). A `send` into an
    * empty queue is admitted whatever its size.
    */
@@ -138,7 +138,7 @@ export interface SocketBase extends Handle {
   /** The unbuffered write lane (`write`). */
   readonly direct: DirectWriter;
   /**
-   * Ends one side or both, like `shutdown(2)`; `side` is required (`TypeError` without it).
+   * Ends one side or both, like `shutdown(2)`; `side` is required (rejects `TypeError` without it).
    *
    * - `'write'`: once everything queued and waiting is out, sends the FIN and resolves; later
    *   writes fail `BrokenPipe`.
@@ -163,7 +163,7 @@ export interface PullSocket extends SocketBase {
    * detached (shared, resizable). Best for large reads.
    */
   readInto(buffer: BytesLike): Promise<{ readonly bytes: number; readonly buffer: ArrayBuffer }>;
-  /** Reads once into `buffer` **by copy** and resolves the byte count (0 at end of stream). The buffer is not detached, so one buffer serves every read. Best for small reads. */
+  /** Reads once into `buffer` (not empty) **by copy** and resolves the byte count (0 at end of stream). The buffer is not detached, so one buffer serves every read. Best for small reads. */
   readCopy(buffer: BytesLike): Promise<number>;
   /** `for await (const chunk of socket)`: the bytes as `read(65536)` returns them, until the end of the stream. */
   [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
@@ -184,7 +184,7 @@ export interface EventSocket extends SocketBase {
    * `io.run()`. After `close` handlers are dropped; `register` on a closed handle throws `BadHandle`.
    */
   register<E extends keyof SocketEvents>(event: E, handler: (...args: SocketEvents[E]) => void): Registration;
-  /** Stops delivery: after it returns no `data`, `end` or `error` is dispatched until `resume()`. At most 8 chunks are held, then reading stops and TCP holds the peer back. Idempotent. */
+  /** Stops delivery: after it returns no `data`, `end`, `error` or `close` is dispatched until `resume()`. At most 8 chunks are held, then reading stops and TCP holds the peer back. The write side is not paused: `drain` fires and sends proceed. Idempotent. */
   pause(): void;
   /** Undoes `pause()`; held events are dispatched first, in order. Idempotent. */
   resume(): void;
@@ -241,12 +241,15 @@ export type Server<M extends Mode = Mode, S extends Mode = Mode> = M extends "pu
     ? EventServer<S>
     : never;
 
-/** Options shared by `listen` and `connect`. Loopback only: any other host is `PermissionDenied`. */
+/** Options shared by `listen` and `connect`. The address must be allowed by the embedder's network ceiling (loopback only by default): any other host, a name included, is `PermissionDenied`. */
 export interface AddressOptions {
   /** `127.0.0.1`, `::1`, another loopback IP literal (used as given) or `localhost` (never resolved; `connect` tries 127.0.0.1 then ::1, `listen` binds 127.0.0.1). Default `'127.0.0.1'`. */
   readonly host?: string;
-  /** Initial `queued.limit` of every socket made through this call: a positive integer. Default 1 MiB. */
-  readonly sendQueueLimit?: number;
+  /** The send queue of every socket made through this call. */
+  readonly queued?: {
+    /** Its initial `queued.limit`: a positive integer. Default 1 MiB. */
+    readonly limit?: number;
+  };
 }
 
 /** Options of {@link NetCap.listen}. */
@@ -273,7 +276,7 @@ export interface HandleClass<T> extends Function {
 }
 
 /**
- * `api.net`: loopback TCP on an {@link Io} runtime. Only loopback addresses are allowed. Every
+ * `api.net`: TCP on an {@link Io} runtime. Only addresses the embedder's network ceiling allows (loopback by default). Every
  * socket belongs to the runtime it was created with; closing the runtime invalidates it.
  */
 export interface NetCap {

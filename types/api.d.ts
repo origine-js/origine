@@ -2,6 +2,9 @@ import type { HostCap } from "./host.d.ts";
 import type { FsCap } from "./fs.d.ts";
 import type { IoCap } from "./io.d.ts";
 import type { NetCap } from "./net.d.ts";
+import type { TlsCap } from "./tls.d.ts";
+import type { HttpCap } from "./http.d.ts";
+import type { DnsCap } from "./dns.d.ts";
 import type { ContextCap } from "./context.d.ts";
 import type { GraphCap } from "./graph.d.ts";
 import type { IsolateCap } from "./isolate.d.ts";
@@ -19,6 +22,12 @@ export interface Api {
   readonly io: IoCap;
   /** Loopback TCP (needs an `io`). */
   readonly net: NetCap;
+  /** TLS over `api.net` stream sockets (needs an `io`; absent when built with `-Dtls=false`: accessing it throws `PermissionDenied`). */
+  readonly tls: TlsCap;
+  /** HTTP/2 sessions over `api.net` or `api.tls` sockets (needs an `io`; absent when built with `-Dhttp=false`: accessing it throws `PermissionDenied`). */
+  readonly http: HttpCap;
+  /** Address lookups over UDP, TCP and TLS (needs an `io`; absent when built with `-Ddns=false`: accessing it throws `PermissionDenied`). */
+  readonly dns: DnsCap;
   /** The machine and process: arguments and environment variables. */
   readonly host: HostCap;
   /** Module graph: sources, code caches and the authority modules are produced with. */

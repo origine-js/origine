@@ -22,6 +22,14 @@ test {
     _ = @import("tests/managed/channel.zig");
     _ = @import("tests/managed/isolate.zig");
     _ = @import("tests/managed/net_iter.zig");
+    _ = @import("tests/managed/net_lifecycle.zig");
+    _ = @import("tests/managed/fs_confined.zig");
+    _ = @import("tests/managed/tls.zig");
+    _ = @import("tests/managed/http.zig");
+    _ = @import("tests/managed/net_addr.zig");
+    _ = @import("tests/managed/dns.zig");
+    _ = @import("tests/managed/netgrant.zig");
+    _ = @import("tests/managed/graph_chain.zig");
     _ = @import("tests/managed/snapshot_api.zig");
     _ = @import("tests/managed/snapshot.zig");
     _ = @import("tests/managed/init_snapshot.zig");

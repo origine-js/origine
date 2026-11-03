@@ -16,6 +16,9 @@ pub const OriginCfg = extern struct {
     fs_root_fd: i32,
     fs_write: u8,
     fs_async: u8,
+    /// The network ceiling as text (`rust/crates/origine_api_core/src/net_rules.rs`); borrowed during the call.
+    net_rules: [*]const u8,
+    net_rules_len: usize,
 };
 
 /// `enum origine_api_side_effect`; `host.zig` maps it to `binding.SideEffect`.
@@ -41,6 +44,8 @@ pub extern fn origine_api_natives_get(index: usize, out: *Native) c_int;
 pub extern fn origine_api_attach_isolate(isolate: *anyopaque) bool;
 pub extern fn origine_api_detach_isolate(isolate: *anyopaque) void;
 pub extern fn origine_api_configure(isolate: *anyopaque, cfg: *const OriginCfg) void;
+/// 0 when `rules` parses, else the length of the message written to `message`.
+pub extern fn origine_api_net_rules_check(rules: [*]const u8, rules_len: usize, message: [*]u8, message_cap: usize) usize;
 pub extern fn origine_api_poll(isolate: *anyopaque, block: u8, timeout_ns: i64) i64;
 pub extern fn origine_api_has_work(isolate: *anyopaque) u8;
 pub extern fn origine_api_pollable(isolate: *anyopaque) i64;

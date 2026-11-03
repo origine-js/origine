@@ -24,6 +24,8 @@ export interface IoErrnoTable {
   /** A malformed argument or path: a NUL byte, an empty entry name, a missing or unknown option. */
   readonly InvalidInput: 30;
   readonly InvalidData: 31;
+  /** A stream ended before its protocol said it could (TLS without `close_notify`). */
+  readonly UnexpectedEof: 32;
   readonly StorageFull: 40;
   readonly FileTooLarge: 41;
   /** EDQUOT. */
@@ -57,6 +59,16 @@ export interface HostErrnoTable {
   readonly StaleHandle: 3;
   /** An async operation was canceled (runtime closed, grant revoked). */
   readonly Canceled: 4;
+  /** The peer's certificate was refused (unknown issuer, expired, wrong name, ...); the reason is the detail's subject. */
+  readonly CertificateRejected: 5;
+  /** The peer sent a fatal TLS alert; the alert's name is the detail's subject. */
+  readonly TlsAlert: 6;
+  /** TLS found no ALPN protocol both sides offer. */
+  readonly NoApplicationProtocol: 7;
+  /** The peer broke a protocol (TLS, HTTP/2); what it broke is the detail's subject. */
+  readonly ProtocolError: 8;
+  /** A DNS server answered with a failure (SERVFAIL, REFUSED, ...); the response code is the detail's subject. */
+  readonly ServerFailure: 9;
 }
 
 /** Name of a Host error code, e.g. `'Unexpected'`. */

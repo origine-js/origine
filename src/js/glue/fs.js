@@ -22,15 +22,10 @@ const OPEN_MODES = Object.freeze(
   Object.assign(Object.create(null), {
     r: 0,
     rw: 1,
-    'r+': 1,
     w: 7,
-    'w+': 7,
     x: 11,
-    'x+': 11,
     c: 3,
-    'c+': 3,
     t: 5,
-    't+': 5,
   }),
 );
 // `undefined` means `r`; anything unknown is -1 (rejected as InvalidInput).
@@ -84,11 +79,13 @@ export default (native, { errno, detail, takeError }) => {
   // How one grant reads the handles it is given, without crossing into native code. A grant requested
   // with `handle: 'hardened'` takes only the handles it issued (and the root sentinel, which names no
   // resource); a plain one takes any file or directory handle and leaves the ids to the natives.
+  // The answer is `{ fs, id }`, read from the handle once: what was checked is what reaches the native.
   function refsOf(hardened, issuer) {
     const take = (Class, handle, root) => {
       if (!(handle instanceof Class)) return null;
-      if (hardened && issuerOf(handle) !== issuer && !(root && handle.fs === 0 && handle.id === 0)) return null;
-      return handle;
+      const { fs, id } = handle;
+      if (hardened && issuerOf(handle) !== issuer && !(root && fs === 0 && id === 0)) return null;
+      return { fs, id };
     };
     return { asDir: handle => take(DirHandle, handle, true), asFile: handle => take(FileHandle, handle, false) };
   }
@@ -159,11 +156,16 @@ export default (native, { errno, detail, takeError }) => {
   // `fileReadInto`/`filePreadInto` (BYOB) and `fileReadAlloc`/`filePreadAlloc` are the zero-copy reads.
   function makeAsyncOps(natives, fsId, { asDir, asFile }, issuer) {
     const ops = settling(natives);
-    const bad = () => Promise.reject(failure(InvalidInput));
-    // Unwrap before observing any fields: forged references never invoke guest getters.
+    // The Rust natives find a grant by the `fs` they are given, so this is what binds an operation to this
+    // grant: a handle of another grant is `BadHandle`, like in the sync natives, whatever authority that grant has.
+    const FOREIGN = freeze({});
+    const bad = ref => Promise.reject(failure(ref === FOREIGN ? BadHandle : InvalidInput));
+    const usable = ref => ref !== null && ref !== FOREIGN;
+    const mine = ref => (ref === null || ref.fs === fsId ? ref : FOREIGN);
+    const unwrapFile = handle => mine(asFile(handle));
     const root = handle => {
       const ref = asDir(handle);
-      return ref !== null && ref.fs === 0 && ref.id === 0 ? { fs: fsId, id: 0 } : ref;
+      return ref !== null && ref.fs === 0 && ref.id === 0 ? { fs: fsId, id: 0 } : mine(ref);
     };
     const statOf = out => new Stat({ kind: out[0], size: out[1] });
     const fileOf = id => new FileHandle(fsId, id, issuer);
@@ -177,30 +179,29 @@ export default (native, { errno, detail, takeError }) => {
 
     // One operation: unwrap the handle, check the arguments (`checks`, one predicate each; the rest are
     // dropped), call the Rust native `name` with `(fs, id, ...args)` and wrap its answer.
-    const any = () => true;
     const through =
       (unwrap, name, checks, wrap) =>
       (handle, ...args) => {
         const ref = unwrap(handle);
-        if (ref === null || !checks.every((check, index) => check(args[index]))) return bad();
+        if (!usable(ref) || !checks.every((check, index) => check(args[index]))) return bad(ref);
         const done = ops[name](ref.fs, ref.id, ...args.slice(0, checks.length));
         return wrap === undefined ? done : done.then(wrap);
       };
     const dir = (name, checks = [], wrap) => through(root, name, checks, wrap);
-    const file = (name, checks = [], wrap) => through(asFile, name, checks, wrap);
+    const file = (name, checks = [], wrap) => through(unwrapFile, name, checks, wrap);
     const path = [isString];
     const data = [isBytes];
 
     // Resolves a JS ReadResult with read-only bytes and buffer fields where `buffer` is a view of the same kind, byteOffset and
-    // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached
-    // when the buffer was pinned; it is untouched when the host copied instead).
+    // length as `view` over the ArrayBuffer the native hands back (the guest's `view` is detached;
+    // an empty one is untouched and comes back as it is).
     const filled = (shape, pending) => pending.then(done => new ReadResult({ bytes: done.bytes, buffer: shape.make(done.buffer) }));
 
     return {
       dirOpenFile(handle, name, flags) {
         const d = root(handle),
           bits = openBits(flags);
-        if (d === null || !isString(name) || bits < 0) return bad();
+        if (!usable(d) || !isString(name) || bits < 0) return bad(d);
         return ops.openFile(d.fs, d.id, name, bits).then(fileOf);
       },
       dirOpenDir: dir('openDir', path, dirOf),
@@ -216,33 +217,35 @@ export default (native, { errno, detail, takeError }) => {
       dirRename(handle, oldPath, newHandle, newPath) {
         const d = root(handle),
           n = root(newHandle);
-        if (d === null || n === null || !isString(oldPath) || !isString(newPath)) return bad();
+        if (!usable(d)) return bad(d);
+        if (!usable(n)) return bad(n);
+        if (!isString(oldPath) || !isString(newPath)) return bad();
         return ops.rename(d.fs, d.id, oldPath, n.fs, n.id, newPath);
       },
       fileClose: file('close'),
       fileStat: file('fileStat', [], statOf),
       fileReadAll(handle, options) {
-        const f = asFile(handle);
-        if (f === null) return bad();
-        const limit = (options === undefined ? undefined : options.limit) ?? Infinity;
+        const f = unwrapFile(handle);
+        if (!usable(f)) return bad(f);
+        const limit = options?.limit ?? Infinity;
         if (typeof limit !== 'number' || !(limit >= 0)) return bad();
         return ops.readAll(f.fs, f.id, limit);
       },
       fileRead: file('fileRead', data),
-      filePread: file('filePread', [isBytes, any]),
-      // Zero-copy BYOB reads: `view` is an ArrayBuffer or a view; when eligible its buffer is
-      // detached (the guest's `view` becomes empty) and the promise resolves a frozen
-      // `{ bytes, buffer }`, `buffer` being a view of the same kind over the returned memory.
+      filePread: file('filePread', [isBytes, isOffset]),
+      // Zero-copy BYOB reads: `view` is an ArrayBuffer or a view; its buffer is detached (the
+      // guest's `view` becomes empty) and the promise resolves a frozen `{ bytes, buffer }`, `buffer` being a
+      // view of the same kind over the returned memory. A buffer that cannot be detached is Unsupported.
       fileReadInto(handle, view) {
-        const f = asFile(handle),
+        const f = unwrapFile(handle),
           shape = shapeOf(view);
-        if (f === null || shape === null) return bad();
+        if (!usable(f) || shape === null) return bad(f);
         return filled(shape, ops.fileReadInto(f.fs, f.id, view));
       },
       filePreadInto(handle, view, offset) {
-        const f = asFile(handle),
+        const f = unwrapFile(handle),
           shape = shapeOf(view);
-        if (f === null || shape === null || !isOffset(offset)) return bad();
+        if (!usable(f) || shape === null || !isOffset(offset)) return bad(f);
         return filled(shape, ops.filePreadInto(f.fs, f.id, view, offset));
       },
       // Host-allocated reads: resolve a Uint8Array of exactly the bytes read (at most `length`).
@@ -250,20 +253,20 @@ export default (native, { errno, detail, takeError }) => {
       filePreadAlloc: file('filePreadAlloc', [isOffset, isOffset]),
       fileWriteAll: file('writeAll', data),
       fileWrite: file('fileWrite', data),
-      filePwriteAll: file('filePwriteAll', [isBytes, any]),
+      filePwriteAll: file('filePwriteAll', [isBytes, isOffset]),
       fileWriteMoveAll: file('writeMoveAll', data),
       fileWriteMove: file('fileWriteMove', data),
-      filePwriteMoveAll: file('filePwriteMoveAll', [isBytes, any]),
-      fileSetLength: file('fileSetLength', [any]),
+      filePwriteMoveAll: file('filePwriteMoveAll', [isBytes, isOffset]),
+      fileSetLength: file('fileSetLength', [isOffset]),
       fileSync: file('fileSync'),
     };
   }
 
-  // Access bits of the natives: 1 read, 2 write.
+  // Access bits of the natives: 1 read, 2 write, and 4 for `symlinks: 'confined'`.
   const ACCESS = freeze(Object.assign(Object.create(null), { r: 1, w: 2, rw: 3 }));
 
   // `{ root, access, hardened }` of a request hint against the cap's spec, or the errno of a bad or denied
-  // request: InvalidInput for a malformed `root` or a missing / unknown `access` or `handle`, PermissionDenied
+  // request: InvalidInput for a malformed `root` or a missing / unknown `access`, `handle` or `symlinks`, PermissionDenied
   // for a write the embedder's ceiling (`spec.write`) does not allow (never downgraded).
   function grantOf(spec, hint) {
     let root = own(hint, 'root');
@@ -274,15 +277,17 @@ export default (native, { errno, detail, takeError }) => {
     if (access & 2 && !spec.write) return PermissionDenied;
     const handle = own(hint, 'handle');
     if (handle !== 'plain' && handle !== 'hardened') return InvalidInput;
+    const symlinks = own(hint, 'symlinks');
+    if (symlinks !== undefined && symlinks !== 'follow' && symlinks !== 'confined') return InvalidInput;
     root = joinPath(spec.root, root);
-    return { root, access, hardened: handle === 'hardened' };
+    return { root, access: symlinks === 'confined' ? access | 4 : access, hardened: handle === 'hardened' };
   }
 
   function makeFsCap(spec) {
     // The graph glue reads source files through the async grants' natives.
     Object.defineProperty(shared, 'fsAsync', { get: () => native.fsAsync });
     return freeze({
-      // Blocking variant on the isolate thread (std.Io, errno cell). Throws a frozen
+      // Blocking variant on the isolate thread (errno cell). Throws a frozen
       // OrigineError subclasses when denied.
       requestSync(hint) {
         const grant = grantOf(spec, hint);
@@ -314,6 +319,8 @@ export default (native, { errno, detail, takeError }) => {
         if (!spec.async || native.fsAsync === undefined) return Promise.reject(failure(PermissionDenied));
         // `io.close()` tells the host, which then refuses the grants opened on that io as an authority.
         shared.asyncFsClosed ??= handle => native.fsAsyncClosed(handle.id);
+        // A graph made before the first async grant could not get the natives that read through one.
+        shared.graphAsyncOps?.();
         // The host opens the grant on the Rust runtime and builds the grant object from its answer.
         return settled(
           native.fsRequestAsync(

@@ -115,6 +115,7 @@ declare module "origine:@std/fs" {
     remove_file(path: string): Outcome<F, void>;
     /** Removes an empty directory. */
     remove_dir(path: string): Outcome<F, void>;
+    /** Like `std::fs::remove_dir_all`: a missing path is `NotFound`, a file is `NotADirectory`, a final symlink is removed and not followed. */
     remove_dir_all(path: string): Outcome<F, void>;
     rename(from: string, to: string): Outcome<F, void>;
     /** `File::open`, `create`, `create_new` and `options()`. */

@@ -1,11 +1,11 @@
 // `api.graph` driver: the steps the host calls for the functions of a handler, and the pipeline run from JS. Built by graph.js.
-import { SourceMap, ImportVerdict, HookHost, ModuleImportPhase, SourceMapKind, SourceKind, ModuleStatus, PipelineKind, ReadMode, VerdictKind } from '../handles.js';
+import { SourceMap, ImportVerdict, HookHost, ModuleImportPhase, SourceMapKind, SourceKind, ModuleStatus, PipelineKind, VerdictKind } from '../handles.js';
 import { PipelineResult, ResolveRequest, ResolvedImport, ProvidedSource, MakerRequest, TransformResult } from './data.js';
 import { freeze, own, errors } from '../util.js';
 export default g => {
   const { native, host, named } = g;
   const { applyTransformer, byId, grantOf, loadCache, metaOf, pinned, readText, recipeCacheId, referenceState, register, sourceText } = g;
-  const { InvalidInput, NotFound, InvalidData } = errors;
+  const { InvalidInput, NotFound, NotADirectory, InvalidData } = errors;
 
   /// The host's chain of a handler runs its host elements itself and calls `step` only for a function
   /// of this realm: one layer, hook, maker, transformer or `meta` at a time, each answering data. The
@@ -26,6 +26,8 @@ export default g => {
       if (answer === undefined) return undefined;
       const id = typeof answer === 'string' ? answer : own(answer, 'id');
       if (typeof id !== 'string' || id === '') throw named(InvalidData, 'a resolver layer must answer an id');
+      // The attributes of an import are what its statement wrote; a layer cannot change them.
+      if (own(answer, 'attributes') !== undefined) throw named(InvalidData, 'a resolver layer answers an id, not attributes');
       return id;
     },
     /// A hook that is a function: its verdict as data `{ kind: 'next' | 'accept' | 'provide' | 'final' | 'link' | 'exports' }`.
@@ -61,8 +63,8 @@ export default g => {
           return new PipelineResult({ kind: PipelineKind.Provide, source: await sourceText(verdict.source, id) });
         case VerdictKind.Link: {
           const state = referenceState.get(verdict.reference);
-          if (state === undefined || state.context === null || state.status !== ModuleStatus.Evaluated)
-            throw named(InvalidInput, 'link needs a reference that is evaluated in a context');
+          if (state === undefined || state.released || state.context === null || state.status !== ModuleStatus.Evaluated)
+            throw named(InvalidInput, 'link needs a reference that is evaluated in a context and not released');
           return new PipelineResult({ kind: PipelineKind.Link, context: state.context, name: state.name });
         }
         case VerdictKind.Exports:
@@ -82,7 +84,6 @@ export default g => {
         text,
         map: new SourceMap({ kind: SourceMapKind.None }),
         transformers: freeze([]),
-        native: true,
       });
       const options = (await record.handler.maker.fn(new MakerRequest({ id, source }))) ?? {};
       const made = await applyTransformer(options.transformer, id, text);
@@ -107,8 +108,9 @@ export default g => {
   };
   const stepByKind = [steps.layer, steps.hook, steps.maker, steps.transform, steps.meta, steps.cacheload];
 
-  /// The pipeline of a handler with functions in it, run from JS: for `reference.load()`, which asks
-  /// for the sources of a module's dependencies and has no request to park.
+  /// The pipeline of a handler, run from JS: for `reference.load()`, which asks for the sources of a module's
+  /// dependencies and has no request to park. Like the host's chain it goes element by element: a native one
+  /// runs in the host, a function here.
   const resolveInJs = async (hid, specifier, referrer, attributes) => {
     const record = byId.get(hid);
     for (let index = 0; index < record.layerFns.length; index++) {
@@ -140,8 +142,14 @@ export default g => {
         const serves = !id.startsWith('origine:') && (record.hookHosts[index] === HookHost.Json ? isJson : !isJson);
         if (!serves) reply = NEXT;
         else {
-          const text = await readText(record.handler.hooks[index].fs, id);
-          reply = new PipelineResult({ kind: PipelineKind.Provide, source: isJson ? host(native.graph.jsonModule, text) : text });
+          try {
+            const text = await readText(record.handler.hooks[index].fs, id);
+            reply = new PipelineResult({ kind: PipelineKind.Provide, source: isJson ? host(native.graph.jsonModule, text) : text });
+          } catch (error) {
+            // `missing: 'skip'`: not in this provider's root, so the next hook gets its turn, as in the host's chain.
+            if (record.handler.hooks[index].missing !== 'skip' || (error?.errno !== NotFound && error?.errno !== NotADirectory)) throw error;
+            reply = NEXT;
+          }
         }
       } else {
         const text = host(native.graph.hook, hid, index, 0, id, json);
@@ -175,17 +183,10 @@ export default g => {
     bound = true;
   };
 
-  /// The native pipeline of a `native` handler, or the driver, for code that is not a context
-  /// (`reference.load()` asks for the sources of a module's dependencies this way).
+  /// The pipeline for code that is not a context (`reference.load()` asks for the sources of a module's
+  /// dependencies this way).
   const pipeline = async (handler, specifier, referrer, attributes) => {
     const record = register(handler);
-    if (record.native && record.reads !== ReadMode.Async) {
-      const id = host(native.graph.pipelineResolve, record.id, specifier, referrer);
-      if (id === undefined) throw named(NotFound, `cannot resolve ${specifier}`);
-      const loaded = host(native.graph.pipelineLoad, record.id, id, attributesJson(attributes));
-      if (loaded.diagnostics !== undefined) throw new SyntaxError(loaded.diagnostics);
-      return { id, source: loaded.source, handler: byId.get(loaded.handler).handler, meta: undefined };
-    }
     return pinned(record, async () => {
       const id = await resolveInJs(record.id, specifier, referrer, attributes);
       const answer = await loadInJs(record.id, id, attributes, specifier, referrer);

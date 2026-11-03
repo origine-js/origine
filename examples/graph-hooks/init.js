@@ -4,7 +4,6 @@
 // module, and fsProvider for files. The handler reports which elements run in JS (`plan`).
 //
 // Prints (stderr), with the modules' own line in between (values are from a real run):
-//   native: false
 //   plan: resolver:native:origine resolver:native:relative resolver:js hooks:js hooks:native:origine hooks:js hooks:native:fs ...
 //   hello hooks | answer 42 | utf8 bytes 2
 //   ./lib/secret.js: ModuleError: ./lib/secret.js: PermissionDenied       (the policy hook; secret.js never runs)
@@ -38,7 +37,6 @@ export async function main(api) {
       fsProvider({ fs: src, read: 'copy' }),
     ],
   });
-  eprintln('native:', handler.native);
   eprintln('plan:', handler.plan.map(p => `${p.stage}:${p.kind}${p.name ? `:${p.name}` : ''}`).join(' '));
 
   const print = (...a) => eprintln(...a);

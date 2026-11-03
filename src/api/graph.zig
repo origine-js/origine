@@ -2,11 +2,11 @@
 //!
 //! An `ImportHandler` of `origine:@std/graph/import` is flattened by the glue into a JSON spec and
 //! registered here as a `Handler`: ordered resolver layers, hooks, a maker and a cache. Every
-//! element is either a host descriptor (run here, natively) or a JS function. A handler with no
-//! function in it is `native`: the whole pipeline runs in Zig (`context.zig` plugs it into a
-//! scope's resolver and loader) and never enters JS. Otherwise the glue's JS driver runs the
-//! chain in the creating realm and asks this file to run the native elements one by one
-//! (`layer`, `hook`, `transform`, `readSource`). Both paths use the same step functions.
+//! element is either a host descriptor (run here, natively) or a JS function. A chain runs natively
+//! until it reaches a function, which the glue's JS driver runs in the creating realm, and goes back
+//! to native after it: `context.zig` does this for a context's imports, and the driver for
+//! `graph.load`, which asks this file for the native elements one by one (`layer`, `hook`,
+//! `transform`, `readSource`). Both use the same step functions.
 //!
 //! Authority is not in the descriptors: file reads go through the fs grant a hook or source names, and
 //! `origine:` modules are served only by the `origine` hook, within the allowlist of the realm
@@ -51,8 +51,6 @@ comptime {
     errno.requireBinding(utf8);
     errno.requireBinding(sourceHash);
     errno.requireBinding(jsonModule);
-    errno.requireBinding(pipelineResolve);
-    errno.requireBinding(pipelineLoad);
     errno.requireBinding(handlerPin);
     errno.requireBinding(handlerUnpin);
     errno.requireBinding(handlersFreed);
@@ -248,8 +246,9 @@ pub const Source = union(enum) {
 
 pub const Hook = union(enum) {
     origine: StdFilter,
-    fs: struct { read: ReadMode, source: Source },
-    json: Source,
+    /// `skip_missing`: `missing: 'skip'`, a file that is not in this root passes to the next hook.
+    fs: struct { read: ReadMode, skip_missing: bool, source: Source },
+    json: struct { skip_missing: bool, source: Source },
     js,
 };
 
@@ -319,6 +318,13 @@ fn parseStringList(alloc: std.mem.Allocator, value: ?std.json.Value) !?[]const [
         slot.* = try alloc.dupe(u8, item.string);
     }
     return out;
+}
+
+/// `missing` of a provider: whether a file that is not in its root passes to the next hook.
+fn parseSkipMissing(object: std.json.ObjectMap) !bool {
+    const missing = jsonString(object.get("missing")) orelse return error.InvalidInput;
+    if (std.mem.eql(u8, missing, "skip")) return true;
+    return if (std.mem.eql(u8, missing, "abort")) false else error.InvalidInput;
 }
 
 /// `fs: { async, id }` of a hook: the grant it reads through, to be checked by `handler`.
@@ -431,9 +437,9 @@ pub fn parseHandler(gpa: std.mem.Allocator, text: []const u8) !*Handler {
             slot.* = .{ .origine = .{ .include = try parseStringList(alloc, std_object.get("include")), .exclude = try parseStringList(alloc, std_object.get("exclude")), .inherit = inherit } };
         } else if (std.mem.eql(u8, host, "fs")) {
             const read = jsonString(object.get("read")) orelse return error.InvalidInput;
-            slot.* = .{ .fs = .{ .read = std.meta.stringToEnum(ReadMode, read) orelse return error.InvalidInput, .source = try parseSource(object) } };
+            slot.* = .{ .fs = .{ .read = std.meta.stringToEnum(ReadMode, read) orelse return error.InvalidInput, .skip_missing = try parseSkipMissing(object), .source = try parseSource(object) } };
         } else if (std.mem.eql(u8, host, "json")) {
-            slot.* = .{ .json = try parseSource(object) };
+            slot.* = .{ .json = .{ .skip_missing = try parseSkipMissing(object), .source = try parseSource(object) } };
         } else return error.InvalidInput;
     }
     result.hooks = hooks;
@@ -521,8 +527,8 @@ pub const CodeCacheStore = struct {
     id: u32,
     owner: *ScopeState,
     kind: CodeCacheKind,
-    /// `limits.size` of the memory cache (0: none).
-    limit: usize = 0,
+    /// `limits.size` of the memory cache (null: none).
+    limit: ?usize = null,
     /// Entries of this cache: `id ++ 0 ++ <32 byte hash of the source>` to bytes.
     memory: std.StringHashMapUnmanaged([]u8) = .empty,
     memory_size: usize = 0,
@@ -535,20 +541,27 @@ pub const CodeCacheStore = struct {
 
     pub const Fresh = struct { id: []u8, hash: [32]u8, bytes: []u8 };
 
-    pub fn deinit(self: *CodeCacheStore) void {
+    /// Frees what the cache holds; it can be released again, and `deinit` still follows.
+    pub fn release(self: *CodeCacheStore) void {
         const alloc = self.host.allocator;
         var it = self.memory.iterator();
         while (it.next()) |entry| {
             alloc.free(entry.key_ptr.*);
             alloc.free(entry.value_ptr.*);
         }
-        self.memory.deinit(alloc);
+        self.memory.clearAndFree(alloc);
+        self.memory_size = 0;
         for (self.fresh.items) |item| {
             alloc.free(item.id);
             alloc.free(item.bytes);
         }
-        self.fresh.deinit(alloc);
+        self.fresh.clearAndFree(alloc);
         if (self.dir_state) |*state| state.deinit();
+        self.dir_state = null;
+    }
+
+    pub fn deinit(self: *CodeCacheStore) void {
+        self.release();
     }
 
     fn key(alloc: std.mem.Allocator, id: []const u8, hash: [32]u8) ![]u8 {
@@ -565,22 +578,19 @@ pub const CodeCacheStore = struct {
         return self.memory.get(probe);
     }
 
-    pub fn remember(self: *CodeCacheStore, id: []const u8, hash: [32]u8, bytes: []const u8) void {
+    /// Keeps `bytes`; false when they did not fit the limit or there was no memory for them.
+    pub fn remember(self: *CodeCacheStore, id: []const u8, hash: [32]u8, bytes: []const u8) bool {
         const alloc = self.host.allocator;
-        const owned_key = key(alloc, id, hash) catch return;
+        if (self.limit) |limit| if (self.memory_size + bytes.len > limit) return false;
+        const owned_key = key(alloc, id, hash) catch return false;
         const owned_bytes = alloc.dupe(u8, bytes) catch {
             alloc.free(owned_key);
-            return;
+            return false;
         };
-        if (self.limit != 0 and self.memory_size + bytes.len > self.limit) {
-            alloc.free(owned_key);
-            alloc.free(owned_bytes);
-            return;
-        }
         const slot = self.memory.getOrPut(alloc, owned_key) catch {
             alloc.free(owned_key);
             alloc.free(owned_bytes);
-            return;
+            return false;
         };
         if (slot.found_existing) {
             self.memory_size -= slot.value_ptr.len;
@@ -589,6 +599,7 @@ pub const CodeCacheStore = struct {
         }
         slot.value_ptr.* = owned_bytes;
         self.memory_size += owned_bytes.len;
+        return true;
     }
 };
 
@@ -640,7 +651,7 @@ fn graphCreateImpl(state: *ScopeState) !u32 {
 }
 
 /// `codeCacheCreate(kind, limit, grant?, path)`: a code cache. `kind` is 0 memory, 1 dir, 2 custom. `limit`
-/// is the most bytes a memory cache keeps (0: no cap). A `dir` cache writes into `path` of `grant`, a
+/// is the most bytes a memory cache keeps (`Infinity`: no cap). A `dir` cache writes into `path` of `grant`, a
 /// sync grant of this realm with write access; the files sit directly in that directory.
 pub fn codeCacheCreate(state: *ScopeState, call: *Call, kind: u32, limit: f64, grant: ?v8.Object, path: []const u8) Error!u32 {
     return codeCacheCreateImpl(state, call, kind, limit, grant, path) catch |err| return errno.narrow(err);
@@ -650,16 +661,17 @@ fn codeCacheCreateImpl(state: *ScopeState, call: *Call, kind_number: u32, limit:
     const host = state.host;
     const alloc = host.allocator;
     const kind = std.enums.fromInt(CodeCacheKind, kind_number) orelse return error.InvalidInput;
-    if (!(limit >= 0) or limit > 9007199254740991) return error.InvalidInput;
+    if (!(limit >= 0) or (limit > 9007199254740991 and !std.math.isInf(limit))) return error.InvalidInput;
     const created = try alloc.create(CodeCacheStore);
     errdefer alloc.destroy(created);
-    created.* = .{ .host = host, .id = try host.code_caches.issue(), .owner = state, .kind = kind, .limit = @intFromFloat(limit) };
+    created.* = .{ .host = host, .id = try host.code_caches.issue(), .owner = state, .kind = kind, .limit = if (std.math.isInf(limit)) null else @intFromFloat(limit) };
     if (kind == .dir) {
         const ref = try fs_api.grantOf(state, call, grant orelse return error.InvalidInput);
         if (ref.kind != .sync) return error.InvalidInput;
         const found = try fs_api.syncGrantOf(state, ref.id);
         if (!found.write) return error.PermissionDenied;
         try fs_api.cleanPath(path);
+        try found.check(found.root, path, true);
         created.dir_state = try init_cache.CodeCacheState.initIn(host, found.root, path);
     }
     errdefer created.deinit();
@@ -672,6 +684,7 @@ pub fn codeCacheClose(state: *ScopeState, id: u32) Error!void {
     const found = state.host.code_caches.get(id) orelse return;
     if (found.owner != state) return error.BadHandle;
     found.closed = true;
+    found.release();
 }
 
 /// `codeCacheAlive(cache)`: whether the cache is still open.
@@ -712,10 +725,12 @@ pub const ImportHook = union(enum) {
     next,
     /// Source text allocated from the caller's allocator.
     source: []u8,
+    /// `read: 'mmap'`: the file mapped, ASCII only. The caller owns the map; see `copyMapped`.
+    mapped: sys.File.MemoryMap,
     /// The graph reads through an async fs grant: the file named by the id has to be read on its io
     /// runtime and then continues as `source` (wrapped as a JSON module when `json`). Only the
     /// context's chain can park for that; the synchronous callers fail `Unsupported`.
-    read: struct { json: bool, grant: u32 },
+    read: struct { json: bool, grant: u32, skip_missing: bool },
 };
 
 /// Where a hook runs: the realm's `origine` ceiling, the allocator for results, and `serve` to
@@ -738,7 +753,47 @@ pub fn readFromGrant(grant: *fs_api.FsGrant, alloc: std.mem.Allocator, id: []con
     if (grant.closed) return error.StaleHandle;
     if (!grant.read) return error.PermissionDenied;
     try fs_api.cleanPath(id);
+    try grant.check(grant.root, id, true);
     return grant.root.readFileAlloc(id, alloc, .unlimited);
+}
+
+/// The most bytes of one V8 string (`String::kMaxLength` on 64 bits).
+const max_string_bytes: usize = (1 << 29) - 24;
+
+fn isAscii(bytes: []const u8) bool {
+    var seen: u8 = 0;
+    for (bytes) |byte| seen |= byte;
+    return seen < 0x80;
+}
+
+/// The file `id` of `grant` mapped, for V8 to read in place as a one-byte string. Text with a non-ASCII
+/// byte has no such form (V8 would take it for Latin-1 and the source is UTF-8), so it is read like `'copy'`,
+/// and so is what cannot be mapped: empty, or too long for a string anyway.
+fn mapFromGrant(grant: *fs_api.FsGrant, alloc: std.mem.Allocator, id: []const u8) !ImportHook {
+    if (grant.closed) return error.StaleHandle;
+    if (!grant.read) return error.PermissionDenied;
+    try fs_api.cleanPath(id);
+    try grant.check(grant.root, id, true);
+    const file = try grant.root.openFile(id, .{ .allow_directory = false });
+    defer file.close();
+    const size = std.math.cast(usize, (try file.stat()).size) orelse return error.FileTooBig;
+    if (size != 0 and size <= max_string_bytes) {
+        var map = try file.createMemoryMap(.{ .len = size, .protection = .{ .read = true } });
+        if (map.mapped and isAscii(map.memory)) return .{ .mapped = map };
+        map.destroy();
+    }
+    return .{ .source = try readFromGrant(grant, alloc, id) };
+}
+
+/// A copy of what `map` holds, in `alloc`, for the callers with no way to hand V8 the map. Releases it.
+pub fn copyMapped(map: *sys.File.MemoryMap, alloc: std.mem.Allocator) ![]u8 {
+    defer map.destroy();
+    return alloc.dupe(u8, map.memory);
+}
+
+/// Whether a read failed because the file is not there, which `missing: 'skip'` passes over.
+pub fn absent(err: anyerror) bool {
+    return err == error.FileNotFound or err == error.NotFound or err == error.NotDir or err == error.NotADirectory;
 }
 
 fn readFromSource(source: Source, env: HookEnv, id: []const u8) ![]u8 {
@@ -767,16 +822,28 @@ pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attribu
             if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
             if (attributesAsk(attributes, "type", "json")) return .next;
             switch (fs_hook.source) {
-                .async => |grant| return .{ .read = .{ .json = false, .grant = grant } },
-                else => return .{ .source = try readFromSource(fs_hook.source, env, id) },
+                .async => |grant| return .{ .read = .{ .json = false, .grant = grant, .skip_missing = fs_hook.skip_missing } },
+                .sync => |grant| if (fs_hook.read == .mmap) return mapFromGrant(grant, env.alloc, id) catch |err| {
+                    if (fs_hook.skip_missing and absent(err)) return .next;
+                    return err;
+                },
+                .named => {},
             }
+            const text = readFromSource(fs_hook.source, env, id) catch |err| {
+                if (fs_hook.skip_missing and absent(err)) return .next;
+                return err;
+            };
+            return .{ .source = text };
         },
-        .json => |source| {
+        .json => |json_hook| {
             if (!attributesAsk(attributes, "type", "json")) return .next;
             // The namespace is the host's: a file of the graph never serves an `origine:` id.
             if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return .next;
-            if (source == .async) return .{ .read = .{ .json = true, .grant = source.async } };
-            const text = try readFromSource(source, env, id);
+            if (json_hook.source == .async) return .{ .read = .{ .json = true, .grant = json_hook.source.async, .skip_missing = json_hook.skip_missing } };
+            const text = readFromSource(json_hook.source, env, id) catch |err| {
+                if (json_hook.skip_missing and absent(err)) return .next;
+                return err;
+            };
             defer env.alloc.free(text);
             return .{ .source = try json_module.wrap(env.alloc, text) };
         },
@@ -787,29 +854,6 @@ pub fn hookStep(h: *Handler, index: usize, env: HookEnv, id: []const u8, attribu
 pub fn acceptStep(env: HookEnv, grant: *fs_api.FsGrant, id: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, id, module_types.origine_prefix)) return error.PermissionDenied;
     return readFromGrant(grant, env.alloc, id);
-}
-
-/// Applies a native maker to `source`: returns the (possibly transformed) text, or the
-/// diagnostics of a rejected source. `import` is the handler id the made module's imports use.
-pub const Made = union(enum) { ok: struct { source: []u8, import: u32 }, diagnostics: []u8 };
-
-pub fn makerStep(h: *Handler, current: u32, alloc: std.mem.Allocator, id: []const u8, source: []u8) !Made {
-    const inherit = switch (h.maker) {
-        .js => return error.Unsupported,
-        .inherit => |inherit| inherit,
-    };
-    const import = if (inherit.import != 0) inherit.import else current;
-    const spec = inherit.transformer orelse return .{ .ok = .{ .source = source, .import = import } };
-    switch (try spec.apply(alloc, id, source)) {
-        .source => |text| {
-            if (text.ptr != source.ptr) alloc.free(source);
-            return .{ .ok = .{ .source = @constCast(text), .import = import } };
-        },
-        .diagnostics => |text| {
-            alloc.free(source);
-            return .{ .diagnostics = @constCast(text) };
-        },
-    }
 }
 
 // ---- natives ---------------------------------------------------------------
@@ -829,8 +873,12 @@ fn handlerImpl(state: *ScopeState, spec: []const u8) !u32 {
         host.allocator.destroy(parsed);
     }
     for (parsed.hooks) |*item| switch (item.*) {
-        .fs => |*fs_hook| fs_hook.source = try resolveSource(state, fs_hook.source),
-        .json => |*source| source.* = try resolveSource(state, source.*),
+        .fs => |*fs_hook| {
+            fs_hook.source = try resolveSource(state, fs_hook.source);
+            // The loop has no mapping op: an async grant cannot honour it, and a request is never downgraded.
+            if (fs_hook.read == .mmap and fs_hook.source == .async) return error.Unsupported;
+        },
+        .json => |*json_hook| json_hook.source = try resolveSource(state, json_hook.source),
         .origine => |filter| {
             const ceiling = host.ceilingOf(state.scope);
             // A realm that serves no `origine:` module has no namespace to give.
@@ -1038,6 +1086,10 @@ fn hookImpl(state: *ScopeState, call: *Call, handler_id: u32, index: u32, contex
     return switch (result) {
         .next => null,
         .source => |text| text,
+        .mapped => |mapped| blk: {
+            var map = mapped;
+            break :blk try copyMapped(&map, call.arena);
+        },
         .read => error.Unsupported,
     };
 }
@@ -1147,70 +1199,4 @@ pub fn sourceHash(state: *ScopeState, call: *Call, text: []const u8) Error![]con
 pub fn jsonModule(state: *ScopeState, call: *Call, text: []const u8) Error![]const u8 {
     _ = state;
     return json_module.wrap(call.arena, text) catch |err| return errno.narrow(err);
-}
-
-/// `pipelineResolve(handler, specifier, referrer)`: the whole native resolution of a `native`
-/// handler (undefined when no layer answers). For the JS side's own use of native handlers.
-pub fn pipelineResolve(state: *ScopeState, call: *Call, handler_id: u32, specifier: []const u8, referrer: []const u8) Error!?[]const u8 {
-    const h = handlerFor(state.host, handler_id) catch |err| return errno.narrow(err);
-    if (!h.native) return error.InvalidInput;
-    return resolveNative(h, call.arena, specifier, referrer) catch |err| return errno.narrow(err);
-}
-
-/// `pipelineLoad(handler, id, attributesJson)`: `{ source, handler, diagnostics }` of the whole
-/// native load stage.
-pub fn pipelineLoad(state: *ScopeState, call: *Call, handler_id: u32, id: []const u8, attributes: []const u8) Error!v8.Value {
-    return pipelineLoadImpl(state, call, handler_id, id, attributes) catch |err| return errno.narrow(err);
-}
-
-fn pipelineLoadImpl(state: *ScopeState, call: *Call, handler_id: u32, id: []const u8, attributes: []const u8) !v8.Value {
-    const host = state.host;
-    const h = try handlerFor(host, handler_id);
-    if (!h.native) return error.InvalidInput;
-    const loaded = try loadNative(.{ .host = host, .alloc = call.arena }, h, handler_id, id, try attributesOf(call, attributes));
-    const object = eu.v.object(call.isolate);
-    switch (loaded) {
-        .source => |item| {
-            try call.set(object, "source", item.source);
-            try call.set(object, "handler", item.import);
-        },
-        .diagnostics => |text| try call.set(object, "diagnostics", text),
-    }
-    return object.value;
-}
-
-// ---- the whole native pipeline --------------------------------------------
-
-/// Resolves `specifier` through the layers of a native handler; `null` when none answers.
-pub fn resolveNative(h: *Handler, alloc: std.mem.Allocator, specifier: []const u8, referrer: []const u8) !?[]const u8 {
-    for (h.layers, 0..) |_, index| {
-        if (try layerStep(h, index, alloc, specifier, referrer)) |id| return id;
-    }
-    return null;
-}
-
-pub const Loaded = union(enum) {
-    source: struct { source: []u8, import: u32 },
-    diagnostics: []u8,
-};
-
-/// The load stage of a native handler for the resolved `id`: hooks in order, then the maker.
-/// `import` of the result is the handler id the module's own imports use.
-pub fn loadNative(env: HookEnv, h: *Handler, handler_id: u32, id: []const u8, attributes: []const module_types.ImportAttribute) !Loaded {
-    var supplied: ?[]u8 = null;
-    for (h.hooks, 0..) |_, index| {
-        switch (try hookStep(h, index, env, id, attributes)) {
-            .next => {},
-            .source => |text| {
-                supplied = text;
-                break;
-            },
-            .read => return error.Unsupported,
-        }
-    }
-    const text = supplied orelse return error.NotFound;
-    return switch (try makerStep(h, handler_id, env.alloc, id, text)) {
-        .ok => |made| .{ .source = .{ .source = made.source, .import = made.import } },
-        .diagnostics => |diagnostics| .{ .diagnostics = diagnostics },
-    };
 }

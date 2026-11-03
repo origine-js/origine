@@ -23,6 +23,13 @@ const checkFs = (what, fs) => {
   return fs;
 };
 
+/// What a file that is not in a provider's root does: `'abort'` unless the program chose.
+const missingOf = (what, options) => {
+  const missing = own(options, 'missing') ?? 'abort';
+  if (missing !== 'skip' && missing !== 'abort') throw invalid(`${what}: missing must be 'skip' or 'abort'`);
+  return missing;
+};
+
 const provider = (host, rest) => new h.Provider({ host, kind: 'provider', ...rest });
 
 /// Names of std modules, without the `origine:@std/` prefix (`'text'`, `'transformer/oxc'`).
@@ -57,18 +64,21 @@ export const origineProvider = (options = {}) => {
 
 /// Reads source files through `fs`, a grant `api.fs` made (sync or async); an id is a path relative to its
 /// root. The whole file is read: check its size in a hook of your own if it matters. `read` is required
-/// because it has a cost: `'copy'` reads the file into memory; `'mmap'` maps it (no copy for
-/// ASCII/Latin-1 text, but a file changed while mapped changes under V8).
+/// because it has a cost: `'copy'` reads the file into memory; `'mmap'` is for large sources on a sync
+/// grant: a file that is all ASCII is read in place by V8, and must not change while the module lives
+/// (truncating it crashes the process). Any other file is copied; an async grant is `Unsupported`.
+/// `missing` says what a file that is not in this root does: `'abort'` (the default) fails the import with
+/// `NotFound`, `'skip'` passes to the next hook, so that several roots can be tried in order.
 export const fsProvider = options => {
   const fs = checkFs('fsProvider', own(options, 'fs'));
   const read = own(options, 'read');
   if (read !== 'copy' && read !== 'mmap') throw invalid("fsProvider: read must be 'copy' or 'mmap'");
-  return provider(h.HookHost.Fs, { fs, read });
+  return provider(h.HookHost.Fs, { fs, read, missing: missingOf('fsProvider', options) });
 };
 
 /// Serves `type: 'json'` imports as an ES module whose default export is the parsed value, read through
-/// `fs`, a grant `api.fs` made.
-export const json = options => provider(h.HookHost.Json, { fs: checkFs('json', own(options, 'fs')) });
+/// `fs`, a grant `api.fs` made. `missing` is the same choice as in `fsProvider`: `'abort'` (the default) or `'skip'`.
+export const json = options => provider(h.HookHost.Json, { fs: checkFs('json', own(options, 'fs')), missing: missingOf('json', options) });
 
 /// Adapts a loader function to a hook: `loader(id, attributes)` returns the source
 /// text, `{ source }`, or a promise of either.

@@ -9,10 +9,22 @@ origine_api_core.workspace = true
 origine_api_macros.workspace = true
 origine_api_fs.workspace = true
 origine_io.workspace = true
-# The vendored fork built against the same V8 archive Zig links (see rust/scripts/cargo-v8.sh).
+origine_tls = { workspace = true, optional = true }
+origine_h2 = { workspace = true, optional = true }
+origine_dns = { workspace = true, optional = true }
+origine_transport = { workspace = true, optional = true }
+# The vendored fork built against the same V8 archive Zig links (see rust/scripts/cargo-env.py).
 # The inspector feature compiles the Rust side of the inspector/CRDTP glue that rusty.cc (in libv8_zig.a)
 # references; without it those symbols are undefined at the final link. Its build script does not bundle libv8/mimalloc into this crate's rlib/staticlib.
 v8 = { path = "../../../lib/v8_zig/rusty_v8", features = ["inspector"] }
+
+[features]
+# `api.tls` (docs/http-design.md); the root crate forwards `-Dtls`.
+tls = ["dep:origine_tls", "dep:origine_transport"]
+# `api.http` (HTTP/2 over origine_h2; links nghttp2, which the Zig build provides with `-Dhttp`).
+http = ["dep:origine_h2", "dep:origine_transport"]
+# `api.dns` (hickory-proto codec + our resolver; DoT needs `tls` too).
+dns = ["dep:origine_dns", "dep:origine_transport"]
 
 [lints]
 workspace = true

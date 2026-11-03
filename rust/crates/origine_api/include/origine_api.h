@@ -28,6 +28,8 @@ typedef struct origine_api_cfg {
   int32_t fs_root_fd; /* a directory descriptor the Rust side duplicates; -1 = no fs */
   uint8_t fs_write;
   uint8_t fs_async;
+  const uint8_t *net_rules; /* the network ceiling, as text (see origine_api_core::net_rules); borrowed during the call */
+  size_t net_rules_len;
 } origine_api_cfg;
 
 /* What V8 may assume about a native (mirrors binding.SideEffect in src/api/binding.zig). */
@@ -59,6 +61,8 @@ bool origine_api_attach_isolate(void *isolate);
 void origine_api_detach_isolate(void *isolate);
 /* Sets the ceilings and the fs root of the attached Host (once, after attach). `cfg` is read. */
 void origine_api_configure(void *isolate, const origine_api_cfg *cfg);
+/* Checks network rule text: 0 when it parses, else the length of the message written to `message` (at most `message_cap` bytes, no NUL). */
+size_t origine_api_net_rules_check(const uint8_t *rules, size_t rules_len, uint8_t *message, size_t message_cap);
 /* Waits for work and runs it; returns the number of live items or -1 on error. timeout_ns < 0 =
  * forever (still returns on origine_api_wake). */
 int64_t origine_api_poll(void *isolate, uint8_t block, int64_t timeout_ns);

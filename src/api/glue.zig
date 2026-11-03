@@ -18,7 +18,7 @@ pub const handles_id = "origine:@internal/handles";
 /// Embedder slot of a context whose glue was made for a snapshot: the snapshot data index of the
 /// handles module, which the restored scope adopts (a module handle cannot ride in the bundle).
 const handles_data_slot = slots.glue_handles;
-pub const Module = enum { common, fs, host, graph, context, isolate, io, net, util, errors, handle, handles, errno, @"net/event", @"net/send", @"net/core", @"net/server", @"net/socket", @"graph/data", @"graph/source", @"graph/handlers", @"graph/driver", @"graph/reference" };
+pub const Module = enum { common, fs, host, graph, context, isolate, io, net, tls, http, dns, addr, util, errors, handle, handles, errno, @"http/client", @"net/event", @"net/send", @"net/core", @"net/server", @"net/socket", @"graph/data", @"graph/source", @"graph/handlers", @"graph/driver", @"graph/reference" };
 pub const module_count = std.meta.fieldNames(Module).len;
 pub const Script = struct { source: []const u8, origin: []const u8, cache_id: []const u8 };
 pub fn script(module: Module) Script {

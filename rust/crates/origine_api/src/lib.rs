@@ -16,19 +16,29 @@
 
 extern crate self as origine_api;
 
+mod channel;
+pub mod class;
 pub mod decode;
+#[cfg(feature = "dns")]
+mod dns;
 pub mod encode;
 mod fs;
+mod gc;
 pub mod host;
-mod channel;
+#[cfg(feature = "http")]
+mod http;
 mod io;
 pub mod message;
 pub mod native;
 mod net;
 pub mod pinned;
 mod registry;
+#[cfg(any(feature = "tls", feature = "http", feature = "dns"))]
+mod sockstream;
 mod sub;
 mod sys;
+#[cfg(feature = "tls")]
+mod tls;
 
 // CONTRACT (docs/contracts.md, surfaces B and C): `include/origine_api.h` is the source of truth;
 // `abi_gen.rs` is generated from it (`just gen-contracts`). The structs are used as they are, and
@@ -42,7 +52,7 @@ pub use decode::{ArrayBufferArg, FromJs};
 pub use encode::IntoJs;
 pub use host::HostState;
 pub use origine_api_core::{ArgError, NativeError};
-pub use origine_api_macros::{FromJs, IntoJs, native};
+pub use origine_api_macros::{FromJs, IntoJs, class, native};
 /// The `v8` crate, re-exported for `#[native]`'s generated code.
 pub use v8;
 
@@ -142,7 +152,38 @@ pub unsafe extern "C" fn origine_api_configure(isolate: *mut c_void, cfg: *const
         })
         .flatten();
     let fs = host::FsConfig { root, write: cfg.fs_write != 0, asynchronous: cfg.fs_async != 0 };
-    with_host(isolate, (), |host| host.configure(ceiling, fs));
+    // The network ceiling. Text that does not parse grants nothing (the embedder checks it with
+    // `origine_api_net_rules_check` first, to say why).
+    let text = if cfg.net_rules.is_null() {
+        &[][..]
+    } else {
+        // SAFETY: the caller guarantees `net_rules` points at `net_rules_len` readable bytes for this call.
+        unsafe { std::slice::from_raw_parts(cfg.net_rules, cfg.net_rules_len) }
+    };
+    let net = std::str::from_utf8(text).ok().and_then(|text| origine_api_core::NetRules::parse(text).ok()).unwrap_or_default();
+    with_host(isolate, (), |host| host.configure(ceiling, fs, net));
+}
+
+/// Checks network rule text: 0 when it parses, else the length of the message written to `message`
+/// (truncated to `message_cap`, no NUL).
+///
+/// # Safety
+/// `rules` points at `rules_len` readable bytes and `message` at `message_cap` writable ones.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn origine_api_net_rules_check(rules: *const u8, rules_len: usize, message: *mut u8, message_cap: usize) -> usize {
+    // SAFETY: by the contract above.
+    let text = unsafe { std::slice::from_raw_parts(rules, rules_len) };
+    let error = match std::str::from_utf8(text) {
+        Ok(text) => match origine_api_core::NetRules::parse(text) {
+            Ok(_) => return 0,
+            Err(error) => error,
+        },
+        Err(_) => "the rules are not UTF-8".to_owned(),
+    };
+    let written = error.len().min(message_cap);
+    // SAFETY: `written <= message_cap`, and `message` has that many writable bytes.
+    unsafe { std::ptr::copy_nonoverlapping(error.as_ptr(), message, written) };
+    written.max(1)
 }
 
 /// Waits for work and runs it: ticks every runtime, advances closing ones and settles finished
@@ -201,6 +242,7 @@ fn abi_signatures() {
     let _ = [h::origine_api_attach_isolate, origine_api_attach_isolate];
     let _ = [h::origine_api_detach_isolate, origine_api_detach_isolate];
     let _ = [h::origine_api_configure, origine_api_configure];
+    let _ = [h::origine_api_net_rules_check, origine_api_net_rules_check];
     let _ = [h::origine_api_poll, origine_api_poll];
     let _ = [h::origine_api_has_work, origine_api_has_work];
     let _ = [h::origine_api_pollable, origine_api_pollable];

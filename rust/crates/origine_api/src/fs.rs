@@ -54,7 +54,11 @@ fn fs_async_request<'s>(
     let slot: Rc<RefCell<Option<Rc<Grant>>>> = Rc::default();
     let filled = Rc::clone(&slot);
     let future = async move {
-        let opened = base.open_dir(&root).await;
+        let checked = if access.confined { origine_api_fs::confine(&base, &root, true).await } else { Ok(()) };
+        let opened = match checked {
+            Ok(()) => base.open_dir(&root).await.map_err(NativeError::from),
+            Err(err) => Err(err),
+        };
         let _ = base.close().await;
         *filled.borrow_mut() = Some(Grant::new(id, access, opened?));
         Ok(GrantOpened { id })
@@ -367,9 +371,8 @@ pub enum ReadInto {
     /// The guest buffer was pinned: `buffer` is a NEW `ArrayBuffer` over the same store (the
     /// guest's original `ArrayBuffer` stays detached).
     Pinned { bytes: usize, store: v8::SharedRef<v8::BackingStore> },
-    /// The copy fallback: the bytes sit in the shared cell and the [`native::Wrap`] copies them
-    /// into the guest's own buffer and resolves `{ bytes, buffer: <that buffer> }`. Encoded as
-    /// the bare count until then.
+    /// An empty buffer, which needs no pin: the [`native::Wrap`] resolves
+    /// `{ bytes: 0, buffer: <that buffer> }`. Encoded as the bare count until then.
     Copied { bytes: usize },
 }
 
@@ -449,6 +452,10 @@ fn read_into<'s>(
         offset,
         Box::new(|| {
             let (buf, copy) = pinned::pin_for_read(&buffer)?;
+            // Zero-copy or not at all: a buffer that cannot be detached is refused, like `net.readInto`.
+            if copy && !buffer.is_empty() {
+                return Err(NativeError::Errno(errno::UNSUPPORTED));
+            }
             copied.set(copy);
             Ok(buf)
         }),
@@ -473,7 +480,7 @@ fn read_into<'s>(
     if !copied.get() {
         return Ok(op);
     }
-    // The copy fallback: fill the guest's own buffer at completion and resolve with it.
+    // An empty buffer: nothing was detached, so it comes back as it is.
     let target = v8::Global::new(scope, buffer.buffer());
     let (start, len) = (buffer.offset(), buffer.len());
     Ok(op.with_wrap(Box::new(move |scope, _count| {
@@ -485,9 +492,8 @@ fn read_into<'s>(
 }
 
 /// `fileReadInto(fs, id, buffer)`: one read at the file position straight into the guest buffer
-/// (pinned and detached when eligible). Resolves `{ bytes, buffer: ArrayBuffer }`, see
-/// [`ReadInto`]; `buffer` is the guest's buffer again (copy fallback) or a new one over the same
-/// store (pinned).
+/// (pinned and detached; `Unsupported`, untouched, when it cannot be detached). Resolves
+/// `{ bytes, buffer: ArrayBuffer }`, see [`ReadInto`]; `buffer` is a new one over the same store.
 #[native(side_effect = "any", path = "fsAsync.fileReadInto", needs = "async_fs", promise)]
 fn fs_async_file_read_into<'s>(
     scope: &mut v8::PinScope<'s, '_>,

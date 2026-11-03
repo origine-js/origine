@@ -16,7 +16,7 @@ is a local package that fetches, patches, and builds V8 and exposes the `@v8`, `
   `DEVELOPER_DIR`; do not pass an absolute `-Dmac_sdk_path`.
 - Rust (rustup; `rust/rust-toolchain.toml` pins the toolchain). Rust is part of the core;
   the first build fetches its crates (oxc today) from crates.io. Build without network with
-  `-Dcargo-offline`.
+  `-Drust_cargo_offline`.
 - Optional: [just](https://github.com/casey/just) for the shortcuts below.
 
 The first build downloads depot_tools and V8 15.8.30 into `lib/v8_zig/.lp-cache/`
@@ -30,7 +30,7 @@ measured profiles for 16 configuration-specific builtins, with strict rejection
 of hash mismatches. Other targets retain Google's baseline, explicitly exclude
 those 16 names, and discard other incompatible entries with warnings. See the
 [profile policy and acceptance report](../lib/v8_zig/docs/builtin-pgo.md).
-Matching entries still guide branch optimization. Use `-Dbuiltin_pgo=false` for an
+Matching entries still guide branch optimization. Use `-Dv8_builtin_pgo=false` for an
 unprofiled comparison build. This is builtin PGO, not C++ compiler PGO.
 
 ## Everyday commands
@@ -56,6 +56,7 @@ wrap the same commands. `just` with no arguments lists every recipe.
 | `just check-contracts` | Regenerates cross-language files into a temp tree and fails on drift; runs `zig build test-io -Dtypescript=false` ([contracts](contracts.md)) |
 | `just check-rust` | `zig build clippy` (warnings denied; every `unsafe` needs a `// SAFETY:` comment), then Miri over the V8-free crates ([rust overview](../rust/docs/README.md)) |
 | `just check-format` | `cargo fmt --check`, `oxfmt --check` and `oxlint` over `bench examples src/js src/repl` |
+| `just check-size` | Builds `-Doptimize=small`, strips, fails above 70 MB (the binary budget). Networking flags `-Dhttp`, `-Dtls`, `-Ddns`, `-Dquic` (all default on; `-Dquic` needs `-Dtls`) select Rust features and the nghttp2 build (`lib/nghttp2`, fetched only with `-Dhttp`) and the AWS-LC build (`lib/aws-lc`, built from the vendored aws-lc-sys only with `-Dtls`; [aws-lc.md](aws-lc.md)); see [http-design.md](http-design.md) |
 | `just format` | Applies the formatters |
 | `just gen-contracts` | Rewrites the committed generated files |
 | `just test-repl` | Drives the REPL in a pseudo-terminal ([repl](repl.md)) |
@@ -127,12 +128,12 @@ Pass these to `zig build` at the root unless noted.
 | --- | --- |
 | `-Doptimize=debug\|safe\|fast\|small` | Zig executable mode (default debug) |
 | `-Dv8_debug=true` | Debug V8 (default release) |
-| `-Dprebuilt_v8_path=/abs/libv8_zig.a` | Skip building V8 and link an existing archive. The Rust workspace cannot be built against it (no GN output for bindgen), so use it only where a Rust archive is not needed |
-| `-Dcache_root=<dir>` | V8 / depot_tools checkout cache (default `lib/v8_zig/.lp-cache`) |
+| `-Dv8_prebuilt_path=/abs/libv8_zig.a` | Skip building V8 and link an existing archive. The Rust workspace cannot be built against it (no GN output for bindgen), so use it only where a Rust archive is not needed |
+| `-Dv8_cache_root=<dir>` | V8 / depot_tools checkout cache (default `lib/v8_zig/.lp-cache`) |
 | `-Dv8_clang_dir=<llvm/bin>` | Override the matching LLVM toolchain |
 | `-Dtypescript=false` | Build the Rust library without the oxc transformer (no `.ts/.tsx/.jsx` support; default true) |
-| `-Dcargo-offline` | Pass `--offline` to cargo |
-| `-Dbuiltin_pgo=false` | Skip Google's builtin PGO baseline (default on for non-debug desktop V8) |
+| `-Drust_cargo_offline` | Pass `--offline` to cargo |
+| `-Dv8_builtin_pgo=false` | Skip Google's builtin PGO baseline (default on for non-debug desktop V8) |
 | `-Dv8_sandbox=false` | Build V8 without the sandbox (default on). A sandboxed V8 gets ArrayBuffer memory from a mimalloc arena inside the sandbox; without it, from the Zig allocator. Also turns builtin PGO off. Exported to Zig as `build_options.v8_sandbox` |
 | `-Dv8_memory_corruption_api=true` | Build V8 with the memory corruption API (`V8_ENABLE_MEMORY_CORRUPTION_API`, GN `v8_enable_memory_corruption_api`). V8 exposes it only under `--sandbox-testing` or `--sandbox-fuzzing`. Requires the sandbox; the V8 package rejects it with `-Dv8_sandbox=false`. Default off, which keeps the default GN output directory |
 | `-Dv8_icu=compressed\|raw` | How the executable carries ICU's data (default `compressed`). `compressed`: one zstd frame (3.8 MB) expanded into a 10.8 MB heap copy on the first `Intl` use. `raw`: the package as it is, about 7 MB more executable (46.45 MB against 39.45 MB measured), nothing to expand, the pages are read in place. ICU is its own link object (`libv8_icu.a`, built from `lib/v8_zig/build/icu.build.zig`), not part of `libv8_zig.a` |
@@ -191,7 +192,7 @@ builds a single `staticlib` (ThinLTO, `opt-level = "z"`, with the hot crates at 
 Symbol collisions: the archive embeds Rust's std, and V8's archive embeds Chromium's.
 Both define `rust_eh_personality` and friends. In macOS non-debug builds (V8's `ld64.lld`
 external link) `build.zig` first runs `clang -r -exported_symbols_list <generated list>`
-so only the prefixes in `kept_symbol_prefixes` (`build.zig`: `origine_*`, `crdtp__*`, `v8_inspector__*`) stay global
+so only the prefixes in `kept_symbol_prefixes` (`rust/build.zig`: `origine_*`, `crdtp__*`, `v8_inspector__*`) stay global
 (docs/contracts.md, surface F). Debug builds and tests link the plain archive (a
 pre-linked object breaks Mach-O thread-locals there). Linux has an `ld -r` + `objcopy`
 equivalent in `build.zig` that is not exercised yet. Cross builds (`-Dtarget` other than native)

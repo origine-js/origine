@@ -5,11 +5,11 @@
 // data `{ kind: 'io', id, backend }` plus `close()`; it is not transferable across scopes
 // and `api.fs.requestAsync` takes it as `io`.
 import { Data } from './handles.js';
-import { freeze, own, failure, ioHandles, closedIo, shared, errors, seal } from './util.js';
+import { freeze, own, failure, ioHandles, closedIo, ioClosers, shared, errors, seal } from './util.js';
 class Timer extends Data {}
 class IoHandle extends Data {}
 seal(Timer, IoHandle);
-const { Unsupported, BadHandle } = errors;
+const { Unsupported, BadHandle, Canceled } = errors;
 export default native => {
   const BACKENDS = freeze(['auto', 'uring', 'kqueue', 'threaded']);
 
@@ -33,6 +33,7 @@ export default native => {
         if (closing !== undefined) return closing;
         closedIo.add(handle);
         shared.asyncFsClosed?.(handle);
+        for (const closer of ioClosers.get(handle) ?? []) closer(failure(Canceled));
         closing = (async () => {
           try {
             await native.io.close(made.id);

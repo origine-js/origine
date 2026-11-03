@@ -8,8 +8,8 @@
 //
 // Elements of the pipeline are JS descriptor instances from the
 // sibling modules (run natively) or functions (run in the creating realm during the load stage).
-// `ImportHandler.make` classifies them: `handler.plan` lists them in order and `handler.native` is
-// true when no import of this handler needs the JS realm.
+// `ImportHandler.make` classifies them: `handler.plan` lists them in order, each as native or JS. A chain
+// runs natively until it reaches a JS element and goes back to native after it.
 import * as h from 'origine:@internal/handles';
 import { ERRNO } from 'origine:@std/errno';
 import { IoError, ImportError } from 'origine:@std/errors';
@@ -220,8 +220,6 @@ export const ImportHandler = freeze({
       meta: meta ?? null,
       /// Every element in pipeline order, `{ stage, kind: 'native' | 'js', name? }`.
       plan: freeze(plan),
-      /// True when no import of this handler enters the JS realm.
-      native: plan.every(entry => entry.kind === 'native'),
     });
   },
   is: value => value instanceof h.ImportHandler,

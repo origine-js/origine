@@ -108,12 +108,16 @@ impl RuntimeEntry {
 pub struct HostState {
     ceiling: Ceiling,
     fs: FsConfig,
+    /// The network ceiling (what `api.net` and the resolvers may reach); nothing until configured.
+    pub(crate) net: origine_api_core::NetRules,
     runtimes: BTreeMap<u32, RuntimeEntry>,
     next_runtime: u32,
     grants: BTreeMap<u32, Rc<GrantRecord>>,
     next_grant: u32,
     sockets: BTreeMap<u32, Rc<Socket>>,
     next_socket: u32,
+    #[cfg(feature = "http")]
+    pub(crate) http: crate::http::HttpState,
     pub(crate) subs: BTreeMap<u32, Sub>,
     pub(crate) events: Events,
     pub(crate) refill: Rc<RefCell<Vec<u32>>>,
@@ -131,6 +135,8 @@ pub struct HostState {
     pub(crate) identity: u32,
     /// Rebuilds a received port (registered by the glue, `channel.setPortFactory`).
     pub(crate) port_factory: Option<Rc<v8::Global<v8::Function>>>,
+    /// The template of each Rust-defined class (`class.rs`), made on first use.
+    pub(crate) classes: std::collections::HashMap<std::any::TypeId, v8::Global<v8::FunctionTemplate>>,
 }
 
 impl HostState {
@@ -139,12 +145,16 @@ impl HostState {
         HostState {
             ceiling: Ceiling::NONE,
             fs: FsConfig { root: None, write: false, asynchronous: false },
+            net: origine_api_core::NetRules::none(),
             runtimes: BTreeMap::new(),
             next_runtime: 1,
             grants: BTreeMap::new(),
             next_grant: 1,
             sockets: BTreeMap::new(),
             next_socket: 1,
+            #[cfg(feature = "tls")]
+            #[cfg(feature = "http")]
+            http: crate::http::HttpState::default(),
             subs: BTreeMap::new(),
             events: Rc::default(),
             refill: Rc::default(),
@@ -158,12 +168,14 @@ impl HostState {
             isolate: 0,
             identity: 0,
             port_factory: None,
+            classes: std::collections::HashMap::new(),
         }
     }
 
-    pub(crate) fn configure(&mut self, ceiling: Ceiling, fs: FsConfig) {
+    pub(crate) fn configure(&mut self, ceiling: Ceiling, fs: FsConfig, net: origine_api_core::NetRules) {
         self.ceiling = ceiling;
         self.fs = fs;
+        self.net = net;
     }
 
     pub(crate) fn completions(&self) -> CompletionQueue {
@@ -496,10 +508,13 @@ impl HostState {
     /// (bounded). Idempotent. The detach function calls it before `Runtime.destroy`.
     pub fn drop_all(&mut self) {
         self.subs.clear();
+        #[cfg(feature = "http")]
+        self.http.clear();
         self.events.borrow_mut().clear();
         self.pending.clear();
         self.chan_waits.clear();
         self.port_factory = None;
+        self.classes.clear();
         crate::channel::release_owned(self.isolate);
         self.completions.borrow_mut().clear();
         let ids: Vec<u32> = self.runtimes.keys().copied().collect();

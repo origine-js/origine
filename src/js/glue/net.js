@@ -12,13 +12,13 @@
 // (`register`, `pause`, `resume`). The write side (`direct`, `queued`, `end`, `close`) is shared
 // by both. `toEvent()`/`toPull()` move the native handle into a new instance of the other class
 // and consume the old one.
-import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors } from './util.js';
+import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
 import event from './net/event.js';
 import send from './net/send.js';
 import core from './net/core.js';
 import server from './net/server.js';
 import socket from './net/socket.js';
-const { BadHandle } = errors;
+const { BadHandle, WouldBlock, Unsupported } = errors;
 // Default `queued.limit`: bytes the outbox holds for a slow peer.
 const QUEUE_LIMIT = 1 << 20;
 export default native => {
@@ -32,6 +32,20 @@ export default native => {
   const { Handle, Server, PullServer, EventServer, live, coreOf, revoke } = server(k);
   const { Socket, PullSocket, EventSocket, makeSocket } = socket(k, { Core, Handle, live, coreOf, revoke, endQueue });
   k.makeSocket = makeSocket;
+
+  // For `api.tls`: the native id of a pull socket that can be handed over, and the call that consumes the JS
+  // handle once the native took the socket (a refused handover leaves the handle usable).
+  shared.netTake = socket => {
+    if (!(socket instanceof PullSocket)) throw new TypeError('socket must be a pull-mode api.net socket');
+    const core = live(socket);
+    if (core.pending > 0 || core.queued.bytes > 0 || core.queued.waiting > 0) throw failure(WouldBlock);
+    if (core.hub !== null || core.readEnded || core.writeEnded) throw failure(Unsupported);
+    return { id: core.id, io: core.io, port: core.port, consume: () => revoke(socket, () => {}) };
+  };
+  // For `api.tls`: a socket of the given mode over native id `id`, the native id of a live socket, and the
+  // `queued.limit` of an options object.
+  shared.netMake = (mode, id, io, port, limit) => makeSocket(mode, id, io, port, limit);
+  shared.netId = socket => live(socket).id;
 
   for (const C of [Lease, DataEvent, Handle, Server, PullServer, EventServer, SendQueue, Direct, Socket, PullSocket, EventSocket]) {
     freezeMethods(C);
@@ -58,12 +72,16 @@ export default native => {
     return mode;
   };
   const queueLimit = options => {
-    const limit = own(options, 'sendQueueLimit') ?? QUEUE_LIMIT;
-    if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('sendQueueLimit must be a positive integer');
+    const queued = own(options, 'queued');
+    if (queued !== undefined && (queued === null || typeof queued !== 'object')) throw new TypeError('queued must be an object');
+    const limit = own(queued, 'limit') ?? QUEUE_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('queued.limit must be a positive integer');
     return limit;
   };
+  shared.netQueueLimit = queueLimit;
+  // Published for `api.http`'s `connect` and `serve`, which dial and listen through it.
   return () =>
-    freeze({
+    (shared.net = freeze({
       Handle,
       Server,
       PullServer,
@@ -99,5 +117,5 @@ export default native => {
           return Promise.reject(e);
         }
       },
-    });
+    }));
 };

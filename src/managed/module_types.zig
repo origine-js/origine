@@ -80,8 +80,14 @@ pub const Export = struct { name: []const u8, value: v8.Global.Of(v8.Value), har
 /// All slices, nested export names, and handles are borrowed until the receiving
 /// updateImportCache/completeLoad call returns (success or error). No ownership is
 /// transferred. Source is copied into V8; export names and handles are retained.
+/// Source text as an external V8 string: nothing is copied into the V8 heap. `string` is a local handle
+/// that owns the memory (its finalizer releases it); `text` is the same bytes, valid while `string` is.
+pub const External = struct { text: []const u8, string: v8.String };
+
 pub const Content = union(enum) {
     source: []const u8,
+    /// Source text V8 reads in place (see `External`).
+    external: External,
     exports: []const Export,
     /// A module already instantiated (and usually evaluated) in another context of the same
     /// isolate, linked into this graph as it is: live bindings, the other realm's own objects.
@@ -112,7 +118,7 @@ pub const LoadRequest = struct {
 /// request.context and is immediately retained. pending retains no result buffers.
 /// Local handles must belong to the enclosing caller's HandleScope; escape values
 /// from any nested HandleScope before returning them.
-pub const LoadResult = union(enum) { source: []const u8, exports: []const Export, module: v8.Module, exception: v8.Value, pending };
+pub const LoadResult = union(enum) { source: []const u8, external: External, exports: []const Export, module: v8.Module, exception: v8.Value, pending };
 /// Borrowed inputs: no input is accessed after completeLoad returns, on success or
 /// error. Accepted content/exceptions are copied/retained independently. Caller
 /// releases its own memory/exception handle. Handles must belong to this runtime.

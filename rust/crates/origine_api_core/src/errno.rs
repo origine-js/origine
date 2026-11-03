@@ -29,6 +29,7 @@ pub fn errno_of(err: &io::Error) -> u32 {
         K::Unsupported => UNSUPPORTED,
         K::FileTooLarge => FILE_TOO_LARGE,
         K::InvalidData => INVALID_DATA,
+        K::UnexpectedEof => UNEXPECTED_EOF,
         K::TimedOut => TIMED_OUT,
         K::WouldBlock => WOULD_BLOCK,
         K::ConnectionRefused => CONNECTION_REFUSED,

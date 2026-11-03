@@ -31,9 +31,10 @@
 //!   writer task flushes in order. `flushed` is a promise for "everything accepted so far reached
 //!   the kernel"; the glue builds `queued.send` on it. A `Drain` event follows every time the
 //!   outbox becomes empty.
-//! * `pause` parks the socket's events (in order) instead of dispatching them; `resume` puts them
-//!   back in front of the host queue. The pump keeps its [`MAX_QUEUED`] bound, so a paused socket
-//!   holds at most that many chunks and then stops reading.
+//! * `pause` parks the socket's read-side events (in order) instead of dispatching them; `resume`
+//!   puts them back in front of the host queue. The pump keeps its [`MAX_QUEUED`] bound, so a paused
+//!   socket holds at most that many chunks and then stops reading. The write side is not paused:
+//!   `Drain` and `Failed` are always dispatched, because sends wait on them. See [`Pause`].
 //!
 //! # Lifetime
 //! Subscriptions never keep the host alive by themselves: the pump task and its in-flight
@@ -46,7 +47,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
-use std::io::Write;
 use std::net::TcpStream;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::rc::Rc;
@@ -61,7 +61,7 @@ use crate::decode::ArrayBufferArg;
 use crate::host::Task;
 use crate::native;
 use crate::native::{ScopeKey, host_mut, host_ref};
-use crate::net::{ADDR_CAP, SEND_FLAGS, Socket, prepare, stream_of};
+use crate::net::{ADDR_CAP, Socket, prepare, stream_of};
 use crate::pinned;
 
 /// Bytes offered to one receive (the most a `data` event carries).
@@ -75,13 +75,37 @@ const MAX_QUEUED: usize = 8;
 /// Fresh slabs a socket keeps ready.
 const SLAB_TARGET: usize = 2;
 
-/// `dispatch(kind, a, b)` kinds; `glue/net.js` uses the same numbers.
+/// `dispatch(kind, a, b)` kinds; `glue/net/core.js` uses the same numbers.
 const KIND_DATA: u32 = 0;
 const KIND_END: u32 = 1;
 const KIND_ERROR: u32 = 2;
 const KIND_DRAIN: u32 = 3;
 const KIND_CONNECTION: u32 = 4;
 const KIND_CLOSE: u32 = 5;
+const KIND_FAILED: u32 = 6;
+
+/// What a subscription holds back.
+#[derive(Clone, Copy, PartialEq)]
+enum Pause {
+    None,
+    /// No handler wants the data (the glue's `autoPaused`): chunks and connections wait for one, and
+    /// an `End` waits behind them; anything else has nothing to wait for and is dispatched.
+    NoHandler,
+    /// The guest called `pause`: everything of the read side, in order.
+    Explicit,
+}
+
+impl Pause {
+    /// Whether `kind` is held back, given whether events already are.
+    fn parks(self, kind: &EventKind, parked: bool) -> bool {
+        match kind {
+            EventKind::Drain | EventKind::Failed(_) => false,
+            EventKind::Data { .. } | EventKind::Accept { .. } => self != Pause::None,
+            EventKind::End => self == Pause::Explicit || (self == Pause::NoHandler && parked),
+            EventKind::Error(_) | EventKind::Closed => self == Pause::Explicit,
+        }
+    }
+}
 
 pub(crate) enum EventKind {
     /// `n` bytes at `offset` of `slab`.
@@ -92,6 +116,8 @@ pub(crate) enum EventKind {
     },
     End,
     Error(u32),
+    /// The write side failed with this errno, ahead of the `Error` and `Closed` that a pause holds back.
+    Failed(u32),
     Drain,
     Accept {
         stream: TcpStream,
@@ -129,11 +155,12 @@ impl Signal {
 pub(crate) struct Idle {
     /// Resumed subscriptions that have not delivered `Close` yet (what `io.run` waits for).
     live: Cell<usize>,
+    /// The pending `io.run` calls.
+    waiters: RefCell<Vec<Waker>>,
     /// Live pump tasks (excluded from the host's live count).
     pub(crate) pumps: Cell<usize>,
     /// Pump ops in flight (excluded from the host's live count).
     pub(crate) recving: Cell<usize>,
-    waiter: Signal,
 }
 
 /// Increments a counter for as long as it lives.
@@ -238,6 +265,9 @@ impl Shared {
 
     fn fail(&self, code: u32) {
         self.fail_out(code);
+        if !self.closed.get() {
+            self.push(EventKind::Failed(code));
+        }
         self.push(EventKind::Error(code));
         self.push_closed();
     }
@@ -263,8 +293,8 @@ pub(crate) struct Sub {
     counted: bool,
     started: bool,
     current: Option<Current>,
-    /// `pause` parks events instead of dispatching them.
-    paused: bool,
+    /// What `pause` holds back; those events wait in `parked`.
+    pause: Pause,
     parked: VecDeque<Event>,
 }
 
@@ -322,7 +352,7 @@ async fn read_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
             return;
         };
         let recving = Count::new(&idle.recving);
-        let (read, buf) = lp.recv(socket.fd(), buf, 0).await;
+        let (read, buf) = socket.recv(&lp, buf).await;
         drop(recving);
         match read {
             Ok(0) => {
@@ -391,19 +421,21 @@ async fn write_pump(socket: Rc<Socket>, lp: Rc<Loop>, shared: Rc<Shared>) {
     loop {
         let next = shared.out.borrow_mut().queue.pop_front();
         let Some(mut chunk) = next else {
-            let mut out = shared.out.borrow_mut();
-            out.writing = false;
-            let fin = out.ended && out.failed.is_none();
-            out.wake();
-            drop(out);
+            let fin = {
+                let mut out = shared.out.borrow_mut();
+                out.writing = false;
+                let fin = out.ended && out.failed.is_none();
+                out.wake();
+                fin
+            };
             if fin {
-                socket.shutdown_write();
+                socket.finish_write().await;
             }
             shared.push(EventKind::Drain);
             return;
         };
         while !chunk.is_empty() {
-            let (result, buf) = lp.send(socket.fd(), chunk, SEND_FLAGS).await;
+            let (result, buf) = socket.send(&lp, chunk).await;
             chunk = buf;
             let sent = match result {
                 Ok(0) => Err(errno::BROKEN_PIPE),
@@ -481,7 +513,7 @@ fn net_subscribe<'s>(
             counted: false,
             started: false,
             current: None,
-            paused: false,
+            pause: Pause::None,
             parked: VecDeque::new(),
         },
     );
@@ -539,12 +571,25 @@ fn net_start(scope: &mut v8::PinScope<'_, '_>, key: ScopeKey, id: u32) -> Result
     host_mut(scope)?.spawn_pump(runtime, &shared, task)
 }
 
-/// `native.net.pause(id)`: parks the socket's events from now on (see the module docs).
-/// Idempotent; `BadHandle` for an unknown, foreign or unsubscribed socket.
+/// `native.net.pause(id, noHandler)`: holds the socket's read-side events back from now on (see
+/// [`Pause`]; `noHandler` is the milder one). Events the new state no longer holds go back in front of
+/// the queue. Idempotent; `BadHandle` for an unknown, foreign or unsubscribed socket.
 #[native(side_effect = "any", path = "net.pause", needs = "runtime")]
-fn net_pause(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
+fn net_pause(host: &mut HostState, key: ScopeKey, id: u32, no_handler: bool) -> Result<(), NativeError> {
     let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    sub.paused = true;
+    sub.pause = if no_handler { Pause::NoHandler } else { Pause::Explicit };
+    let mut events = host.events.borrow_mut();
+    let mut freed = Vec::new();
+    for event in std::mem::take(&mut sub.parked) {
+        if sub.pause.parks(&event.kind, !sub.parked.is_empty()) {
+            sub.parked.push_back(event);
+        } else {
+            freed.push(event);
+        }
+    }
+    while let Some(event) = freed.pop() {
+        events.push_front(event);
+    }
     Ok(())
 }
 
@@ -553,7 +598,7 @@ fn net_pause(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeE
 #[native(side_effect = "any", path = "net.resume", needs = "runtime")]
 fn net_resume(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
     let sub = host.subs.get_mut(&id).filter(|sub| sub.owner == key).ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    sub.paused = false;
+    sub.pause = Pause::None;
     let mut events = host.events.borrow_mut();
     while let Some(event) = sub.parked.pop_back() {
         events.push_front(event);
@@ -580,7 +625,7 @@ fn net_take<'s>(scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32) -> Res
 /// remembered per lease (an unreleased lease that is garbage collected has the same effect, later).
 /// `Unsupported` for a buffer that is shared or undetachable; the socket is not consulted.
 #[native(side_effect = "any", path = "net.release", needs = "runtime")]
-fn net_release<'s>(_scope:&mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
+fn net_release<'s>(_scope: &mut v8::PinScope<'s, '_>, key: ScopeKey, id: u32, buffer: v8::Local<'s, v8::Value>) -> Result<(), NativeError> {
     let _ = (key, id);
     let buffer = v8::Local::<v8::ArrayBuffer>::try_from(buffer).map_err(|_| NativeError::type_error("buffer must be an ArrayBuffer"))?;
     if buffer.was_detached() {
@@ -614,14 +659,6 @@ fn writer_of(host: &HostState, key: ScopeKey, id: u32) -> Result<Writer, NativeE
     Ok(Writer { socket, lp, shared: Rc::clone(&sub.shared), runtime: sub.runtime })
 }
 
-/// A write on `stream`: the bytes the kernel took, `Ok(0)` when it would block.
-fn kernel_write(stream: &TcpStream, bytes: &[u8]) -> Result<usize, std::io::Error> {
-    match (&*stream).write(bytes) {
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => Ok(0),
-        other => other,
-    }
-}
-
 /// `native.net.directWrite(id, data)`: the direct lane. A plain non-blocking write; answers the
 /// bytes the kernel took, 0 when it would block or while the outbox is busy (queued bytes go
 /// first). A write error throws its errno and the socket emits `error` and closes; `BrokenPipe`
@@ -640,8 +677,7 @@ fn net_direct_write(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBuf
         return Ok(0);
     }
     drop(out);
-    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    match data.with_bytes(|bytes| kernel_write(stream, bytes)) {
+    match data.with_bytes(|bytes| socket.try_write(bytes)) {
         Ok(n) => Ok(n),
         Err(error) => {
             let code = errno::errno_of(&error);
@@ -676,18 +712,16 @@ fn net_put(host: &mut HostState, key: ScopeKey, id: u32, data: ArrayBufferArg<'_
         }
         return Ok(take);
     }
-    let stream = socket.stream().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
-    let (kernel, rest) = match data
-        .with_bytes(|bytes| kernel_write(stream, bytes).map(|n| (n, bytes[n..bytes.len().min(n.saturating_add(max))].to_vec())))
-    {
-        Ok(pair) => pair,
-        Err(error) => {
-            drop(out);
-            let code = errno::errno_of(&error);
-            shared.fail(code);
-            return Err(NativeError::Errno(code));
-        }
-    };
+    let (kernel, rest) =
+        match data.with_bytes(|bytes| socket.try_write(bytes).map(|n| (n, bytes[n..bytes.len().min(n.saturating_add(max))].to_vec()))) {
+            Ok(pair) => pair,
+            Err(error) => {
+                drop(out);
+                let code = errno::errno_of(&error);
+                shared.fail(code);
+                return Err(NativeError::Errno(code));
+            }
+        };
     out.accepted += kernel as u64;
     out.sent += kernel as u64;
     if rest.is_empty() {
@@ -751,10 +785,20 @@ fn net_flushed(
 /// already is). Idempotent.
 #[native(side_effect = "any", path = "net.end", needs = "runtime")]
 fn net_end(host: &mut HostState, key: ScopeKey, id: u32) -> Result<(), NativeError> {
-    let Writer { socket, shared, .. } = writer_of(host, key, id)?;
+    let Writer { socket, lp, shared, runtime } = writer_of(host, key, id)?;
     let mut out = shared.out.borrow_mut();
     if !std::mem::replace(&mut out.ended, true) && !out.writing && out.failed.is_none() {
-        socket.shutdown_write();
+        if !socket.is_tls() {
+            socket.shutdown_write();
+            return Ok(());
+        }
+        // `close_notify` then the FIN take the loop: the write pump does both once the outbox is empty.
+        out.writing = true;
+        drop(out);
+        if let Err(error) = host.spawn_pump(runtime, &shared, Box::pin(write_pump(socket, lp, Rc::clone(&shared)))) {
+            shared.out.borrow_mut().writing = false;
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -774,11 +818,13 @@ fn io_run(
         io,
         poll_fn(move |cx| {
             if idle.live.get() == 0 {
-                Poll::Ready(Ok(()))
-            } else {
-                idle.waiter.set(cx);
-                Poll::Pending
+                return Poll::Ready(Ok(()));
             }
+            let mut waiters = idle.waiters.borrow_mut();
+            if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                waiters.push(cx.waker().clone());
+            }
+            Poll::Pending
         }),
     ))
 }
@@ -802,7 +848,7 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
     let (shared, owner, runtime) = (Rc::clone(&sub.shared), sub.owner, sub.runtime);
     // A paused socket holds its events back, in order. A socket the guest closed does not: its
     // `Close` (and nothing before it) goes through.
-    if sub.paused && !shared.stop.get() {
+    if sub.pause.parks(&event.kind, !sub.parked.is_empty()) && !shared.stop.get() {
         if let Some(sub) = host.subs.get_mut(&id) {
             sub.parked.push_back(event);
         }
@@ -819,10 +865,15 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
         }
         EventKind::End => (KIND_END, 0, 0),
         EventKind::Error(code) => (KIND_ERROR, code, 0),
+        EventKind::Failed(code) => (KIND_FAILED, code, 0),
         EventKind::Drain => (KIND_DRAIN, 0, 0),
         EventKind::Accept { stream, port } => {
             shared.queued.set(shared.queued.get() - 1);
             shared.space.wake();
+            // The guest closed the listener: nothing would take this connection. Dropping `stream` closes it.
+            if shared.stop.get() {
+                return;
+            }
             let accepted =
                 host.reserve_socket().and_then(|new| host.insert_socket(new, Socket::accepted(owner, runtime, stream)).map(|()| new));
             match accepted {
@@ -853,7 +904,9 @@ fn deliver(scope: &mut v8::PinScope<'_, '_, ()>, event: Event) {
     {
         let idle = &sub.shared.idle;
         idle.live.set(idle.live.get() - 1);
-        idle.waiter.wake();
+        for waker in idle.waiters.borrow_mut().drain(..) {
+            waker.wake();
+        }
     }
 }
 

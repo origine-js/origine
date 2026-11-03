@@ -39,15 +39,16 @@ const v6Text = o => {
 };
 
 // The parsers are natives (src/api/addr.zig) that fill `scratch`: octets at 0..16 and, for a socket address, the port as a
-// u16 at 16..18. A parse is synchronous and never calls back into JS, so one scratch per realm is enough; the instance
-// copies out the octets it keeps. The natives are bound at install, after this module is evaluated, so `native.addr` is
+// u16 at 16..18 and the scope id as a u32 at 20..24. A parse is synchronous and never calls back into JS, so one
+// scratch per realm is enough; the instance copies out the octets it keeps. The natives are bound at install, after this module is evaluated, so `native.addr` is
 // read at call time.
 let native;
 export const link = value => {
   native = value;
 };
-const scratch = new Uint8Array(18);
+const scratch = new Uint8Array(24);
 const scratchPort = new Uint16Array(scratch.buffer, 16, 1);
+const scratchScope = new Uint32Array(scratch.buffer, 20, 1);
 const familyOctets = family => scratch.slice(0, family === 4 ? 4 : 16);
 
 export class IpAddr {
@@ -154,22 +155,27 @@ export class IpAddr {
 export class SocketAddr {
   #ip;
   #port;
-  constructor(made, ip, port) {
+  #scopeId;
+  constructor(made, ip, port, scopeId) {
     if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
     this.#ip = ip;
     this.#port = port;
+    this.#scopeId = scopeId;
     seal(this);
   }
-  static new(ip, port) {
+  /** `scopeId` is the IPv6 zone as a number, like Rust's `SocketAddrV6`: 0 (none) unless `ip` is IPv6. */
+  static new(ip, port, scopeId = 0) {
     if (!(ip instanceof IpAddr)) throw new TypeError('ip must be an IpAddr');
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new TypeError('port must be an integer in 0..65535');
-    return new SocketAddr(token, ip, port);
+    if (!Number.isInteger(scopeId) || scopeId < 0 || scopeId > 0xffffffff) throw new TypeError('scopeId must be an integer in 0..4294967295');
+    if (scopeId !== 0 && !ip.isV6()) throw new TypeError('only an IPv6 address has a scopeId');
+    return new SocketAddr(token, ip, port, scopeId);
   }
-  /** `1.2.3.4:53` or `[::1]:853`, as Rust's `SocketAddr::from_str`: v6 needs brackets, v4 must not have them. */
+  /** `1.2.3.4:53`, `[::1]:853` or `[fe80::1%2]:853`, as Rust's `SocketAddr::from_str`: v6 needs brackets, v4 must not have them, the zone is a number. */
   static parse(text) {
     const family = native.addr.parseSocket(text, scratch);
     if (!family) throw new TypeError(`invalid socket address: ${JSON.stringify(text)}`);
-    return new SocketAddr(token, new IpAddr(token, familyOctets(family)), scratchPort[0]);
+    return new SocketAddr(token, new IpAddr(token, familyOctets(family)), scratchPort[0], scratchScope[0]);
   }
   get ip() {
     return this.#ip;
@@ -177,11 +183,16 @@ export class SocketAddr {
   get port() {
     return this.#port;
   }
+  /** The IPv6 zone (an interface index) or 0. */
+  get scopeId() {
+    return this.#scopeId;
+  }
   equals(other) {
-    return other instanceof SocketAddr && this.#port === other.#port && this.#ip.equals(other.#ip);
+    return other instanceof SocketAddr && this.#port === other.#port && this.#scopeId === other.#scopeId && this.#ip.equals(other.#ip);
   }
   toString() {
-    return this.#ip.isV6() ? `[${this.#ip}]:${this.#port}` : `${this.#ip}:${this.#port}`;
+    if (!this.#ip.isV6()) return `${this.#ip}:${this.#port}`;
+    return this.#scopeId === 0 ? `[${this.#ip}]:${this.#port}` : `[${this.#ip}%${this.#scopeId}]:${this.#port}`;
   }
 }
 

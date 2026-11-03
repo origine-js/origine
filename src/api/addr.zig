@@ -4,10 +4,11 @@
 //!
 //!     bytes 0..16   the octets (4 used for IPv4, 16 for IPv6)
 //!     bytes 16..18  the port, a native-endian u16 (`parseSocket` only)
+//!     bytes 20..24  the IPv6 scope id, a native-endian u32 (`parseSocket` only; 0 when there is none)
 //!
 //! The result is the family (4 or 6), or 0 for text that is no address. Invalid text is an ordinary result,
 //! not an error, so the errno cell is never touched; the glue builds the `TypeError`. The rules are Rust's
-//! `FromStr` for `Ipv4Addr`, `Ipv6Addr` and `SocketAddr` (no zone, no whitespace, no leading zeros in an octet,
+//! `FromStr` for `Ipv4Addr`, `Ipv6Addr` and `SocketAddr` (a zone only as a numeric scope id in a socket address, no whitespace, no leading zeros in an octet,
 //! leading zeros allowed in a port).
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,7 +17,7 @@ const binding = @import("binding.zig");
 const ScopeCore = @import("host.zig").ScopeCore;
 
 pub const ip_len = 16;
-pub const socket_len = 18;
+pub const socket_len = 24;
 /// `[ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255]:65535` is the longest address text (53 bytes).
 const max_text = 64;
 
@@ -102,24 +103,38 @@ pub fn ip(text: []const u8, out: *[16]u8) u32 {
     return if (parseV4(text, out[0..4])) 4 else 0;
 }
 
-/// `a.b.c.d:port` or `[v6]:port` into `out`; the family, or 0. A port is decimal digits that fit a u16 (Rust
-/// allows leading zeros); a bracketed address must be IPv6 and a bare one IPv4.
-pub fn socket(text: []const u8, out: *[18]u8) u32 {
+/// A decimal `u32` or `u16` (Rust allows leading zeros): non-empty digits, no sign, no overflow.
+fn number(comptime T: type, digits: []const u8) ?T {
+    if (digits.len == 0) return null;
+    var value: u64 = 0;
+    for (digits) |c| {
+        if (!isDigit(c)) return null;
+        value = value * 10 + (c - '0');
+        if (value > std.math.maxInt(T)) return null;
+    }
+    return @intCast(value);
+}
+
+/// `a.b.c.d:port` or `[v6]:port` or `[v6%scope]:port` into `out`; the family, or 0. A bracketed address must be
+/// IPv6 and a bare one IPv4; the scope id is a number (Rust has no interface names) and only a bracketed address has one.
+pub fn socket(text: []const u8, out: *[24]u8) u32 {
     const bracketed = text.len > 0 and text[0] == '[';
     const close = std.mem.indexOfScalar(u8, text, if (bracketed) ']' else ':') orelse return 0;
     const colon = if (bracketed) close + 1 else close;
     if (colon >= text.len or text[colon] != ':') return 0;
-    const digits = text[colon + 1 ..];
-    if (digits.len == 0) return 0;
-    var port: u32 = 0;
-    for (digits) |c| {
-        if (!isDigit(c)) return 0;
-        port = port * 10 + (c - '0');
-        if (port > std.math.maxInt(u16)) return 0;
+    const port = number(u16, text[colon + 1 ..]) orelse return 0;
+    var address = text[@intFromBool(bracketed)..close];
+    var scope: u32 = 0;
+    if (bracketed) {
+        if (std.mem.indexOfScalar(u8, address, '%')) |at| {
+            scope = number(u32, address[at + 1 ..]) orelse return 0;
+            address = address[0..at];
+        }
     }
-    const family = ip(text[@intFromBool(bracketed)..close], out[0..16]);
+    const family = ip(address, out[0..16]);
     if (family != (if (bracketed) @as(u32, 6) else 4)) return 0;
-    std.mem.writeInt(u16, out[16..18], @intCast(port), builtin.cpu.arch.endian());
+    std.mem.writeInt(u16, out[16..18], port, builtin.cpu.arch.endian());
+    std.mem.writeInt(u32, out[20..24], scope, builtin.cpu.arch.endian());
     return family;
 }
 
@@ -146,7 +161,7 @@ pub fn parseIp(_: *ScopeCore, text: v8.Value, out: v8.Object) u32 {
     return ip(bytes, outOf(out, ip_len) orelse return 0);
 }
 
-/// `native.addr.parseSocket(text, out)`: `out` is a `Uint8Array` of at least 18 bytes.
+/// `native.addr.parseSocket(text, out)`: `out` is a `Uint8Array` of at least 24 bytes.
 pub fn parseSocket(_: *ScopeCore, text: v8.Value, out: v8.Object) u32 {
     var buffer: [max_text]u8 = undefined;
     const bytes = textOf(text, &buffer) orelse return 0;

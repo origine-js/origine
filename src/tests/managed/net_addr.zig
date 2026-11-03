@@ -27,13 +27,19 @@ test "net: IpAddr and SocketAddr parse, print and classify like Rust's" {
         \\  const s = SocketAddr.parse('[::1]:853');
         \\  out.socket = s.toString() === '[::1]:853' && s.port === 853 && s.ip.isV6() && SocketAddr.parse('1.2.3.4:53').toString() === '1.2.3.4:53' && SocketAddr.parse('1.2.3.4:00053').port === 53 && SocketAddr.parse('[::ffff:1.2.3.4]:65535').port === 65535 && SocketAddr.new(IpAddr.v4(1, 2, 3, 4), 0).port === 0 && s.equals(SocketAddr.new(IpAddr.parse('::1'), 853));
         \\  out.socketBad = ['1.2.3.4', '[1.2.3.4]:53', '::1:53', '1.2.3.4:65536', '1.2.3.4:', ':53', '[::1]', '1.2.3.4:5a', '[::1]]:53', 5, undefined].map(x => throws(() => SocketAddr.parse(x))).every(n => n === 'TypeError') && throws(() => SocketAddr.new(IpAddr.v4(1, 1, 1, 1), 70000)) === 'TypeError' && throws(() => SocketAddr.new('1.1.1.1', 1)) === 'TypeError';
+        \\  const z = SocketAddr.parse('[fe80::1%2]:853');
+        \\  out.zone = z.scopeId === 2 && z.port === 853 && z.toString() === '[fe80::1%2]:853' && SocketAddr.parse('[::1]:1').scopeId === 0 && SocketAddr.parse('1.2.3.4:5').scopeId === 0
+        \\    && SocketAddr.parse('[fe80::1%0]:1').toString() === '[fe80::1]:1' && SocketAddr.parse('[fe80::1%4294967295]:1').scopeId === 4294967295
+        \\    && z.equals(SocketAddr.new(IpAddr.parse('fe80::1'), 853, 2)) && !z.equals(SocketAddr.new(IpAddr.parse('fe80::1'), 853)) && SocketAddr.new(IpAddr.parse('::1'), 1).scopeId === 0
+        \\    && ['[fe80::1%eth0]:1', '[fe80::1%]:1', '[fe80::1%4294967296]:1', '[fe80::1%-1]:1', 'fe80::1%2:1', '1.2.3.4%2:5', '[1.2.3.4%2]:5', '[fe80::1%2%3]:1'].every(x => throws(() => SocketAddr.parse(x)) === 'TypeError')
+        \\    && throws(() => SocketAddr.new(IpAddr.v4(1, 1, 1, 1), 1, 2)) === 'TypeError' && throws(() => SocketAddr.new(IpAddr.parse('::1'), 1, -1)) === 'TypeError' && throws(() => IpAddr.parse('fe80::1%2')) === 'TypeError';
         \\  out.shared = IpAddr === (await import('origine:@std/net')).IpAddr && throws(() => new SocketAddr()) === 'TypeError';
         \\  out.frozen = Object.isFrozen(IpAddr.parse('1.2.3.4')) && Object.isFrozen(IpAddr) && Object.isFrozen(IpAddr.prototype);
         \\}
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.v4 && report.v6 && report.bad && report.octets && report.classes && report.canonical && report.equals && report.socket && report.socketBad && report.shared && report.frozen");
+    try check(p.scope, "report.v4 && report.v6 && report.bad && report.octets && report.classes && report.canonical && report.equals && report.socket && report.socketBad && report.zone && report.shared && report.frozen");
 }
 
 test "net: api.dns returns the module's IpAddr and does not re-export the classes" {

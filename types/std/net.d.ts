@@ -34,11 +34,14 @@ declare module 'origine:@std/net' {
   /** An address and a port. */
   export class SocketAddr {
     private constructor();
-    static new(ip: IpAddr, port: number): SocketAddr;
-    /** `1.2.3.4:53` or `[::1]:853`. */
+    /** `scopeId` is the IPv6 zone as a number; it must be 0 for an IPv4 address. */
+    static new(ip: IpAddr, port: number, scopeId?: number): SocketAddr;
+    /** `1.2.3.4:53`, `[::1]:853` or `[fe80::1%2]:853`: the zone is a number, as in Rust (no interface names). */
     static parse(text: string): SocketAddr;
     readonly ip: IpAddr;
     readonly port: number;
+    /** The IPv6 zone (an interface index), or 0. */
+    readonly scopeId: number;
     equals(other: unknown): boolean;
     toString(): string;
   }

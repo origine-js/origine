@@ -11,7 +11,7 @@ Enable instrumentation with `V8_STARTUP_TRACE=1`:
 
 ```sh
 V8_STARTUP_TRACE=1 zig-out/bin/origine </dev/null
-V8_STARTUP_TRACE=1 zig-out/bin/origine examples/timers/init.js
+V8_STARTUP_TRACE=1 zig-out/bin/origine examples/io/timers/init.js
 ```
 
 The shell buffers host I/O, platform creation, V8 initialization, runtime/isolate

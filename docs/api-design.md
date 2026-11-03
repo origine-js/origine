@@ -11,7 +11,7 @@ the Zig/Rust agreement is in [async-host-contract.md](async-host-contract.md).
 
 The host lives in `src/api/` (re-exported by `src/api.zig`), the guest JS in `src/js/`, the
 Rust natives in `rust/crates/origine_api*`. Tests: `src/tests/managed/api.zig`. Run an example with
-`zig build run -- examples/draft-1/init.js args...`.
+`zig build run -- examples/fs/sync-and-async/init.js args...`.
 
 | Area | State |
 |---|---|
@@ -331,4 +331,4 @@ Decided: the evaluated `init.js` is snapshotted and `main` is not called while s
 
 - `zig build test` runs the managed runtime tests, including `src/tests/managed/capabilities.zig` (brands, hardening) and `src/tests/managed/api.zig` (monotonic narrowing under the host ceiling, contexts inheriting no authority, native and JS import handlers, hooks, makers, transformers, `origineProvider` and its allowlist, `ImportHook.link`, code caches, the refcounted module table, preload values, sync and async fs, `io` lifetime and cancellation, pinned and detached buffers, net echo and events, timers, snapshot restore of the prepared API); `shared_link.zig` and `async_resolve.zig` cover the managed layer.
 - `just check-contracts` and `just check-rust` verify the Zig/Rust/C agreement ([contracts.md](contracts.md)).
-- Manual: `zig build run -- examples/draft-1/init.js`, `examples/timers/init.js`, `examples/net/*.js`, `examples/typescript/init.ts`.
+- Manual: `zig build run -- examples/fs/sync-and-async/init.js`, `examples/io/timers/init.js`, `examples/net/*/init.js`, `examples/typescript/init.ts` (all of `examples/` is listed in [examples/README.md](../examples/README.md)).

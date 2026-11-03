@@ -8,13 +8,13 @@ vendored, so the build never fetches a crate and aws-lc-sys's cc/cmake builder n
 | piece | where |
 | --- | --- |
 | Zig build of AWS-LC | `lib/aws-lc/` (package: `build.zig`, hard-coded lists in `sources.zig`, module `aws_lc`) |
-| vendored crates | `rust/vendor/aws-lc-rs`, `rust/vendor/aws-lc-sys` (`[patch.crates-io]` in `rust/Cargo.toml`) |
-| cargo side | `rust/vendor/aws-lc-sys/build.rs`: emits the link/include directives, nothing else |
+| vendored crates | `lib/aws-lc/aws-lc-rs`, `lib/aws-lc/aws-lc-sys` (`[patch.crates-io]` in `rust/Cargo.toml`) |
+| cargo side | `lib/aws-lc/aws-lc-sys/build.rs`: emits the link/include directives, nothing else |
 | wiring | `build.zig`: the `aws_lc` dependency, `awsLcPrefix`, `CargoAwsLc`, `cargoCommand`, the `aws-lc-prefix` step; `justfile`: `test-net` |
 
 ## Source: the vendored aws-lc-sys crate
 
-`rust/vendor/aws-lc-sys` is the crates.io package whose version `rust/Cargo.lock` pins (0.47.0,
+`lib/aws-lc/aws-lc-sys` is the crates.io package whose version `rust/Cargo.lock` pins (0.47.0,
 AWS-LC 5.12.0), with its AWS-LC sources kept and its cc/cmake/bindgen machinery removed. It is not
 an AWS-LC release: it is the exact tree the Rust bindings were generated from, so the symbol
 prefix headers, the pregenerated `universal` bindings and the C sources cannot skew.
@@ -79,10 +79,10 @@ the headers must define `BORINGSSL_PREFIX` to the contents of `links`.
 
 ## Updating
 
-Bump `aws-lc-rs`/`aws-lc-sys` in `rust/Cargo.lock`, replace `rust/vendor/aws-lc-sys` with the new
+Bump `aws-lc-rs`/`aws-lc-sys` in `rust/Cargo.lock`, replace `lib/aws-lc/aws-lc-sys` with the new
 crate (keeping `Cargo.toml`, `build.rs`, `src/lib.rs`, `README.md` and the trimmed `aws-lc/` and
 `generated-include/`), then regenerate `lib/aws-lc/sources.zig` as its header describes and update
-`crate`/`links` if the version changed. `rust/vendor/aws-lc-rs` only pins the pair; it needs no
+`crate`/`links` if the version changed. `lib/aws-lc/aws-lc-rs` only pins the pair; it needs no
 changes unless aws-lc-rs itself does. Check `zig build aws-lc-prefix`, `zig build clippy`,
 `zig build test` and `just test-net`.
 

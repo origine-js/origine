@@ -76,13 +76,13 @@ Prefer pushing logic into V8-free crates so Miri can check it, and keep `unsafe`
 | `just format` | apply formatters |
 
 Clippy goes through Zig because the `v8` crate's build script needs the `V8_ZIG_*` environment
-(`rust/scripts/cargo-v8.py`); plain `cargo clippy --workspace` fails. Crates without V8 can use
+(`rust/scripts/cargo-env.py`); plain `cargo clippy --workspace` fails. Crates without V8 can use
 plain cargo. Tests that call the real loop need `ORIGINE_IO_LIB` ([origine_io docs](../crates/origine_io/docs/testing.md)).
 
 ## How Rust links into the executable
 
 1. `rust/build.zig` (the `origine_rs` package) runs `cargo build --release --locked --target <triple>
-   --target-dir rust/target` (through `cargo-v8.py`, with `--no-default-features` when
+   --target-dir rust/target` (through `cargo-env.py`, with `--no-default-features` when
    `-Dtypescript=false`) and copies `liborigine_native.a` (`origine_native.lib` on Windows MSVC)
    into the build cache. `crate-type = ["staticlib"]`.
 2. **Partial link / symbol hiding.** The archive carries its own copy of Rust's `std`, which

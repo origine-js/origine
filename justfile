@@ -53,7 +53,7 @@ tsc := typescript
 # tests. origine_api (the V8 glue) cannot run under Miri because it links V8; its pure-Rust logic
 # lives in origine_api_core, which is Miri-tested. Miri runs origine_io against its pure-Rust fake of the C API (cfg(miri)).
 check-rust:
-    # Through zig: the `v8` crate's build script needs the V8_ZIG_* environment (rust/scripts/cargo-v8.py).
+    # Through zig: the `v8` crate's build script needs the V8_ZIG_* environment (rust/scripts/cargo-env.py).
     zig build clippy -Drust_cargo_offline=true
     cd rust && MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --offline --locked -p origine_io -p origine_oxc -p origine_repl -p origine_api_core -p origine_api_fs -p origine_api_macros
 

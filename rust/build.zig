@@ -65,28 +65,23 @@ fn optionPath(b: *std.Build, name: []const u8, description: []const u8) std.Buil
         std.debug.panic("-Dv8_archive also needs -D{s}", .{name});
 }
 
-/// A cargo invocation for this package. With `v8`, cargo runs through `scripts/cargo-v8.py`
-/// (V8_ZIG_* exports); with `aws_lc`, through `scripts/cargo-aws-lc.py` (ORIGINE_AWS_LC_PREFIX).
+/// A cargo invocation for this package, through `scripts/cargo-env.py`, which exports the paths the
+/// build scripts of the vendored crates read: V8_ZIG_* (`v8`) and ORIGINE_AWS_LC_PREFIX (`aws_lc`).
 fn cargoCommand(b: *std.Build, v8: ?V8, aws_lc: ?std.Build.LazyPath, offline: bool, args: []const []const u8) *std.Build.Step.Run {
     const run = std.Build.Step.Run.create(b, b.fmt("cargo {s}", .{args[0]}));
-    // `--no-cache`: the scripts have no dependencies and a build must not need a writable uv cache.
+    // `--no-cache`: the script has no dependencies and a build must not need a writable uv cache.
+    run.addArgs(&.{ "uv", "run", "--quiet", "--no-cache", "--script" });
+    run.addFileArg2(b.path("scripts/cargo-env.py"), .{ .make_absolute = true });
     if (v8) |paths| {
-        run.addArgs(&.{ "uv", "run", "--quiet", "--no-cache", "--script" });
-        run.addFileArg2(b.path("scripts/cargo-v8.py"), .{ .make_absolute = true });
-        run.addFileArg2(paths.archive, .{});
-        run.addFileArg2(paths.mimalloc, .{});
-        run.addFileArg2(paths.icu, .{});
-        run.addFileArg2(paths.root, .{});
-        run.addFileArg2(paths.compile_commands, .{});
-        run.addFileArg2(paths.binding, .{});
+        run.addFileArg2(paths.archive, .{ .prefix = "V8_ZIG_ARCHIVE=" });
+        run.addFileArg2(paths.mimalloc, .{ .prefix = "V8_ZIG_MIMALLOC=" });
+        run.addFileArg2(paths.icu, .{ .prefix = "V8_ZIG_ICU=" });
+        run.addFileArg2(paths.root, .{ .prefix = "V8_ZIG_V8_ROOT=" });
+        run.addFileArg2(paths.compile_commands.dirname(), .{ .prefix = "V8_ZIG_GN_OUT=" });
+        run.addFileArg2(paths.binding, .{ .prefix = "V8_ZIG_BINDING=" });
     }
-    if (aws_lc) |prefix| {
-        run.addArgs(&.{ "uv", "run", "--quiet", "--no-cache", "--script" });
-        run.addFileArg2(b.path("scripts/cargo-aws-lc.py"), .{ .make_absolute = true });
-        run.addDirectoryArg2(prefix, .{ .make_absolute = true });
-    }
-    run.addArg("cargo");
-    run.addArg(args[0]);
+    if (aws_lc) |prefix| run.addFileArg2(prefix, .{ .prefix = "ORIGINE_AWS_LC_PREFIX=" });
+    run.addArgs(&.{ "--", "cargo", args[0] });
     if (offline) run.addArg("--offline");
     run.addArg("--manifest-path");
     run.addFileArg2(b.path("Cargo.toml"), .{ .make_absolute = true });

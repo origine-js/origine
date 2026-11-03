@@ -127,7 +127,7 @@ automatically: the macOS release external-link and Linux `ld -r` paths (they nee
 
 ## H. AWS-LC (aws-lc-sys bindings <-> `lib/aws-lc`)
 
-Source of truth: the vendored aws-lc-sys crate (`rust/vendor/aws-lc-sys`), the version
+Source of truth: the vendored aws-lc-sys crate (`lib/aws-lc/aws-lc-sys`), the version
 `rust/Cargo.lock` pins. The `lib/aws-lc` package builds its AWS-LC tree with the symbol prefix of its
 `links` key, and cargo uses the same crate's pregenerated `universal` bindings: the C sources, the
 prefix headers and the bindings are one tree, so they cannot skew. The per-target source lists are

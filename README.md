@@ -23,7 +23,7 @@ options are in [docs/BUILD.md](docs/BUILD.md).
 ```sh
 zig build                       # build zig-out/bin/origine
 zig build run                   # start the REPL
-zig build run -- examples/timers/init.js
+zig build run -- examples/io/timers/init.js
 zig build test                  # V8 package and managed runtime tests
 ```
 
@@ -64,7 +64,7 @@ export async function main(api) {
 itself holds no authority: the hook names the grant that reads the files.
 
 ```js
-// examples/graph-hello/init.js
+// examples/graph/hello/init.js
 import { ImportHandler } from 'origine:@std/graph/import';
 import { ImportResolver } from 'origine:@std/graph/resolve';
 import { relative } from 'origine:@std/graph/resolve/layers';
@@ -72,7 +72,7 @@ import { fsProvider } from 'origine:@std/graph/providers';
 import { eprintln } from 'origine:@std/debug';
 
 export async function main(api) {
-  const src = api.fs.requestSync({ handle: 'plain', root: 'examples/graph-hello', access: 'r' });
+  const src = api.fs.requestSync({ handle: 'plain', root: 'examples/graph/hello', access: 'r' });
   const handler = ImportHandler.make({
     resolver: ImportResolver.layered().layer(relative()),   // './x' resolves against the importer
     hooks: [fsProvider({ fs: src, read: 'copy' })],          // reads the files through `src`
@@ -84,17 +84,17 @@ export async function main(api) {
 ```
 
 ```js
-// examples/graph-hello/main.js
+// examples/graph/hello/main.js
 import { greet } from './greet.js';
 export const message = greet('graph');
 ```
 
 ```js
-// examples/graph-hello/greet.js
+// examples/graph/hello/greet.js
 export const greet = name => `hello, ${name}`;
 ```
 
-`zig build run -- examples/graph-hello/init.js` runs it. The graph API is described in
+`zig build run -- examples/graph/hello/init.js` runs it. The graph API is described in
 [src/js/docs/graph.md](src/js/docs/graph.md) and [docs/graph-api.md](docs/graph-api.md).
 
 ### Capabilities
@@ -111,22 +111,10 @@ export async function main(api) {
 ```
 
 The design, narrowing rules and security properties are in [docs/api-design.md](docs/api-design.md);
-the guest modules are in [src/js/docs/](src/js/docs/README.md). Runnable examples live in `examples/`:
-
-| Example | Shows |
-| --- | --- |
-| [examples/draft-1](examples/draft-1/init.js) | sync and async fs, `io`, a context with an import handler and preload |
-| [examples/timers](examples/timers/init.js) | `io.sleepUntil`, cancellable timers |
-| [examples/net](examples/net/README.md) | loopback TCP with promises and with events |
-| [examples/typescript](examples/typescript/init.ts) | TypeScript inits; `children.ts` loads TypeScript and JSX in a context |
-| [examples/graph-hello](examples/graph-hello/init.js) | the module graph in one program (above) |
-| [examples/graph-basic](examples/graph-basic/init.js) | declaring, loading and evaluating a recipe step by step |
-| [examples/graph-hooks](examples/graph-hooks/init.js) | hooks answer resolved ids in order |
-| [examples/graph-resolve](examples/graph-resolve/init.js) | resolver layers and the `NotFound` case |
-| [examples/graph-transform](examples/graph-transform/init.js) | transformers between reading a source and compiling it |
-| [examples/graph-cache](examples/graph-cache/init.js) | `ImportCache` tables and code caches |
-| [examples/graph-cross-context](examples/graph-cross-context/init.js) | two contexts sharing one graph |
-| [examples/graph-migrate-scope](examples/graph-migrate-scope/init.js) | the removed `api.scope` call and its replacement |
+the guest modules are in [src/js/docs/](src/js/docs/README.md). Runnable examples, one folder per API area, are
+indexed in [examples/README.md](examples/README.md): file system, I/O runtimes, TCP, TLS, HTTP/2, DNS, host, isolates,
+the module graph, contexts and the `origine:@std/*` modules. The places where the API is harder to use than it should
+be are listed in [docs/api-unintuitive.md](docs/api-unintuitive.md).
 
 ## Repository layout
 

@@ -118,6 +118,8 @@ intptr_t oio_loop_pollable(oio_loop *loop);
 int64_t oio_loop_next_timer_ns(oio_loop *loop);
 uint32_t oio_loop_active(oio_loop *loop);
 uint64_t oio_loop_caps(oio_loop *loop);
+/* The backend running the loop, an `oio_backend` other than OIO_BACKEND_AUTO: what AUTO resolved to. */
+uint32_t oio_loop_backend(oio_loop *loop);
 
 int oio_nop(oio_loop *loop, oio_op *op, oio_cb cb);
 int oio_open(oio_loop *loop, oio_op *op, oio_fd dirfd, const char *path, uint64_t flags, uint32_t mode, oio_cb cb);

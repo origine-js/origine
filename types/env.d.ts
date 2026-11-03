@@ -1,6 +1,6 @@
 /** `api.host.env`: command-line arguments and environment variables configured by the host. */
 export interface EnvCap {
-  /** The arguments the program was started with. Allocates a frozen array. */
+  /** The program's arguments, `[init, ...userArgs]`: element 0 is the init path, not the first user argument. Allocates a frozen array. */
   args(): readonly string[];
   /** The value of the variable `name`, or `undefined` when it is unset. */
   get(name: string): string | undefined;

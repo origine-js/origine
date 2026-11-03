@@ -72,12 +72,10 @@ declare module "origine:@std/fs" {
     flush(): Outcome<F, void>;
   }
 
-  /** `std::fs::OpenOptions`: a builder, validated as in Rust when `open` runs. `append` is `Unsupported`. */
+  /** `std::fs::OpenOptions`: a builder, validated as in Rust when `open` runs. There is no `append`: append mode is not shipped. */
   export interface OpenOptions<F extends Fs = Fs> {
     read(on: boolean): this;
     write(on: boolean): this;
-    /** Not supported yet: `open` fails `Unsupported` when it is on. */
-    append(on: boolean): this;
     /** Needs `write(true)`. */
     truncate(on: boolean): this;
     /** Needs `write(true)`. */

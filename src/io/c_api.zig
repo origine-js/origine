@@ -69,6 +69,11 @@ pub export fn oio_loop_active(loop: *Loop) u32 {
     return loop.active;
 }
 
+/// The backend running the loop (`oio_backend`, never `OIO_BACKEND_AUTO`): what `auto` resolved to.
+pub export fn oio_loop_backend(loop: *Loop) u32 {
+    return @intFromEnum(loop.kind);
+}
+
 pub export fn oio_loop_caps(loop: *Loop) u64 {
     return @bitCast(loop.caps());
 }

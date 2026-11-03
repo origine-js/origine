@@ -1,6 +1,6 @@
 # `api.net`: TCP
 
-`api.net` exists wherever `api.io` does (the embedder's runtime ceiling). Every socket belongs to the `io` runtime it was created with; closing the runtime invalidates its sockets. **Which addresses are reachable is the embedder's [network ceiling](../../../docs/net-grant.md)**: loopback only by default (`127.0.0.1`, `localhost`, `::1`), wider when the embedder says so (the shell's `--net-connect` and `--net-listen`). An address no rule allows rejects with `PermissionDenied`, the address as the error's `subject`.
+`api.net` exists wherever `api.io` does (the embedder's runtime ceiling). Every socket belongs to the `io` runtime it was created with; closing the runtime invalidates its sockets. **Which addresses are reachable is the embedder's [network ceiling](../../../docs/net-grant.md)**: loopback only by default (`127.0.0.1`, `localhost`, `::1`), wider when the embedder says so (the shell's `--net-connect` and `--net-listen`). An address no rule allows rejects with `PermissionDenied`, the address with its port (`10.0.0.1:80`) as the error's `subject`.
 
 ```js
 const io = api.io.create();

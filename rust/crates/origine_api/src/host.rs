@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use origine_api_core::slab::Slab;
-use origine_api_core::{Backend, Ceiling, NativeError, errno};
+use origine_api_core::{Backend, BackendChoice, Ceiling, NativeError, errno};
 use origine_api_fs::{Access, Grant};
 use origine_io::fs::Dir;
 use origine_io::rt::Runtime;
@@ -188,24 +188,32 @@ impl HostState {
 
     // ---- runtimes ----------------------------------------------------------------------
 
-    /// Creates a runtime owned by `owner`, enforcing the embedder's ceiling.
-    pub fn create_runtime(&mut self, owner: ScopeKey, backend: Backend, entries: Option<u32>) -> Result<u32, NativeError> {
-        self.ceiling.check_create(self.runtimes.len(), backend).map_err(NativeError::Errno)?;
+    /// Creates a runtime owned by `owner`, enforcing the embedder's ceiling. Answers its id and the backend
+    /// that is running, which is what `BackendChoice::Auto` resolved to.
+    pub fn create_runtime(&mut self, owner: ScopeKey, choice: BackendChoice, entries: Option<u32>) -> Result<(u32, Backend), NativeError> {
+        self.ceiling.check_create(self.runtimes.len(), choice).map_err(NativeError::Errno)?;
         let id = self.next_runtime;
         let next = id.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
-        let kind = match backend {
-            Backend::Auto => origine_io::Backend::Auto,
-            Backend::Uring => origine_io::Backend::Uring,
-            Backend::Kqueue => origine_io::Backend::KqueueGcd,
-            Backend::Threaded => origine_io::Backend::Threaded,
+        let kind = match choice {
+            BackendChoice::Auto => origine_io::BackendChoice::Auto,
+            BackendChoice::Named(Backend::Uring) => origine_io::BackendChoice::Named(origine_io::Backend::Uring),
+            BackendChoice::Named(Backend::Kqueue) => origine_io::BackendChoice::Named(origine_io::Backend::KqueueGcd),
+            BackendChoice::Named(Backend::Threaded) => origine_io::BackendChoice::Named(origine_io::Backend::Threaded),
         };
         let entries = entries.unwrap_or(self.ceiling.default_entries).min(1 << 16);
         let lp = Loop::new(Options { backend: kind, entries }).map_err(|_| NativeError::Errno(errno::UNSUPPORTED))?;
+        // The loop refuses `Iocp`, so a running one is never that.
+        let running = match lp.backend() {
+            origine_io::Backend::Uring => Backend::Uring,
+            origine_io::Backend::KqueueGcd => Backend::Kqueue,
+            origine_io::Backend::Threaded => Backend::Threaded,
+            origine_io::Backend::Iocp => return Err(NativeError::Errno(errno::UNSUPPORTED)),
+        };
         let lp = Rc::new(lp);
         let rt = Runtime::new(Rc::clone(&lp));
         self.next_runtime = next;
         self.runtimes.insert(id, RuntimeEntry { lp, rt: Some(rt), owner, state: RtState::Open, held: Vec::new() });
-        Ok(id)
+        Ok((id, running))
     }
 
     /// The open runtime `id` of `owner`; `BadHandle` for an unknown, foreign or closing one.

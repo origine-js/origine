@@ -16,6 +16,8 @@ pub const PostFn = backend_mod.PostFn;
 pub const Loop = struct {
     allocator: std.mem.Allocator,
     backend: backend_mod.Backend,
+    /// The backend that is running: what `auto` resolved to, never `auto`.
+    kind: backend_mod.Kind,
     /// Submitted ops whose callback has not run yet.
     active: u32 = 0,
     dispatching: bool = false,
@@ -26,7 +28,8 @@ pub const Loop = struct {
     pub fn create(allocator: std.mem.Allocator, options: Options) !*Loop {
         const loop = try allocator.create(Loop);
         errdefer allocator.destroy(loop);
-        loop.* = .{ .allocator = allocator, .backend = try createBackend(allocator, options) };
+        const made = try createBackend(allocator, options);
+        loop.* = .{ .allocator = allocator, .backend = made.backend, .kind = made.kind };
         return loop;
     }
 
@@ -246,31 +249,33 @@ pub const Loop = struct {
     }
 };
 
-fn createBackend(allocator: std.mem.Allocator, options: Options) !backend_mod.Backend {
+const Made = struct { backend: backend_mod.Backend, kind: backend_mod.Kind };
+
+fn createBackend(allocator: std.mem.Allocator, options: Options) !Made {
     const threaded = @import("backend/threaded.zig");
     const choice: backend_mod.Kind = @fromBackingInt(@intCast(options.backend));
     switch (choice) {
-        .threaded => return threaded.create(allocator, options),
+        .threaded => return .{ .backend = try threaded.create(allocator, options), .kind = .threaded },
         .uring => {
             const uring = @import("backend/uring.zig");
             if (!uring.supported) return error.Unsupported;
-            return uring.create(allocator, options);
+            return .{ .backend = try uring.create(allocator, options), .kind = .uring };
         },
         .kqueue_gcd => {
             const kqueue = @import("backend/kqueue.zig");
             if (!kqueue.supported) return error.Unsupported;
-            return kqueue.create(allocator, options);
+            return .{ .backend = try kqueue.create(allocator, options), .kind = .kqueue_gcd };
         },
         .iocp => return error.Unsupported,
         .auto => {
             if (builtin.os.tag == .linux) {
                 const uring = @import("backend/uring.zig");
-                if (uring.create(allocator, options)) |b| return b else |_| {}
+                if (uring.create(allocator, options)) |b| return .{ .backend = b, .kind = .uring } else |_| {}
             } else if (builtin.os.tag.isDarwin() or builtin.os.tag.isBSD()) {
                 const kqueue = @import("backend/kqueue.zig");
-                return kqueue.create(allocator, options);
+                return .{ .backend = try kqueue.create(allocator, options), .kind = .kqueue_gcd };
             }
-            return threaded.create(allocator, options);
+            return .{ .backend = try threaded.create(allocator, options), .kind = .threaded };
         },
     }
 }

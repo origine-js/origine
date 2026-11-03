@@ -1,15 +1,21 @@
 import type { HostError, IoError } from "./errors.d.ts";
 
 /**
- * The I/O backends. `'auto'` (the default) picks the first allowed one that works; the others
- * name one explicitly (`'uring'` on Linux, `'kqueue'` on macOS and BSD, `'threaded'` everywhere).
+ * An I/O backend that runs (`'uring'` on Linux, `'kqueue'` on macOS and BSD, `'threaded'` everywhere). It is what
+ * {@link Io.backend} reports, never `'auto'`; see {@link BackendChoice} for what `create` accepts.
  */
 export type Backend = "uring" | "kqueue" | "threaded";
+
+/**
+ * The backend {@link IoCap.create} is asked for: `'auto'` (the default) picks the first allowed one that works,
+ * and the resolved {@link Backend} is what the runtime reports.
+ */
+export type BackendChoice = Backend | "auto";
 
 /** Options of {@link IoCap.create}. */
 export interface IoOptions {
   /** The backend to use. Asking for one the host excluded or the system lacks is `Unsupported`. */
-  readonly backend?: Backend | "auto";
+  readonly backend?: BackendChoice;
   /** Submission queue entries of the backend: a positive integer (`TypeError` otherwise). */
   readonly entries?: number;
 }
@@ -43,7 +49,7 @@ export interface Io {
   readonly kind: "io";
   /** Numeric id of the runtime (not authority: every native re-checks ownership). */
   readonly id: number;
-  /** The backend that was chosen. */
+  /** The backend that runs: what `'auto'` resolved to, never `'auto'`. */
   readonly backend: Backend;
   /**
    * Closes the runtime, cancelling every pending operation and timer. Every call returns the

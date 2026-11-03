@@ -13,7 +13,8 @@ beside the implementation and list them here.
 | [docs/BUILD.md](docs/BUILD.md) | Requirements, build options, V8 patching loop, checks, Rust and TypeScript support |
 | [docs/repl.md](docs/repl.md) | Interactive REPL: multiline input, inspection, history, completion |
 | [docs/repl-architecture.md](docs/repl-architecture.md) | What the REPL does in Rust (parsing, line editor) and what stays in Zig and JS |
-| [examples/net/README.md](examples/net/README.md) | Loopback TCP demos |
+| [examples/README.md](examples/README.md) | Runnable examples, one folder per API area |
+| [docs/api-unintuitive.md](docs/api-unintuitive.md) | Places where the API is harder to use than it should be, found while writing the examples |
 
 ## Design and contracts
 

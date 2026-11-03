@@ -802,6 +802,12 @@ pub unsafe extern "C" fn oio_loop_active(l: *mut oio_loop) -> u32 {
 
 /// # Safety
 /// `l` must be a live loop.
+pub unsafe extern "C" fn oio_loop_backend(_l: *mut oio_loop) -> u32 {
+    sys::OIO_BACKEND_THREADED
+}
+
+/// # Safety
+/// `l` must be a live loop.
 pub unsafe extern "C" fn oio_loop_caps(_l: *mut oio_loop) -> u64 {
     sys::OIO_CAP_NOP
         | sys::OIO_CAP_FILE_IO

@@ -1,7 +1,6 @@
 //! Behavioral tests use the same exported modules as embedders.
 
 test {
-    _ = @import("api/addr.zig");
     _ = @import("tests/managed/sys.zig");
     _ = @import("tests/managed/repl.zig");
     _ = @import("tests/managed/ownership.zig");

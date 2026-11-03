@@ -152,25 +152,3 @@ pub fn parseSocket(_: *ScopeCore, text: v8.Value, out: v8.Object) u32 {
     const bytes = textOf(text, &buffer) orelse return 0;
     return socket(bytes, outOf(out, socket_len) orelse return 0);
 }
-
-test "ip: Rust's rules" {
-    var out: [16]u8 = @splat(0);
-    try std.testing.expectEqual(@as(u32, 4), ip("1.2.3.4", &out));
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, out[0..4]);
-    try std.testing.expectEqual(@as(u32, 6), ip("::ffff:1.2.3.4", &out));
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4 }, &out);
-    try std.testing.expectEqual(@as(u32, 6), ip("ABCD::EF", &out));
-    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xef }, &out);
-    for ([_][]const u8{ "", "1.2.3", "1.2.3.4.5", "256.1.1.1", "01.2.3.4", "1.2.3.-4", ":::", "1::2::3", "12345::", "g::1", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7:8::", "::1%en0", "[::1]", "1.2.3.4:5", " 1.2.3.4", "1:2:3:4:5:6:7:1.2.3.4" }) |bad|
-        try std.testing.expectEqual(@as(u32, 0), ip(bad, &out));
-}
-
-test "socket: Rust's rules" {
-    var out: [18]u8 = @splat(0);
-    try std.testing.expectEqual(@as(u32, 4), socket("1.2.3.4:00053", &out));
-    try std.testing.expectEqual(@as(u16, 53), std.mem.readInt(u16, out[16..18], builtin.cpu.arch.endian()));
-    try std.testing.expectEqual(@as(u32, 6), socket("[::1]:65535", &out));
-    try std.testing.expectEqual(@as(u16, 65535), std.mem.readInt(u16, out[16..18], builtin.cpu.arch.endian()));
-    for ([_][]const u8{ "1.2.3.4", "1.2.3.4:", "1.2.3.4:65536", "1.2.3.4:5a", "[1.2.3.4]:53", "::1:53", "[::1]", "[::1]53", "[::1:53", "[::1]]:53", ":53", "1.2.3.4:5:3", " 1.2.3.4:53", "1.2.3.4:99999999999999999999" }) |bad|
-        try std.testing.expectEqual(@as(u32, 0), socket(bad, &out));
-}

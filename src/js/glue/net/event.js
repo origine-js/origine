@@ -1,4 +1,6 @@
 // `api.net` data events: the leased chunk and the `data` event. Built by net.js.
+import { constants } from '../errors.js';
+
 export default ({ native, token }) => {
   let beginData;
   let endData;
@@ -13,7 +15,7 @@ export default ({ native, token }) => {
     #id;
     #buffer;
     constructor(made, id, buffer, length) {
-      if (made !== token) throw new TypeError('leases are created by data events');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       super(buffer, 0, length);
       this.#id = id;
       this.#buffer = buffer;
@@ -48,7 +50,7 @@ export default ({ native, token }) => {
     #live = false;
     #lease = null;
     constructor(made, id) {
-      if (made !== token) throw new TypeError('events are created by api.net');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#id = id;
     }
     static {

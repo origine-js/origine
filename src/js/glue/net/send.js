@@ -1,5 +1,6 @@
 // `api.net` send side: the send queue (`socket.queued`) and the direct lane (`socket.direct`). Built by net.js.
 import { failure, errors, ioClosers } from '../util.js';
+import { constants } from '../errors.js';
 const { BadHandle } = errors;
 const DONE = Promise.resolve();
 export default ({ native, token }) => {
@@ -20,7 +21,7 @@ export default ({ native, token }) => {
     #waiting = [];
     #idle = [];
     constructor(made, core, limit) {
-      if (made !== token) throw new TypeError('queues are created by sockets');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#core = core;
       this.#limit = limit;
     }
@@ -166,7 +167,7 @@ export default ({ native, token }) => {
     #core;
     #queue;
     constructor(made, core, queue) {
-      if (made !== token) throw new TypeError('direct writers are created by sockets');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#core = core;
       this.#queue = queue;
     }

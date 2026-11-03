@@ -1,6 +1,9 @@
 // Error classes shared by the glue and origine:@std/errors through the private context bundle.
 import { ERRNO } from './errno.js';
 
+// Thrown by a constructor called without its token (only the glue makes these objects), as Web does.
+export const constants = Object.freeze({ ILLEGAL_CONSTRUCTOR: 'Illegal constructor' });
+
 const names = new Map([...Object.entries(ERRNO.io), ...Object.entries(ERRNO.host)].map(([name, code]) => [code, name]));
 
 const transientCodes = new Set(
@@ -73,14 +76,14 @@ export class ImportError extends OrigineError {
   }
 }
 
-const constants = (target, source) => {
+const defineConstants = (target, source) => {
   for (const [name, value] of Object.entries(source)) Object.defineProperty(target, name, { value, enumerable: true });
   // Keep the existing Error.name(code) helper alongside standard instance names.
   Object.defineProperty(target, 'name', { value: OrigineError.nameOf });
 };
-constants(IoError, ERRNO.io);
-constants(HostError, ERRNO.host);
-constants(
+defineConstants(IoError, ERRNO.io);
+defineConstants(HostError, ERRNO.host);
+defineConstants(
   ImportError,
   Object.fromEntries(['NotFound', 'PermissionDenied', 'InvalidInput', 'InvalidData', 'Unsupported'].map(name => [name, ERRNO.io[name]])),
 );

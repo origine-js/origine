@@ -6,6 +6,7 @@
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, hostError } from './util.js';
 import { provide } from './handles.js';
 import { IpAddr, SocketAddr } from './addr.js';
+import { constants } from './errors.js';
 const { BadHandle, Unsupported } = errors;
 // Read when the module is evaluated (before guest code): a realm cannot swap it.
 const { asyncDispose } = Symbol;
@@ -50,7 +51,7 @@ export default native => {
     #addrs;
     #target;
     constructor(made, kind, name, addrs, target) {
-      if (made !== token) throw new TypeError('use DnsServer.system, udp, tcp, tls or https');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#kind = kind;
       this.#name = name;
       this.#addrs = addrs;

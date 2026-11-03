@@ -4,10 +4,11 @@
 // makes and checks the same instances. Frozen instances, made by named constructors that validate.
 import { seal } from './util.js';
 import { provide } from './handles.js';
+import { constants } from './errors.js';
 
 const token = {};
 
-const v4Text = o => `${o[0]}.${o[1]}.${o[2]}.${o[3]}`;
+const v4Text = ([a, b, c, d]) => `${a}.${b}.${c}.${d}`;
 
 // RFC 5952: lowercase hex, the longest run of two or more zero groups becomes `::` (the first on a tie),
 // an IPv4-mapped address keeps its dotted tail like Rust prints it.
@@ -95,7 +96,7 @@ const parseV6 = text => {
 export class IpAddr {
   #octets;
   constructor(made, octets) {
-    if (made !== token) throw new TypeError('use IpAddr.v4, v6, fromOctets or parse');
+    if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
     this.#octets = octets;
     seal(this);
   }
@@ -133,7 +134,7 @@ export class IpAddr {
   }
   /** A fresh copy: 4 or 16 bytes. */
   octets() {
-    return Uint8Array.from(this.#octets);
+    return this.#octets.slice();
   }
   isV4() {
     return this.#octets.length === 4;
@@ -197,7 +198,7 @@ export class SocketAddr {
   #ip;
   #port;
   constructor(made, ip, port) {
-    if (made !== token) throw new TypeError('use SocketAddr.new or parse');
+    if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
     this.#ip = ip;
     this.#port = port;
     seal(this);

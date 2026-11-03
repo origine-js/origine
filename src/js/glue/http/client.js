@@ -2,6 +2,7 @@
 // (docs/http-design.md). Built by http.js, which hands over what only it can reach: `connect`, the exchange `watch` hook,
 // the session's `peer` limits and the `HeaderList` helpers. Pull-mode `fetch` only; the pool serves both modes.
 import { freeze, freezeMethods, own, failure, errors } from '../util.js';
+import { constants } from '../errors.js';
 const {
   BadHandle,
   WouldBlock,
@@ -70,7 +71,7 @@ export default k => {
     #clock = 0;
     #closed = false;
     constructor(made, io, options) {
-      if (made !== token || new.target !== ClientPool) throw new TypeError('pools are made by http.pool');
+      if (made !== token || new.target !== ClientPool) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#io = io;
       this.#mode = modeOf(options);
       limitsOf(own(options, 'limits'));
@@ -398,7 +399,7 @@ export default k => {
   class ResponseBody {
     #response;
     constructor(made, response) {
-      if (made !== token) throw new TypeError('bodies are made by http.fetch');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#response = response;
     }
     [Symbol.asyncIterator]() {
@@ -418,7 +419,7 @@ export default k => {
     #over = false;
     #trailers;
     constructor(made, parts) {
-      if (made !== token) throw new TypeError('responses are made by http.fetch');
+      if (made !== token) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.status = parts.status;
       this.headers = parts.headers;
       this.url = parts.url;

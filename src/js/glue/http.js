@@ -7,6 +7,7 @@
 // is a dispatcher over the same natives, one event at a time, so handlers see events in order.
 import { freeze, freezeMethods, own, failure, ioHandles, closedIo, errors, shared } from './util.js';
 import client from './http/client.js';
+import { constants } from './errors.js';
 const { BadHandle, NoApplicationProtocol } = errors;
 const HEAD = 6;
 const DONE = Promise.resolve();
@@ -171,7 +172,7 @@ export default native => {
     #done = false;
     #watch;
     constructor(made, sid, id) {
-      if (made !== token || new.target === Exchange) throw new TypeError('exchanges are made by their session');
+      if (made !== token || new.target === Exchange) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#sid = sid;
       this.#id = id;
     }
@@ -356,7 +357,7 @@ export default native => {
     #io;
     #closed = false;
     constructor(made, id, io) {
-      if (made !== token || new.target === Session) throw new TypeError('sessions are made by http.session');
+      if (made !== token || new.target === Session) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#id = id;
       this.#io = io;
     }
@@ -544,7 +545,7 @@ export default native => {
     #dropped = 0;
     #hub = makeHub(['request', 'close', 'error'], () => {});
     constructor(made, listener, tls, limits, mode) {
-      if (made !== token || new.target === HttpServer) throw new TypeError('servers are made by http.serve');
+      if (made !== token || new.target === HttpServer) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#listener = listener;
       const event = mode === 'event';
       const wake = () => {

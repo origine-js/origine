@@ -1,5 +1,6 @@
 // `api.net` sockets (`PullSocket`, `EventSocket`) and `makeSocket`. Built by net.js.
 import { failure, errors } from '../util.js';
+import { constants } from '../errors.js';
 const { BadHandle } = errors;
 const DONE = Promise.resolve();
 const MAX_READ = 1 << 28;
@@ -12,7 +13,7 @@ export default (k, { Core, Handle, live, coreOf, revoke, endQueue }) => {
     #remotePort;
     constructor(made, core) {
       super(made, core);
-      if (new.target === Socket) throw new TypeError('sockets are created by api.net');
+      if (new.target === Socket) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#remotePort = core.port;
     }
     get remotePort() {

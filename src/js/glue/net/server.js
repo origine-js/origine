@@ -1,5 +1,6 @@
 // `api.net` handle base and the servers (`PullServer`, `EventServer`). Built by net.js.
 import { failure, errors } from '../util.js';
+import { constants } from '../errors.js';
 const { BadHandle } = errors;
 export default k => {
   const { native, token } = k;
@@ -18,7 +19,7 @@ export default k => {
     #core;
     #io;
     constructor(made, core) {
-      if (made !== token || new.target === Handle) throw new TypeError('handles are created by api.net');
+      if (made !== token || new.target === Handle) throw new TypeError(constants.ILLEGAL_CONSTRUCTOR);
       this.#core = core;
       this.#io = core.io;
     }

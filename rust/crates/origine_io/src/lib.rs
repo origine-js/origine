@@ -287,6 +287,7 @@ impl Loop {
             sys::OIO_BACKEND_URING => Backend::Uring,
             sys::OIO_BACKEND_KQUEUE_GCD => Backend::KqueueGcd,
             sys::OIO_BACKEND_IOCP => Backend::Iocp,
+            sys::OIO_BACKEND_THREADED => Backend::Threaded,
             other => unreachable!("oio_loop_backend answered {other}, which is no running backend"),
         }
     }

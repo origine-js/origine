@@ -15,6 +15,7 @@ const v8 = @import("@v8");
 const eu = @import("@util");
 const binding = @import("binding.zig");
 const func = binding.func;
+const addr_api = @import("addr.zig");
 const env_api = @import("env.zig");
 const errno = @import("errno.zig");
 const threading_api = @import("threading.zig");
@@ -677,6 +678,12 @@ pub const Host = struct {
         const native = native_value.toObject(ctx) orelse return error.BootstrapFailed;
         const bind = binding.rawDynamic(env, state, binding.native(ScopeState, bindCapability), .any);
         try binding.set(env, native, "bind", bind.object.value);
+        // Pure parsers with no authority: they work in any realm, so they are bound here and not by `bindCapability`.
+        const addr = try binding.object(env, ScopeState, state, .{
+            .parseIp = func(addr_api.parseIp, .{ .side_effect = .none, .detached = .allow }),
+            .parseSocket = func(addr_api.parseSocket, .{ .side_effect = .none, .detached = .allow }),
+        });
+        try binding.set(env, native, "addr", addr.value);
         const errno_value = bundle.object.getIndex(ctx, glue_script.errno_index) orelse return error.BootstrapFailed;
         try bindErrno(state, errno_value);
         try bindDetail(state, ctx, native);

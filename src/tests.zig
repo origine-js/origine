@@ -26,6 +26,7 @@ test {
     _ = @import("tests/managed/fs_confined.zig");
     _ = @import("tests/managed/tls.zig");
     _ = @import("tests/managed/http.zig");
+    _ = @import("tests/managed/h2.zig");
     _ = @import("tests/managed/net_addr.zig");
     _ = @import("tests/managed/dns.zig");
     _ = @import("tests/managed/netgrant.zig");

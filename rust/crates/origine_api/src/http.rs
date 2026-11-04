@@ -19,10 +19,10 @@ use origine_io::rt::AbortHandle;
 
 use crate::HostState;
 use crate::decode::ArrayBufferArg;
+use crate::fields::HeaderList;
 use crate::native;
 use crate::native::{Op, ScopeKey};
-use crate::net::Socket;
-use crate::sockstream::{SocketTransport, StreamArg};
+use crate::sockstream::{StreamArg, Under};
 
 struct Conn {
     owner: ScopeKey,
@@ -30,7 +30,7 @@ struct Conn {
     connection: Connection,
     exchanges: RefCell<HashMap<u32, Rc<Exchange>>>,
     abort: AbortHandle,
-    socket: Rc<Socket>,
+    under: Rc<Under>,
 }
 
 impl Conn {
@@ -56,7 +56,7 @@ impl HttpState {
     pub(crate) fn clear(&mut self) {
         for conn in std::mem::take(&mut self.conns).into_values() {
             conn.abort.abort();
-            conn.socket.shutdown();
+            conn.under.shutdown();
         }
     }
 
@@ -70,7 +70,7 @@ impl HttpState {
 
 // ---- errors ----
 
-fn h2_error(e: H2Error) -> NativeError {
+pub(crate) fn h2_error(e: H2Error) -> NativeError {
     let detailed = |code: u32, subject: String| NativeError::Errno(code).with_subject(subject);
     match e {
         H2Error::InvalidField(m) => detailed(errno::INVALID_INPUT, m),
@@ -87,7 +87,7 @@ fn h2_error(e: H2Error) -> NativeError {
     }
 }
 
-fn conn_error(e: ConnError) -> NativeError {
+pub(crate) fn conn_error(e: ConnError) -> NativeError {
     match e {
         ConnError::Transport(kind, message) => NativeError::from(io::Error::new(kind, message.clone())).with_subject(message),
         ConnError::Protocol(e) => h2_error(e),
@@ -103,8 +103,14 @@ fn body_of(mode: u32) -> Result<Body, NativeError> {
     }
 }
 
-fn fields_of(packed: &ArrayBufferArg<'_>) -> Result<FieldList, NativeError> {
-    FieldList::from_packed(packed.to_vec()).and_then(|list| list.checked()).map_err(h2_error)
+/// The fields of a `HeaderList` (none for `undefined`); its pseudo header fields are refused here, where they
+/// travel separately.
+fn fields_of(list: Option<&HeaderList>) -> Result<FieldList, NativeError> {
+    let fields = list.map(HeaderList::fields).unwrap_or_default();
+    if fields.has_pseudo() {
+        return Err(NativeError::Errno(errno::INVALID_INPUT).with_subject("pseudo header fields travel separately here".to_owned()));
+    }
+    Ok(fields)
 }
 
 // ---- sessions ----
@@ -114,10 +120,10 @@ fn fields_of(packed: &ArrayBufferArg<'_>) -> Result<FieldList, NativeError> {
 /// a server; the rest are the `Limits`. Returns the session id.
 #[native(side_effect = "any", path = "http.session", needs = "runtime")]
 #[allow(clippy::too_many_arguments)]
-fn http_session(
-    host: &mut HostState,
+fn http_session<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
     key: ScopeKey,
-    stream: StreamArg<'_>,
+    stream: StreamArg<'s>,
     role: u32,
     streams: u32,
     headers: u32,
@@ -130,18 +136,18 @@ fn http_session(
         1 => Role::Server,
         _ => return Err(NativeError::Errno(errno::INVALID_INPUT)),
     };
-    let stream = stream.native()?;
-    let lp = stream.conn()?.io.lp(host)?;
-    let (io, socket) = stream.take()?;
+    stream.native()?;
+    let (io, under) = stream.transport(scope, None)?;
+    let under = Rc::new(under);
     if io.owner != key {
-        socket.shutdown();
+        under.shutdown();
         return Err(NativeError::Errno(errno::BAD_HANDLE));
     }
-    let transport = SocketTransport { socket: Rc::clone(&socket), lp };
-    let (handle, driver) = connect(role, Limits { streams, headers, window, connection, batch }, transport).map_err(h2_error)?;
+    let (handle, driver) = connect(role, Limits { streams, headers, window, connection, batch }, Rc::clone(&under)).map_err(h2_error)?;
+    let host = crate::native::host_mut(scope)?;
     let session = host.http.next.checked_add(1).ok_or(NativeError::Errno(errno::PERMISSION_DENIED))?;
     host.http.next = session;
-    let closing = Rc::clone(&socket);
+    let closing = Rc::clone(&under);
     let abort = host.spawn_detached(
         io.runtime,
         Box::pin(async move {
@@ -151,7 +157,7 @@ fn http_session(
     )?;
     host.http.conns.insert(
         session,
-        Rc::new(Conn { owner: key, runtime: io.runtime, connection: handle, exchanges: RefCell::default(), abort, socket }),
+        Rc::new(Conn { owner: key, runtime: io.runtime, connection: handle, exchanges: RefCell::default(), abort, under }),
     );
     Ok(session)
 }
@@ -203,7 +209,7 @@ fn http_destroy(host: &mut HostState, key: ScopeKey, session: u32) -> Result<(),
     let conn = host.http.conn(key, session)?;
     host.http.conns.remove(&session);
     conn.abort.abort();
-    conn.socket.shutdown();
+    conn.under.shutdown();
     conn.exchanges.borrow_mut().clear();
     Ok(())
 }
@@ -211,7 +217,8 @@ fn http_destroy(host: &mut HostState, key: ScopeKey, session: u32) -> Result<(),
 // ---- streams ----
 
 /// `native.http.open(session, method, scheme, authority, path, fields, body)`: opens a request stream and queues
-/// its head; `fields` is a packed header list, `body` 0 for none and 1 for a streamed body. Returns the stream id.
+/// its head; `fields` is a `HeaderList` or `undefined`, `body` 0 for none and 1 for a streamed body. Returns the
+/// stream id.
 #[native(side_effect = "any", path = "http.open", needs = "runtime")]
 #[allow(clippy::too_many_arguments)]
 fn http_open(
@@ -222,11 +229,11 @@ fn http_open(
     scheme: String,
     authority: String,
     path: String,
-    fields: ArrayBufferArg<'_>,
+    fields: Option<&HeaderList>,
     body: u32,
 ) -> Result<u32, NativeError> {
     let conn = host.http.conn(key, session)?;
-    let fields = fields_of(&fields)?;
+    let fields = fields_of(fields)?;
     let head = RequestHead { method: &method, scheme: &scheme, authority: &authority, path: &path };
     let exchange = conn.connection.open(&head, &fields, body_of(body)?).map_err(h2_error)?;
     Ok(conn.insert(exchange))
@@ -255,7 +262,7 @@ pub struct Ev {
     scheme: Option<String>,
     authority: Option<String>,
     path: Option<String>,
-    fields: Option<Vec<u8>>,
+    fields: Option<HeaderList>,
     last: bool,
     end_stream: bool,
     data: Option<Vec<u8>>,
@@ -294,7 +301,7 @@ fn event_of(event: StreamEvent) -> Result<Ev, NativeError> {
             scheme: pseudo.scheme,
             authority: pseudo.authority,
             path: pseudo.path,
-            fields: Some(fields.into_bytes()),
+            fields: Some(HeaderList::received(fields)),
             last,
             end_stream,
             ..Ev::of(0)
@@ -340,12 +347,12 @@ fn http_respond(
     session: u32,
     stream: u32,
     status: u32,
-    fields: ArrayBufferArg<'_>,
+    fields: Option<&HeaderList>,
     body: u32,
 ) -> Result<(), NativeError> {
     let status = u16::try_from(status).map_err(|_| NativeError::Errno(errno::INVALID_INPUT))?;
     let exchange = host.http.conn(key, session)?.exchange(stream)?;
-    exchange.respond(status, &fields_of(&fields)?, body_of(body)?).map_err(h2_error)
+    exchange.respond(status, &fields_of(fields)?, body_of(body)?).map_err(h2_error)
 }
 
 /// `native.http.send(session, stream, data)`: Promise resolved once `data` (copied now) is queued; it waits while
@@ -371,10 +378,10 @@ fn http_queued(host: &mut HostState, key: ScopeKey, session: u32, stream: u32) -
     Ok(u32::try_from(queued).unwrap_or(u32::MAX))
 }
 
-/// `native.http.finish(session, stream, trailers)`: ends the body; `trailers` is a packed header list, empty for none.
+/// `native.http.finish(session, stream, trailers)`: ends the body; `trailers` is a `HeaderList` or `undefined`.
 #[native(side_effect = "any", path = "http.finish", needs = "runtime")]
-fn http_finish(host: &mut HostState, key: ScopeKey, session: u32, stream: u32, trailers: ArrayBufferArg<'_>) -> Result<(), NativeError> {
-    let trailers = fields_of(&trailers)?;
+fn http_finish(host: &mut HostState, key: ScopeKey, session: u32, stream: u32, trailers: Option<&HeaderList>) -> Result<(), NativeError> {
+    let trailers = fields_of(trailers)?;
     let exchange = host.http.conn(key, session)?.exchange(stream)?;
     exchange.finish((!trailers.is_empty()).then_some(trailers)).map_err(h2_error)
 }

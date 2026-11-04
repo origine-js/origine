@@ -136,5 +136,7 @@ export default native => () => {
     Lease,
   });
   shared.net = classes;
+  // For `api.http`: an ArrayBuffer of received bytes as a `Lease` (the payload of a DATA frame event).
+  shared.lease = buffer => new Lease(token, buffer);
   return classes;
 };

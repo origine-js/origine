@@ -38,6 +38,8 @@ pub(crate) struct IoCore {
     next_timer: Cell<u32>,
     /// The conns made on this runtime, closed with it.
     pub(crate) conns: Rc<RefCell<Vec<Weak<Conn>>>>,
+    /// Other objects closed with the runtime (HTTP/2 sessions).
+    pub(crate) closers: Closers,
     pub(crate) events: Events,
     pub(crate) refill: Rc<RefCell<Vec<u32>>>,
     pub(crate) idle: Rc<Idle>,
@@ -66,6 +68,24 @@ impl IoCore {
             conns.retain(|conn| conn.strong_count() > 0);
         }
         conns.push(Rc::downgrade(conn));
+    }
+}
+
+/// What the runtime closes when it closes, besides its conns.
+pub(crate) trait Closable {
+    fn close_now(&self);
+}
+
+pub(crate) type Closers = Rc<RefCell<Vec<Weak<dyn Closable>>>>;
+
+impl IoCore {
+    /// Registers `object` to be closed with the runtime.
+    pub(crate) fn adopt_closer(&self, object: Weak<dyn Closable>) {
+        let mut closers = self.closers.borrow_mut();
+        if closers.len() >= 64 && closers.len().is_power_of_two() {
+            closers.retain(|closer| closer.strong_count() > 0);
+        }
+        closers.push(object);
     }
 }
 
@@ -110,6 +130,7 @@ fn io_create<'s>(
         lp: Rc::downgrade(&lp),
         next_timer: Cell::new(0),
         conns: host.conns_of(runtime),
+        closers: host.closers_of(runtime),
         events: Rc::clone(&host.events),
         refill: Rc::clone(&host.refill),
         idle: host.idle_of(runtime),

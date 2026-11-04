@@ -348,7 +348,7 @@ export default k => {
   const REDIRECTS = new Set([301, 302, 303, 307, 308]);
   const BODY_HEADERS = new Set(['content-length', 'content-type', 'content-encoding', 'content-language', 'content-location']);
   const without = (list, names) => {
-    const out = new HeaderList();
+    const out = HeaderList.of([]);
     if (list !== undefined) for (const [name, value] of list) if (!names.has(name)) out.put(name, value);
     return out;
   };

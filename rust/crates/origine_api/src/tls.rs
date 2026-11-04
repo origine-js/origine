@@ -23,10 +23,10 @@ use crate::class::Releasable;
 use crate::conn::{Conn, Front, Kind};
 use crate::decode::ArrayBufferArg;
 use crate::fs::{AllocRead, ReadInto};
-use crate::io::{Io, IoCore};
-use crate::native::{Op, host_ref};
+use crate::io::Io;
+use crate::native::Op;
 use crate::net::{SockAddr, Socket};
-use crate::sockstream::{JsStream, SocketTransport, StreamArg, Under};
+use crate::sockstream::{StreamArg, Under};
 use crate::stream::{self, ShapeOptions, Side};
 use crate::{FromJs, HostState, IntoJs, class, native};
 
@@ -211,23 +211,7 @@ where
     F: FnOnce(Rc<Under>) -> Fut + 'static,
     Fut: Future<Output = Result<TlsStream<Rc<Under>>, TlsError>> + 'static,
 {
-    let (core, under): (Rc<IoCore>, Under) = match stream {
-        StreamArg::Native(stream) => {
-            let conn = stream.conn()?;
-            if io.is_some_and(|io| !Rc::ptr_eq(&io.0, &conn.io)) {
-                return Err(NativeError::type_error("options.io must be the Io of the stream (a native stream runs on its own)"));
-            }
-            let lp = conn.io.lp(host_ref(scope)?)?;
-            let (core, socket) = stream.take()?;
-            (core, Under::Socket(SocketTransport { socket, lp }))
-        }
-        StreamArg::Js(object) => {
-            let io = io.ok_or_else(|| NativeError::type_error("options.io (an Io) is required for a stream that is not native"))?;
-            io.0.lp(host_ref(scope)?)?;
-            let js = JsStream::adopt(scope, object, &io.0)?;
-            (Rc::clone(&io.0), Under::Js(js))
-        }
-    };
+    let (core, under) = stream.transport(scope, io)?;
     let under = Rc::new(under);
     Ok(Op::new(core.runtime, async move {
         let tls = match run(Rc::clone(&under)).await {

@@ -16,12 +16,12 @@ use std::sync::OnceLock;
 use crate::abi_gen::{self, origine_api_native};
 #[cfg(feature = "dns")]
 use crate::dns;
-#[cfg(feature = "http")]
-use crate::http;
 use crate::native::{Needs, RawNative, SideEffect};
 #[cfg(feature = "tls")]
 use crate::tls;
 use crate::{channel, fs, io, net, stream, udp};
+#[cfg(feature = "http")]
+use crate::{fields, h2, http};
 
 /// Every native, in registration order.
 pub(crate) static NATIVES: &[RawNative] = &[
@@ -113,6 +113,22 @@ pub(crate) static NATIVES: &[RawNative] = &[
     tls::CLASS_PULL_TLS_STREAM,
     #[cfg(feature = "tls")]
     tls::CLASS_EVENT_TLS_STREAM,
+    #[cfg(feature = "http")]
+    fields::CLASS_HEADER_LIST,
+    #[cfg(feature = "http")]
+    h2::NATIVE_H2_CLIENT,
+    #[cfg(feature = "http")]
+    h2::NATIVE_H2_SERVER,
+    #[cfg(feature = "http")]
+    h2::NATIVE_HTTP_LINK,
+    #[cfg(feature = "http")]
+    h2::CLASS_H2_SESSION_UNSHAPED,
+    #[cfg(feature = "http")]
+    h2::CLASS_PULL_H2_SESSION,
+    #[cfg(feature = "http")]
+    h2::CLASS_EVENT_H2_SESSION,
+    #[cfg(feature = "http")]
+    h2::CLASS_H2_REGISTRATION,
     #[cfg(feature = "http")]
     http::NATIVE_HTTP_SESSION,
     #[cfg(feature = "http")]
@@ -262,6 +278,10 @@ mod tests {
             ("tls", include_str!("tls.rs")),
             #[cfg(feature = "http")]
             ("http", include_str!("http.rs")),
+            #[cfg(feature = "http")]
+            ("fields", include_str!("fields.rs")),
+            #[cfg(feature = "http")]
+            ("h2", include_str!("h2.rs")),
             #[cfg(feature = "dns")]
             ("dns", include_str!("dns.rs")),
         ] {

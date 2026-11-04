@@ -1,47 +1,19 @@
-// `api.http`: HTTP/2 sessions over `api.net` or `api.tls` sockets (docs/http-design.md). An ES module factory used
-// by index.js, like net.js and tls.js. `HeaderList` is an ordered, packed sequence of fields (not a map): `put`
-// appends into one buffer and the whole list crosses into the native once. A session is made from a pull-mode
-// socket, which it consumes; streams are `ClientExchange` / `ServerExchange` objects over the session's table.
+// `api.http`: HTTP/2 (docs/http-design.md). An ES module factory used by index.js, like net.js and tls.js.
+// `api.http.fields` is `HeaderList`, a class defined in Rust (rust/crates/origine_api/src/fields.rs): an ordered
+// sequence of fields (not a map), validated natively. `api.http.protocols.h2` is the frame-level HTTP/2 table
+// (rust/crates/origine_api/src/h2.rs): `client` / `server` make an `H2SessionUnshaped` over a stream; `h3` has the
+// same shape and throws `Unsupported` until QUIC exists. The message-level API below (`session`, `connect`, `serve`,
+// `pool`, `fetch`) is the previous one, kept until native fetch replaces it: a session is made from a socket, which
+// it consumes; streams are `ClientExchange` / `ServerExchange` objects over the session's table.
 // A session, a server and their exchanges have one of two read modes, fixed when they are made and visible in their
 // class: `Pull*` (`next()`, `accept()`) or `Event*` (`register(event, handler)`); the write side is shared. Event mode
 // is a dispatcher over the same natives, one event at a time, so handlers see events in order.
-import { freeze, freezeMethods, own, failure, errors, shared } from './util.js';
+import { freeze, freezeMethods, own, failure, errors, hostError, shared } from './util.js';
 import { IpAddr, SocketAddr } from './addr.js';
 import client from './http/client.js';
 import { constants, fromDetail } from './errors.js';
 const { BadHandle, NoApplicationProtocol, PermissionDenied } = errors;
-const HEAD = 6;
 const DONE = Promise.resolve();
-
-const encode = text => {
-  const out = [];
-  for (const ch of text) {
-    let c = ch.codePointAt(0);
-    if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd;
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-  }
-  return Uint8Array.from(out);
-};
-const decode = (bytes, from, to) => {
-  let out = '';
-  for (let i = from; i < to;) {
-    const b = bytes[i];
-    const n = b < 0x80 ? 1 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 0;
-    if (n === 0 || i + n > to) {
-      out += '�';
-      i += 1;
-      continue;
-    }
-    let c = n === 1 ? b : b & (0xff >> (n + 1));
-    for (let k = 1; k < n; k++) c = (c << 6) | (bytes[i + k] & 63);
-    out += String.fromCodePoint(c);
-    i += n;
-  }
-  return out;
-};
 
 export default native => {
   const token = {};
@@ -60,89 +32,9 @@ export default native => {
     if (!(io instanceof shared.Io) || io.closed) throw failure(BadHandle);
     return io;
   };
-  const NAME = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
-  let received;
+  // `api.http.fields`, installed when the capability is bound (the class is defined in Rust).
+  let HeaderList;
   let ids;
-
-  /**
-   * An ordered sequence of header fields, packed into one buffer (`name_len u16 | value_len u32 | name | value`
-   * records). Names are lowercase tokens; values are UTF-8 strings without CR, LF or NUL. Duplicates and order are
-   * kept. Lists you receive are frozen; one you build is sent whole, in one native call.
-   */
-  class HeaderList {
-    #bytes = new Uint8Array(256);
-    #size = 0;
-    #count = 0;
-    #sealed = false;
-    static {
-      received = bytes => {
-        const list = new HeaderList();
-        list.#bytes = bytes;
-        list.#size = bytes.length;
-        for (let at = 0; at < bytes.length; list.#count++) {
-          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-          at += HEAD + view.getUint16(at, true) + view.getUint32(at + 2, true);
-        }
-        list.#sealed = true;
-        return list;
-      };
-    }
-    /** Appends a field. `name` must be lowercase (`InvalidInput` otherwise, also for a connection-specific one). */
-    put(name, value) {
-      if (this.#sealed) throw new TypeError('a received HeaderList cannot be changed');
-      if (typeof name !== 'string' || !NAME.test(name)) throw new TypeError('header name must be a lowercase token');
-      if (typeof value !== 'string' || /[\0\r\n]/.test(value)) throw new TypeError('header value must be a string without CR, LF or NUL');
-      const n = encode(name);
-      const v = encode(value);
-      const need = this.#size + HEAD + n.length + v.length;
-      if (need > this.#bytes.length) {
-        const grown = new Uint8Array(Math.max(need, this.#bytes.length * 2));
-        grown.set(this.#bytes.subarray(0, this.#size));
-        this.#bytes = grown;
-      }
-      const view = new DataView(this.#bytes.buffer);
-      view.setUint16(this.#size, n.length, true);
-      view.setUint32(this.#size + 2, v.length, true);
-      this.#bytes.set(n, this.#size + HEAD);
-      this.#bytes.set(v, this.#size + HEAD + n.length);
-      this.#size = need;
-      this.#count++;
-      return this;
-    }
-    get length() {
-      return this.#count;
-    }
-    *[Symbol.iterator]() {
-      const view = new DataView(this.#bytes.buffer, this.#bytes.byteOffset, this.#bytes.byteLength);
-      for (let at = 0; at < this.#size;) {
-        const n = view.getUint16(at, true);
-        const v = view.getUint32(at + 2, true);
-        yield [decode(this.#bytes, at + HEAD, at + HEAD + n), decode(this.#bytes, at + HEAD + n, at + HEAD + n + v)];
-        at += HEAD + n + v;
-      }
-    }
-    /** The first value of `name`, or undefined. */
-    get(name) {
-      const wanted = String(name).toLowerCase();
-      for (const [n, v] of this) if (n === wanted) return v;
-      return undefined;
-    }
-    getAll(name) {
-      const wanted = String(name).toLowerCase();
-      const out = [];
-      for (const [n, v] of this) if (n === wanted) out.push(v);
-      return out;
-    }
-    has(name) {
-      return this.get(name) !== undefined;
-    }
-    static packed(list) {
-      if (!(list instanceof HeaderList)) throw new TypeError('headers must be a HeaderList');
-      return list.#bytes.subarray(0, list.#size);
-    }
-  }
-  const EMPTY = new Uint8Array(0);
-  const packed = list => (list === undefined ? EMPTY : HeaderList.packed(list));
 
   const bodyOf = options => {
     const body = own(options, 'body');
@@ -157,7 +49,7 @@ export default native => {
         const event = {
           type: 'headers',
           kind: ['request', 'response', 'trailers'][ev.head],
-          headers: received(ev.fields),
+          headers: ev.fields,
           last: ev.last,
           endStream: ev.endStream,
         };
@@ -235,7 +127,7 @@ export default native => {
     }
     /** Ends the body, optionally with trailing fields. */
     finish(trailers) {
-      native.http.finish(this.#sid, this.#id, packed(trailers));
+      native.http.finish(this.#sid, this.#id, trailers);
     }
     /** Resets the stream with an HTTP/2 error code (8 is CANCEL). */
     reset(code = 8) {
@@ -261,7 +153,7 @@ export default native => {
       const status = own(options, 'status');
       if (!Number.isInteger(status) || status < 100 || status > 599) throw new TypeError('status must be an integer in 100..599');
       const [sid, id] = ids(this);
-      native.http.respond(sid, id, status, packed(own(options, 'headers')), bodyOf(options));
+      native.http.respond(sid, id, status, own(options, 'headers'), bodyOf(options));
     }
   }
 
@@ -440,7 +332,7 @@ export default native => {
         field('scheme'),
         field('authority'),
         field('path'),
-        packed(own(options, 'headers')),
+        own(options, 'headers'),
         bodyOf(options),
       );
       return new (this.#event ? EventClientExchange : PullClientExchange)(token, Session.idOf(this), id);
@@ -686,27 +578,7 @@ export default native => {
     return session;
   };
 
-  const { ClientPool, FetchResponse, pool, fetch } = client({
-    connect,
-    watch: Exchange.watch,
-    peer: session => native.http.peer(Session.idOf(session)), // the peer's stream limit, or -1 once no stream can be opened
-    merge: lists => {
-      const parts = lists.map(list => HeaderList.packed(list));
-      const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
-      let at = 0;
-      for (const part of parts) {
-        out.set(part, at);
-        at += part.length;
-      }
-      return received(out);
-    },
-    HeaderList,
-    limitsOf,
-    modeOf,
-  });
-
   for (const C of [
-    HeaderList,
     Exchange,
     ClientExchange,
     ServerExchange,
@@ -722,8 +594,6 @@ export default native => {
     HttpServer,
     PullHttpServer,
     EventHttpServer,
-    ClientPool,
-    FetchResponse,
   ]) {
     freezeMethods(C);
     freezeMethods(C.prototype);
@@ -731,9 +601,87 @@ export default native => {
     Object.freeze(C);
   }
 
-  return () =>
-    freeze({
+  const { Unsupported } = errors;
+  const { asyncDispose, asyncIterator } = Symbol;
+  // Called once, when the capability is bound (index.js `late`): the Rust classes exist only then.
+  const bind = () => {
+    HeaderList = native.http.HeaderList(hostError, {
+      /** `for (const [name, value] of list)`: the fields in order. */
+      *[Symbol.iterator]() {
+        yield* this.entries();
+      },
+    });
+    // A DATA frame's payload is a `Lease`, made by `api.net`'s lease maker.
+    native.http.link(buffer => shared.lease(buffer));
+    const closing = {
+      [asyncDispose]() {
+        return this.close();
+      },
+    };
+    const H2SessionUnshaped = native.http.H2SessionUnshaped(hostError, closing);
+    const PullH2Session = native.http.PullH2Session(hostError, {
+      ...closing,
+      /** `for await (const frame of session)`: the frame events as `next()` answers them, until the session is over. */
+      async *[asyncIterator]() {
+        for (;;) {
+          const frame = await this.next();
+          if (frame === undefined) return;
+          yield frame;
+        }
+      },
+    });
+    const EventH2Session = native.http.EventH2Session(hostError, closing);
+    const H2Registration = native.http.H2Registration(hostError);
+    const h2 = freeze({
+      H2SessionUnshaped,
+      PullH2Session,
+      EventH2Session,
+      H2Registration,
+      /** A client session over `stream` (a native stream, consumed, or a duck-typed one with `options.io`). */
+      client(stream, options) {
+        return native.http.h2Client(stream, options);
+      },
+      /** A server session over `stream`. */
+      server(stream, options) {
+        return native.http.h2Server(stream, options);
+      },
+    });
+    // HTTP/3 has the same shape; the QUIC session fills it.
+    const h3 = freeze({
+      client() {
+        throw failure(Unsupported);
+      },
+      server() {
+        throw failure(Unsupported);
+      },
+    });
+    const { ClientPool, FetchResponse, pool, fetch } = client({
+      connect,
+      watch: Exchange.watch,
+      peer: session => native.http.peer(Session.idOf(session)), // the peer's stream limit, or -1 once no stream can be opened
+      // One list of the fields of `lists`, in order (the batches of one header block).
+      merge: lists => HeaderList.of(lists.flatMap(list => [...list])),
       HeaderList,
+      limitsOf,
+      modeOf,
+    });
+
+    for (const C of [ClientPool, FetchResponse]) {
+      freezeMethods(C);
+      freezeMethods(C.prototype);
+      Object.freeze(C.prototype);
+      Object.freeze(C);
+    }
+    return { ClientPool, FetchResponse, pool, fetch, protocols: freeze({ h2, h3 }) };
+  };
+
+  let bound;
+  return () => {
+    bound ??= bind();
+    const { ClientPool, FetchResponse, pool, fetch } = bound;
+    return freeze({
+      fields: HeaderList,
+      protocols: bound.protocols,
       ClientExchange,
       ServerExchange,
       PullClientExchange,
@@ -789,4 +737,5 @@ export default native => {
         return new (mode === 'event' ? EventHttpServer : PullHttpServer)(token, listener, tls, limits, mode, io);
       },
     });
+  };
 };

@@ -6,7 +6,7 @@ const m = @import("@managed");
 // A tiny HTTP/2 server and client in JS over `api.http`, shared by the tests (TLS fixtures come from tls.zig).
 const prelude = tls_prelude ++
     \\const limits = { streams: 100, headers: 16384, window: 65535, connection: 1 << 20, batch: 4096 };
-    \\const headersOf = (api, pairs) => { const h = new api.http.HeaderList(); for (const [k, v] of pairs) h.put(k, v); return h; };
+    \\const headersOf = (api, pairs) => api.http.fields.of(pairs);
     \\// Reads a stream to its end: { status, headers, trailers, body, closed }.
     \\const collect = async (ex) => {
     \\  const out = { body: [], size: 0 };
@@ -92,7 +92,7 @@ test "http: header lists, bad inputs and what ends a connection" {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create();
         \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
-        \\  const list = new api.http.HeaderList().put('a', '1').put('b', 'é').put('a', '3');
+        \\  const list = api.http.fields.of([['a', '1'], ['b', 'é']]); list.put('a', '3');
         \\  out.list = list.length === 3 && list.get('A') === '1' && list.getAll('a').join() === '1,3' && list.get('b') === 'é' && list.has('b') && !list.has('c') && [...list].length === 3;
         \\  out.badName = throws(() => list.put('X-Upper', 'v'));
         \\  out.badValue = throws(() => list.put('x', 'a\nb'));
@@ -125,7 +125,7 @@ test "http: header lists, bad inputs and what ends a connection" {
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.list && report.badName === 'TypeError' && report.badValue === 'TypeError' && report.limits === 'TypeError' && report.role === 'TypeError' && report.badMode === 'TypeError' && report.untouched && report.badHead === 'TypeError' && report.upper === 'TypeError' && report.reset === 8 && ['UnexpectedEof', 'ConnectionReset', 'BrokenPipe', 'NotConnected'].includes(report.aborted) && report.closedSession");
+    try check(p.scope, "report.list && report.badName === 'InvalidInput' && report.badValue === 'InvalidInput' && report.limits === 'TypeError' && report.role === 'TypeError' && report.badMode === 'TypeError' && report.untouched && report.badHead === 'TypeError' && report.upper === 'TypeError' && report.reset === 8 && ['UnexpectedEof', 'ConnectionReset', 'BrokenPipe', 'NotConnected'].includes(report.aborted) && report.closedSession");
 }
 
 test "http: h2 over TLS with ALPN" {
@@ -403,7 +403,7 @@ test "http: fetch follows redirects with explicit rules and streams bodies" {
         \\  const plain = await get('/echo?q=1');
         \\  const first = await readAll(plain);
         \\  out.plain = plain.status === 200 && plain.url === `${base}/echo?q=1` && !plain.redirected && first.text === 'GET /echo?q=1 auth= body=' && plain.trailers.get('x-done') === 'yes';
-        \\  out.frozen = plain.headers instanceof api.http.HeaderList && Object.isFrozen(plain) && plain instanceof api.http.FetchResponse;
+        \\  out.frozen = plain.headers instanceof api.http.fields && Object.isFrozen(plain) && plain instanceof api.http.FetchResponse;
         \\  out.once = (() => { try { plain.body[Symbol.asyncIterator](); return 'no'; } catch (e) { return e.name; } })();
         \\  // Flow control: 300000 bytes through a 65535 byte window arrive in full because each chunk is given back on the next pull.
         \\  const big = await get('/big');

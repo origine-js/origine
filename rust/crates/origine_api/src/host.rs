@@ -99,6 +99,8 @@ struct RuntimeEntry {
     held: Vec<Rc<GrantRecord>>,
     /// The descriptors made on it (shared with its `IoCore`), closed with it.
     conns: Rc<RefCell<Vec<Weak<Conn>>>>,
+    /// The other objects closed with it (shared with its `IoCore`).
+    closers: crate::io::Closers,
 }
 
 impl RuntimeEntry {
@@ -120,8 +122,13 @@ pub struct HostState {
     #[cfg(feature = "http")]
     pub(crate) http: crate::http::HttpState,
     /// The duck-typed streams protocol engines run over (`sockstream.rs`).
-    #[cfg(feature = "tls")]
+    #[cfg(any(feature = "tls", feature = "http"))]
     pub(crate) js_streams: crate::sockstream::JsStreams,
+    /// The handlers of the event-mode HTTP/2 sessions (`h2.rs`), by an id that never reaches JS.
+    #[cfg(feature = "http")]
+    pub(crate) h2_hubs: BTreeMap<u32, crate::h2::H2Hub>,
+    #[cfg(feature = "http")]
+    pub(crate) next_h2_hub: u32,
     /// The event hubs of the conns that have handlers (`sub.rs`), by an id that never reaches JS.
     pub(crate) hubs: BTreeMap<u32, Hub>,
     pub(crate) next_hub: u32,
@@ -160,8 +167,12 @@ impl HostState {
             next_grant: 1,
             #[cfg(feature = "http")]
             http: crate::http::HttpState::default(),
-            #[cfg(feature = "tls")]
+            #[cfg(any(feature = "tls", feature = "http"))]
             js_streams: crate::sockstream::JsStreams::default(),
+            #[cfg(feature = "http")]
+            h2_hubs: BTreeMap::new(),
+            #[cfg(feature = "http")]
+            next_h2_hub: 1,
             hubs: BTreeMap::new(),
             next_hub: 1,
             closings: BTreeMap::new(),
@@ -221,7 +232,10 @@ impl HostState {
         let lp = Rc::new(lp);
         let rt = Runtime::new(Rc::clone(&lp));
         self.next_runtime = next;
-        self.runtimes.insert(id, RuntimeEntry { lp, rt: Some(rt), owner, state: RtState::Open, held: Vec::new(), conns: Rc::default() });
+        self.runtimes.insert(
+            id,
+            RuntimeEntry { lp, rt: Some(rt), owner, state: RtState::Open, held: Vec::new(), conns: Rc::default(), closers: Rc::default() },
+        );
         Ok((id, running))
     }
 
@@ -305,12 +319,18 @@ impl HostState {
         self.timers.retain(|(runtime, _), _| *runtime != id);
         let canceled = self.pending.take_where(|pending| pending.runtime == id);
         crate::sub::drop_hubs(self, id);
-        #[cfg(feature = "tls")]
+        #[cfg(any(feature = "tls", feature = "http"))]
         self.js_streams.drop_runtime(id);
         let conns = self.runtimes.get(&id).map(|entry| std::mem::take(&mut *entry.conns.borrow_mut())).unwrap_or_default();
         for conn in conns.iter().filter_map(Weak::upgrade) {
             conn.close();
         }
+        let closers = self.runtimes.get(&id).map(|entry| std::mem::take(&mut *entry.closers.borrow_mut())).unwrap_or_default();
+        for closer in closers.iter().filter_map(Weak::upgrade) {
+            closer.close_now();
+        }
+        #[cfg(feature = "http")]
+        self.h2_hubs.retain(|_, hub| hub.runtime() != id);
         let grant_ids: Vec<u32> = self.grants.iter().filter(|(_, record)| record.runtime == id).map(|(grant, _)| *grant).collect();
         if let Some(entry) = self.runtimes.get_mut(&id) {
             entry.state = RtState::Draining { close_op: None, grants_released: false };
@@ -478,6 +498,11 @@ impl HostState {
         self.runtimes.get(&runtime).map(|entry| Rc::clone(&entry.conns)).unwrap_or_default()
     }
 
+    /// The other objects closed with runtime `runtime` (shared with its `IoCore`).
+    pub(crate) fn closers_of(&self, runtime: u32) -> crate::io::Closers {
+        self.runtimes.get(&runtime).map(|entry| Rc::clone(&entry.closers)).unwrap_or_default()
+    }
+
     /// The idle counters of runtime `runtime`.
     pub(crate) fn idle_of(&mut self, runtime: u32) -> Rc<Idle> {
         Rc::clone(self.idle.entry(runtime).or_default())
@@ -500,7 +525,9 @@ impl HostState {
     /// (bounded). Idempotent. The detach function calls it before `Runtime.destroy`.
     pub fn drop_all(&mut self) {
         self.hubs.clear();
-        #[cfg(feature = "tls")]
+        #[cfg(feature = "http")]
+        self.h2_hubs.clear();
+        #[cfg(any(feature = "tls", feature = "http"))]
         self.js_streams.clear();
         self.closings.clear();
         #[cfg(feature = "http")]

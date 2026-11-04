@@ -368,7 +368,7 @@ test "dns: DNS over HTTPS" {
         \\        const query = Uint8Array.from(body);
         \\        seen.push({ method: head.method, path: head.path, type: head.headers.get('content-type'), accept: head.headers.get('accept'), id: (query[0] << 8) | query[1] });
         \\        const send = async (status, type, data) => {
-        \\          const h = new api.http.HeaderList(); h.put('content-type', type);
+        \\          const h = api.http.fields.of([['content-type', type]]);
         \\          ex.respond({ status, headers: h, body: 'stream' });
         \\          await ex.send(data); ex.finish();
         \\        };

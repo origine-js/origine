@@ -5,7 +5,7 @@
 //! recognised by its class (the cppgc `TypeId`) and **consumed**: its socket leaves the object (which answers
 //! `BadHandle` afterwards) and the engine reads and writes it on the loop, without entering JS.
 //!
-//! Any other object is a **duck-typed stream** ([`JsStream`], `api.tls` only for now): the engine reads and writes it
+//! Any other object is a **duck-typed stream** ([`JsStream`]; `api.tls` and `api.http.protocols.h2`): the engine reads and writes it
 //! by calling its JS methods, `read(length)` (or `readInto(buffer)`), `queued.put(bytes)` and `queued.drained()`,
 //! `end('write')` and `close()`. It is slower (one turn of the loop and a copy per call) and it runs on the `io` the
 //! caller names, since it has no runtime of its own.
@@ -137,11 +137,11 @@ impl NativeStream<'_> {
     }
 }
 
-#[cfg(feature = "tls")]
-pub(crate) use js::{JsStream, JsStreamError, JsStreams, Under};
+#[cfg(any(feature = "tls", feature = "http"))]
+pub(crate) use js::{JsStreamError, JsStreams, Under};
 
-/// The duck-typed stream adapter and what a TLS stream runs over.
-#[cfg(feature = "tls")]
+/// The duck-typed stream adapter and what a TLS stream or an HTTP/2 session runs over.
+#[cfg(any(feature = "tls", feature = "http"))]
 mod js {
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
@@ -156,7 +156,7 @@ mod js {
     use crate::decode::ArrayBufferArg;
     use crate::host::{Completion, CompletionQueue};
 
-    /// The transport under a TLS stream: a native socket (plain or TLS), or a duck-typed JS stream.
+    /// The transport under a TLS stream or an HTTP/2 session: a native socket (plain or TLS), or a duck-typed JS stream.
     pub(crate) enum Under {
         Socket(SocketTransport),
         Js(Rc<JsStream>),
@@ -179,6 +179,35 @@ mod js {
                 Under::Js(stream) => Box::pin(Rc::clone(stream).write_all(buf)),
             };
             future
+        }
+    }
+
+    impl<'s> StreamArg<'s> {
+        /// What an engine runs over, and the runtime it runs on. A native stream is consumed and runs on its own
+        /// runtime (`io`, if given, must be that one: `TypeError` otherwise, before anything is touched); any other
+        /// object is adopted as a [`JsStream`] and needs `io` (`TypeError` without it).
+        pub(crate) fn transport(
+            self,
+            scope: &mut v8::PinScope<'s, '_>,
+            io: Option<&crate::io::Io>,
+        ) -> Result<(Rc<IoCore>, Under), NativeError> {
+            match self {
+                StreamArg::Native(stream) => {
+                    let conn = stream.conn()?;
+                    if io.is_some_and(|io| !Rc::ptr_eq(&io.0, &conn.io)) {
+                        return Err(NativeError::type_error("options.io must be the Io of the stream (a native stream runs on its own)"));
+                    }
+                    let lp = conn.io.lp(crate::native::host_ref(scope)?)?;
+                    let (core, socket) = stream.take()?;
+                    Ok((core, Under::Socket(SocketTransport { socket, lp })))
+                }
+                StreamArg::Js(object) => {
+                    let io = io.ok_or_else(|| NativeError::type_error("options.io (an Io) is required for a stream that is not native"))?;
+                    io.0.lp(crate::native::host_ref(scope)?)?;
+                    let js = JsStream::adopt(scope, object, &io.0)?;
+                    Ok((Rc::clone(&io.0), Under::Js(js)))
+                }
+            }
         }
     }
 

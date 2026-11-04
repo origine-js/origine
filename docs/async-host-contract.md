@@ -18,8 +18,8 @@ const io = api.io.create({ backend: 'auto', entries: 256 }); // JS IoHandle inst
 const async = await api.fs.requestAsync({ handle: 'plain', io, root, access }); // rejects BadHandle/PermissionDenied/Unsupported
 await io.close();                                           // Promise<void>: cancels in-flight ops, destroys the runtime
 ```
-`api.fs.request` is removed. `api.fs.narrow` was dropped for now (`Config.fs` is the ceiling, `access` is per request). `api.io.narrow({ backends, maxRuntimes })`
-only narrows what `create` may do (embedder ceiling = `Config.runtime`). Handles are immutable JS class instances, not transferable across scopes.
+`api.fs.request` is removed. `api.fs.narrow` was dropped for now (`Config.fs` is the ceiling, `access` is per request). There is no `api.io.narrow`:
+the embedder ceiling (`Config.runtime`) is the only limit on what `create` may do. Handles are immutable JS class instances, not transferable across scopes.
 
 ## Errno (two domains, numbering)
 The error codes are two enums, `IoErrno` (Rust `io::ErrorKind` names, plus `TooManyOpenFiles` and `Io`) and `HostErrno`

@@ -37,6 +37,7 @@ pub(crate) static NATIVES: &[RawNative] = &[
     channel::NATIVE_CHANNEL_RECV,
     io::NATIVE_IO_CREATE,
     io::NATIVE_IO_RUNTIME,
+    io::NATIVE_IO_LINK,
     io::CLASS_IO,
     io::CLASS_IO_TIMER,
     io::CLASS_TIMER,

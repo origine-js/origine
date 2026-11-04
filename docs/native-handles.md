@@ -102,8 +102,7 @@ scope. Closed or released resources do not regain authority after restoration.
 `api.host.env` exposes only `args`, `get`, and `list`; the filtered-view `narrow`
 method and `EnvNarrow` type have been removed. Reads retain their existing return
 values. `args` and `list` allocate frozen arrays; `get` returns a value or undefined.
-No replacement alias is provided. `api.io.narrow` remains because its backend
-restrictions and shared live-runtime quotas have concrete effects. Invalid I/O
-narrowing options still throw TypeError, and a disallowed backend or exhausted
-quota still raises Unsupported. Internal Zig `errno.narrow` remains the error-set
+No replacement alias is provided. `api.io.narrow` was removed too: the
+embedder's `Config.runtime` is the only limit on backends and runtimes, and a
+disallowed backend or exhausted runtime count raises Unsupported. Internal Zig `errno.narrow` remains the error-set
 conversion boundary and is unrelated to capability narrowing.

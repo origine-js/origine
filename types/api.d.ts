@@ -1,17 +1,17 @@
-import type { HostCap } from "./host.d.ts";
-import type { FsCap } from "./fs.d.ts";
-import type { IoCap } from "./io.d.ts";
-import type { NetCap } from "./net.d.ts";
-import type { TlsCap } from "./tls.d.ts";
-import type { HttpCap } from "./http.d.ts";
-import type { DnsCap } from "./dns.d.ts";
-import type { ContextCap } from "./context.d.ts";
-import type { GraphCap } from "./graph.d.ts";
-import type { IsolateCap } from "./isolate.d.ts";
+import type { HostCap } from './host.d.ts';
+import type { FsCap } from './fs.d.ts';
+import type { IoCap } from './io.d.ts';
+import type { NetCap } from './net.d.ts';
+import type { TlsCap } from './tls.d.ts';
+import type { HttpCap } from './http.d.ts';
+import type { DnsCap } from './dns.d.ts';
+import type { ContextCap } from './context.d.ts';
+import type { GraphCap } from './graph.d.ts';
+import type { IsolateCap } from './isolate.d.ts';
 
 /**
- * The host API handed to `main`: every permission a program has. Frozen. `api.io.narrow` restricts backend choices and shared runtime quotas;
- * filesystem authority is selected explicitly through grants.
+ * The host API handed to `main`: every permission a program has. Frozen. Nothing narrows a capability (the
+ * embedder's ceiling is the only limit); filesystem authority is selected explicitly through grants.
  * `api.io` and `api.net` exist where the embedder gave the program a runtime ceiling (the
  * `origine` shell does); see {@link BasicApi} for code that must also run without it.
  */
@@ -39,7 +39,7 @@ export interface Api {
 }
 
 /** The part of {@link Api} every embedder provides. */
-export type BasicApi = Pick<Api, "fs" | "host" | "graph" | "context">;
+export type BasicApi = Pick<Api, 'fs' | 'host' | 'graph' | 'context'>;
 
 /**
  * The entry point: an init module exports `main`. It may be `async`; the program runs until the

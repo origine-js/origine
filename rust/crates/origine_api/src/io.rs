@@ -1,6 +1,6 @@
 //! `api.io`: the I/O runtime as a Rust-defined class.
 //!
-//! `native.io.create(opts, onClose)` makes a runtime (an `io::Loop` plus its task runtime, in the Host) and returns
+//! `native.io.create(opts)` makes a runtime (an `io::Loop` plus its task runtime, in the Host) and returns
 //! an `Io` instance owning an [`IoCore`] in the cppgc heap. The instance carries its tables as frozen data
 //! properties, each an instance of its own class over the same core: `io.timer` ([`IoTimer`]), `io.tcp`
 //! ([`IoTcp`]) and `io.udp` ([`IoUdp`]). `io` itself has the loop-wide operations: `run()`, `close()`, `backend`
@@ -89,17 +89,14 @@ fn table<'s, T: class::Class>(
     crate::encode::set(scope, object, name, value)
 }
 
-/// `native.io.create(opts, onClose?)`: creates a runtime owned by the calling scope and returns its `Io`.
-/// `onClose(promise, runtime)` is called when `close()` starts, with the promise of the close (the glue gives back
-/// its narrowing slots when it settles and tells the async fs). Throws an OrigineError subclass:
-/// `PermissionDenied` at the runtime ceiling, `Unsupported` for a backend the embedder excluded or the platform
-/// lacks; `TypeError` for a bad option.
+/// `native.io.create(opts)`: creates a runtime owned by the calling scope and returns its `Io`. Throws an
+/// OrigineError subclass: `PermissionDenied` at the runtime ceiling, `Unsupported` for a backend the embedder excluded
+/// or the platform lacks; `TypeError` for a bad option.
 #[native(side_effect = "any", path = "io.create", needs = "runtime")]
 fn io_create<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     key: ScopeKey,
     opts: Option<IoCreateOpts>,
-    on_close: Option<v8::Local<'s, v8::Function>>,
 ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
     let (backend, entries) = opts.map_or((None, None), |opts| (opts.backend, opts.entries));
     let backend = backend.unwrap_or_default();
@@ -117,12 +114,6 @@ fn io_create<'s>(
         refill: Rc::clone(&host.refill),
         idle: host.idle_of(runtime),
     });
-    if let Some(on_close) = on_close {
-        let function = v8::Global::new(scope, on_close);
-        let current = scope.get_current_context();
-        let context = v8::Global::new(scope, current);
-        host_mut(scope)?.close_hooks.insert(runtime, (function, context));
-    }
     let io = class::wrap(scope, Io(Rc::clone(&core)))?;
     let object = v8::Local::<v8::Object>::try_from(io).map_err(|_| NativeError::Errno(errno::UNEXPECTED))?;
     table(scope, object, "timer", IoTimer(Rc::clone(&core)))?;
@@ -137,6 +128,32 @@ fn io_create<'s>(
 fn io_runtime(host: &HostState, io: &Io) -> Result<u32, NativeError> {
     io.0.lp(host)?;
     Ok(io.0.runtime)
+}
+
+/// The key of the realm's closing hook (`native.io.link`), a private of the global.
+const CLOSING: &str = "origine:io.closing";
+
+/// `native.io.link(closing)`: `closing(runtime)` is called when a runtime of this realm starts closing (the glue
+/// tells the async fs, whose grants on it stop being an authority). Called once per realm.
+#[native(side_effect = "any", path = "io.link", needs = "runtime")]
+fn io_link<'s>(scope: &mut v8::PinScope<'s, '_>, closing: v8::Local<'s, v8::Function>) -> Result<(), NativeError> {
+    let name = v8::String::new(scope, CLOSING).ok_or(NativeError::Errno(errno::UNEXPECTED))?;
+    let key = v8::Private::for_api(scope, Some(name));
+    let global = scope.get_current_context().global(scope);
+    global.set_private(scope, key, closing.into());
+    Ok(())
+}
+
+/// Calls the realm's closing hook, if the glue linked one; what it throws is dropped.
+fn closing_hook(scope: &mut v8::PinScope<'_, '_>, runtime: u32) {
+    let Some(name) = v8::String::new(scope, CLOSING) else { return };
+    let key = v8::Private::for_api(scope, Some(name));
+    let global = scope.get_current_context().global(scope);
+    let Some(function) = global.get_private(scope, key).and_then(|f| v8::Local::<v8::Function>::try_from(f).ok()) else { return };
+    let id = v8::Integer::new_from_unsigned(scope, runtime).into();
+    let undefined = v8::undefined(scope).into();
+    v8::tc_scope!(let tc, scope);
+    let _ = function.call(tc, undefined, &[id]);
 }
 
 /// An I/O runtime (`api.io.create`).
@@ -177,7 +194,6 @@ impl Io {
         let context = v8::Global::new(scope, current);
         let promise_global = v8::Global::new(scope, promise);
         let host = host_mut(scope)?;
-        let hook = host.close_hooks.remove(&runtime);
         let closing = host.begin_close(self.0.owner, runtime, Pending::new(resolver_global, context, runtime, None));
         match closing {
             Ok(canceled) => {
@@ -185,14 +201,7 @@ impl Io {
                 for pending in canceled {
                     native::finish::<()>(scope, pending, Err(NativeError::Errno(errno::CANCELED)));
                 }
-                if let Some((function, _)) = hook {
-                    let function = v8::Local::new(scope, function);
-                    let id = v8::Integer::new_from_unsigned(scope, runtime).into();
-                    let undefined = v8::undefined(scope).into();
-                    v8::tc_scope!(let tc, scope);
-                    let promise = v8::Local::new(tc, &promise);
-                    let _ = function.call(tc, undefined, &[promise.into(), id]);
-                }
+                closing_hook(scope, runtime);
             }
             Err(error) => {
                 let value = class::guest_error(scope, error);

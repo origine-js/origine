@@ -26,7 +26,7 @@ Examples that write files do it under a `work/` directory they create and that g
 | | [access](fs/access/init.js) | `access` `'r' \| 'w' \| 'rw'`, `handle` `'plain' \| 'hardened'`, refusals |
 | | [symlinks](fs/symlinks/init.js) | `symlinks: 'follow' \| 'confined'` with a link that leaves the root |
 | [io](io) | [timers](io/timers/init.js) | `sleep`, `sleepUntil`, `timer`, `timerAt`, cancellation |
-| | [runtimes](io/runtimes/init.js) | `create` options, `narrow`, `maxRuntimes`, `now`, `run`, `close`, `await using` |
+| | [runtimes](io/runtimes/init.js) | `create` options, `now`, `run`, `close`, `await using` |
 | [net](net) | [promises](net/promises/init.js) | `'pull'` sockets: `read`, `readCopy`, `readInto`, `queued.send` |
 | | [events](net/events/init.js) | `'event'` sockets: `register`, `queued.put`, `drain`, `pause`, leases |
 | | [lifecycle](net/lifecycle/init.js) | `end('write')`, the auto-close rule, `toEvented()` |

@@ -124,8 +124,6 @@ pub struct HostState {
     pub(crate) next_hub: u32,
     /// The promise of each runtime's `close()`, which every later call returns.
     pub(crate) closings: BTreeMap<u32, v8::Global<v8::Promise>>,
-    /// What the glue asked to be told when a runtime starts closing (`native.io.create`'s `onClose`).
-    pub(crate) close_hooks: BTreeMap<u32, (v8::Global<v8::Function>, v8::Global<v8::Context>)>,
     pub(crate) events: Events,
     pub(crate) refill: Rc<RefCell<Vec<u32>>>,
     idle: BTreeMap<u32, Rc<Idle>>,
@@ -162,7 +160,6 @@ impl HostState {
             hubs: BTreeMap::new(),
             next_hub: 1,
             closings: BTreeMap::new(),
-            close_hooks: BTreeMap::new(),
             events: Rc::default(),
             refill: Rc::default(),
             idle: BTreeMap::new(),
@@ -307,7 +304,6 @@ impl HostState {
         for conn in conns.iter().filter_map(Weak::upgrade) {
             conn.close();
         }
-        self.close_hooks.remove(&id);
         let grant_ids: Vec<u32> = self.grants.iter().filter(|(_, record)| record.runtime == id).map(|(grant, _)| *grant).collect();
         if let Some(entry) = self.runtimes.get_mut(&id) {
             entry.state = RtState::Draining { close_op: None, grants_released: false };
@@ -498,7 +494,6 @@ impl HostState {
     pub fn drop_all(&mut self) {
         self.hubs.clear();
         self.closings.clear();
-        self.close_hooks.clear();
         #[cfg(feature = "http")]
         self.http.clear();
         self.events.borrow_mut().clear();

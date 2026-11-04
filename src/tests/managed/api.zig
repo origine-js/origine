@@ -458,30 +458,22 @@ test "api: host.threading.parallelism is a positive integer" {
     try check(fx.scope, "Number.isInteger(report.n) && report.n >= 1 && report.frozen");
 }
 
-test "api: io narrowing enforces quotas and env exposes only reads" {
+test "api: io has no narrowing, close is one promise, env exposes only reads" {
     var fx: Fixture = undefined;
     try fx.setup(
         \\import { Dir, IoError, HostError } from 'origine:@std/io';
         \\export async function main(api) {
         \\  const out = globalThis.report = {};
         \\  const io = api.io.create({});
-        \\  // The io ceiling is narrowable too: backend list and runtime count.
-        \\  const capped = api.io.narrow({ maxRuntimes: 1, backends: ['threaded'] });
-        \\  const first = capped.create({});
-        \\  out.narrowedBackend = first.backend;
-        \\  try { capped.create({}); } catch (e) { out.countCapped = IoError.is(e, IoError.Unsupported); }
-        \\  try { api.io.narrow({ backends: ['threaded'] }).create({ backend: 'uring' }); } catch (e) { out.backendCapped = IoError.is(e, IoError.Unsupported); }
-        \\  await first.close();
-        \\  await capped.create({}).close();
-        \\  // close() is one shared promise; the narrowing slot is held until it settles.
-        \\  const slot = api.io.narrow({ maxRuntimes: 1 });
-        \\  const solo = slot.create({ backend: 'threaded' });
-        \\  const c1 = solo.close(), c2 = solo.close();
+        \\  // The embedder's ceiling is the only limit: `api.io` has `create` and nothing that narrows it.
+        \\  out.noNarrow = Object.keys(api.io).join(',') === 'create' && api.io.narrow === undefined && Object.isFrozen(api.io);
+        \\  const threaded = api.io.create({ backend: 'threaded' });
+        \\  out.threaded = threaded.backend === 'threaded';
+        \\  // close() is one shared promise.
+        \\  const c1 = threaded.close(), c2 = threaded.close();
         \\  out.closeShared = c1 === c2;
-        \\  try { slot.create({ backend: 'threaded' }); out.closeHeld = false; } catch (e) { out.closeHeld = IoError.is(e, IoError.Unsupported); }
         \\  await Promise.all([c1, c2]);
-        \\  out.closeAfter = solo.close() === c1;
-        \\  await slot.create({ backend: 'threaded' }).close();
+        \\  out.closeAfter = threaded.close() === c1 && threaded.closed;
         \\  await io.close();
         \\  out.home = api.host.env.get('HOME'); out.path = api.host.env.get('PATH');
         \\  out.envReads = Object.keys(api.host.env).join(',') === 'args,get,list' && Object.isFrozen(api.host.env);
@@ -491,9 +483,9 @@ test "api: io narrowing enforces quotas and env exposes only reads" {
     , true, &.{});
     defer fx.deinit();
     try fx.run();
-    try check(fx.scope, "report.narrowedBackend === 'threaded' && report.countCapped && report.backendCapped");
+    try check(fx.scope, "report.noNarrow && report.threaded");
     try check(fx.scope, "report.home === '/home/test' && report.path === '/bin' && report.envReads");
-    try check(fx.scope, "report.noContextNarrow === true && report.frozen === true && report.closeShared && report.closeHeld && report.closeAfter");
+    try check(fx.scope, "report.noContextNarrow === true && report.frozen === true && report.closeShared && report.closeAfter");
 }
 
 test "api: without a host grant fs is denied" {

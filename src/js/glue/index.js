@@ -40,7 +40,7 @@ export function create(native) {
     graph: undefined,
     context: undefined,
     isolate: undefined,
-    io: { parent: null, backends: undefined, max: Infinity, live: 0 },
+    io: undefined,
     net: undefined,
     tls: undefined,
     http: undefined,

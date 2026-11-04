@@ -21,14 +21,6 @@ export interface IoOptions {
   readonly entries?: number;
 }
 
-/** Options of {@link IoCap.narrow}. A narrowed capability can only lower what its parent allows. */
-export interface IoNarrow {
-  /** The only backends `create` may use (`'auto'` then means the first of these that works). */
-  readonly backends?: readonly Backend[];
-  /** Most runtimes alive at once through this capability; a slot is given back once `close()` settles. */
-  readonly maxRuntimes?: number;
-}
-
 /** A cancellable timer: {@link IoTimer.timer}. A frozen instance of a native class. */
 export interface Timer {
   /** Resolves when the delay has passed; rejects with a HostError whose errno is Canceled when cancelled. */
@@ -104,7 +96,7 @@ export interface Io extends AsyncDisposable {
 
 /**
  * `api.io`: async runtimes, timers and the base of sockets. Present where the embedder gave the
- * program a runtime ceiling.
+ * program a runtime ceiling (its backends and runtime count), which is the only limit: there is no narrowing.
  */
 export interface IoCap {
   /**
@@ -112,6 +104,4 @@ export interface IoCap {
    * the number of runtimes is not allowed or available, `PermissionDenied` at the runtime ceiling; or a `TypeError` for bad options.
    */
   create(options?: IoOptions): Io;
-  /** A capability that can only do less than this one. There is no way to widen it again. */
-  narrow(options: IoNarrow): IoCap;
 }

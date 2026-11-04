@@ -45,8 +45,8 @@ export const main: Main = async (api: Api) => {
   void names;
 
   const io = api.io.create({ backend: 'auto', entries: 256 });
-  const narrowIo = api.io.narrow({ backends: ['threaded'], maxRuntimes: 2 });
-  const timer = narrowIo.create().timer.timer(10);
+  const threaded = api.io.create({ backend: 'threaded' });
+  const timer = threaded.timer.timer(10);
   const stopped: boolean = timer.cancel();
   await timer.promise.catch(() => {});
   await io.timer.sleep(5);
@@ -123,8 +123,8 @@ export const main: Main = async (api: Api) => {
   api.context.narrow({});
   // @ts-expect-error environment views have no narrowing API
   api.host.env.narrow({});
-  // @ts-expect-error `narrow` takes the same `backends`, no `max`
-  api.io.narrow({ max: 1 });
+  // @ts-expect-error `io` has no `narrow`: the embedder's ceiling is the only limit
+  api.io.narrow({ backends: ['threaded'] });
   // @ts-expect-error not a backend
   api.io.create({ backend: 'epoll' });
   // @ts-expect-error `fs` has no `narrow`

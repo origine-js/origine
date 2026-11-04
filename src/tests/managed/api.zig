@@ -2407,7 +2407,7 @@ test "api: Rust-style fs over sync and async io" {
         \\  const exact = await rs.File.open(p + '/h.bin');
         \\  out[label + 'exact'] = (await rejects(() => exact.read_exact(new Uint8Array(9)), IoError.InvalidData));
         \\  await exact.close();
-        \\  out[label + 'append'] = await rejects(() => rs.OpenOptions.new().write(true).append(true).open(p + '/h.bin'), IoError.Unsupported);
+        \\  out[label + 'append'] = !('append' in rs.OpenOptions.new());
         \\  out[label + 'noflags'] = await rejects(() => rs.OpenOptions.new().open(p + '/h.bin'), IoError.InvalidInput);
         \\  out[label + 'createWithoutWrite'] = await rejects(() => rs.OpenOptions.new().read(true).create(true).open(p + '/h.bin'), IoError.InvalidInput);
         \\  out[label + 'createNew'] = await rejects(() => rs.File.create_new(p + '/h.bin'), IoError.AlreadyExists);

@@ -15,6 +15,7 @@ code as it is.
   |---|---|
   | `native.io.create` | `io_create` |
   | `native.io.runtime` | `io_runtime` |
+  | `native.io.link` | `io_link` |
   | `native.fsAsync.request` | `fs_async_request` |
   | `native.fsAsync.<op>` | `fs_async_<snake_op>` (e.g. `openFile` -> `fs_async_open_file`) |
 
@@ -41,8 +42,9 @@ number reaches the guest.
 
 | Native / member | Signature | Result |
 |---|---|---|
-| `create` | `(opts?: { backend?, entries? }, onClose?: (promise, runtime) => void)` | an `Io` (sync, frozen). `onClose` is the glue's: called when `close()` starts, with its promise (narrowing slots, async fs). Throws `Unsupported` (backend excluded or unavailable), `PermissionDenied` (runtime ceiling), `TypeError`. |
+| `create` | `(opts?: { backend?, entries? })` | an `Io` (sync, frozen). Throws `Unsupported` (backend excluded or unavailable), `PermissionDenied` (runtime ceiling), `TypeError`. |
 | `runtime` | `(io: Io)` | the runtime's number, for the async fs natives the glue calls; `BadHandle` once closing |
+| `link` | `(closing: (runtime) => void)` | once per realm: `closing` is called when a runtime of the realm starts closing (the glue tells the async fs) |
 | `Io` | installer | `backend`, `closed`, `run()` (Promise resolving once every flowing conn of the runtime delivered `close`), `close()` (cancels the runtime's ops, which reject `Canceled`, closes its conns, drains, releases its grants, destroys the loop; every call returns the same promise), `timer`, `tcp`, `udp` |
 | `IoTimer` | installer | `now()` (monotonic ms since host creation), `sleep(ms)`, `sleepUntil(deadline)`, `timer(ms)` / `timerAt(deadline)` (a frozen `Timer` with `promise` and `cancel()`). `ms`: finite, 0 to 2147483647 (`TypeError`); `BadHandle` once closed. |
 | `IoTcp` | installer | `listen(addr)` (sync, `TcpListenerUnshaped`), `connect(addr)` (Promise `TcpStreamUnshaped`; non-blocking, the loop's `connect`) |

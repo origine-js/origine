@@ -1,0 +1,11 @@
+# Trees Bazel must not read as packages: Zig build caches and outputs, the old V8 checkout cache,
+# Cargo output and agent worktrees.
+ignore_directories([
+    "**/.zig-cache",
+    "**/.zig-global-cache",
+    "**/zig-out",
+    "**/zig-pkg",
+    "**/.lp-cache",
+    "**/target",
+    ".claude",
+])

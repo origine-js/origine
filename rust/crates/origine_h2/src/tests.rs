@@ -348,7 +348,9 @@ fn http_one_is_not_a_preface() {
 #[test]
 fn fields_are_checked_when_they_are_put() {
     let mut f = FieldList::new();
-    for bad in [&b"Content-Type"[..], b"", b":path", b"connection", b"keep-alive", b"transfer-encoding", b"upgrade", b"has space", b"te"] {
+    for bad in
+        [&b"Content-Type"[..], b"", b":", b":Path", b"connection", b"keep-alive", b"transfer-encoding", b"upgrade", b"has space", b"te"]
+    {
         assert!(matches!(f.put(bad, b"x"), Err(H2Error::InvalidField(_))), "{:?}", String::from_utf8_lossy(bad));
     }
     assert!(f.put(b"te", b"gzip").is_err());
@@ -357,6 +359,12 @@ fn fields_are_checked_when_they_are_put() {
     assert!(f.put(b"x", b"nul\0").is_err());
     f.put(b"x", b"").unwrap();
     assert_eq!(f.len(), 2);
+    // Pseudo headers lead the list, as on the wire.
+    assert!(matches!(f.put(b":path", b"/"), Err(H2Error::InvalidField(_))));
+    let mut head = FieldList::new();
+    head.put(b":method", b"GET").unwrap();
+    head.put(b"accept", b"*/*").unwrap();
+    assert!(head.has_pseudo() && !f.has_pseudo());
 }
 
 #[test]

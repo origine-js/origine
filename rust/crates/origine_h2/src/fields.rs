@@ -2,8 +2,9 @@ use crate::error::H2Error;
 
 /// An ordered sequence of header fields, packed into one buffer: for each field
 /// `name_len: u16 LE | value_len: u32 LE | name | value`. It is a sequence, not a map: duplicates
-/// and order are kept. Names are lowercase; pseudo headers (`:method`, `:status`, ...) are not fields
-/// and travel separately.
+/// and order are kept. Names are lowercase. Pseudo header fields (`:method`, `:status`, ...) may lead the
+/// list, before any other field, as on the wire (the frame-level API); the message-level [`crate::Session`]
+/// passes them separately and refuses them here ([`FieldList::has_pseudo`]).
 ///
 /// The packed form is what crosses the JS boundary: one buffer per batch instead of one call per field.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -27,8 +28,22 @@ impl FieldList {
     }
 
     /// Appends a field after checking it. `name` must be lowercase, a token, and not a connection-specific
-    /// or pseudo header; `value` must not hold NUL, CR or LF.
+    /// header; a pseudo header (`:` and a token) only before every other field; `value` must not hold NUL, CR or
+    /// LF.
     pub fn put(&mut self, name: &[u8], value: &[u8]) -> Result<(), H2Error> {
+        if let Some(pseudo) = name.strip_prefix(b":") {
+            if pseudo.is_empty() || !pseudo.iter().copied().all(token_byte) {
+                return Err(H2Error::InvalidField(format!("bad pseudo header {:?}", String::from_utf8_lossy(name))));
+            }
+            if self.iter().any(|(n, _)| n.first() != Some(&b':')) {
+                return Err(H2Error::InvalidField(format!("{} after a regular field", String::from_utf8_lossy(name))));
+            }
+            if value.iter().any(|&b| b == 0 || b == b'\r' || b == b'\n') {
+                return Err(H2Error::InvalidField(format!("bad value for {}", String::from_utf8_lossy(name))));
+            }
+            self.push_unchecked(name, value);
+            return Ok(());
+        }
         if name.is_empty() || name.len() > u16::MAX as usize || !name.iter().copied().all(token_byte) {
             return Err(H2Error::InvalidField(format!("bad name {:?} (lowercase token required)", String::from_utf8_lossy(name))));
         }
@@ -77,6 +92,11 @@ impl FieldList {
             list.put(name, value)?;
         }
         Ok(list)
+    }
+
+    /// Whether the list holds pseudo header fields.
+    pub fn has_pseudo(&self) -> bool {
+        self.iter().any(|(n, _)| n.first() == Some(&b':'))
     }
 
     pub fn len(&self) -> usize {

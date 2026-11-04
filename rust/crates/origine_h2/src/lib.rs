@@ -13,16 +13,22 @@ mod driver;
 mod error;
 mod event;
 mod fields;
+mod frame_driver;
+mod frames;
 mod session;
 mod sys;
 
 #[cfg(test)]
 mod driver_tests;
 #[cfg(test)]
+mod frames_tests;
+#[cfg(test)]
 mod tests;
 
 pub use driver::{ConnError, Connection, Driver, Exchange, StreamEvent, connect};
 pub use error::H2Error;
 pub use event::{Event, HeaderKind, Limits, Pseudo, Role};
-pub use fields::FieldList;
+pub use fields::{FieldList, Fields};
+pub use frame_driver::{FrameConn, FrameDriver, Next, frame_connect};
+pub use frames::{Category, FrameEvent, FrameOptions, FrameSession, Messaging, Priority, SettingId, Settings, StreamState};
 pub use session::{Body, RequestHead, Session};

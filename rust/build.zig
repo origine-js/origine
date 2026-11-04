@@ -43,15 +43,17 @@ pub fn build(b: *std.Build) void {
     const file_name = if (result.os.tag == .windows and result.abi == .msvc) "origine_native.lib" else "liborigine_native.a";
 
     // One cargo run: the archive the root links and the object the pre-link step derives from it.
+    // It is cached on the declared sources and Cargo.lock; `cargo` itself decides what to relink.
     const cargo = cargoCommand(b, v8, aws_lc, offline, &.{ "build", "--release", "--locked", "--target", triple });
     cargo.addArgs(&.{ "--no-default-features", "--features", features });
     cargo.addArg("--target-dir");
     cargo.addDirectoryArg2(b.path("target"), .{ .make_absolute = true });
+    for (cargoInputs(b)) |path| cargo.addFileInput(b.path(path));
+    // The archive is an output argument, not a copy of `target/`: a cache hit must deliver the
+    // file from the cache, and a `WriteFile` copy that reruns would rewrite its inode and
+    // invalidate every program that links the archive.
+    const archive = cargo.addOutputFileArg2(file_name, .{});
     b.step("build", "Build liborigine_native.a and the pre-linked object").dependOn(&cargo.step);
-
-    const copy = b.addWriteFiles();
-    copy.step.dependOn(&cargo.step);
-    const archive = copy.addCopyFile(b.path(b.fmt("target/{s}/release/{s}", .{ triple, file_name })), file_name);
     b.addNamedLazyPath("archive", archive);
     b.addNamedLazyPath("object", prelinked(b, result, archive));
 
@@ -86,8 +88,38 @@ fn cargoCommand(b: *std.Build, v8: ?V8, aws_lc: ?std.Build.LazyPath, offline: bo
     run.addArg("--manifest-path");
     run.addFileArg2(b.path("Cargo.toml"), .{ .make_absolute = true });
     run.addArgs(args[1..]);
-    run.has_side_effects = true;
     return run;
+}
+
+/// Every file cargo reads that is not already a `LazyPath` input (V8, AWS-LC, the toolchain):
+/// the workspace manifests and lockfile, and each crate's sources and build script. Zig caches
+/// a `Run` on its declared inputs, so these are what decide whether cargo runs at all; cargo
+/// still owns incremental compilation and relinking inside the run. `target/` is not an input
+/// (it is the build output) and neither is `.git`. Returns paths relative to the package root
+/// and borrows b through build teardown.
+fn cargoInputs(b: *std.Build) []const []const u8 {
+    var paths: std.ArrayList([]const u8) = .empty;
+    for ([_][]const u8{ "Cargo.toml", "Cargo.lock" }) |path| paths.append(b.allocator, path) catch @panic("OOM");
+    var dir = std.Io.Dir.cwd().openDir(b.graph.io, ".", .{ .iterate = true }) catch @panic("cannot open rust/");
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch @panic("cannot walk rust/")) |entry| {
+        if (entry.kind != .file) continue;
+        const name = entry.path;
+        // Rooted at `src/`, `crates/` and `scripts/`, or a top-level `*.toml`/`*.rs`.
+        const is_source = std.mem.startsWith(u8, name, "src/") or
+            std.mem.startsWith(u8, name, "crates/") or
+            std.mem.startsWith(u8, name, "scripts/") or
+            std.mem.indexOfScalar(u8, name, '/') == null;
+        if (!is_source) continue;
+        if (!(std.mem.endsWith(u8, name, ".toml") or
+            std.mem.endsWith(u8, name, ".rs") or
+            std.mem.endsWith(u8, name, ".py") or
+            std.mem.endsWith(u8, name, ".h"))) continue;
+        paths.append(b.allocator, b.dupe(name)) catch @panic("OOM");
+    }
+    return paths.items;
 }
 
 /// The pre-linked object the root's external link uses (or the archive where the platform has no

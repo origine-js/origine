@@ -1,0 +1,55 @@
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -380,22 +380,36 @@
+         ctx.actions.declare_file(prefix + "/snapshot" + suffix + ".cc"),
+         ctx.actions.declare_file(prefix + "/embedded" + suffix + ".S"),
+     ]
+-    ctx.actions.run(
+-        outputs = outs,
+-        inputs = [],
+-        mnemonic = "V8Mksnapshot",
+-        arguments = [
+-            "--embedded_variant=Default",
+-            "--target_os",
+-            ctx.attr.target_os,
+-            "--startup_src",
+-            outs[0].path,
+-            "--embedded_src",
+-            outs[1].path,
+-        ] + ctx.attr.args,
+-        executable = ctx.executable.tool,
+-        progress_message = "Running mksnapshot",
+-    )
++    arguments = [
++        "--embedded_variant=Default",
++        "--target_os",
++        ctx.attr.target_os,
++        "--startup_src",
++        outs[0].path,
++        "--embedded_src",
++        outs[1].path,
++    ] + ctx.attr.args
++    if prefix != "icu":
++        ctx.actions.run(
++            outputs = outs,
++            mnemonic = "V8Mksnapshot",
++            arguments = arguments,
++            executable = ctx.executable.tool,
++            progress_message = "Running mksnapshot",
++        )
++    else:
++        # V8 finds the ICU data (icu_use_data_file) beside the executable it was started from, and
++        # mksnapshot takes no flag for it: run a copy that has icudtl.dat next to it.
++        stage = ctx.actions.declare_directory(prefix + "/mksnapshot-stage")
++        ctx.actions.run_shell(
++            outputs = outs + [stage],
++            inputs = [ctx.file._icu_data],
++            tools = [ctx.executable.tool],
++            mnemonic = "V8Mksnapshot",
++            arguments = [ctx.executable.tool.path, ctx.file._icu_data.path, stage.path] + arguments,
++            command = 'set -eu; tool="$1"; data="$2"; stage="$3"; shift 3; cp "$tool" "$stage/mksnapshot"; cp "$data" "$stage/icudtl.dat"; exec "$stage/mksnapshot" "$@"',
++            progress_message = "Running mksnapshot",
++        )
+     return [DefaultInfo(files = depset(outs))]
+ 
+ _v8_mksnapshot = rule(

@@ -1,0 +1,10 @@
+load("@rules_rust//rust:defs.bzl", "rust_static_library")
+
+rust_static_library(
+    name = "tools",
+    srcs = ["lib.rs"],
+    crate_root = "lib.rs",
+    deps = ["@crates//:temporal_capi_0_2_6"],
+    rustc_flags = ["-Cpanic=abort"],
+    visibility = ["//visibility:public"],
+)

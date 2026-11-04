@@ -1,0 +1,126 @@
+diff --git a/zig/private/repo/zig_repository.bzl b/zig/private/repo/zig_repository.bzl
+--- a/zig/private/repo/zig_repository.bzl
++++ b/zig/private/repo/zig_repository.bzl
+@@ -89,6 +89,7 @@
+     zig_exe = {zig_exe},
+     zig_h = "lib/zig.h",
+     zig_lib = "lib",
++    zig_lib_files = glob(["lib/**"]),
+     zig_version = {zig_version},
+     zig_cache = {zig_cache},
+ )
+diff --git a/zig/private/zig_toolchain.bzl b/zig/private/zig_toolchain.bzl
+--- a/zig/private/zig_toolchain.bzl
++++ b/zig/private/zig_toolchain.bzl
+@@ -70,6 +70,7 @@
+         mandatory = True,
+         allow_single_file = True,
+     ),
++    "zig_lib_files": attr.label_list(allow_files = True),
+     "zig_version": attr.string(
+         doc = "The Zig toolchain's version.",
+         mandatory = True,
+@@ -89,6 +90,7 @@
+         doc = "Absolute path to an existing Zig library directory for the target platform.",
+         mandatory = True,
+     ),
++    "zig_lib_files": attr.label_list(allow_files = True),
+     "zig_version": attr.string(
+         doc = "The Zig toolchain's version.",
+         mandatory = True,
+@@ -149,11 +151,12 @@
+     # Validation actions of transitive dependencies do not seem to be picked up
+     # by Bazel. So, we need to make the validation output an input of Zig SDK
+     # using actions to ensure that it takes place.
+-    tool_files = [zig_exe, zig_lib, validation]
++    tool_files = [zig_exe, validation] + (ctx.files.zig_lib_files or [zig_lib])
+     zigtoolchaininfo = zig_file_toolchain_info(
+         zig_exe = zig_exe,
+         zig_h = zig_h,
+         zig_lib = zig_lib,
++        zig_lib_files = ctx.files.zig_lib_files or [zig_lib],
+         zig_version = zig_version,
+         zig_cache = zig_cache,
+         validation = validation,
+diff --git a/zig/private/providers/zig_toolchain_info.bzl b/zig/private/providers/zig_toolchain_info.bzl
+--- a/zig/private/providers/zig_toolchain_info.bzl
++++ b/zig/private/providers/zig_toolchain_info.bzl
+@@ -18,7 +18,7 @@
+     fields = FIELDS,
+ )
+ 
+-def zig_file_toolchain_info(*, zig_exe, zig_h, zig_lib, zig_version, zig_cache, validation):
++def zig_file_toolchain_info(*, zig_exe, zig_h, zig_lib, zig_lib_files, zig_version, zig_cache, validation):
+     return ZigToolchainInfo(
+         mode = "file",
+         zig_exe = struct(
+@@ -27,6 +27,7 @@
+         ),
+         zig_lib = struct(
+             file = zig_lib,
++            files = zig_lib_files,
+             header = zig_h,
+             path = None,
+         ),
+@@ -44,6 +45,7 @@
+         ),
+         zig_lib = struct(
+             file = None,
++            files = [],
+             header = None,
+             path = zig_lib_path,
+         ),
+diff --git a/zig/private/common/zig_build.bzl b/zig/private/common/zig_build.bzl
+--- a/zig/private/common/zig_build.bzl
++++ b/zig/private/common/zig_build.bzl
+@@ -510,7 +510,7 @@
+     transitive_inputs.append(root_module.transitive_inputs)
+     transitive_inputs.append(depset([zigtoolchaininfo.validation]))
+     if zigtoolchaininfo.zig_lib.file != None:
+-        transitive_inputs.append(depset([zigtoolchaininfo.zig_lib.file]))
++        transitive_inputs.append(depset(zigtoolchaininfo.zig_lib.files))
+ 
+     inputs = depset(
+         direct = direct_inputs,
+@@ -652,7 +652,7 @@
+             lib_args.add(test_artifact)
+             ctx.actions.run(
+                 outputs = [static_lib],
+-                inputs = [test_artifact, zigtoolchaininfo.validation] + ([zigtoolchaininfo.zig_lib.file] if zigtoolchaininfo.zig_lib.file else []),
++                inputs = [test_artifact, zigtoolchaininfo.validation] + zigtoolchaininfo.zig_lib.files,
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+                 arguments = ["build-lib", global_args, lib_args],
+                 mnemonic = "ZigBuildLib",
+diff --git a/zig/private/common/zig_docs.bzl b/zig/private/common/zig_docs.bzl
+--- a/zig/private/common/zig_docs.bzl
++++ b/zig/private/common/zig_docs.bzl
+@@ -174,7 +174,7 @@
+     transitive_inputs.append(root_module.transitive_inputs)
+     transitive_inputs.append(depset([zigtoolchaininfo.validation]))
+     if zigtoolchaininfo.zig_lib.file != None:
+-        transitive_inputs.append(depset([zigtoolchaininfo.zig_lib.file]))
++        transitive_inputs.append(depset(zigtoolchaininfo.zig_lib.files))
+ 
+     inputs = depset(
+         direct = direct_inputs,
+diff --git a/zig/private/common/translate_c.bzl b/zig/private/common/translate_c.bzl
+--- a/zig/private/common/translate_c.bzl
++++ b/zig/private/common/translate_c.bzl
+@@ -131,7 +131,7 @@
+     zig_out = ctx.actions.declare_file("{}{}_c.zig".format(output_prefix, ctx.label.name))
+     inputs.extend([zigtoolchaininfo.validation])
+     if zigtoolchaininfo.zig_lib.file != None:
+-        inputs.append(zigtoolchaininfo.zig_lib.file)
++        inputs.extend(zigtoolchaininfo.zig_lib.files)
+ 
+     ctx.actions.run_shell(
+         command = "${{@}} > {}".format(zig_out.path),
+@@ -207,7 +207,7 @@
+         args.add(zig_toolchain_lib_dir_path(zigtoolchaininfo), format = "--zig-lib=%s")
+         args.add("--")
+         if zigtoolchaininfo.zig_lib.file != None:
+-            inputs.append(zigtoolchaininfo.zig_lib.file)
++            inputs.extend(zigtoolchaininfo.zig_lib.files)
+     else:
+         args.add("-o", zig_out)
+     args.add(hdr)

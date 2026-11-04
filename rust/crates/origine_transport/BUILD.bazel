@@ -1,0 +1,20 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "origine_transport",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+)
+
+rust_library(
+    name = "testing",
+    crate_name = "origine_transport",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_features = ["testing"],
+    testonly = True,
+)
+
+rust_test(name = "transport_test", crate = ":origine_transport")

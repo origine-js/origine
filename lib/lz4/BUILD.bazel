@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "lz4",
+    main = "src/lz4.zig",
+    import_name = "@lz4",
+    deps = ["@origine_lz4//:lz4"],
+    visibility = ["//visibility:public"],
+)
+
+zig_test(name = "lz4_test", deps = [":lz4"], zigopts = ["-lc"])

@@ -1,0 +1,8 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "headers",
+    hdrs = glob(["bindings/cpp/**/*.hpp"]),
+    includes = ["bindings/cpp"],
+    visibility = ["//visibility:public"],
+)

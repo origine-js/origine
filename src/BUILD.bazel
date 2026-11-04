@@ -1,0 +1,42 @@
+load("@rules_zig//zig:defs.bzl", "zig_configure", "zig_library", "zig_static_library", "zig_test")
+
+zig_library(
+    name = "safe",
+    main = "safe.zig",
+    import_name = "@safe",
+)
+
+zig_library(
+    name = "io",
+    main = "io/io.zig",
+    srcs = glob(["io/**/*.zig"]),
+    extra_srcs = glob(["io/include/**"]),
+    deps = [":safe"],
+    import_name = "@io",
+    visibility = ["//visibility:public"],
+)
+
+zig_test(
+    name = "io_test",
+    deps = [":io"],
+    zigopts = ["-lc"],
+)
+
+zig_static_library(
+    name = "io_native_unconfigured",
+    main = "io/lib.zig",
+    deps = [":io"],
+    zigopts = ["-lc", "-fllvm"],
+)
+
+zig_configure(
+    name = "io_native",
+    actual = ":io_native_unconfigured",
+    mode = "release_fast",
+    visibility = ["//visibility:public"],
+)
+
+zig_test(
+    name = "safe_test",
+    deps = [":safe"],
+)

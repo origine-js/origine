@@ -1,0 +1,11 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "origine_io",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    link_deps = ["//src:io_native"],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(name = "io_test", crate = ":origine_io")

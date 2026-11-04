@@ -1,0 +1,193 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -541,9 +541,16 @@
+ 
+ v8_custom_config(name = "default")
+ 
++v8_flag(name = "v8_enable_sandbox", default = True)
++v8_flag(name = "v8_enable_memory_corruption_api")
++v8_flag(name = "v8_enable_temporal_support", default = True)
++
+ v8_config(
+     name = "define_flags",
+     conditional_defines = {
++        "v8_enable_sandbox": "V8_ENABLE_SANDBOX",
++        "v8_enable_memory_corruption_api": "V8_ENABLE_MEMORY_CORRUPTION_API",
++        "v8_enable_temporal_support": "V8_TEMPORAL_SUPPORT",
+         "v8_android_log_stdout": "V8_ANDROID_LOG_STDOUT",
+         "v8_code_comments": "V8_CODE_COMMENTS",
+         "v8_deprecation_warnings": "V8_DEPRECATION_WARNINGS",
+@@ -580,7 +587,16 @@
+         "v8_enable_ecma402_icu4x": "V8_ENABLE_ECMA402_ICU4X",
+     },
+     defines = [
+-        "GOOGLE3",
++        "V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT=2",
++        "V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT=2",
++        "V8_PROMISE_INTERNAL_FIELD_COUNT=1",
++        "CPPGC_SUPPORTS_OBJECT_NAMES",
++        "CPPGC_CAGED_HEAP",
++        "CPPGC_YOUNG_GENERATION",
++        "CPPGC_POINTER_COMPRESSION",
++        "CPPGC_ENABLE_LARGER_CAGE",
++        "CPPGC_ENABLE_OBJECT_SECTION_GCINFO",
++        "CPPGC_SLIM_WRITE_BARRIER",
+         "V8_ADVANCED_BIGINT_ALGORITHMS",
+         "V8_CONCURRENT_MARKING",
+         "V8_ENABLE_SPARKPLUG",
+@@ -666,7 +682,7 @@
+             "V8_COMPRESS_POINTERS",
+             "V8_31BIT_SMIS_ON_64BIT_ARCH",
+             "V8_CONTIGUOUS_COMPRESSED_RO_SPACE",
+-            "V8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB=8",
++            "V8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB=16",
+         ],
+         "//conditions:default": [],
+     }) + select({
+@@ -1133,7 +1149,7 @@
+ 
+ filegroup(
+     name = "noicu/torque_files",
+-    srcs = [
++    srcs = [":origine_temporal_torque"] + [
+         "src/builtins/aggregate-error.tq",
+         "src/builtins/array.tq",
+         "src/builtins/array-at.tq",
+@@ -4613,9 +4629,7 @@
+ # toolchain.
+ filegroup(
+     name = "metagen_clang_builtin_headers",
+-    srcs = glob([
+-        "third_party/llvm-build/Release+Asserts/lib/clang/*/include/**",
+-    ]),
++    srcs = ["@origine_llvm//:builtin_headers"],
+ )
+ 
+ # Metagen's checked-in C++ driver, shared with GN and metagen.py. It
+@@ -4702,7 +4716,7 @@
+     # intl object sources, so its IT enum must include the intl types:
+     # the icu-prefixed run additionally parses the intl headers,
+     # with the same defines and with ICU's headers + include paths.
+-    icu_cc_compilation_context_from = ["//external:icu"],
++    icu_cc_compilation_context_from = ["@origine_icu//:icu"],
+     icu_extra_defines = [
+         "V8_INTL_SUPPORT",
+         "ICU_UTIL_DATA_IMPL=ICU_UTIL_DATA_STATIC",
+@@ -4755,7 +4769,7 @@
+ 
+ genrule(
+     name = "generated_inspector_files",
+-    srcs = [
++    srcs = ["third_party/inspector_protocol/code_generator.py"] + [
+         "include/js_protocol.pdl",
+         "src/inspector/inspector_protocol_config.json",
+     ],
+@@ -4780,11 +4794,10 @@
+         "src/inspector/protocol/Schema.h",
+     ],
+     cmd = "$(location :code_generator) --jinja_dir . \
+            --inspector_protocol_dir third_party/inspector_protocol \
+            --config $(location :src/inspector/inspector_protocol_config.json) \
+            --config_value protocol.path=$(location :include/js_protocol.pdl) \
+            --output_base $(@D)/src/inspector",
+-    local = 1,
+     message = "Generating inspector files",
+     tools = [
+         ":code_generator",
+@@ -4951,7 +4964,7 @@
+ 
+ v8_library(
+     name = "v8_libshared",
+-    srcs = [
++    srcs = [":origine_temporal_sources"] + [
+         ":v8_base_without_compiler_files",
+         ":v8_common_libshared_files",
+     ] + select({
+@@ -4963,7 +4976,7 @@
+     copts = ["-Wno-implicit-fallthrough"],
+     icu_deps = [
+         ":icu/generated_torque_definitions_headers",
+-        "//external:icu",
++        "@origine_icu//:icu",
+     ] + select({
+         ":is_v8_use_metagen": [
+             ":icu/run_metagen_headers",
+@@ -5101,7 +5114,7 @@
+     ],
+     deps = [
+         ":v8_libbase",
+-        "//external:icu",
++        "@origine_icu//:icu",
+     ],
+ )
+ 
+@@ -5131,6 +5144,10 @@
+ 
+ v8_binary(
+     name = "mksnapshot",
++    deps = select({
++        ":is_v8_enable_temporal_support": ["@origine//build/bazel/temporal:tools"],
++        "//conditions:default": [],
++    }),
+     srcs = [
+         ":mksnapshot_files",
+     ] + select({
+@@ -5297,3 +5314,22 @@
+         "nosan",
+     ],
+ )
++
++filegroup(
++    name = "origine_temporal_torque",
++    srcs = select({
++        ":is_v8_enable_temporal_support": ["src/objects/js-temporal-objects.tq"],
++        "//conditions:default": [],
++    }),
++)
++filegroup(
++    name = "origine_temporal_sources",
++    srcs = glob(["src/objects/js-temporal-*.h"]) + select({
++        ":is_v8_enable_temporal_support": [
++            "src/builtins/builtins-temporal.cc",
++            "src/objects/js-temporal-objects.cc",
++            "src/objects/js-temporal-zoneinfo64.cc",
++        ],
++        "//conditions:default": [],
++    }),
++)
+diff --git a/bazel/defs.bzl b/bazel/defs.bzl
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -110,7 +110,7 @@
+ 
+ def _default_args():
+     return struct(
+-        deps = [":define_flags", "@libcxx//:libc++"],
++        deps = [":define_flags", "@libcxx//:libc++", "@origine_mimalloc//:mimalloc", "@origine_temporal_headers//:headers", "@googletest//:gtest_prod"],
+         defines = select({
+             "@v8//bazel/config:is_windows": [
+                 "UNICODE",
+@@ -207,7 +207,7 @@
+ 
+ ENABLE_I18N_SUPPORT_DEFINES = [
+     "-DV8_INTL_SUPPORT",
+-    "-DICU_UTIL_DATA_IMPL=ICU_UTIL_DATA_STATIC",
++    "-DICU_UTIL_DATA_IMPL=ICU_UTIL_DATA_FILE",
+     # src/regexp/regexp-compiler-tonode.cc uses an unsafe ICU method and
+     # access a character implicitly.
+     "-DUNISTR_FROM_CHAR_EXPLICIT=",
+@@ -407,6 +407,7 @@
+             cfg = "exec",
+         ),
+         "target_os": attr.string(mandatory = True),
++        "_icu_data": attr.label(default = "@origine_icu//:common/icudtl.dat", allow_single_file = True),
+         "prefix": attr.string(mandatory = True),
+         "suffix": attr.string(mandatory = True),
+     },
+diff --git a/testing/gtest/include/gtest/gtest_prod.h b/testing/gtest/include/gtest/gtest_prod.h
+--- a/testing/gtest/include/gtest/gtest_prod.h
++++ b/testing/gtest/include/gtest/gtest_prod.h
+@@ -11 +11 @@
+-#include "third_party/googletest/src/googletest/include/gtest/gtest_prod.h"
++#include "gtest/gtest_prod.h"

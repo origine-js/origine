@@ -1,0 +1,11 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "origine_alloc",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    link_deps = ["@origine_mimalloc//:mimalloc"],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(name = "alloc_test", crate = ":origine_alloc")

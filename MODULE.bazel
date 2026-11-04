@@ -1,0 +1,158 @@
+module(name = "origine", version = "0.0.0")
+
+# Every external pin of the build is in this file. Chromium sources (V8, ICU, libc++, LLVM) follow
+# V8's DEPS: `just bump-v8 <version>` rewrites them. The rest are ordinary Bzlmod/archive pins.
+
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "rules_cc", version = "0.2.18")
+bazel_dep(name = "rules_zig", version = "0.17.0")
+bazel_dep(name = "rules_rust", version = "0.75.0")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "abseil-cpp", version = "20250814.1")
+bazel_dep(name = "highway", version = "1.2.0")
+bazel_dep(name = "googletest", version = "1.17.0")
+
+single_version_override(
+    module_name = "rules_zig",
+    patches = ["//build/bazel:rules_zig-sdk-inputs.patch"],
+    patch_strip = 1,
+)
+
+single_version_override(module_name = "highway", patches = ["//build/bazel:highway.patch"], patch_strip = 1)
+
+# Toolchains
+
+zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
+zig.toolchain(zig_version = "0.17.0", default = True)
+use_repo(zig, "zig_toolchains")
+
+# Keep in step with rust/rust-toolchain.toml (Cargo still uses it for Miri and maintenance).
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["nightly/2026-10-19"],
+    sha256s = {
+        "2026-10-19/rustc-nightly-aarch64-apple-darwin.tar.xz": "a7f8ffe48d1d947bfa059688c025b684396e996a009ac0b687505c0d1092a2af",
+        "2026-10-19/clippy-nightly-aarch64-apple-darwin.tar.xz": "c02ed2388dabd95502c60e29f232a4e7a5523c9307c203940fb779ef8bcc88b2",
+        "2026-10-19/cargo-nightly-aarch64-apple-darwin.tar.xz": "559086de622d31d39b71f60ed52168aac46bf2d8fbe380ee6a7e260fcc830770",
+        "2026-10-19/llvm-tools-nightly-aarch64-apple-darwin.tar.xz": "659f2ebf0c18f54bfca5ce213f571d19e075c01f1fa95f87c844c76c0f08abb3",
+        "2026-10-19/rust-std-nightly-aarch64-apple-darwin.tar.xz": "b936ed4cfe8ba143f332ccbd7f727b4df46450b01eb9c7ce17ffde5cd385fd2a",
+    },
+)
+use_repo(rust, "rust_toolchains")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+git_source = use_repo_rule("//build/bazel:git_source.bzl", "git_source")
+macos_sdk = use_repo_rule("//build/bazel:macos_sdk.bzl", "macos_sdk")
+
+# V8's Clang, the revision its DEPS names (third_party/llvm-build).
+http_archive(
+    name = "origine_llvm",
+    url = "https://commondatastorage.googleapis.com/chromium-browser-clang/Mac_arm64/clang-llvmorg-24-init-14453-ge063be79-1.tar.xz",
+    sha256 = "0a8d887534b3153c7f6860265dc7e075d420174521c60ccd52c2c243949ef468",
+    build_file = "//build/bazel:llvm.BUILD.bazel",
+)
+
+# Oldest macOS the binaries run on; MACOSX_DEPLOYMENT_TARGET overrides it per build.
+macos_sdk(name = "origine_macos_sdk", deployment_target = "15.0")
+
+register_toolchains(
+    "@origine_llvm//:macos_arm64_toolchain",
+    "@zig_toolchains//:all",
+    "@rust_toolchains//:all",
+)
+
+# V8 and the Chromium sources of its DEPS
+
+# V8 15.8.30
+git_source(
+    name = "v8",
+    sources = {
+        ".": "https://chromium.googlesource.com/v8/v8.git@a98309795399032afd2f191adaa94ed6e9918437",
+        "third_party/dragonbox/src": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git@beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44",
+        "third_party/fp16/src": "https://chromium.googlesource.com/external/github.com/Maratyszcza/FP16.git@782eea126dc5c755827be751a099eb01826175cf",
+        "third_party/fast_float/src": "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git@42f254836ee416ffcf2f4e6576260003ac33d48c",
+        "third_party/llvm-libc/src": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git@7801c8cf22a3bd02638aafc1a88fc11e460cf603",
+        "third_party/simdutf": "https://chromium.googlesource.com/chromium/src/third_party/simdutf@f7356eed293f8208c40b3c1b344a50bd70971983",
+    },
+    # Origine's V8 changes, then the fixes to V8's own Bazel overlay.
+    patch_series = ["lib/v8_zig/build-tools/patches/v8", "build/bazel/patches/v8"],
+    # ThinLTO for every V8 C++ action in `-c opt`; the toolchain feature requires `opt`.
+    files = {"REPO.bazel": 'repo(features = ["origine_thin_lto"])\n'},
+)
+
+git_source(
+    name = "origine_icu",
+    sources = {".": "https://chromium.googlesource.com/chromium/deps/icu.git@4fe960221710e5b5524ac6e49a454bbb8bfc295d"},
+    patch_series = ["lib/v8_zig/build-tools/patches/icu"],
+    # ICU's own Bazel files cover only its tools; one root package builds the libraries.
+    delete = ["source/common/BUILD.bazel", "source/i18n/BUILD.bazel", "source/stubdata/BUILD.bazel"],
+    build_file = "//build/bazel:icu.BUILD.bazel",
+)
+
+# Chromium's libc++ (GN `use_custom_libcxx`), shared by V8, Rust and Zig.
+git_source(
+    name = "libcxx",
+    sources = {
+        "libcxx": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git@97b436da4c33663581d394f4ee0a5977fc38c2f4",
+        "libcxxabi": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git@eac1e333a6055ed9363d0d382c7bf1a9c7cf5b26",
+        "llvm-libc": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git@7801c8cf22a3bd02638aafc1a88fc11e460cf603",
+        "buildtools": "https://chromium.googlesource.com/chromium/src/buildtools.git@de083582f390f985c6c682651cc44ad0c0b03daa",
+    },
+    build_file = "//build/bazel:libcxx.BUILD.bazel",
+)
+
+# Native libraries
+
+http_archive(
+    name = "origine_lz4",
+    url = "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz",
+    sha256 = "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b",
+    strip_prefix = "lz4-1.10.0",
+    build_file = "//build/bazel:lz4.BUILD.bazel",
+)
+
+http_archive(
+    name = "origine_mimalloc",
+    url = "https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.0.tar.gz",
+    sha256 = "c663101ba193b5b823c8541c1b719ab67e3ebf9976e425a02359a5cad5e52990",
+    strip_prefix = "mimalloc-3.6.0",
+    build_file = "//build/bazel:mimalloc.BUILD.bazel",
+    patches = [
+        "//lib/mimalloc/patches:0001-enable-arena-unload.patch",
+        "//lib/mimalloc/patches:0002-no-cache-for-arena-theaps.patch",
+    ],
+    patch_args = ["-p1"],
+)
+
+http_archive(
+    name = "origine_nghttp2",
+    url = "https://github.com/nghttp2/nghttp2/releases/download/v1.68.1/nghttp2-1.68.1.tar.xz",
+    sha256 = "6abd7ab0a7f1580d5914457cb3c85eb80455657ee5119206edbd7f848c14f0b2",
+    strip_prefix = "nghttp2-1.68.1",
+    build_file = "//build/bazel:nghttp2.BUILD.bazel",
+)
+
+# The C++ headers of the temporal_capi crate rust/Cargo.lock pins; V8 compiles against them.
+http_archive(
+    name = "origine_temporal_headers",
+    url = "https://static.crates.io/crates/temporal_capi/temporal_capi-0.2.6.crate",
+    sha256 = "f48eb9ca4ca22caaa48d1e7a534ad3fd598a23d1a71945e8ad5ac0be501fa5f2",
+    type = "tar.gz",
+    strip_prefix = "temporal_capi-0.2.6",
+    build_file = "//build/bazel:temporal-headers.BUILD.bazel",
+)
+
+include("//build/bazel:rust-dependencies.MODULE.bazel")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.11")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "v8_python_deps",
+    python_version = "3.11",
+    requirements_lock = "@v8//:bazel/requirements.txt",
+)
+use_repo(pip, "v8_python_deps")

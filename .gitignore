@@ -2,6 +2,7 @@
 /.zig-global-cache
 /zig-pkg/
 /zig-out/
+/bazel-*
 /.lp-cache/
 .DS_Store
 __oricache__/

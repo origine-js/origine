@@ -1,3 +1,4 @@
+diff --git a/src/arena/arena.c b/src/arena/arena.c
 --- a/src/arena/arena.c
 +++ b/src/arena/arena.c
 @@ -1095,6 +1095,7 @@
@@ -31,6 +32,7 @@
  mi_decl_export bool mi_arena_reload(void* start, size_t size, mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id) {
    // assume the memory area is already containing the arena
    if (arena_id != NULL) { *arena_id = _mi_arena_id_none(); }
+diff --git a/include/mimalloc.h b/include/mimalloc.h
 --- a/include/mimalloc.h
 +++ b/include/mimalloc.h
 @@ -420,7 +420,7 @@

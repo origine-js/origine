@@ -1,0 +1,11 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -4121,6 +4121,8 @@
+     name = "cppgc_base_files",
+     srcs = [
+         "src/heap/cppgc-internal/allocation.cc",
++        "src/heap/cppgc-internal/caged-heap-local-data.cc",
++        "src/heap/cppgc-internal/caged-heap.cc",
+         "src/heap/cppgc-internal/caged-heap.h",
+         "src/heap/cppgc-internal/compaction-worklists.cc",
+         "src/heap/cppgc-internal/compaction-worklists.h",

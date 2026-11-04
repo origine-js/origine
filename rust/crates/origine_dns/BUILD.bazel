@@ -1,0 +1,16 @@
+load("//build/bazel:rust_dependencies.bzl", "registry_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "origine_dns",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    deps = registry_deps("origine_dns"),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "dns_test",
+    crate = ":origine_dns",
+    deps = registry_deps("origine_dns", kind = "dev"),
+)

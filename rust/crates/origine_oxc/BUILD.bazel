@@ -1,0 +1,12 @@
+load("//build/bazel:rust_dependencies.bzl", "registry_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "origine_oxc",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    deps = registry_deps("origine_oxc"),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(name = "oxc_test", crate = ":origine_oxc")

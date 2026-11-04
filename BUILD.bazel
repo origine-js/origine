@@ -1,0 +1,14 @@
+test_suite(
+    name = "test-io",
+    tests = ["//src:io_test", "//src:safe_test"],
+)
+
+test_suite(
+    name = "bootstrap-tests",
+    tests = [
+        ":test-io",
+        "//build/bazel/probe:thin_lto_test",
+        "//lib/lz4:lz4_test",
+        "//rust:core-tests",
+    ],
+)

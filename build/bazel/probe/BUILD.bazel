@@ -1,0 +1,37 @@
+load("@rules_rust//rust:defs.bzl", "rust_static_library")
+load("@rules_zig//zig:defs.bzl", "zig_configure", "zig_static_library")
+load("//build/bazel:thin_lto.bzl", "thin_lto_probe_test")
+
+zig_static_library(
+    name = "zig_unconfigured",
+    main = "zig.zig",
+    emit_llvm_bc = True,
+    zigopts = ["-fllvm"],
+)
+
+zig_configure(name = "zig", actual = ":zig_unconfigured", mode = "release_fast")
+
+filegroup(
+    name = "zig_bitcode",
+    srcs = [":zig"],
+    output_group = "llvm_bc",
+    visibility = ["//visibility:public"],
+)
+
+rust_static_library(
+    name = "rust",
+    srcs = ["rust.rs"],
+    crate_root = "rust.rs",
+    rustc_flags = ["-Clinker-plugin-lto", "-Copt-level=3", "-Cpanic=abort"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["cpp.cc", "main.cc"])
+
+thin_lto_probe_test(
+    name = "thin_lto_test",
+    zig = ":zig_bitcode",
+    rust = ":rust",
+    cpp = "cpp.cc",
+    main = "main.cc",
+)

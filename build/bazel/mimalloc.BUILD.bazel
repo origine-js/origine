@@ -1,0 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "mimalloc",
+    srcs = ["src/static.c"],
+    hdrs = glob(["include/**/*.h", "src/**/*.h", "src/**/*.c"], exclude = ["src/static.c"]),
+    includes = ["include"],
+    defines = ["MI_STATIC_LIB", "MI_OSX_ZONE=0", "MI_OSX_INTERPOSE=0"],
+    copts = ["-std=c11"],
+    visibility = ["//visibility:public"],
+)

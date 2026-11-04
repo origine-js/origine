@@ -1,0 +1,11 @@
+exports_files(["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"])
+
+test_suite(
+    name = "core-tests",
+    tests = [
+        "//rust/crates/origine_alloc:alloc_test",
+        "//rust/crates/origine_api_core:core_test",
+        "//rust/crates/origine_api_fs:fs_test",
+        "//rust/crates/origine_io:io_test",
+    ],
+)

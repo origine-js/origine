@@ -1,0 +1,10 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "lz4",
+    srcs = ["lib/lz4.c", "lib/lz4hc.c"],
+    hdrs = glob(["lib/*.h"]) + ["lib/lz4.c"],
+    includes = ["lib"],
+    copts = ["-std=c99"],
+    visibility = ["//visibility:public"],
+)

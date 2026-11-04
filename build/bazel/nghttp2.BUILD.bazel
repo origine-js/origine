@@ -1,0 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "nghttp2",
+    srcs = glob(["lib/*.c"]),
+    hdrs = glob(["lib/*.h", "lib/includes/**/*.h"]),
+    includes = ["lib", "lib/includes"],
+    defines = ["NGHTTP2_STATICLIB=1", "HAVE_NETINET_IN=1", "HAVE_TIME_H=1", "HAVE_ARPA_INET_H=1", "HAVE_UNISTD_H=1"],
+    copts = ["-std=gnu99"],
+    visibility = ["//visibility:public"],
+)

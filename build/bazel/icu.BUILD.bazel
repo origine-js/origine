@@ -1,0 +1,55 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["common/icudtl.dat", "tzres/zoneinfo64.res"])
+
+filegroup(name = "icudata", srcs = ["common/icudtl.dat"])
+
+# Chromium's ICU configuration (third_party/icu/BUILD.gn at the pinned revision).
+DEFINES = [
+    "HAVE_DLOPEN=0",
+    "UCONFIG_ONLY_HTML_CONVERSION=1",
+    "U_CHARSET_IS_UTF8=1",
+    "U_USING_ICU_NAMESPACE=0",
+    "U_ENABLE_DYLOAD=0",
+    "USE_CHROMIUM_ICU=1",
+    "U_ENABLE_TRACING=1",
+    "U_ENABLE_RESOURCE_TRACING=0",
+    "U_STATIC_IMPLEMENTATION",
+    "UNISTR_FROM_STRING_EXPLICIT=",
+    "UNISTR_FROM_CHAR_EXPLICIT=",
+]
+
+cc_library(
+    name = "icuuc",
+    srcs = glob(["source/common/*.cpp"]),
+    hdrs = glob(["source/common/**/*.h"]),
+    includes = ["source/common"],
+    defines = DEFINES,
+    local_defines = ["U_COMMON_IMPLEMENTATION", "U_ICUDATAENTRY_IN_COMMON"],
+    copts = ["-Wno-deprecated-declarations"],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "icui18n",
+    srcs = glob(["source/i18n/*.cpp"]),
+    hdrs = glob(["source/i18n/**/*.h"]),
+    includes = ["source/i18n"],
+    local_defines = ["U_I18N_IMPLEMENTATION"],
+    copts = ["-Wno-deprecated-declarations"],
+    deps = [":icuuc"],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "stubdata",
+    srcs = ["source/stubdata/stubdata.cpp"],
+    hdrs = ["source/stubdata/stubdata.h"],
+    local_defines = ["U_COMMON_IMPLEMENTATION"],
+    deps = [":icuuc"],
+    alwayslink = True,
+)
+
+cc_library(name = "icu", deps = [":icuuc", ":icui18n", ":stubdata"])

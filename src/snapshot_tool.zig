@@ -19,11 +19,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (compress and !std.mem.eql(u8, args[2], "lz4")) return error.UsageUnknownMode;
     // A fixed seed plus predictable mode makes the snapshot reproducible, so an unchanged
     // rebuild reuses the embedded blob. V8 freezes its flags during initialization.
+    // `--predictable` alone still sizes the young generation and grows the heap from
+    // measured allocation throughput, so a slower run (a cold binary, a loaded machine)
+    // collects at other points and serializes a different heap layout;
+    // `--predictable-gc-schedule` fixes that schedule.
     if (build_options.snapshot_seeded) {
-        var flags_buf: [64]u8 = undefined;
-        const flags = try std.fmt.bufPrint(&flags_buf, "--random-seed={d} --predictable", .{build_options.snapshot_seed});
+        var flags_buf: [128]u8 = undefined;
+        const flags = try std.fmt.bufPrint(&flags_buf, "--random-seed={d} --predictable --predictable-gc-schedule", .{build_options.snapshot_seed});
         v8.V8.setFlagsFromString(flags);
     }
+
     var engine = Engine.init(.{});
     defer engine.deinit();
     const blob = try m.snapshot.create(std.heap.page_allocator);

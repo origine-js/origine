@@ -75,8 +75,9 @@ zig_options(
         "engine_snapshot_compressed": "bool = false",
         "v8_sandbox": "bool = true",
     } | select({
-        "//build/bazel/settings:opt": {"snapshot_seeded": "bool = false"},
-        "//conditions:default": {"snapshot_seeded": "bool = true"},
+        # build.zig: `optimize == .debug`.
+        "@rules_zig//zig/config/mode:debug": {"snapshot_seeded": "bool = true"},
+        "//conditions:default": {"snapshot_seeded": "bool = false"},
     }),
     settings = {"//build/bazel/settings:snapshot_seed": "snapshot_seed: u32"},
 )

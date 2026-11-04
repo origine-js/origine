@@ -105,13 +105,14 @@ format:
 # (`bazel-build`, `bazel-run`); the Zig recipes above stay until the remaining gates pass (release
 # ThinLTO, compressed ICU, feature settings, size and startup).
 
-# Build origine with Bazel (bazel-bin/src/origine). `config` is debug, safe, fast or small (.bazelrc).
-bazel-build config="fast" *args:
+# Build origine with Bazel (bazel-bin/src/origine). `config` is debug, safe, fast or small: the Zig
+# host's mode on release V8; v8-debug builds a debug V8 too (.bazelrc).
+bazel-build config="debug" *args:
     bazel build --config={{config}} //src:origine {{args}}
 
-# Run the Bazel-built origine (arguments follow the init path, as for `run`).
+# Run the Bazel-built origine (debug host, release V8; arguments follow the init path, as for `run`).
 bazel-run *args:
-    bazel run --config=fast //src:origine -- {{args}}
+    bazel run //src:origine -- {{args}}
 
 # Fetch the pinned V8 source and apply its patch series, without compiling it; prints where it is.
 bazel-patch-v8:

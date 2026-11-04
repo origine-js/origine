@@ -9,7 +9,15 @@ test --test_output=errors
 build --@v8//:v8_use_metagen=false
 build --@v8//:v8_typed_array_max_size_in_heap=0
 
-build:debug --compilation_mode=dbg
-build:safe --compilation_mode=opt --@rules_zig//zig/settings:mode=release_safe
-build:fast --compilation_mode=opt --@rules_zig//zig/settings:mode=release_fast
-build:small --compilation_mode=opt --copt=-Os --@rules_zig//zig/settings:mode=release_small
+# As build.zig: V8, the C/C++ libraries and Rust (Cargo's --release) are always release; a config
+# selects the Zig host's mode. So every config but `small` shares one V8 build, and the default
+# (no config) is a debug host on release V8.
+build --compilation_mode=opt
+build --@rules_zig//zig/settings:mode=debug
+build:debug --@rules_zig//zig/settings:mode=debug
+build:safe --@rules_zig//zig/settings:mode=release_safe
+build:fast --@rules_zig//zig/settings:mode=release_fast
+build:small --copt=-Os --@rules_zig//zig/settings:mode=release_small
+# A debug V8 (and everything else C++ and Rust), for working on V8 or its patches (build.zig's
+# -Dv8_debug=true); compiles its own V8.
+build:v8-debug --compilation_mode=dbg --@rules_zig//zig/settings:mode=debug

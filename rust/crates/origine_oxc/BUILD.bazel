@@ -1,8 +1,10 @@
 load("//build/bazel:rust_dependencies.bzl", "registry_deps")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//build/bazel:opt.bzl", "rust_opt")
 
 rust_library(
     name = "origine_oxc",
+    rustc_flags = rust_opt("origine_oxc"),
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     deps = registry_deps("origine_oxc"),

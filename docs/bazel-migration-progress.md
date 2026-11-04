@@ -62,8 +62,7 @@ than lost when updating submodules. No migration commit or cutover has occurred.
   (Clang 24) and its distribution checksum.
 - Added the custom LLVM C/C++ toolchain, SDK discovery/identity repository, and
   source-pinned libc++, libc++abi, LLVM-libc headers, and Chromium configuration.
-- Added `debug`, `safe`, `fast`, and `small` configurations. These are currently
-  compiler configurations, not proof that the full application works in each.
+- Build profiles are defined in `build/bazel/build.py`, not in Bazel (see "Commands and justfile").
 - Patched `rules_zig` to declare individual SDK library files as action inputs
   instead of a directory input; bootstrap tests pass with this patch.
 
@@ -132,10 +131,11 @@ chain with the pinned compilers and links using V8's LLVM linker.
   - `origine_native` is an rlib, not a staticlib: rules_rust's staticlib bundles every native dependency
     (V8, abseil, ICU, AWS-LC, mimalloc), where Cargo used `-bundle`. The program's cc link will take the
     crates and the native libraries once each.
-- The program builds with Bazel (2026-11-04): `bazel build --config=fast //src:origine` (`just bazel-build`).
+- The program builds with Bazel (2026-11-04): `just build release-fast`.
   All 50 `examples/**/init.{js,ts}` behave as with the Zig-built binary (exit code and output; only ephemeral
-  port numbers differ), and the Rust/Zig tests pass. Not yet: ThinLTO across languages, compressed ICU,
-  typed feature settings, `-c opt`/small configurations, size and startup measurement.
+  port numbers differ), and the Rust/Zig tests pass. Not yet: ThinLTO across languages, the
+  release-small build (analysis only), size and startup measurement. The link no longer adds
+  the system `libc++.1.dylib` (the toolchain's `-lc++`; nothing used it).
   - Zig: `@v8`, `@util`, `@diagnostics` (lib/v8_zig), `@mimalloc` (lib/mimalloc), `@lz4`, `@io`, `@engine`,
     `@managed` (src); `origine_config` and `build_options` are generated (`build/bazel/zig_options.bzl`).
     Zig modules have no C dependencies: rules_zig would run translate-c over them (and Zig 0.17 has no
@@ -149,8 +149,10 @@ chain with the pinned compilers and links using V8's LLVM linker.
     included, with one std and the allocator shim rustc writes for a staticlib. No Rust library declares
     a native library (they would be bundled into the staticlib); the program and the tests that need one
     (`io_test`, `alloc_test`, `tls_test`, `h2_test`) link them. Nothing from rules_rust is patched.
-  - ICU: the raw provider (`//lib/v8_zig/binding:icu_raw`, `.incbin` of `icudtl.dat`); build.zig's default
-    is the compressed one, which needs Python `zstandard` through rules_python.
+  - ICU: the raw provider (`//lib/v8_zig/binding:icu_raw`, `.incbin` of `icudtl.dat`) or, with
+    `icu_compression`, `icu_compressed`: `compress-icu.py` run hermetically (rules_python `pip.parse` hub
+    `icu_python_deps` from the hashed `build/bazel/icu-requirements.lock`, compiled with `uv pip compile
+    --generate-hashes`) and the zstd 1.5.7 decoder (`@origine_zstd`). Dev with `-C icu`: 73.0 MB vs 80.0 MB.
   - V8 is compiled once: `0005-mksnapshot-target-config.patch` and `0006-generators-target-config.patch`
     build mksnapshot, Torque and the generators in the target configuration (Origine builds natively only),
     so they link the objects libv8 is made of instead of an exec-configured copy. 6 exec-configured C++
@@ -158,16 +160,28 @@ chain with the pinned compilers and links using V8's LLVM linker.
 
 ### Commands and justfile
 
-Homebrew Bazelisk is installed. `.bazelversion` selects Bazel 8.4.2. The `justfile` keeps every
-Zig build recipe (`build`, `run`, `test`, `check`, ...) and adds, prefixed `bazel-`:
+Homebrew Bazelisk is installed. `.bazelversion` selects Bazel 8.4.2. The `justfile` runs the build through
+`build/bazel/build.py` (uv, pydantic, typer, rich), the only place profiles exist:
 
-- `just bazel-patch-v8`, `just bazel-build-v8`.
-- `just bazel-test-bootstrap`, `just bazel-test-io`, `just bazel-test-core`, `just bazel-test-net`,
-  `just bazel-test-oxc`, and `just bazel-test-lto`.
+- `just build [dev|release-fast|release-balanced|release-small|v8-debug]` (default `dev`), with `-x/--feature-profile
+  default|minimal`, `-F/--feature tls,quic,...` (repeatable; `requires` is validated, `-F quic` alone is an error)
+  and `-C/--compression engine-snapshot,icu,user-snapshot,user-codecache|none` (default: the profile's; only
+  `release-small` compresses the engine snapshot and ICU). Bazel flags may follow `--`.
+- `just run [options] -- <init.js> args`, `just examples [options]` (every `examples/**/init.{js,ts}`, failures
+  listed), `just show` (profiles, feature profiles, features, compression, every module's mode).
+- Bazel has no profiles and no persisted choices (`just dev`, `dev.py` and `user.bazelrc` are gone). Each
+  invocation passes everything: rules_zig's global mode, a mode per module
+  (`--//build/bazel/opt:<module>=<mode>`: Zig `debug|safe|fast|small`, Rust `0|1|2|3|s|z`, declared in
+  `build/bazel/opt.bzl`, which `zig_opt`/`rust_opt` turn into `zigopts`/`rustc_flags`), one flag per feature and
+  per compression option (`//build/bazel/settings`), and `--copt=-Os` for `release-smaller`. The Python profile
+  models list every module (checked against `opt.bzl`); the flag defaults equal `dev`, so a plain
+  `bazel build //src:origine` builds the dev profile. Features and compression are loaded from
+  `build/bazel/features.bzl`.
+- Tests compile their module as the test root (rules_zig's mode), so they stay debug whatever the profile.
+- `just bazel-patch-v8`, `just bazel-build-v8`, `just bazel-bump-v8 <version>`.
 - `just bazel-sync-rust-deps` and `just bazel-check-rust-deps`.
-- `just bazel-bump-v8 <version>`.
 
-Application build/run and the full runtime checks stay on the Zig recipes until cutover.
+The Zig build remains for `test`, `check*`, `build-v8`, `v8-dev` and `patch-v8` until cutover.
 There is no `//:origine`, `//:origine-snapshot`, `//:deps`, or complete root test
 suite yet. Do not document these as working commands.
 
@@ -279,7 +293,14 @@ V8, ICU and libc++ trees are byte-identical apart from the overlay lines above. 
 4. Port Rusty V8, C++ shims, API macros, REPL/API crates, native aggregate, main
    Zig modules, and all reusable generators.
 5. Implement typed feature/compression settings with existing defaults and
-   validation, including QUIC requiring TLS.
+   validation, including QUIC requiring TLS. Features done (2026-11-04): `FEATURES` in
+   `build/bazel/features.bzl` is the one list; `//build/bazel/settings:<feature>` flags (default on) select the
+   Zig `origine_config`, the Rust crate features and deps (`if_feature`), and the native libraries linked
+   (AWS-LC with `tls`, nghttp2 with `http`); a feature's `requires` fails analysis when unmet. Checked with
+   typescript, tls and quic off: builds (66.9 MB vs 69.3), no AWS-LC/rustls/oxc transformer in the binary,
+   only those features' examples fail. Compression settings (engine snapshot LZ4, ICU zstd, user snapshot/code caches) are flags in
+   `//build/bazel/settings` wired to the snapshot genrule, `build_options`, `origine_config` and the ICU provider;
+   each builds and runs.
 6. Implement snapshotter → blob → provider-object dependencies, the explicit
    default seed `0x3c3d6918`, and independent main compilation.
 7. Implement one final `ld64.lld` release ThinLTO link preserving Zig bitcode,

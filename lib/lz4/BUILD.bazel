@@ -1,11 +1,20 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("//build/bazel:opt.bzl", "zig_opt")
 
+# Small by default (build.zig: the lz4 dependency is `.small`).
 zig_library(
     name = "lz4",
     main = "src/lz4.zig",
     import_name = "@lz4",
     deps = ["@origine_lz4//:lz4"],
+    zigopts = zig_opt("lz4"),
     visibility = ["//visibility:public"],
 )
 
-zig_test(name = "lz4_test", deps = [":lz4"], zigopts = ["-lc"])
+# The module is the test root, so the test is compiled in rules_zig's mode, not `-Osmall`.
+zig_test(
+    name = "lz4_test",
+    main = "src/lz4.zig",
+    deps = ["@origine_lz4//:lz4"],
+    zigopts = ["-lc"],
+)

@@ -1,4 +1,6 @@
-load("@bazel_skylib//rules:common_settings.bzl", "int_flag")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "int_flag", "string_flag")
+load("//build/bazel:features.bzl", "COMPRESSION", "FEATURES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -8,3 +10,29 @@ int_flag(
     name = "snapshot_seed",
     build_setting_default = 0x3c3d6918,
 )
+
+# The features compiled into origine (FEATURES in //build/bazel:features.bzl; build.zig's
+# -Dtypescript/-Dhttp/...), all on by default. Each removes its API, its Rust feature and its native
+# library: `--//build/bazel/settings:http=false`, or `just build -F` without it.
+[
+    (
+        bool_flag(name = feature, build_setting_default = True),
+        config_setting(name = feature + "_on", flag_values = {":" + feature: "true"}),
+    )
+    for feature in FEATURES
+]
+
+# Any networking API (tls, http or dns): they share origine_transport.
+selects.config_setting_group(
+    name = "networking_on",
+    match_any = [":tls_on", ":http_on", ":dns_on"],
+)
+
+# How blobs are stored (COMPRESSION in //build/bazel:features.bzl), all off by default.
+[
+    (
+        bool_flag(name = option, build_setting_default = False),
+        config_setting(name = option + "_on", flag_values = {":" + option: "true"}),
+    )
+    for option in COMPRESSION
+]

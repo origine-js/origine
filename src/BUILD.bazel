@@ -1,11 +1,14 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_zig//zig:defs.bzl", "zig_configure", "zig_library", "zig_static_library", "zig_test")
+load("//build/bazel:features.bzl", "FEATURES", "if_feature")
+load("//build/bazel:opt.bzl", "zig_opt")
 load("//build/bazel:zig_options.bzl", "zig_options")
 
 zig_library(
     name = "safe",
     main = "safe.zig",
     import_name = "@safe",
+    zigopts = zig_opt("safe"),
 )
 
 zig_library(
@@ -15,12 +18,17 @@ zig_library(
     extra_srcs = glob(["io/include/**"]),
     deps = [":safe"],
     import_name = "@io",
+    zigopts = zig_opt("io"),
     visibility = ["//visibility:public"],
 )
 
+# Tests compile their module as the test root: rules_zig's mode, not the critical `-O` of the module.
 zig_test(
     name = "io_test",
-    deps = [":io"],
+    main = "io/io.zig",
+    srcs = glob(["io/**/*.zig"]),
+    extra_srcs = glob(["io/include/**"]),
+    deps = [":safe"],
     zigopts = ["-lc"],
 )
 
@@ -31,34 +39,43 @@ zig_static_library(
     zigopts = ["-lc", "-fllvm"],
 )
 
-zig_configure(
+[
+    zig_configure(
+        name = "io_native_" + mode,
+        actual = ":io_native_unconfigured",
+        mode = {"debug": "debug", "safe": "release_safe", "fast": "release_fast", "small": "release_small"}[mode],
+    )
+    for mode in ["debug", "safe", "fast", "small"]
+]
+
+# The event loop's mode (//build/bazel/opt:io_native).
+alias(
     name = "io_native",
-    actual = ":io_native_unconfigured",
-    mode = "release_fast",
+    actual = select({
+        "//build/bazel/opt:io_native_" + mode: ":io_native_" + mode
+        for mode in ["debug", "safe", "fast", "small"]
+    }),
     visibility = ["//visibility:public"],
 )
 
 zig_test(
     name = "safe_test",
-    deps = [":safe"],
+    main = "safe.zig",
 )
 
 # The programs: a Zig host (origine, origine-snapshot) linked by the C++ toolchain (V8's Clang and
 # ld64.lld) with the Rust staticlib (//rust:origine_native), V8 and the native libraries.
 
 
-# `origine_config`: the compiled-in features, as build.zig's `config` options.
+# `origine_config`: the compiled-in features (//build/bazel/settings), as build.zig's `config`.
 zig_options(
     name = "origine_config_zig",
-    constants = {
-        "typescript": "bool = true",
-        "http": "bool = true",
-        "tls": "bool = true",
-        "dns": "bool = true",
-        "quic": "bool = true",
-        "user_snapshot_compressed": "bool = false",
-        "user_codecache_compressed": "bool = false",
+    settings = {"//build/bazel/settings:" + feature: feature + ": bool" for feature in FEATURES} | {
+        "//build/bazel/settings:user_snapshot_compression": "user_snapshot_compressed: bool",
+        "//build/bazel/settings:user_codecache_compression": "user_codecache_compressed: bool",
     },
+    # A feature's `requires` must be on with it (one requirement each).
+    implies = {feature: info["requires"][0] for feature, info in FEATURES.items() if info["requires"]},
 )
 
 zig_library(
@@ -72,14 +89,16 @@ zig_options(
     name = "build_options_zig",
     constants = {
         "has_snapshot": "bool = true",
-        "engine_snapshot_compressed": "bool = false",
         "v8_sandbox": "bool = true",
     } | select({
         # build.zig: `optimize == .debug`.
         "@rules_zig//zig/config/mode:debug": {"snapshot_seeded": "bool = true"},
         "//conditions:default": {"snapshot_seeded": "bool = false"},
     }),
-    settings = {"//build/bazel/settings:snapshot_seed": "snapshot_seed: u32"},
+    settings = {
+        "//build/bazel/settings:snapshot_seed": "snapshot_seed: u32",
+        "//build/bazel/settings:engine_snapshot_compression": "engine_snapshot_compressed: bool",
+    },
 )
 
 zig_library(
@@ -92,6 +111,7 @@ zig_library(
     name = "engine",
     main = "engine.zig",
     import_name = "@engine",
+    zigopts = zig_opt("engine"),
     deps = ["//lib/v8_zig:v8", "//lib/v8_zig:diagnostics"],
 )
 
@@ -101,6 +121,7 @@ zig_library(
     srcs = glob(["managed/**/*.zig", "api/**/*.zig", "repl/**/*.zig", "fs_light/**/*.zig", "api.zig", "repl.zig"]),
     extra_srcs = glob(["js/**/*.js", "repl/**/*.js"]),
     import_name = "@managed",
+    zigopts = zig_opt("managed"),
     deps = [
         ":io",
         ":origine_config",
@@ -126,13 +147,13 @@ _HOST_DEPS = [
 # and the native libraries it and the Zig host call.
 _NATIVE_DEPS = [
     ":io_native",
-    "//lib/aws-lc:aws_lc_crypto",
-    "//lib/v8_zig/binding:icu_raw",
     "//rust:origine_native",
     "@origine_mimalloc//:mimalloc",
-    "@origine_nghttp2//:nghttp2",
     "@v8//:origine_binding_icu",
-]
+] + select({
+    "//build/bazel/settings:icu_compression_on": ["//lib/v8_zig/binding:icu_compressed"],
+    "//conditions:default": ["//lib/v8_zig/binding:icu_raw"],
+}) + if_feature("tls", ["//lib/aws-lc:aws_lc_crypto"]) + if_feature("http", ["@origine_nghttp2//:nghttp2"])
 
 
 
@@ -142,7 +163,7 @@ zig_static_library(
     deps = _HOST_DEPS,
     compiler_runtime = "include",
     # libc: std.start exports the C `main` the program starts from.
-    zigopts = ["-lc"],
+    zigopts = ["-lc"] + zig_opt("snapshot_tool_main"),
 )
 
 cc_binary(
@@ -156,22 +177,31 @@ genrule(
     name = "engine_snapshot",
     srcs = [":origine-snapshot"],
     outs = ["engine.snapshot"],
-    cmd = "$(execpath :origine-snapshot) $@",
+    # Compressed: the tool LZ4-packs the blob (src/snapshot_tool.zig's `lz4` argument).
+    cmd = select({
+        "//build/bazel/settings:engine_snapshot_compression_on": "$(execpath :origine-snapshot) $@ lz4",
+        "//conditions:default": "$(execpath :origine-snapshot) $@",
+    }),
 )
+
+_PROVIDER = """cat > $@ <<'EOF'
+const bytes = @embedFile("engine.snapshot");
+const blob: [bytes.len]u8 align(16) = bytes.*;
+pub export const origine_snapshot_present: bool = true;
+pub export const origine_snapshot_blob: [*]const u8 = &blob;
+pub export const origine_snapshot_len: usize = blob.len;
+pub export const origine_snapshot_compressed: bool = {};
+EOF"""
 
 # The blob as a link object exporting `origine_snapshot_*` (main.zig declares them), so the
 # blob is not an input of the host's own compilation.
 genrule(
     name = "snapshot_provider_zig",
     outs = ["snapshot_provider.zig"],
-    cmd = """cat > $@ <<'EOF'
-const bytes = @embedFile("engine.snapshot");
-const blob: [bytes.len]u8 align(16) = bytes.*;
-pub export const origine_snapshot_present: bool = true;
-pub export const origine_snapshot_blob: [*]const u8 = &blob;
-pub export const origine_snapshot_len: usize = blob.len;
-pub export const origine_snapshot_compressed: bool = false;
-EOF""",
+    cmd = select({
+        "//build/bazel/settings:engine_snapshot_compression_on": _PROVIDER.format("true"),
+        "//conditions:default": _PROVIDER.format("false"),
+    }),
 )
 
 zig_static_library(
@@ -186,7 +216,7 @@ zig_static_library(
     deps = _HOST_DEPS,
     compiler_runtime = "include",
     # libc: std.start exports the C `main` the program starts from.
-    zigopts = ["-lc"],
+    zigopts = ["-lc"] + zig_opt("origine_main"),
 )
 
 cc_binary(

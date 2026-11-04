@@ -63,7 +63,7 @@ def _impl(ctx):
                 "-isystem", llvm_libc,
                 "-Wno-pragma-clang-attribute",
             ] + ["-D" + define for define in CLIENT_DEFINES]),
-            _flags("origine_link", _LINK, ["-target", TARGET, "-isysroot", sdk, "-fuse-ld=lld", "-lc++", "-Wl,-dead_strip"]),
+            _flags("origine_link", _LINK, ["-target", TARGET, "-isysroot", sdk, "-fuse-ld=lld", "-Wl,-dead_strip"]),
             _flags("dbg", _COMPILE, ["-O0", "-g"], enabled = False),
             _flags("opt", _COMPILE, ["-O2", "-DNDEBUG"], enabled = False),
             # Requested per repository (V8's REPO.bazel); applies only with `-c opt`.

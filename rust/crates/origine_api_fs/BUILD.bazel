@@ -1,9 +1,11 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//build/bazel:opt.bzl", "rust_opt")
 
 rust_library(
     name = "origine_api_fs",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
+    rustc_flags = rust_opt("origine_api_fs"),
     deps = ["//rust/crates/origine_api_core", "//rust/crates/origine_io"],
     visibility = ["//visibility:public"],
 )

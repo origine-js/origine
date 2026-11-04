@@ -1,0 +1,21 @@
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("//build/bazel:opt.bzl", "RUST_CRATES", "RUST_LEVELS", "ZIG_MODES", "ZIG_MODULES")
+
+package(default_visibility = ["//visibility:public"])
+
+# One flag per optimizable module (see //build/bazel:opt.bzl). build/bazel/build.py sets all of them.
+[
+    (
+        string_flag(name = module, build_setting_default = default, values = ZIG_MODES),
+        [config_setting(name = module + "_" + mode, flag_values = {":" + module: mode}) for mode in ZIG_MODES],
+    )
+    for module, default in ZIG_MODULES.items()
+]
+
+[
+    (
+        string_flag(name = crate, build_setting_default = default, values = RUST_LEVELS),
+        [config_setting(name = crate + "_" + level, flag_values = {":" + crate: level}) for level in RUST_LEVELS],
+    )
+    for crate, default in RUST_CRATES.items()
+]

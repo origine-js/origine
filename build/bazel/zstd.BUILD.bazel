@@ -1,0 +1,23 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Only the decoder, as lib/v8_zig/build/zstd.build.zig's `addSources`: no compression, dictionary
+# training, legacy formats or CLI.
+cc_library(
+    name = "zstd_decoder",
+    srcs = [
+        "lib/common/debug.c",
+        "lib/common/entropy_common.c",
+        "lib/common/error_private.c",
+        "lib/common/fse_decompress.c",
+        "lib/common/xxhash.c",
+        "lib/common/zstd_common.c",
+        "lib/decompress/huf_decompress.c",
+        "lib/decompress/zstd_ddict.c",
+        "lib/decompress/zstd_decompress.c",
+        "lib/decompress/zstd_decompress_block.c",
+    ] + glob(["lib/**/*.h"]),
+    hdrs = ["lib/zstd.h"],
+    includes = ["lib"],
+    copts = ["-std=c99", "-Os", "-DZSTD_DISABLE_ASM", "-DZSTD_LEGACY_SUPPORT=0", "-DZSTD_STRIP_ERROR_STRINGS"],
+    visibility = ["//visibility:public"],
+)

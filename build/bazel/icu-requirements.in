@@ -1,0 +1,2 @@
+zstandard==0.25.0
+typer==0.19.2

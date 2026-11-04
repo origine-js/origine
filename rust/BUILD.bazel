@@ -1,5 +1,6 @@
 load("@rules_rust//rust:defs.bzl", "rust_static_library")
-load("//build/bazel:rust_dependencies.bzl", "package_features")
+load("//build/bazel:features.bzl", "if_feature")
+load("//build/bazel:opt.bzl", "rust_opt")
 
 exports_files(["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"])
 
@@ -11,13 +12,15 @@ rust_static_library(
     name = "origine_native",
     srcs = ["src/lib.rs"],
     crate_root = "src/lib.rs",
-    crate_features = package_features("origine_native"),
+    rustc_flags = rust_opt("origine_native"),
+    # Cargo features from //build/bazel/settings (http/tls/dns/quic only forward to origine_api).
+    crate_features = if_feature("typescript", ["typescript"]) + if_feature("http", ["http"]) +
+                     if_feature("tls", ["tls"]) + if_feature("dns", ["dns"]) + if_feature("quic", ["quic"]),
     deps = [
         "//rust/crates/origine_alloc",
         "//rust/crates/origine_api",
-        "//rust/crates/origine_oxc",
         "//rust/crates/origine_repl",
-    ],
+    ] + if_feature("typescript", ["//rust/crates/origine_oxc"]),
     visibility = ["//visibility:public"],
 )
 

@@ -6,14 +6,27 @@ default:
 build-v8 *args:
     zig build build-v8 {{args}}
 
-# Build the app. V8 is built from source on the first build only (see `build-v8`);
-# it is release V8 unless `v8_debug` is passed.
-build mode="debug" v8="release":
-    zig build {{ if mode == "release" { "-Doptimize=small" } else if mode == "debug" { "" } else { error("mode must be debug or release") } }} {{ if v8 == "debug" { "-Dv8_debug=true" } else if v8 == "release" { "" } else { error("v8 must be debug or release") } }}
+# Bazel builds origine (build/bazel/build.py): `build [dev|release-fast|release-balanced|release-small|v8-debug] [-x feature-profile] [-F features] [-C compression]`; `just show` lists them all.
+build *args:
+    uv run --script build/bazel/build.py build {{args}}
 
-# Run the shell against release V8.
+# Build, then run: `just run [options] -- <init.js> args`.
 run *args:
-    zig build run -- {{args}}
+    uv run --script build/bazel/build.py run {{args}}
+
+# Pick a build profile (or edit a copy of one), features and compression in a TUI, then build, run or print the command.
+interactive:
+    uv run --script build/bazel/build.py interactive
+
+alias i := interactive
+
+# Print the build profiles, features, compression and every module's mode.
+show *args:
+    uv run --script build/bazel/build.py show {{args}}
+
+# Run every examples/**/init.{js,ts} on a Bazel build and list the failures.
+examples *args:
+    uv run --script build/bazel/build.py examples {{args}}
 
 # Working on V8 or its patches: rebuild a debug V8 (quick incremental compiles), then run.
 v8-dev *args:
@@ -101,18 +114,9 @@ format:
     zig fmt build.zig src
     vpx {{oxfmt}} {{js_paths}}
 
-# Bazel (migration in progress; docs/bazel-migration-progress.md). Bazel builds and runs origine
-# (`bazel-build`, `bazel-run`); the Zig recipes above stay until the remaining gates pass (release
-# ThinLTO, compressed ICU, feature settings, size and startup).
-
-# Build origine with Bazel (bazel-bin/src/origine). `config` is debug, safe, fast or small: the Zig
-# host's mode on release V8; v8-debug builds a debug V8 too (.bazelrc).
-bazel-build config="debug" *args:
-    bazel build --config={{config}} //src:origine {{args}}
-
-# Run the Bazel-built origine (debug host, release V8; arguments follow the init path, as for `run`).
-bazel-run *args:
-    bazel run //src:origine -- {{args}}
+# Bazel (migration in progress; docs/bazel-migration-progress.md). `build`, `run`, `show` and
+# `examples` above use Bazel; the Zig build remains for `test`, `check*`, `build-v8`, `v8-dev` and
+# `patch-v8` until cutover (release ThinLTO, size and startup gates).
 
 # Fetch the pinned V8 source and apply its patch series, without compiling it; prints where it is.
 bazel-patch-v8:
@@ -121,44 +125,7 @@ bazel-patch-v8:
 
 # Build V8 with Bazel; source and patch changes invalidate its actions.
 bazel-build-v8 *args:
-    bazel build --config=fast @v8//:icu/v8 {{args}}
-
-# Every Bazel test: Zig, Rust (core, networking, OXC, REPL, macros) and the ThinLTO probe.
-bazel-test *args:
-    bazel test --config=fast //:tests {{args}}
-
-# Run every example (`examples/**/init.{js,ts}`) on the Bazel-built origine; prints the ones that fail.
-bazel-examples:
-    #!/usr/bin/env bash
-    set -u
-    bazel build --config=fast //src:origine
-    bin="$(bazel cquery --config=fast --output=files //src:origine 2>/dev/null)"
-    home="$(mktemp -d)"
-    failed=0
-    for init in $(fd -t f '^init\.(js|ts)$' examples | sort); do
-        if ! HOME="$home" timeout 30 "$bin" "$init" >/dev/null 2>&1; then echo "failed: $init"; failed=1; fi
-    done
-    rm -rf "$home"
-    exit $failed
-
-# The migrated core targets and the three-language ThinLTO acceptance probe.
-bazel-test-bootstrap *args:
-    bazel test --config=fast //:bootstrap-tests {{args}}
-
-bazel-test-io *args:
-    bazel test //:test-io {{args}}
-
-bazel-test-core *args:
-    bazel test //rust:core-tests {{args}}
-
-bazel-test-net *args:
-    bazel test --config=fast //rust/crates/origine_tls:tls_test //rust/crates/origine_h2:h2_test //rust/crates/origine_dns:dns_test {{args}}
-
-bazel-test-oxc *args:
-    bazel test --config=fast //rust/crates/origine_oxc:oxc_test {{args}}
-
-bazel-test-lto *args:
-    bazel test --config=fast //build/bazel/probe:thin_lto_test {{args}}
+    bazel build @v8//:icu/v8 {{args}}
 
 # Regenerate the registry crate specs from rust/Cargo.lock (Cargo supplies metadata only).
 bazel-sync-rust-deps:

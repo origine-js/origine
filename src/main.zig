@@ -321,23 +321,24 @@ fn initSnapshot(
     return created;
 }
 
-/// The frozen-intrinsics startup snapshot generated at build time (see build.zig and
-/// snapshot_tool.zig); empty when the build could not generate one (cross builds). With
-/// `-Dengine_snapshot=compressed` it is LZ4-compressed (`lib/lz4`) and expanded at startup.
-const embedded_snapshot = if (build_options.has_snapshot) @embedFile("engine_snapshot") else "";
-const snapshot_compressed = build_options.has_snapshot and build_options.engine_snapshot_compressed;
+/// The frozen-intrinsics startup snapshot generated at build time (see build.zig,
+/// snapshot_tool.zig and snapshot_provider.zig). Both programs link
+/// `origine_snapshot_provider`, which owns the embedded bytes, so this module only
+/// declares them: the snapshot is not an input of the shell's own compilation.
+extern const origine_snapshot_present: bool;
+extern const origine_snapshot_blob: [*]const u8;
+extern const origine_snapshot_len: usize;
+extern const origine_snapshot_compressed: bool;
 
-/// The uncompressed blob in `align(16)` as V8 requires (empty when compressed or absent).
-const embedded_raw: [if (snapshot_compressed) 0 else embedded_snapshot.len]u8 align(16) =
-    if (snapshot_compressed) .{} else embedded_snapshot.*;
-
-/// Returns the embedded snapshot, or null to use V8's built-in seed (no embedded blob). A compressed blob is expanded into a 16-byte
-/// aligned buffer that lives for the rest of the process; the data is produced by the build, so a
-/// blob that fails to expand is a build defect and aborts.
+/// Returns the embedded snapshot, or null to use V8's built-in seed (no embedded blob). A
+/// compressed blob is expanded into a 16-byte aligned buffer that lives for the rest of the
+/// process; the data is produced by the build, so a blob that fails to expand is a build
+/// defect and aborts.
 fn embeddedSnapshot(alloc: std.mem.Allocator) ?[]align(16) const u8 {
-    if (embedded_snapshot.len == 0) return null;
-    if (snapshot_compressed) {
-        return lz4.unpack(alloc, embedded_snapshot) catch |err| std.debug.panic("embedded engine snapshot: {s}", .{@errorName(err)});
+    if (!origine_snapshot_present) return null;
+    const bytes = origine_snapshot_blob[0..origine_snapshot_len];
+    if (origine_snapshot_compressed) {
+        return lz4.unpack(alloc, bytes) catch |err| std.debug.panic("embedded engine snapshot: {s}", .{@errorName(err)});
     }
-    return &embedded_raw;
+    return @alignCast(bytes);
 }

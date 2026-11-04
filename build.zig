@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) !void {
     const tls = b.option(bool, "tls", "TLS (api.tls; rustls) (default true)") orelse true;
     const dns = b.option(bool, "dns", "DNS resolver (api.dns) (default true)") orelse true;
     const quic = b.option(bool, "quic", "QUIC and api.net.udp (default true; needs -Dtls)") orelse true;
-    if (quic and !tls) std.process.fatal("-Dquic needs -Dtls (QUIC is TLS 1.3); pass -Dquic=false or drop -Dtls=false", .{});
+    if (quic and !tls) std.process.fatal("-Dquic depends on -Dtls", .{});
     const rust_features = b.fmt("{s}{s}{s}{s}{s}", .{
         if (typescript) "typescript," else "",
         if (http) "http," else "",
@@ -148,9 +148,15 @@ pub fn build(b: *std.Build) !void {
     // to V8's built-in seed.
     const build_options = b.addOptions();
     const embed_snapshot = target.query.isNative();
+    // The snapshot provider object (see `snapshotProvider`); null when there is no blob.
+    var provider: ?*std.Build.Step.Compile = null;
     build_options.addOption(bool, "has_snapshot", embed_snapshot);
     build_options.addOption(bool, "engine_snapshot_compressed", engine_snapshot == .compressed);
     build_options.addOption(bool, "v8_sandbox", v8_sandbox);
+    // Debug snapshots are reproducible so a rebuild with unchanged inputs reuses them
+    // Release keeps V8's default random seed.
+    build_options.addOption(bool, "snapshot_seeded", optimize == .debug);
+    build_options.addOption(u32, "snapshot_seed", 0x3c3d6918);
     root.addOptions("build_options", build_options);
     if (embed_snapshot) {
         const tool_module = b.createModule(.{
@@ -165,16 +171,17 @@ pub fn build(b: *std.Build) !void {
         tool_module.addImport("@lz4", lz4_dep.module("@lz4"));
         tool_module.addImport("@managed", modules.managed);
         tool_module.addImport("@engine", modules.engine);
-        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_program, io_lib, lz4_lib, icu_lib, native_libs);
+        tool_module.addOptions("build_options", build_options);
+        const tool = linkProgram(b, v8, target, optimize, external_link, "origine-snapshot", tool_module, rust_program, io_lib, lz4_lib, icu_lib, native_libs, null);
         const generate = std.Build.Step.Run.create(b, "generate engine snapshot");
         generate.addFileArg2(tool, .{});
         const blob = generate.addOutputFileArg2(if (engine_snapshot == .compressed) "engine.snapshot.lz4" else "engine.snapshot", .{});
         // LZ4-compressed (`lib/lz4`) when asked; main.zig expands it at startup.
         if (engine_snapshot == .compressed) generate.addArg("lz4");
-        root.addAnonymousImport("engine_snapshot", .{ .root_source_file = blob });
+        provider = snapshotProvider(b, target, optimize, blob, engine_snapshot == .compressed);
     }
 
-    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_program, io_lib, lz4_lib, icu_lib, native_libs);
+    const binary = linkProgram(b, v8, target, optimize, external_link, "origine", root, rust_program, io_lib, lz4_lib, icu_lib, native_libs, provider);
     const install = b.addInstallBinFile(binary, "origine");
     b.getInstallStep().dependOn(&install.step);
     b.step("build-shell", "Build and install the REPL").dependOn(&install.step);
@@ -276,6 +283,26 @@ fn ioLibrary(b: *std.Build, target: std.Build.ResolvedTarget, io_module: *std.Bu
 
 const HostModules = struct { engine: *std.Build.Module, managed: *std.Build.Module };
 
+/// The engine snapshot as a link-level provider: a generated module that embeds `blob` and
+/// exports `origine_snapshot_*` (see `src/snapshot_provider.zig`). Compiled as its own object so
+/// the blob is not an input of the shell's compilation, and linked into every program that
+/// restores the snapshot. Borrows b and blob through build teardown.
+fn snapshotProvider(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, blob: std.Build.LazyPath, compressed: bool) *std.Build.Step.Compile {
+    const files = b.addWriteFiles();
+    _ = files.addCopyFile(blob, "engine.snapshot");
+    const source = files.add("snapshot_provider.zig", b.fmt(
+        \\const bytes = @embedFile("engine.snapshot");
+        \\const blob: [bytes.len]u8 align(16) = bytes.*;
+        \\pub export const origine_snapshot_present: bool = true;
+        \\pub export const origine_snapshot_blob: [*]const u8 = &blob;
+        \\pub export const origine_snapshot_len: usize = blob.len;
+        \\pub export const origine_snapshot_compressed: bool = {s};
+        \\
+    , .{if (compressed) "true" else "false"}));
+    const module = b.createModule(.{ .root_source_file = source, .target = target, .optimize = optimize });
+    return b.addObject(.{ .name = "origine_snapshot_provider", .root_module = module });
+}
+
 /// Borrows b and dependency through build teardown; returns build-owned modules importing the
 /// dependency's @v8 and @diagnostics. Retains no runtime state.
 fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std.Build.Module, lz4_module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, config: *std.Build.Step.Options) HostModules {
@@ -296,7 +323,7 @@ fn hostModules(b: *std.Build, dependency: *std.Build.Dependency, io_module: *std
 /// Builds `module` into an executable named `name`. On macOS non-debug builds this
 /// compiles an object and links it with V8's matching ld64.lld (ThinLTO, ICF); other
 /// builds use the Zig linker. Returns the build-owned binary path.
-fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, native_libs: []const *std.Build.Step.Compile) std.Build.LazyPath {
+fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, external_link: bool, name: []const u8, module: *std.Build.Module, rust_lib: std.Build.LazyPath, io_lib: *std.Build.Step.Compile, lz4_lib: *std.Build.Step.Compile, icu_lib: ?*std.Build.Step.Compile, native_libs: []const *std.Build.Step.Compile, provider: ?*std.Build.Step.Compile) std.Build.LazyPath {
     if (external_link) {
         const object = b.addObject(.{ .name = name, .root_module = module, .use_llvm = true });
         // The external linker does not add Zig's compiler-rt; an object that needs a soft-float helper
@@ -317,6 +344,7 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
         link.addArtifactArg2(io_lib, .{});
         link.addArtifactArg2(lz4_lib, .{});
         for (native_libs) |lib| link.addArtifactArg2(lib, .{});
+        if (provider) |p| link.addArtifactArg2(p, .{});
         link.addFileArg2(rust_lib, .{});
         link.addArgs(&.{ "-Wl,-dead_strip", "-Wl,--icf=all", "-Wl,-x", "-Wl,-w", "-Wl,-mllvm,-enable-merge-functions" });
         return binary;
@@ -325,6 +353,7 @@ fn linkProgram(b: *std.Build, v8: *std.Build.Dependency, target: std.Build.Resol
     module.linkLibrary(io_lib);
     module.linkLibrary(lz4_lib);
     for (native_libs) |lib| module.linkLibrary(lib);
+    if (provider) |p| module.addObjectFile(p.getEmittedBin());
     const exe = b.addExecutable(.{ .name = name, .root_module = module });
     if (optimize != .debug) {
         exe.use_llvm = true;

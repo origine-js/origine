@@ -5,8 +5,10 @@
 const std = @import("std");
 const m = @import("@managed");
 const eu = @import("@util");
+const v8 = @import("@v8");
 const Engine = @import("@engine").Engine;
 const lz4 = @import("@lz4");
+const build_options = @import("build_options");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const alloc = eu.alloc;
@@ -15,6 +17,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (args.len < 2 or args.len > 3) return error.UsageOutputPath;
     const compress = args.len == 3;
     if (compress and !std.mem.eql(u8, args[2], "lz4")) return error.UsageUnknownMode;
+    // A fixed seed plus predictable mode makes the snapshot reproducible, so an unchanged
+    // rebuild reuses the embedded blob. V8 freezes its flags during initialization.
+    if (build_options.snapshot_seeded) {
+        var flags_buf: [64]u8 = undefined;
+        const flags = try std.fmt.bufPrint(&flags_buf, "--random-seed={d} --predictable", .{build_options.snapshot_seed});
+        v8.V8.setFlagsFromString(flags);
+    }
     var engine = Engine.init(.{});
     defer engine.deinit();
     const blob = try m.snapshot.create(std.heap.page_allocator);

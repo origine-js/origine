@@ -44,21 +44,25 @@ pub fn build(b: *std.Build) void {
 
     // One cargo run: the archive the root links and the object the pre-link step derives from it.
     // It is cached on the declared sources and Cargo.lock; `cargo` itself decides what to relink.
-    const cargo = cargoCommand(b, v8, aws_lc, offline, &.{ "build", "--release", "--locked", "--target", triple });
+    // The archive is an output of this Run (cargo-env.py copies it out of `target/`), not a
+    // `WriteFile` copy: a cache hit must deliver the file from the cache, and a copy step that
+    // reruns would rewrite its inode and invalidate every program that links the archive.
+    var archive: std.Build.LazyPath = undefined;
+    const cargo = cargoCommand(b, v8, aws_lc, offline, .{
+        .artifact = b.fmt("target/{s}/release/{s}", .{ triple, file_name }),
+        .basename = file_name,
+        .output = &archive,
+    }, &.{ "build", "--release", "--locked", "--target", triple });
     cargo.addArgs(&.{ "--no-default-features", "--features", features });
     cargo.addArg("--target-dir");
     cargo.addDirectoryArg2(b.path("target"), .{ .make_absolute = true });
     for (cargoInputs(b)) |path| cargo.addFileInput(b.path(path));
-    // The archive is an output argument, not a copy of `target/`: a cache hit must deliver the
-    // file from the cache, and a `WriteFile` copy that reruns would rewrite its inode and
-    // invalidate every program that links the archive.
-    const archive = cargo.addOutputFileArg2(file_name, .{});
     b.step("build", "Build liborigine_native.a and the pre-linked object").dependOn(&cargo.step);
     b.addNamedLazyPath("archive", archive);
     b.addNamedLazyPath("object", prelinked(b, result, archive));
 
-    b.step("clippy", "Run clippy (-D warnings) over the Rust workspace").dependOn(&cargoCommand(b, v8, aws_lc_host orelse aws_lc, offline, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
-    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, v8, null, offline, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
+    b.step("clippy", "Run clippy (-D warnings) over the Rust workspace").dependOn(&cargoCommand(b, v8, aws_lc_host orelse aws_lc, offline, null, &.{ "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings" }).step);
+    b.step("test-alloc", "Test the Rust mimalloc bindings against the Zig-built mimalloc").dependOn(&cargoCommand(b, v8, null, offline, null, &.{ "test", "--locked", "-p", "origine_alloc" }).step);
 }
 
 /// A required `LazyPath` option: the root always passes the full V8 set or none of it.
@@ -69,7 +73,11 @@ fn optionPath(b: *std.Build, name: []const u8, description: []const u8) std.Buil
 
 /// A cargo invocation for this package, through `scripts/cargo-env.py`, which exports the paths the
 /// build scripts of the vendored crates read: V8_ZIG_* (`v8`) and ORIGINE_AWS_LC_PREFIX (`aws_lc`).
-fn cargoCommand(b: *std.Build, v8: ?V8, aws_lc: ?std.Build.LazyPath, offline: bool, args: []const []const u8) *std.Build.Step.Run {
+/// A file cargo writes under rust/ (`artifact`) that becomes an output of the Run, named
+/// `basename`; `output` receives its `LazyPath`.
+const CargoOutput = struct { artifact: []const u8, basename: []const u8, output: *std.Build.LazyPath };
+
+fn cargoCommand(b: *std.Build, v8: ?V8, aws_lc: ?std.Build.LazyPath, offline: bool, copy: ?CargoOutput, args: []const []const u8) *std.Build.Step.Run {
     const run = std.Build.Step.Run.create(b, b.fmt("cargo {s}", .{args[0]}));
     // `--no-cache`: the script has no dependencies and a build must not need a writable uv cache.
     run.addArgs(&.{ "uv", "run", "--quiet", "--no-cache", "--script" });
@@ -78,11 +86,20 @@ fn cargoCommand(b: *std.Build, v8: ?V8, aws_lc: ?std.Build.LazyPath, offline: bo
         run.addFileArg2(paths.archive, .{ .prefix = "V8_ZIG_ARCHIVE=" });
         run.addFileArg2(paths.mimalloc, .{ .prefix = "V8_ZIG_MIMALLOC=" });
         run.addFileArg2(paths.icu, .{ .prefix = "V8_ZIG_ICU=" });
-        run.addFileArg2(paths.root, .{ .prefix = "V8_ZIG_V8_ROOT=" });
-        run.addFileArg2(paths.compile_commands.dirname(), .{ .prefix = "V8_ZIG_GN_OUT=" });
-        run.addFileArg2(paths.binding, .{ .prefix = "V8_ZIG_BINDING=" });
+        // Directory arguments are cached by path, not contents. The V8 checkout and its GN output
+        // change with the archive (a file input above); the binding directory is source, so the
+        // headers the `v8` build script reads from it are inputs of their own.
+        run.addDirectoryArg2(paths.root, .{ .prefix = "V8_ZIG_V8_ROOT=" });
+        run.addDirectoryArg2(paths.compile_commands.dirname(), .{ .prefix = "V8_ZIG_GN_OUT=" });
+        run.addDirectoryArg2(paths.binding, .{ .prefix = "V8_ZIG_BINDING=" });
+        for ([_][]const u8{ "binding.hpp", "support.h" }) |header| run.addFileInput(paths.binding.path(b, header));
     }
-    if (aws_lc) |prefix| run.addFileArg2(prefix, .{ .prefix = "ORIGINE_AWS_LC_PREFIX=" });
+    // A generated tree (WriteFile directory): its path changes with its contents.
+    if (aws_lc) |prefix| run.addDirectoryArg2(prefix, .{ .prefix = "ORIGINE_AWS_LC_PREFIX=" });
+    if (copy) |c| {
+        run.addArgs(&.{ "--copy", c.artifact });
+        c.output.* = run.addOutputFileArg2(c.basename, .{});
+    }
     run.addArgs(&.{ "--", "cargo", args[0] });
     if (offline) run.addArg("--offline");
     run.addArg("--manifest-path");
@@ -100,7 +117,8 @@ fn cargoCommand(b: *std.Build, v8: ?V8, aws_lc: ?std.Build.LazyPath, offline: bo
 fn cargoInputs(b: *std.Build) []const []const u8 {
     var paths: std.ArrayList([]const u8) = .empty;
     for ([_][]const u8{ "Cargo.toml", "Cargo.lock" }) |path| paths.append(b.allocator, path) catch @panic("OOM");
-    var dir = std.Io.Dir.cwd().openDir(b.graph.io, ".", .{ .iterate = true }) catch @panic("cannot open rust/");
+    // This package's directory (rust/), not the process cwd, which is the root package's.
+    var dir = b.root.openDir(b.graph.io, ".", .{ .iterate = true }) catch @panic("cannot open rust/");
     defer dir.close(b.graph.io);
     var walker = dir.walk(b.allocator) catch @panic("OOM");
     defer walker.deinit();

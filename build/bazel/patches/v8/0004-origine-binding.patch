@@ -1,0 +1,20 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -5333,3 +5333,16 @@
+         "//conditions:default": [],
+     }),
+ )
++
++# The C++ shim of Origine's Zig binding and rusty_v8 (lib/v8_zig/binding). Built in V8's package
++# with V8's own flags, as GN's `v8_zig` static library is, since it reaches V8 internals.
++v8_library(
++    name = "origine_binding",
++    srcs = ["@origine//lib/v8_zig/binding:shim"],
++    # Access control is a front-end check only (no ABI effect); the shim reads private members
++    # such as FunctionCallbackInfo::kArgsLength.
++    copts = ["-fno-access-control"],
++    icu_deps = [":icu/v8"],
++    noicu_deps = [":noicu/v8"],
++    visibility = ["//visibility:public"],
++)

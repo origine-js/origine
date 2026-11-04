@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//build/bazel:rust_dependencies.bzl", "package_features", "registry_deps")
+
+# No rust_test: the crate links V8 (its pure-Rust logic is tested in origine_api_core).
+rust_library(
+    name = "origine_api",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_features = package_features("origine_api"),
+    deps = [
+        "//lib/v8_zig/rusty_v8:v8",
+        "//rust/crates/origine_api_core",
+        "//rust/crates/origine_api_fs",
+        "//rust/crates/origine_dns",
+        "//rust/crates/origine_h2",
+        "//rust/crates/origine_io",
+        "//rust/crates/origine_tls",
+        "//rust/crates/origine_transport",
+    ] + registry_deps("origine_api"),
+    proc_macro_deps = ["//rust/crates/origine_api_macros"],
+    visibility = ["//visibility:public"],
+)

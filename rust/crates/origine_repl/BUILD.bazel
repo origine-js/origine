@@ -1,0 +1,13 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//build/bazel:rust_dependencies.bzl", "package_features", "registry_deps")
+
+rust_library(
+    name = "origine_repl",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_features = package_features("origine_repl"),
+    deps = ["//rust/crates/origine_oxc"] + registry_deps("origine_repl"),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(name = "repl_test", crate = ":origine_repl")

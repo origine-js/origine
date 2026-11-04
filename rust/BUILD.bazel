@@ -1,4 +1,25 @@
+load("@rules_rust//rust:defs.bzl", "rust_static_library")
+load("//build/bazel:rust_dependencies.bzl", "package_features")
+
 exports_files(["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"])
+
+# liborigine_native.a, as Cargo builds it: every Rust crate of the program in one archive with one
+# Rust std, Temporal's (temporal_capi, through rusty_v8) included, and the allocator shim rustc
+# writes for a staticlib. No Rust target declares a native library (those are linked by the
+# program, src/BUILD.bazel, or by a test), so nothing native is bundled in.
+rust_static_library(
+    name = "origine_native",
+    srcs = ["src/lib.rs"],
+    crate_root = "src/lib.rs",
+    crate_features = package_features("origine_native"),
+    deps = [
+        "//rust/crates/origine_alloc",
+        "//rust/crates/origine_api",
+        "//rust/crates/origine_oxc",
+        "//rust/crates/origine_repl",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 test_suite(
     name = "core-tests",

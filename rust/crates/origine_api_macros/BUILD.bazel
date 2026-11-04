@@ -1,0 +1,12 @@
+load("@rules_rust//rust:defs.bzl", "rust_proc_macro", "rust_test")
+load("//build/bazel:rust_dependencies.bzl", "registry_deps")
+
+rust_proc_macro(
+    name = "origine_api_macros",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    deps = ["//rust/crates/origine_api_core"] + registry_deps("origine_api_macros"),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(name = "macros_test", crate = ":origine_api_macros")

@@ -19,4 +19,9 @@ rust_library(
     visibility = ["//rust/crates/origine_h2:__pkg__"],
 )
 
-rust_test(name = "tls_test", crate = ":testing", deps = registry_deps("origine_tls", kind = "dev"))
+rust_test(
+    name = "tls_test",
+    crate = ":testing",
+    deps = registry_deps("origine_tls", kind = "dev"),
+    link_deps = ["//lib/aws-lc:aws_lc_crypto"],
+)

@@ -1,7 +1,7 @@
 // Run: zig build run -- examples/tls/resumption/init.js   (or: zig-out/bin/origine examples/tls/resumption/init.js)
 // Session resumption on the client: a client resumes only when it is given a TlsSessions store (`limit` server names;
 // a limit of 0 is a TypeError). Resumption also needs the server to issue session tickets, and tls.server has no option
-// for that, so here the second handshake is a full one. tls.info(socket).resumed says which kind a handshake was.
+// for that, so here the second handshake is a full one. stream.info().resumed says which kind a handshake was.
 //
 // Prints (stderr):
 //   first handshake: resumed=false (server got "round 1")
@@ -35,7 +35,7 @@ export async function main(api) {
       const secureServer = tlsServer.pulling();
       await secureClient.queued.send(encodeUtf8(`round ${round}`));
       const got = decodeUtf8(await secureServer.read(64));
-      eprintln(`${round === 1 ? 'first' : 'second'} handshake: resumed=${tls.info(secureClient).resumed} (server got "${got}")`);
+      eprintln(`${round === 1 ? 'first' : 'second'} handshake: resumed=${secureClient.info().resumed} (server got "${got}")`);
       await secureClient.close();
       await secureServer.close();
     }

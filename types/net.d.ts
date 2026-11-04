@@ -1,4 +1,5 @@
 import type { SocketAddr } from 'origine:@std/net';
+import type { EventTlsStream, PullTlsStream, TlsStreamUnshaped } from './tls.d.ts';
 
 // The network objects. They are made by an `Io`'s tables (`io.tcp.listen`, `io.tcp.connect`, `io.udp.bind`) and
 // are instances of classes defined natively: `new` throws a `TypeError`, a member called on another object is a
@@ -9,8 +10,11 @@ import type { SocketAddr } from 'origine:@std/net';
 /** How an HTTP/2 object of `api.http` is read: `'pull'` asks with promises, `'event'` pushes to `register`ed handlers. */
 export type Mode = 'event' | 'pull';
 
-/** A native stream a protocol engine (`api.tls`, `api.http`) can take over: one nothing is using yet. */
-export type NativeStream = TcpStreamUnshaped | PullTcpStream | EventTcpStream;
+/**
+ * A native stream a protocol engine (`api.tls`, `api.http`) can take over: one nothing is using yet. The TLS stream
+ * classes of `api.tls` are native streams too.
+ */
+export type NativeStream = TcpStreamUnshaped | PullTcpStream | EventTcpStream | TlsStreamUnshaped | PullTlsStream | EventTlsStream;
 
 /** Which side of a stream {@link TcpStreamBase.end} ends, as in `shutdown(2)`. */
 export type EndSide = 'write' | 'read' | 'both';
@@ -115,7 +119,7 @@ export interface NetObject extends AsyncDisposable {
   close(): Promise<void>;
 }
 
-/** A connected stream that flows nothing yet (`io.tcp.connect`, an accepted connection, a TLS handshake). */
+/** A connected stream that flows nothing yet (`io.tcp.connect`, an accepted connection). */
 export declare class TcpStreamUnshaped implements NetObject {
   private constructor();
   readonly closed: boolean;

@@ -67,77 +67,65 @@ fn shaped<'s, T: class::Class>(
     crate::encode::freeze(scope, object)
 }
 
+/// A `PullTcpStream` over `conn`, or a `PullTlsStream` when the conn carries TLS.
 fn make_pull<'s>(scope: &mut v8::PinScope<'s, '_>, conn: Rc<Conn>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    #[cfg(feature = "tls")]
+    if conn.socket()?.is_tls() {
+        return shaped(scope, crate::tls::PullTlsStream(Front::new(Rc::clone(&conn))), &conn);
+    }
     shaped(scope, PullTcpStream(Front::new(Rc::clone(&conn))), &conn)
 }
 
+/// An `EventTcpStream` over `conn`, or an `EventTlsStream` when the conn carries TLS.
 fn make_event<'s>(scope: &mut v8::PinScope<'s, '_>, conn: Rc<Conn>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    #[cfg(feature = "tls")]
+    if conn.socket()?.is_tls() {
+        return shaped(scope, crate::tls::EventTlsStream(Front::new(Rc::clone(&conn))), &conn);
+    }
     shaped(scope, EventTcpStream(Front::new(Rc::clone(&conn))), &conn)
 }
 
-/// A connected stream that flows nothing yet (`io.tcp.connect`, an accepted connection, a TLS handshake).
-pub(crate) struct TcpStreamUnshaped(pub(crate) Front);
+// ---- the members of the stream classes ----
+//
+// The TCP classes here and the TLS classes of `tls.rs` have the same members over a `Front`; these are their bodies.
 
-impl TcpStreamUnshaped {
-    pub(crate) fn new(conn: Rc<Conn>) -> TcpStreamUnshaped {
-        TcpStreamUnshaped(Front::new(conn))
+/// `pulling(options)` of an unshaped stream: consumes it.
+pub(crate) fn pulling<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    front: &Front,
+    options: Option<ShapeOptions>,
+) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let limit = limit_of(options)?;
+    let conn = front.take(|_| Ok(()))?;
+    if let Some(limit) = limit {
+        conn.limit.set(limit);
     }
+    make_pull(scope, conn)
 }
 
-#[class(path = "net.TcpStreamUnshaped", side_effect = "any", needs = "runtime")]
-impl TcpStreamUnshaped {
-    /// Consumes this object: a `PullTcpStream` over the connection.
-    fn pulling<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        options: Option<ShapeOptions>,
-    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        let limit = limit_of(options)?;
-        let conn = self.0.take(|_| Ok(()))?;
-        if let Some(limit) = limit {
-            conn.limit.set(limit);
-        }
-        make_pull(scope, conn)
+/// `evented(options)` of an unshaped stream: consumes it.
+pub(crate) fn evented<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    front: &Front,
+    options: Option<ShapeOptions>,
+) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let limit = limit_of(options)?;
+    let conn = front.take(|_| Ok(()))?;
+    if let Some(limit) = limit {
+        conn.limit.set(limit);
     }
+    make_event(scope, conn)
+}
 
-    /// Consumes this object: an `EventTcpStream` over the connection.
-    fn evented<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        options: Option<ShapeOptions>,
-    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        let limit = limit_of(options)?;
-        let conn = self.0.take(|_| Ok(()))?;
-        if let Some(limit) = limit {
-            conn.limit.set(limit);
-        }
-        make_event(scope, conn)
-    }
-
-    fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        self.0.close();
-        resolved(scope)
-    }
-
-    #[getter]
-    fn closed(&self, host: &HostState) -> bool {
-        self.0.closed(host)
-    }
-
-    #[getter(name = "localAddr")]
-    fn local_addr(&self) -> Result<SockAddr, NativeError> {
-        self.0.local_addr()
-    }
-
-    #[getter(name = "peerAddr")]
-    fn peer_addr(&self) -> Result<SockAddr, NativeError> {
-        self.0.peer_addr()
-    }
+/// `close()`: frees the descriptor now; an already resolved promise.
+pub(crate) fn close<'s>(scope: &mut v8::PinScope<'s, '_>, front: &Front) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    front.close();
+    resolved(scope)
 }
 
 /// `end(side)`: 'write', 'read' or 'both'.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
+pub(crate) enum Side {
     Write,
     Read,
     Both,
@@ -155,7 +143,7 @@ impl<'s> FromJs<'s> for Side {
 }
 
 /// `end(side)` of a shaped stream (see `types/net.d.ts`).
-fn end(
+pub(crate) fn end(
     host: &mut HostState,
     front: &Front,
     side: Side,
@@ -176,6 +164,188 @@ fn end(
     }))
 }
 
+/// `read(length)` of a pull stream: a `Uint8Array` of 1 to `length` bytes (allocated), empty at end of stream.
+pub(crate) fn read(
+    scope: &mut v8::PinScope<'_, '_>,
+    front: &Front,
+    length: f64,
+) -> Result<Op<'static, impl Future<Output = Result<AllocRead, NativeError>> + use<>>, NativeError> {
+    if length.fract() != 0.0 || !(1.0..=MAX_READ).contains(&length) {
+        return Err(NativeError::type_error("length must be an integer in 1..2**28"));
+    }
+    let len = length as usize;
+    let conn = front.get()?;
+    let socket = conn.socket()?;
+    let lp = conn.io.lp(host_ref(scope)?)?;
+    let isolate: &mut v8::Isolate = scope;
+    let buf = pinned::alloc_for_read(isolate, len)?;
+    let busy = Busy::new(&conn);
+    Ok(Op::new(conn.io.runtime, async move {
+        let _busy = busy;
+        if conn.read_ended.get() {
+            return Ok(AllocRead::new(0, None));
+        }
+        let (read, buf) = socket.recv(&lp, buf).await;
+        let n = read?;
+        if n == 0 {
+            conn.peer_end();
+        }
+        Ok(AllocRead::new(n, buf.into_store()))
+    }))
+}
+
+/// `readInto(buffer)` of a pull stream: one read straight into `buffer` (detached while it runs).
+pub(crate) fn read_into<'s>(
+    host: &mut HostState,
+    front: &Front,
+    buffer: ArrayBufferArg<'s>,
+) -> Result<Op<'s, impl Future<Output = Result<ReadInto, NativeError>> + 'static + use<>>, NativeError> {
+    if buffer.is_empty() {
+        return Err(NativeError::type_error("buffer must not be empty"));
+    }
+    let conn = front.get()?;
+    let socket = conn.socket()?;
+    let lp = conn.io.lp(host)?;
+    let (buf, copied) = pinned::pin_for_read(&buffer)?;
+    if copied {
+        return Err(NativeError::Errno(errno::UNSUPPORTED));
+    }
+    let busy = Busy::new(&conn);
+    Ok(Op::new(conn.io.runtime, async move {
+        let _busy = busy;
+        let (bytes, buf) = if conn.read_ended.get() {
+            (0, buf)
+        } else {
+            let (read, buf) = socket.recv(&lp, buf).await;
+            (read?, buf)
+        };
+        if bytes == 0 {
+            conn.peer_end();
+        }
+        let store = buf.into_store().ok_or(NativeError::Errno(errno::UNEXPECTED))?;
+        Ok(ReadInto::Pinned { bytes, store })
+    }))
+}
+
+/// `readCopy(buffer)` of a pull stream: one read into `buffer` by copy; the byte count, 0 at end of stream.
+pub(crate) fn read_copy<'s>(
+    host: &mut HostState,
+    front: &Front,
+    buffer: ArrayBufferArg<'s>,
+) -> Result<Op<'s, impl Future<Output = Result<usize, NativeError>> + 'static + use<>>, NativeError> {
+    // 0 means end of stream here: an empty buffer could not tell it from nothing read.
+    if buffer.is_empty() {
+        return Err(NativeError::type_error("buffer must not be empty"));
+    }
+    let conn = front.get()?;
+    let socket = conn.socket()?;
+    let lp = conn.io.lp(host)?;
+    let len = buffer.len();
+    let busy = Busy::new(&conn);
+    let runtime = conn.io.runtime;
+    Ok(Op::reading(
+        runtime,
+        async move {
+            let _busy = busy;
+            if conn.read_ended.get() {
+                return Ok(Vec::new());
+            }
+            let (read, mut data) = socket.recv(&lp, vec![0u8; len]).await;
+            let n = read?;
+            if n == 0 {
+                conn.peer_end();
+            }
+            data.truncate(n);
+            Ok(data)
+        },
+        buffer,
+    ))
+}
+
+/// `toEvented()` of a pull stream: consumes it. `WouldBlock` while a read is pending.
+pub(crate) fn to_evented<'s>(scope: &mut v8::PinScope<'s, '_>, front: &Front) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let conn = front.take(|conn| if conn.pending.get() > 0 { Err(NativeError::Errno(errno::WOULD_BLOCK)) } else { Ok(()) })?;
+    make_event(scope, conn)
+}
+
+/// `toPulling()` of an event stream: consumes it. `Unsupported` once a `data` handler started the flow.
+pub(crate) fn to_pulling<'s>(scope: &mut v8::PinScope<'s, '_>, front: &Front) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let conn = front.get()?;
+    sub::unsubscribe(host_mut(scope)?, &conn)?;
+    let conn = front.take(|_| Ok(()))?;
+    make_pull(scope, conn)
+}
+
+/// `register(event, handler)` of an event object: returns a `Registration`.
+pub(crate) fn register<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    front: &Front,
+    event: &str,
+    handler: v8::Local<'s, v8::Function>,
+) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let conn = front.get()?;
+    sub::register(scope, &conn, event, handler)
+}
+
+/// `pause()` (`paused` true) or `resume()` of an event object.
+pub(crate) fn set_paused(scope: &mut v8::PinScope<'_, '_>, front: &Front, paused: bool) -> Result<(), NativeError> {
+    sub::set_paused(scope, &front.conn()?, paused)
+}
+
+/// `paused` of an event object.
+pub(crate) fn paused(front: &Front) -> Result<bool, NativeError> {
+    Ok(front.conn()?.flow.paused())
+}
+
+/// A connected stream that flows nothing yet (`io.tcp.connect`, an accepted connection).
+pub(crate) struct TcpStreamUnshaped(pub(crate) Front);
+
+impl TcpStreamUnshaped {
+    pub(crate) fn new(conn: Rc<Conn>) -> TcpStreamUnshaped {
+        TcpStreamUnshaped(Front::new(conn))
+    }
+}
+
+#[class(path = "net.TcpStreamUnshaped", side_effect = "any", needs = "runtime")]
+impl TcpStreamUnshaped {
+    /// Consumes this object: a `PullTcpStream` over the connection.
+    fn pulling<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        options: Option<ShapeOptions>,
+    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        pulling(scope, &self.0, options)
+    }
+
+    /// Consumes this object: an `EventTcpStream` over the connection.
+    fn evented<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        options: Option<ShapeOptions>,
+    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        evented(scope, &self.0, options)
+    }
+
+    fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        close(scope, &self.0)
+    }
+
+    #[getter]
+    fn closed(&self, host: &HostState) -> bool {
+        self.0.closed(host)
+    }
+
+    #[getter(name = "localAddr")]
+    fn local_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.local_addr()
+    }
+
+    #[getter(name = "peerAddr")]
+    fn peer_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.peer_addr()
+    }
+}
+
 /// A stream read with promises: `read`, `readInto`, `readCopy`.
 pub(crate) struct PullTcpStream(Front);
 
@@ -188,28 +358,7 @@ impl PullTcpStream {
         scope: &mut v8::PinScope<'_, '_>,
         length: f64,
     ) -> Result<Op<'static, impl Future<Output = Result<AllocRead, NativeError>> + use<>>, NativeError> {
-        if length.fract() != 0.0 || !(1.0..=MAX_READ).contains(&length) {
-            return Err(NativeError::type_error("length must be an integer in 1..2**28"));
-        }
-        let len = length as usize;
-        let conn = self.0.get()?;
-        let socket = conn.socket()?;
-        let lp = conn.io.lp(host_ref(scope)?)?;
-        let isolate: &mut v8::Isolate = scope;
-        let buf = pinned::alloc_for_read(isolate, len)?;
-        let busy = Busy::new(&conn);
-        Ok(Op::new(conn.io.runtime, async move {
-            let _busy = busy;
-            if conn.read_ended.get() {
-                return Ok(AllocRead::new(0, None));
-            }
-            let (read, buf) = socket.recv(&lp, buf).await;
-            let n = read?;
-            if n == 0 {
-                conn.peer_end();
-            }
-            Ok(AllocRead::new(n, buf.into_store()))
-        }))
+        read(scope, &self.0, length)
     }
 
     /// One read straight into `buffer` (detached while it runs): `{ bytes, buffer }`, `buffer` a new ArrayBuffer over
@@ -220,31 +369,7 @@ impl PullTcpStream {
         host: &mut HostState,
         buffer: ArrayBufferArg<'s>,
     ) -> Result<Op<'s, impl Future<Output = Result<ReadInto, NativeError>> + 'static + use<>>, NativeError> {
-        if buffer.is_empty() {
-            return Err(NativeError::type_error("buffer must not be empty"));
-        }
-        let conn = self.0.get()?;
-        let socket = conn.socket()?;
-        let lp = conn.io.lp(host)?;
-        let (buf, copied) = pinned::pin_for_read(&buffer)?;
-        if copied {
-            return Err(NativeError::Errno(errno::UNSUPPORTED));
-        }
-        let busy = Busy::new(&conn);
-        Ok(Op::new(conn.io.runtime, async move {
-            let _busy = busy;
-            let (bytes, buf) = if conn.read_ended.get() {
-                (0, buf)
-            } else {
-                let (read, buf) = socket.recv(&lp, buf).await;
-                (read?, buf)
-            };
-            if bytes == 0 {
-                conn.peer_end();
-            }
-            let store = buf.into_store().ok_or(NativeError::Errno(errno::UNEXPECTED))?;
-            Ok(ReadInto::Pinned { bytes, store })
-        }))
+        read_into(host, &self.0, buffer)
     }
 
     /// One read into `buffer` by copy (it is not detached): the byte count, 0 at end of stream.
@@ -254,40 +379,13 @@ impl PullTcpStream {
         host: &mut HostState,
         buffer: ArrayBufferArg<'s>,
     ) -> Result<Op<'s, impl Future<Output = Result<usize, NativeError>> + 'static + use<>>, NativeError> {
-        // 0 means end of stream here: an empty buffer could not tell it from nothing read.
-        if buffer.is_empty() {
-            return Err(NativeError::type_error("buffer must not be empty"));
-        }
-        let conn = self.0.get()?;
-        let socket = conn.socket()?;
-        let lp = conn.io.lp(host)?;
-        let len = buffer.len();
-        let busy = Busy::new(&conn);
-        let runtime = conn.io.runtime;
-        Ok(Op::reading(
-            runtime,
-            async move {
-                let _busy = busy;
-                if conn.read_ended.get() {
-                    return Ok(Vec::new());
-                }
-                let (read, mut data) = socket.recv(&lp, vec![0u8; len]).await;
-                let n = read?;
-                if n == 0 {
-                    conn.peer_end();
-                }
-                data.truncate(n);
-                Ok(data)
-            },
-            buffer,
-        ))
+        read_copy(host, &self.0, buffer)
     }
 
     /// Consumes this object: an `EventTcpStream` over the connection. `WouldBlock` while a read is pending.
     #[method(name = "toEvented")]
     fn to_evented<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        let conn = self.0.take(|conn| if conn.pending.get() > 0 { Err(NativeError::Errno(errno::WOULD_BLOCK)) } else { Ok(()) })?;
-        make_event(scope, conn)
+        to_evented(scope, &self.0)
     }
 
     #[method(promise)]
@@ -300,8 +398,7 @@ impl PullTcpStream {
     }
 
     fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        self.0.close();
-        resolved(scope)
+        close(scope, &self.0)
     }
 
     #[getter]
@@ -344,30 +441,26 @@ impl EventTcpStream {
         event: String,
         handler: v8::Local<'s, v8::Function>,
     ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        let conn = self.0.get()?;
-        sub::register(scope, &conn, &event, handler)
+        register(scope, &self.0, &event, handler)
     }
 
     fn pause(&self, scope: &mut v8::PinScope<'_, '_>) -> Result<(), NativeError> {
-        sub::set_paused(scope, &self.0.conn()?, true)
+        set_paused(scope, &self.0, true)
     }
 
     fn resume(&self, scope: &mut v8::PinScope<'_, '_>) -> Result<(), NativeError> {
-        sub::set_paused(scope, &self.0.conn()?, false)
+        set_paused(scope, &self.0, false)
     }
 
     #[getter]
     fn paused(&self) -> Result<bool, NativeError> {
-        Ok(self.0.conn()?.flow.paused())
+        paused(&self.0)
     }
 
     /// Consumes this object: a `PullTcpStream`. `Unsupported` once a `data` handler started the flow.
     #[method(name = "toPulling")]
     fn to_pulling<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        let conn = self.0.get()?;
-        sub::unsubscribe(host_mut(scope)?, &conn)?;
-        let conn = self.0.take(|_| Ok(()))?;
-        make_pull(scope, conn)
+        to_pulling(scope, &self.0)
     }
 
     #[method(promise)]
@@ -380,8 +473,7 @@ impl EventTcpStream {
     }
 
     fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-        self.0.close();
-        resolved(scope)
+        close(scope, &self.0)
     }
 
     #[getter]

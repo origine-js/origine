@@ -119,6 +119,9 @@ pub struct HostState {
     next_grant: u32,
     #[cfg(feature = "http")]
     pub(crate) http: crate::http::HttpState,
+    /// The duck-typed streams protocol engines run over (`sockstream.rs`).
+    #[cfg(feature = "tls")]
+    pub(crate) js_streams: crate::sockstream::JsStreams,
     /// The event hubs of the conns that have handlers (`sub.rs`), by an id that never reaches JS.
     pub(crate) hubs: BTreeMap<u32, Hub>,
     pub(crate) next_hub: u32,
@@ -157,6 +160,8 @@ impl HostState {
             next_grant: 1,
             #[cfg(feature = "http")]
             http: crate::http::HttpState::default(),
+            #[cfg(feature = "tls")]
+            js_streams: crate::sockstream::JsStreams::default(),
             hubs: BTreeMap::new(),
             next_hub: 1,
             closings: BTreeMap::new(),
@@ -300,6 +305,8 @@ impl HostState {
         self.timers.retain(|(runtime, _), _| *runtime != id);
         let canceled = self.pending.take_where(|pending| pending.runtime == id);
         crate::sub::drop_hubs(self, id);
+        #[cfg(feature = "tls")]
+        self.js_streams.drop_runtime(id);
         let conns = self.runtimes.get(&id).map(|entry| std::mem::take(&mut *entry.conns.borrow_mut())).unwrap_or_default();
         for conn in conns.iter().filter_map(Weak::upgrade) {
             conn.close();
@@ -493,6 +500,8 @@ impl HostState {
     /// (bounded). Idempotent. The detach function calls it before `Runtime.destroy`.
     pub fn drop_all(&mut self) {
         self.hubs.clear();
+        #[cfg(feature = "tls")]
+        self.js_streams.clear();
         self.closings.clear();
         #[cfg(feature = "http")]
         self.http.clear();

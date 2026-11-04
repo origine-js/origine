@@ -1,13 +1,13 @@
 // Run: zig build run -- examples/tls/loopback/init.js   (or: zig-out/bin/origine examples/tls/loopback/init.js)
-// TLS over a native stream. The client and server consume their plain (unshaped) streams and return TLS streams,
-// unshaped again: shape them with pulling() or evented() and use read, queued.send, end('write'), close. The handshake
-// runs natively, without entering JS. The certificates are test material from
+// TLS over a native stream. The client and server consume their plain (unshaped) streams and return TLS streams
+// (TlsStreamUnshaped): shape them with pulling() or evented() and use read, queued.send, end('write'), close, and
+// info(). The handshake runs natively, without entering JS. The certificates are test material from
 // examples/tls/fixtures (a CA and a server certificate for localhost; never trust them anywhere else).
 //
 // Prints (stderr):
 //   client got "hello over tls" from the server
 //   server got "hello, server" from the client
-//   tls.info: version=tls1.3 servername=localhost peer certificates=1 resumed=false
+//   info: version=tls1.3 servername=localhost peer certificates=1 resumed=false
 //   wrong servername: client CertificateRejected (NotValidForName)
 //   client that trusts no CA: client CertificateRejected (UnknownIssuer)
 import { fs } from 'origine:@std/fs';
@@ -53,11 +53,9 @@ export async function main(api) {
     await secureClient.queued.send(encodeUtf8('hello, server'));
     eprintln(`server got "${decodeUtf8(await secureServer.read(64))}" from the client`);
 
-    // tls.info describes what the handshake settled. It works on the TLS stream (any shape), not on the plain one.
-    const info = tls.info(secureClient);
-    eprintln(
-      `tls.info: version=${info.version} servername=${info.servername} peer certificates=${info.peer.length} resumed=${info.resumed}`,
-    );
+    // info() describes what the handshake settled. It is a method of the TLS stream classes (any shape).
+    const info = secureClient.info();
+    eprintln(`info: version=${info.version} servername=${info.servername} peer certificates=${info.peer.length} resumed=${info.resumed}`);
 
     // The name the client asks for must be in the certificate. A wrong one fails the handshake on the client.
     const wrongName = await handshakeOutcome(api, io, listener, client, { servername: 'example.com' }, server);

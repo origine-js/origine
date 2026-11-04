@@ -100,8 +100,12 @@ export type {
 } from './net.d.ts';
 export type {
   ClientAuth,
+  DuckStream,
+  EventTlsStream,
   Identity,
+  PullTlsStream,
   RootPki,
+  TlsAcceptOptions,
   TlsCap,
   TlsClient,
   TlsClientOptions,
@@ -110,6 +114,8 @@ export type {
   TlsServerOptions,
   TlsInfo,
   TlsSessions,
+  TlsStreamUnshaped,
+  TlsTransport,
 } from './tls.d.ts';
 export type {
   ClientExchange,

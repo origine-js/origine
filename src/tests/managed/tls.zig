@@ -83,8 +83,8 @@ test "tls: a handshake, data both ways, a clean close and a cut connection" {
         \\  const client = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)), alpn: ['h2', 'http/1.1'] });
         \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
         \\  const { a, b, plain } = await secure(api, io, client, server);
-        \\  out.negotiated = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2' && tls.info(a).version === 'tls1.3' && tls.info(a).servername === 'localhost' && tls.info(b).servername === 'localhost';
-        \\  out.peer = tls.info(a).peer.length === 1 && tls.info(b).peer.length === 0;
+        \\  out.negotiated = a.info().alpn === 'h2' && b.info().alpn === 'h2' && a.info().version === 'tls1.3' && a.info().servername === 'localhost' && b.info().servername === 'localhost';
+        \\  out.peer = a.info().peer.length === 1 && b.info().peer.length === 0 && a instanceof tls.PullTlsStream;
         \\  out.consumed = plain.closed && (() => { try { plain.pulling(); return 'no'; } catch (e) { return e.name; } })() === 'BadHandle';
         \\  await a.queued.send(bytes('hello'));
         \\  out.up = text(await b.read(64));
@@ -171,10 +171,10 @@ test "tls: event-mode sockets deliver plaintext, send and end with close_notify"
         \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none() });
         \\  const { plain, accepted } = await pair(api, io);
         \\  const [ua, ub] = await Promise.all([client.connect(plain, { servername: 'localhost' }), server.accept(accepted)]);
-        \\  out.unshaped = ua instanceof api.net.TcpStreamUnshaped && tls.info(ua).alpn === undefined;
+        \\  out.unshaped = ua instanceof tls.TlsStreamUnshaped && !(ua instanceof api.net.TcpStreamUnshaped) && ua.info().alpn === undefined;
         \\  const a = ua.evented(), b = ub.evented();
-        \\  out.kinds = out.unshaped && a instanceof api.net.EventTcpStream && b instanceof api.net.EventTcpStream;
-        \\  out.info = tls.info(a).version === 'tls1.3' && tls.info(b).servername === 'localhost';
+        \\  out.kinds = out.unshaped && a instanceof tls.EventTlsStream && b instanceof tls.EventTlsStream;
+        \\  out.info = a.info().version === 'tls1.3' && b.info().servername === 'localhost';
         \\  const big = Uint8Array.from({ length: 200000 }, (_, i) => i % 251);
         \\  const expected = big.reduce((x, v) => x + v, 0);
         \\  let got = 0, sum = 0, ended = false, failed = null;
@@ -193,16 +193,17 @@ test "tls: event-mode sockets deliver plaintext, send and end with close_notify"
         \\  const reply = new Promise(resolve => a.register('data', event => resolve(text(event.buffer()))));
         \\  await b.queued.send(bytes('pong'));
         \\  out.reply = await reply;
-        \\  out.badInfo = (() => { try { tls.info(plain); return 'no'; } catch (e) { return e.name; } })();
+        \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
         \\  await a.close();
         \\  await b.close();
+        \\  out.badInfo = throws(() => a.info()) + ',' + throws(() => tls.EventTlsStream.prototype.info.call(plain)) + ',' + String(api.tls.info);
         \\  await running;
         \\  await io.close();
         \\}
     );
     defer p.deinit();
     try p.run();
-    try check(p.scope, "report.kinds && report.info && report.bulk && report.reply === 'pong' && report.badInfo === 'BadHandle'");
+    try check(p.scope, "report.kinds && report.info && report.bulk && report.reply === 'pong' && report.badInfo === 'BadHandle,TypeError,undefined'");
 }
 
 test "tls: the value classes are Rust-defined classes, frozen and brand-checked" {
@@ -216,6 +217,7 @@ test "tls: the value classes are Rust-defined classes, frozen and brand-checked"
         \\  const throws = f => { try { f(); return 'no'; } catch (e) { return e.name; } };
         \\  const classes = [tls.RootPki, tls.Identity, tls.ClientAuth, tls.TlsSessions, tls.TlsClient, tls.TlsServer];
         \\  out.names = classes.map(C => C.name).join() === 'RootPki,Identity,ClientAuth,TlsSessions,TlsClient,TlsServer';
+        \\  classes.push(tls.TlsStreamUnshaped, tls.PullTlsStream, tls.EventTlsStream);
         \\  out.noNew = classes.every(C => throws(() => new C()) === 'TypeError') && throws(() => tls.RootPki()) === 'TypeError';
         \\  out.frozen = classes.every(C => Object.isFrozen(C) && Object.isFrozen(C.prototype) &&
         \\    Object.values(Object.getOwnPropertyDescriptors(C)).every(d => typeof d.value !== 'function' || Object.isFrozen(d.value)) &&
@@ -261,7 +263,7 @@ test "tls: native values are freed with their wrappers and what was built from t
         \\  for (let i = 0; i < 3; i++) { %CollectGarbage(null); await Promise.resolve(); }
         \\  const { plain, accepted } = await pair(api, io);
         \\  const [a, b] = await Promise.all([client.connect(plain, { servername: 'localhost' }), server.accept(accepted)]);
-        \\  out.survives = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2';
+        \\  out.survives = a.info().alpn === 'h2' && b.info().alpn === 'h2';
         \\  // Releasing by hand makes the value unusable but not what was built from it.
         \\  const spare = tls.RootPki.bundled();
         \\  spare.release();
@@ -273,4 +275,152 @@ test "tls: native values are freed with their wrappers and what was built from t
     defer p.deinit();
     try p.run();
     try check(p.scope, "report.survives && report.released === 'BadHandle' && report.wrongKind === 'TypeError'");
+}
+
+test "tls: TLS over TLS, over an idle shaped stream, and the io option of a native stream" {
+    if (!tls_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { tls } = api;
+        \\  const roots = tls.RootPki.fromPem(bytes(CA));
+        \\  const identities = [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))];
+        \\  const client = tls.client({ roots, alpn: ['h2'] });
+        \\  const server = tls.server({ identities, clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
+        \\  // An outer TLS stream carries an inner one, with its own ALPN.
+        \\  const { plain, accepted, listener } = await pair(api, io);
+        \\  const [oa, ob] = await Promise.all([client.connect(plain, { servername: 'localhost' }), server.accept(accepted)]);
+        \\  const innerClient = tls.client({ roots, alpn: ['inner'] });
+        \\  const innerServer = tls.server({ identities, clientAuth: tls.ClientAuth.none(), alpn: ['inner'] });
+        \\  const [ia, ib] = await Promise.all([innerClient.connect(oa, { servername: 'localhost' }), innerServer.accept(ob)]);
+        \\  out.nested = ia.info().alpn === 'inner' && ib.info().alpn === 'inner' && oa.closed && ob.closed && ia.peerAddr.port === listener.localAddr.port;
+        \\  const a = ia.pulling(), b = ib.evented();
+        \\  const echoed = new Promise(resolve => b.register('data', event => resolve(text(event.buffer()))));
+        \\  await a.queued.send(bytes('deep'));
+        \\  out.deep = await echoed;
+        \\  await b.queued.send(bytes('back'));
+        \\  out.back = text(await a.read(16));
+        \\  await a.end('write');
+        \\  await a.close();
+        \\  await b.close();
+        \\  // An idle shaped stream is a stream too.
+        \\  const second = await pair(api, io);
+        \\  const shapedPlain = second.plain.pulling(), shapedAccepted = second.accepted.evented();
+        \\  const [sa, sb] = await Promise.all([client.connect(shapedPlain, { servername: 'localhost' }), server.accept(shapedAccepted)]);
+        \\  out.fromShaped = sa instanceof tls.TlsStreamUnshaped && sb instanceof tls.TlsStreamUnshaped && shapedPlain.closed && shapedAccepted.closed;
+        \\  // A native stream runs on its own io: naming it is fine, naming another one is refused before anything is touched.
+        \\  const other = api.io.create();
+        \\  const third = await pair(api, io);
+        \\  out.otherIo = await outcome(client.connect(third.plain, { servername: 'localhost', io: other }));
+        \\  out.stillUsable = !third.plain.closed;
+        \\  const [ta, tb] = await Promise.all([client.connect(third.plain, { servername: 'localhost', io }), server.accept(third.accepted, { io })]);
+        \\  out.sameIo = ta.info().servername === 'localhost' && tb.info().alpn === 'h2';
+        \\  await other.close();
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.nested && report.deep === 'deep' && report.back === 'back' && report.fromShaped && report.otherIo === 'TypeError' && report.stillUsable && report.sameIo");
+}
+
+test "tls: a pure-JS pipe stream pair carries a handshake and an echo" {
+    if (!tls_enabled) return error.SkipZigTest;
+    var p: Parent = undefined;
+    try p.setup("init.js", prelude ++
+        \\import { IoError } from 'origine:@std/io';
+        \\// One direction of a pipe: chunks in order, a reader waiting for one, who waits for the lane to empty.
+        \\const lane = () => ({ chunks: [], size: 0, ended: false, reader: null, drainers: [] });
+        \\const wake = l => { const reader = l.reader; l.reader = null; reader?.(); };
+        \\// One end of a pipe: reads `inn`, writes `out`, which holds at most `limit` bytes (so `put` takes part).
+        \\const end = (inn, out, limit, log) => {
+        \\  const self = {
+        \\    closed: false,
+        \\    read(length) {
+        \\      log.reads++;
+        \\      return new Promise(resolve => {
+        \\        const attempt = () => {
+        \\          if (inn.size > 0) {
+        \\            let chunk = inn.chunks[0];
+        \\            if (chunk.length > length) { inn.chunks[0] = chunk.subarray(length); chunk = chunk.subarray(0, length); } else inn.chunks.shift();
+        \\            inn.size -= chunk.length;
+        \\            if (inn.size === 0) for (const drained of inn.drainers.splice(0)) drained();
+        \\            resolve(chunk);
+        \\          } else if (inn.ended) resolve(new Uint8Array(0));
+        \\          else inn.reader = attempt;
+        \\        };
+        \\        attempt();
+        \\      });
+        \\    },
+        \\    queued: {
+        \\      put(bytes) {
+        \\        if (out.ended) throw new Error('ended');
+        \\        const n = Math.min(bytes.length, limit - out.size);
+        \\        if (n <= 0) { log.full++; return 0; }
+        \\        out.chunks.push(bytes.slice(0, n));
+        \\        out.size += n;
+        \\        if (n < bytes.length) log.partial++;
+        \\        wake(out);
+        \\        return n;
+        \\      },
+        \\      drained() { return out.size === 0 ? Promise.resolve() : new Promise(resolve => out.drainers.push(resolve)); },
+        \\    },
+        \\    end(side) { log.ends.push(side); out.ended = true; wake(out); return Promise.resolve(); },
+        \\    close() { self.closed = true; out.ended = inn.ended = true; wake(out); wake(inn); return Promise.resolve(); },
+        \\  };
+        \\  return self;
+        \\};
+        \\const pipePair = (limit, log) => { const ab = lane(), ba = lane(); return [end(ba, ab, limit, log), end(ab, ba, limit, log)]; };
+        \\export async function main(api) {
+        \\  const out = globalThis.report = {};
+        \\  const io = api.io.create();
+        \\  const { tls } = api;
+        \\  const client = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)), alpn: ['h2'] });
+        \\  const server = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
+        \\  const log = { reads: 0, partial: 0, full: 0, ends: [] };
+        \\  const [left, right] = pipePair(4096, log);
+        \\  // A stream that is not native needs an io, and the whole contract.
+        \\  out.needsIo = await outcome(client.connect(left, { servername: 'localhost' }));
+        \\  out.shape = await outcome(client.connect({ read() {}, queued: {}, end() {}, close() {} }, { servername: 'localhost', io }));
+        \\  out.notObject = await outcome(client.connect(42, { servername: 'localhost', io }));
+        \\  const [x, y] = await Promise.all([client.connect(left, { servername: 'localhost', io }), server.accept(right, { io })]);
+        \\  out.kinds = x instanceof tls.TlsStreamUnshaped && y instanceof tls.TlsStreamUnshaped && x.info().alpn === 'h2' && y.info().servername === 'localhost';
+        \\  out.noAddr = (() => { try { return x.localAddr; } catch (e) { return e.name; } })();
+        \\  // The server echoes in event mode; the client is read with promises.
+        \\  const a = x.pulling(), b = y.evented();
+        \\  b.register('data', event => { b.queued.put(event.buffer()); });
+        \\  b.register('end', () => { b.end('write'); });
+        \\  const running = io.run();
+        \\  const big = Uint8Array.from({ length: 100000 }, (_, i) => i % 251);
+        \\  const expected = big.reduce((sum, v) => sum + v, 0);
+        \\  const drain = async want => { let got = 0, sum = 0; while (got < want) { const c = await a.read(65536); if (c.length === 0) break; got += c.length; for (const v of c) sum += v; } return [got, sum]; };
+        \\  const [, echoed] = await Promise.all([a.queued.send(big), drain(big.length)]);
+        \\  out.echo = echoed[0] === big.length && echoed[1] === expected;
+        \\  out.slow = log.partial > 0 && log.reads > 0;
+        \\  // close_notify both ways, then the pipe's own end.
+        \\  await a.end('write');
+        \\  out.eof = (await a.read(16)).length === 0;
+        \\  await running;
+        \\  await a.close();
+        \\  await io.timer.sleep(1);
+        \\  out.ended = log.ends.join() === 'write,write' && left.closed && right.closed;
+        \\  // A stream that fails passes its own error on.
+        \\  const broken = { read() { return Promise.reject({ errno: IoError.ConnectionReset }); }, queued: { put: b => b.length, drained: () => Promise.resolve() }, end() {}, close() {} };
+        \\  out.broken = await outcome(client.connect(broken, { servername: 'localhost', io }));
+        \\  // Closing the io cancels a handshake waiting on a JS stream.
+        \\  const other = api.io.create();
+        \\  const [lonely] = pipePair(4096, log);
+        \\  const waiting = outcome(client.connect(lonely, { servername: 'localhost', io: other }));
+        \\  await io.timer.sleep(1);
+        \\  await other.close();
+        \\  out.canceled = await waiting;
+        \\  await io.close();
+        \\}
+    );
+    defer p.deinit();
+    try p.run();
+    try check(p.scope, "report.needsIo === 'TypeError' && report.shape === 'TypeError' && report.notObject === 'TypeError' && report.kinds && report.noAddr === 'NotConnected'");
+    try check(p.scope, "report.echo && report.slow && report.eof && report.ended && report.broken === 'ConnectionReset' && report.canceled === 'Canceled'");
 }

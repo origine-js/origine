@@ -32,7 +32,7 @@ Examples that write files do it under a `work/` directory they create and that g
 | | [lifecycle](net/lifecycle/init.js) | `end('write')`, the auto-close rule, `toEvented()` |
 | | [write-lanes](net/write-lanes/init.js) | `direct.write`, `queued.limit`, `drained()`, `end('read')`, server `toEvent`/`toPull` |
 | | [addresses](net/addresses/init.js) | loopback by default, `localhost`, `PermissionDenied` outside the ceiling |
-| [tls](tls) | [loopback](tls/loopback/init.js) | `tls.server`, `tls.client`, `RootPki`, `Identity`, `tls.info`, the errors |
+| [tls](tls) | [loopback](tls/loopback/init.js) | `tls.server`, `tls.client`, `RootPki`, `Identity`, `info()`, the errors |
 | | [resumption](tls/resumption/init.js) | `TlsSessions` and what the server must also do |
 | | [client-auth](tls/client-auth/init.js) | `ClientAuth.require`, client `identity` |
 | [http](http) | [session](http/session/init.js) | `http.session` over a socket, streams, flow control (h2c) |

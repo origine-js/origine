@@ -1,22 +1,48 @@
-// `api.tls`: TLS 1.2/1.3 over native streams (docs/http-design.md). An ES module factory used by index.js. Every
-// class is defined in Rust (rust/crates/origine_api/src/tls.rs, `#[class]`): the values parsed once and reused
-// (`RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient`, `TlsServer`) parse and validate in their named
-// constructors, so a bad certificate fails with its own error. `TlsClient.connect(stream, { servername })` and
-// `TlsServer.accept(stream)` consume a native stream (`TcpStreamUnshaped`, or an idle `PullTcpStream` /
-// `EventTcpStream`) and run the handshake in Rust, without entering JS; they resolve a new `TcpStreamUnshaped` whose
-// bytes are plaintext, and `info(stream)` tells what the handshake settled. Nothing here holds state.
+// `api.tls`: TLS 1.2/1.3 over streams (docs/http-design.md). An ES module factory used by index.js. Every class is
+// defined in Rust (rust/crates/origine_api/src/tls.rs, `#[class]`): the values parsed once and reused (`RootPki`,
+// `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient`, `TlsServer`) parse and validate in their named constructors,
+// so a bad certificate fails with its own error. `TlsClient.connect(stream, { servername, io? })` and
+// `TlsServer.accept(stream, { io? })` take a native stream (TCP or TLS, unshaped or idle shaped), which they consume
+// and handshake over in Rust without entering JS, or a duck-typed JS stream run on `io`; they resolve a
+// `TlsStreamUnshaped`, which `pulling()` / `evented()` turn into `PullTlsStream` / `EventTlsStream` (the members of
+// the TCP classes plus `info()`). Nothing here holds state.
 import { freeze, hostError, shared } from './util.js';
+
+// Read when the module is evaluated (before guest code): a realm cannot swap them.
+const { asyncDispose, asyncIterator } = Symbol;
+const READ_CHUNK = 65536;
 
 export default native => {
   // Called when the capability is bound (index.js `late`): the installers exist only then.
   return () => {
-    // For `api.http`: what the handshake of a stream settled, or undefined for a plain one.
+    const closing = {
+      [asyncDispose]() {
+        return this.close();
+      },
+    };
+    const TlsStreamUnshaped = native.tls.TlsStreamUnshaped(hostError, closing);
+    const PullTlsStream = native.tls.PullTlsStream(hostError, {
+      ...closing,
+      /** `for await (const chunk of stream)`: the bytes as `read(65536)` returns them, until the end of the stream. */
+      async *[asyncIterator]() {
+        for (;;) {
+          const chunk = await this.read(READ_CHUNK);
+          if (chunk.length === 0) return;
+          yield chunk;
+        }
+      },
+    });
+    const EventTlsStream = native.tls.EventTlsStream(hostError, closing);
+    const infos = [TlsStreamUnshaped, PullTlsStream, EventTlsStream].map(C => C.prototype.info);
+    // For `api.http`: what the handshake of a stream settled, or undefined for a stream that is not TLS (the native
+    // `info` is brand-checked, so only a genuine TLS stream answers).
     shared.tlsInfo = stream => {
-      try {
-        return native.tls.info(stream);
-      } catch {
-        return undefined;
+      for (const info of infos) {
+        try {
+          return info.call(stream);
+        } catch {}
       }
+      return undefined;
     };
     return freeze({
       RootPki: native.tls.RootPki(hostError),
@@ -25,13 +51,9 @@ export default native => {
       TlsSessions: native.tls.TlsSessions(hostError),
       TlsClient: native.tls.TlsClient(hostError),
       TlsServer: native.tls.TlsServer(hostError),
-      /**
-       * What the handshake of a TLS stream settled: `{ alpn, version, servername, resumed, peer }`; `peer` is the
-       * peer's certificates in DER, leaf first (empty when it sent none). `BadHandle` for a stream that is not TLS.
-       */
-      info(stream) {
-        return native.tls.info(stream);
-      },
+      TlsStreamUnshaped,
+      PullTlsStream,
+      EventTlsStream,
       /** `{ roots: RootPki (required), identity?: Identity, alpn?: string[], sessions?: TlsSessions }`. */
       client(options) {
         return native.tls.client(options);

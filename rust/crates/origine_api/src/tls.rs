@@ -2,11 +2,15 @@
 //!
 //! Values that are parsed once and reused (roots, identities, client authentication, session caches,
 //! client and server configurations) are Rust-defined classes (`#[class]`, see `class`) owned by the
-//! garbage collector; the guest gets them from `native.tls.<Class>` installers. A TLS
-//! stream is made from a native stream (`sockstream::StreamArg`): `TlsClient.connect` / `TlsServer.accept`
-//! **consume** it (the object answers `BadHandle` afterwards) and the handshake runs on its runtime, in Rust,
-//! without entering JS. The result is a new `TcpStreamUnshaped` whose reads and writes carry plaintext, so
-//! `.pulling()`, `.evented()` and the whole write side work on it.
+//! garbage collector; the guest gets them from `native.tls.<Class>` installers.
+//!
+//! A TLS stream is made over a stream (`sockstream::StreamArg`) by `TlsClient.connect` / `TlsServer.accept`. A
+//! native stream (TCP or TLS, unshaped or an idle shaped one) is **consumed** (the object answers `BadHandle`
+//! afterwards) and the handshake runs on its runtime, in Rust, without entering JS; any other object is a duck-typed
+//! stream (`sockstream::JsStream`) read and written through its JS methods on the `io` the caller passes. The result
+//! is a `TlsStreamUnshaped` whose reads and writes carry plaintext; `.pulling()` / `.evented()` make it a
+//! `PullTlsStream` / `EventTlsStream`, with the members of the TCP classes plus `info()`. TLS over TLS is a TLS
+//! stream given to `connect`.
 
 use std::future::Future;
 use std::io;
@@ -18,10 +22,12 @@ use origine_tls::{CertProblem, ClientOptions, ServerOptions, TlsError, TlsStream
 use crate::class::Releasable;
 use crate::conn::{Conn, Front, Kind};
 use crate::decode::ArrayBufferArg;
-use crate::native::Op;
-use crate::net::Socket;
-use crate::sockstream::{SocketTransport, StreamArg};
-use crate::stream::TcpStreamUnshaped;
+use crate::fs::{AllocRead, ReadInto};
+use crate::io::{Io, IoCore};
+use crate::native::{Op, host_ref};
+use crate::net::{SockAddr, Socket};
+use crate::sockstream::{JsStream, SocketTransport, StreamArg, Under};
+use crate::stream::{self, ShapeOptions, Side};
 use crate::{FromJs, HostState, IntoJs, class, native};
 
 /// How `origine_tls` failures reach the guest: one errno per meaning, the detail in `subject`.
@@ -33,6 +39,12 @@ pub(crate) fn tls_error(e: TlsError) -> NativeError {
 pub(crate) fn tls_error_of(e: &TlsError) -> NativeError {
     let detailed = |code: u32, subject: String| NativeError::Errno(code).with_subject(subject);
     match e {
+        // A duck-typed stream underneath failed: its own errno.
+        TlsError::Io(e) if let Some(inner) = e.get_ref().and_then(|inner| inner.downcast_ref::<crate::sockstream::JsStreamError>()) => {
+            inner.native()
+        }
+        // A TLS stream underneath failed (TLS over TLS).
+        TlsError::Io(e) if let Some(inner) = e.get_ref().and_then(|inner| inner.downcast_ref::<TlsError>()) => tls_error_of(inner),
         TlsError::Io(e) => NativeError::from(io::Error::new(e.kind(), e.to_string())),
         TlsError::UnexpectedEof => NativeError::Errno(errno::UNEXPECTED_EOF),
         TlsError::Certificate(problem) => detailed(
@@ -173,36 +185,59 @@ impl TlsSessions {
     }
 }
 
-/// `{ servername }` of `TlsClient.connect`.
+/// `{ servername, io? }` of `TlsClient.connect`.
 #[derive(FromJs)]
-struct ConnectOptions {
+struct ConnectOptions<'s> {
     servername: String,
+    io: Option<&'s Io>,
 }
 
-/// Runs a handshake over the socket of `stream` (consumed) and makes the TLS stream: a new `TcpStreamUnshaped`
-/// whose bytes are plaintext. A failed handshake closes the socket.
-fn handshake<F, Fut>(
-    host: &HostState,
-    stream: StreamArg<'_>,
+/// `{ io? }` of `TlsServer.accept`.
+#[derive(FromJs)]
+struct AcceptOptions<'s> {
+    io: Option<&'s Io>,
+}
+
+/// Runs a handshake over `stream` and makes the TLS stream: a `TlsStreamUnshaped` whose bytes are plaintext. A
+/// native stream is consumed and runs on its own runtime (`io`, if given, must be that one); any other object is a
+/// duck-typed stream and needs `io`. A failed handshake closes what is underneath.
+fn handshake<'s, F, Fut>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: StreamArg<'s>,
+    io: Option<&Io>,
     run: F,
-) -> Result<Op<'static, impl Future<Output = Result<TcpStreamUnshaped, NativeError>> + use<F, Fut>>, NativeError>
+) -> Result<Op<'static, impl Future<Output = Result<TlsStreamUnshaped, NativeError>> + use<F, Fut>>, NativeError>
 where
-    F: FnOnce(SocketTransport) -> Fut + 'static,
-    Fut: Future<Output = Result<TlsStream<SocketTransport>, TlsError>> + 'static,
+    F: FnOnce(Rc<Under>) -> Fut + 'static,
+    Fut: Future<Output = Result<TlsStream<Rc<Under>>, TlsError>> + 'static,
 {
-    let conn = stream.conn()?;
-    let lp = conn.io.lp(host)?;
-    let (io, plain) = stream.take()?;
-    let runtime = io.runtime;
-    Ok(Op::new(runtime, async move {
-        let tls = match run(SocketTransport { socket: Rc::clone(&plain), lp }).await {
+    let (core, under): (Rc<IoCore>, Under) = match stream {
+        StreamArg::Native(stream) => {
+            let conn = stream.conn()?;
+            if io.is_some_and(|io| !Rc::ptr_eq(&io.0, &conn.io)) {
+                return Err(NativeError::type_error("options.io must be the Io of the stream (a native stream runs on its own)"));
+            }
+            let lp = conn.io.lp(host_ref(scope)?)?;
+            let (core, socket) = stream.take()?;
+            (core, Under::Socket(SocketTransport { socket, lp }))
+        }
+        StreamArg::Js(object) => {
+            let io = io.ok_or_else(|| NativeError::type_error("options.io (an Io) is required for a stream that is not native"))?;
+            io.0.lp(host_ref(scope)?)?;
+            let js = JsStream::adopt(scope, object, &io.0)?;
+            (Rc::clone(&io.0), Under::Js(js))
+        }
+    };
+    let under = Rc::new(under);
+    Ok(Op::new(core.runtime, async move {
+        let tls = match run(Rc::clone(&under)).await {
             Ok(tls) => tls,
             Err(e) => {
-                plain.shutdown();
+                under.shutdown();
                 return Err(tls_error(e));
             }
         };
-        Ok(TcpStreamUnshaped::new(Conn::new(&io, Kind::Stream, Socket::over_tls(tls, plain))))
+        Ok(TlsStreamUnshaped(Front::new(Conn::new(&core, Kind::Stream, Socket::over_tls(tls, under)))))
     }))
 }
 
@@ -211,23 +246,23 @@ pub(crate) struct TlsClient(Releasable<origine_tls::TlsClient>);
 
 #[class(path = "tls.TlsClient", side_effect = "any", needs = "runtime")]
 impl TlsClient {
-    /// Handshakes over `stream` (a native stream nothing is using, consumed: a refused call leaves it usable) and
-    /// resolves a new `TcpStreamUnshaped` whose bytes are plaintext; `servername` is what the certificate must be
-    /// valid for (and the SNI sent).
+    /// Handshakes over `stream` and resolves a `TlsStreamUnshaped` whose bytes are plaintext; `servername` is what the
+    /// certificate must be valid for (and the SNI sent). A native stream nothing is using is consumed (a refused call
+    /// leaves it usable); any other object is a duck-typed stream and needs `io`.
     #[method(promise)]
-    fn connect(
+    fn connect<'s>(
         &self,
-        host: &mut HostState,
-        stream: StreamArg<'_>,
-        options: ConnectOptions,
-    ) -> Result<Op<'static, impl Future<Output = Result<TcpStreamUnshaped, NativeError>> + use<>>, NativeError> {
+        scope: &mut v8::PinScope<'s, '_>,
+        stream: StreamArg<'s>,
+        options: ConnectOptions<'s>,
+    ) -> Result<Op<'static, impl Future<Output = Result<TlsStreamUnshaped, NativeError>> + use<>>, NativeError> {
         if options.servername.is_empty() {
             return Err(ArgError::new(1, "property `servername` to be a non-empty string").into());
         }
         // The handshake outlives the call: it holds its own copy of the configuration.
         let client = self.0.get()?;
         let servername = options.servername;
-        handshake(host, stream, move |transport| async move { TlsStream::connect(&client, transport, &servername).await })
+        handshake(scope, stream, options.io, move |transport| async move { TlsStream::connect(&client, transport, &servername).await })
     }
 
     fn release(&self) {
@@ -240,15 +275,17 @@ pub(crate) struct TlsServer(Releasable<origine_tls::TlsServer>);
 
 #[class(path = "tls.TlsServer", side_effect = "any", needs = "runtime")]
 impl TlsServer {
-    /// Handshakes over `stream` (consumed) as the server; see `TlsClient.connect`.
+    /// Handshakes over `stream` as the server; see `TlsClient.connect`.
     #[method(promise)]
-    fn accept(
+    fn accept<'s>(
         &self,
-        host: &mut HostState,
-        stream: StreamArg<'_>,
-    ) -> Result<Op<'static, impl Future<Output = Result<TcpStreamUnshaped, NativeError>> + use<>>, NativeError> {
+        scope: &mut v8::PinScope<'s, '_>,
+        stream: StreamArg<'s>,
+        options: Option<AcceptOptions<'s>>,
+    ) -> Result<Op<'static, impl Future<Output = Result<TlsStreamUnshaped, NativeError>> + use<>>, NativeError> {
         let server = self.0.get()?;
-        handshake(host, stream, move |transport| async move { TlsStream::accept(&server, transport).await })
+        let io = options.and_then(|options| options.io);
+        handshake(scope, stream, io, move |transport| async move { TlsStream::accept(&server, transport).await })
     }
 
     fn release(&self) {
@@ -318,12 +355,10 @@ fn tls_server(options: ServerConfig<'_>) -> Result<TlsServer, NativeError> {
 
 // ---- streams ----
 
-/// `native.tls.info(stream)`: what the handshake of a TLS stream settled: `{ alpn, version ('tls1.2' | 'tls1.3'),
-/// servername, resumed, peer }`, `peer` the peer's certificates in DER, leaf first. `BadHandle` for a stream that
-/// is not TLS (or is closed).
-#[native(side_effect = "any", path = "tls.info", needs = "runtime")]
-fn tls_info<'s>(scope: &mut v8::PinScope<'s, '_>, stream: AnyStream<'s>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
-    let socket = stream.0.get()?.socket()?;
+/// What the handshake of the TLS stream behind `front` settled: `{ alpn, version ('tls1.2' | 'tls1.3'), servername,
+/// resumed, peer }`, `peer` the peer's certificates in DER, leaf first. `BadHandle` once closed or consumed.
+fn info<'s>(scope: &mut v8::PinScope<'s, '_>, front: &Front) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+    let socket = front.get()?.socket()?;
     let tls = socket.tls().ok_or(NativeError::Errno(errno::BAD_HANDLE))?;
     let info = tls.info();
     let object = crate::encode::new_object(scope);
@@ -341,21 +376,192 @@ fn tls_info<'s>(scope: &mut v8::PinScope<'s, '_>, stream: AnyStream<'s>) -> Resu
     crate::encode::freeze(scope, object)
 }
 
-/// Any TCP stream object, borrowed for the call (without the checks of a handover).
-struct AnyStream<'s>(&'s Front);
+/// A TLS stream that flows nothing yet (what `TlsClient.connect` / `TlsServer.accept` resolve).
+pub(crate) struct TlsStreamUnshaped(pub(crate) Front);
 
-impl<'s> FromJs<'s> for AnyStream<'s> {
-    fn from_js(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, index: usize) -> Result<Self, ArgError> {
-        let isolate: &mut v8::Isolate = scope;
-        if let Some(stream) = crate::gc::unwrap_ref::<TcpStreamUnshaped>(isolate, value) {
-            return Ok(AnyStream(&stream.0));
-        }
-        if let Some(stream) = crate::gc::unwrap_ref::<crate::stream::PullTcpStream>(isolate, value) {
-            return Ok(AnyStream(stream.front()));
-        }
-        if let Some(stream) = crate::gc::unwrap_ref::<crate::stream::EventTcpStream>(isolate, value) {
-            return Ok(AnyStream(stream.front()));
-        }
-        Err(ArgError::new(index, "a TLS stream"))
+#[class(path = "tls.TlsStreamUnshaped", side_effect = "any", needs = "runtime")]
+impl TlsStreamUnshaped {
+    /// Consumes this object: a `PullTlsStream` over the connection.
+    fn pulling<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        options: Option<ShapeOptions>,
+    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::pulling(scope, &self.0, options)
+    }
+
+    /// Consumes this object: an `EventTlsStream` over the connection.
+    fn evented<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        options: Option<ShapeOptions>,
+    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::evented(scope, &self.0, options)
+    }
+
+    /// What the handshake settled (a new frozen object each call).
+    fn info<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        info(scope, &self.0)
+    }
+
+    fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::close(scope, &self.0)
+    }
+
+    #[getter]
+    fn closed(&self, host: &HostState) -> bool {
+        self.0.closed(host)
+    }
+
+    #[getter(name = "localAddr")]
+    fn local_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.local_addr()
+    }
+
+    #[getter(name = "peerAddr")]
+    fn peer_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.peer_addr()
+    }
+}
+
+/// A TLS stream read with promises (the members of `PullTcpStream`, plus `info()`).
+pub(crate) struct PullTlsStream(pub(crate) Front);
+
+#[class(path = "tls.PullTlsStream", side_effect = "any", needs = "runtime")]
+impl PullTlsStream {
+    /// One read: a `Uint8Array` of 1 to `length` bytes (allocated), empty after the peer's `close_notify`.
+    #[method(promise)]
+    fn read(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        length: f64,
+    ) -> Result<Op<'static, impl Future<Output = Result<AllocRead, NativeError>> + use<>>, NativeError> {
+        stream::read(scope, &self.0, length)
+    }
+
+    /// One read straight into `buffer` (detached while it runs): `{ bytes, buffer }`.
+    #[method(promise, name = "readInto")]
+    fn read_into<'s>(
+        &self,
+        host: &mut HostState,
+        buffer: ArrayBufferArg<'s>,
+    ) -> Result<Op<'s, impl Future<Output = Result<ReadInto, NativeError>> + 'static + use<>>, NativeError> {
+        stream::read_into(host, &self.0, buffer)
+    }
+
+    /// One read into `buffer` by copy: the byte count, 0 at end of stream.
+    #[method(promise, name = "readCopy")]
+    fn read_copy<'s>(
+        &self,
+        host: &mut HostState,
+        buffer: ArrayBufferArg<'s>,
+    ) -> Result<Op<'s, impl Future<Output = Result<usize, NativeError>> + 'static + use<>>, NativeError> {
+        stream::read_copy(host, &self.0, buffer)
+    }
+
+    /// Consumes this object: an `EventTlsStream`. `WouldBlock` while a read is pending.
+    #[method(name = "toEvented")]
+    fn to_evented<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::to_evented(scope, &self.0)
+    }
+
+    fn info<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        info(scope, &self.0)
+    }
+
+    /// `'write'` sends `close_notify`, then ends what is underneath (a half close).
+    #[method(promise)]
+    fn end(
+        &self,
+        host: &mut HostState,
+        side: Side,
+    ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
+        stream::end(host, &self.0, side)
+    }
+
+    fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::close(scope, &self.0)
+    }
+
+    #[getter]
+    fn closed(&self, host: &HostState) -> bool {
+        self.0.closed(host)
+    }
+
+    #[getter(name = "localAddr")]
+    fn local_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.local_addr()
+    }
+
+    #[getter(name = "peerAddr")]
+    fn peer_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.peer_addr()
+    }
+}
+
+/// A TLS stream that pushes events to handlers held natively (the members of `EventTcpStream`, plus `info()`).
+pub(crate) struct EventTlsStream(pub(crate) Front);
+
+#[class(path = "tls.EventTlsStream", side_effect = "any", needs = "runtime")]
+impl EventTlsStream {
+    /// Subscribes `handler` to `data`, `end`, `error`, `drain` or `close`; returns a `Registration`.
+    fn register<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        event: String,
+        handler: v8::Local<'s, v8::Function>,
+    ) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::register(scope, &self.0, &event, handler)
+    }
+
+    fn pause(&self, scope: &mut v8::PinScope<'_, '_>) -> Result<(), NativeError> {
+        stream::set_paused(scope, &self.0, true)
+    }
+
+    fn resume(&self, scope: &mut v8::PinScope<'_, '_>) -> Result<(), NativeError> {
+        stream::set_paused(scope, &self.0, false)
+    }
+
+    #[getter]
+    fn paused(&self) -> Result<bool, NativeError> {
+        stream::paused(&self.0)
+    }
+
+    /// Consumes this object: a `PullTlsStream`. `Unsupported` once a `data` handler started the flow.
+    #[method(name = "toPulling")]
+    fn to_pulling<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::to_pulling(scope, &self.0)
+    }
+
+    fn info<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        info(scope, &self.0)
+    }
+
+    #[method(promise)]
+    fn end(
+        &self,
+        host: &mut HostState,
+        side: Side,
+    ) -> Result<Op<'static, impl Future<Output = Result<(), NativeError>> + use<>>, NativeError> {
+        stream::end(host, &self.0, side)
+    }
+
+    fn close<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>, NativeError> {
+        stream::close(scope, &self.0)
+    }
+
+    #[getter]
+    fn closed(&self, host: &HostState) -> bool {
+        self.0.closed(host)
+    }
+
+    #[getter(name = "localAddr")]
+    fn local_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.local_addr()
+    }
+
+    #[getter(name = "peerAddr")]
+    fn peer_addr(&self) -> Result<SockAddr, NativeError> {
+        self.0.peer_addr()
     }
 }

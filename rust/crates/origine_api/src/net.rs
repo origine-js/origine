@@ -31,16 +31,17 @@ enum Endpoint {
     Listener(TcpListener),
     Stream(TcpStream),
     Datagram(UdpSocket),
-    /// A TLS stream over a plain stream socket (its handshake done): reads and writes carry plaintext.
+    /// A TLS stream (its handshake done) over a native socket or a duck-typed JS stream: reads and writes carry
+    /// plaintext.
     #[cfg(feature = "tls")]
     Tls(TlsConn),
 }
 
-/// The TLS stream of a socket and the plain socket under it (kept alive for its descriptor).
+/// The TLS stream of a socket and what is under it (kept for its descriptor, addresses and shutdown).
 #[cfg(feature = "tls")]
 struct TlsConn {
-    stream: origine_tls::TlsStream<crate::sockstream::SocketTransport>,
-    inner: Rc<Socket>,
+    stream: origine_tls::TlsStream<Rc<crate::sockstream::Under>>,
+    under: Rc<crate::sockstream::Under>,
 }
 
 /// One descriptor (or a TLS stream over one).
@@ -96,10 +97,10 @@ impl Socket {
         Socket::new(Endpoint::Datagram(socket))
     }
 
-    /// A TLS socket over `inner`.
+    /// A TLS socket over `under` (the transport `stream` runs on).
     #[cfg(feature = "tls")]
-    pub(crate) fn over_tls(stream: origine_tls::TlsStream<crate::sockstream::SocketTransport>, inner: Rc<Socket>) -> Socket {
-        Socket::new(Endpoint::Tls(TlsConn { stream, inner }))
+    pub(crate) fn over_tls(stream: origine_tls::TlsStream<Rc<crate::sockstream::Under>>, under: Rc<crate::sockstream::Under>) -> Socket {
+        Socket::new(Endpoint::Tls(TlsConn { stream, under }))
     }
 
     pub(crate) fn fd(&self) -> isize {
@@ -108,13 +109,13 @@ impl Socket {
             Endpoint::Stream(s) => s.as_raw_fd() as isize,
             Endpoint::Datagram(d) => d.as_raw_fd() as isize,
             #[cfg(feature = "tls")]
-            Endpoint::Tls(t) => t.inner.fd(),
+            Endpoint::Tls(t) => t.under.fd(),
         }
     }
 
     /// The TLS stream, for a stream made by `tls.connect` / `tls.accept`.
     #[cfg(feature = "tls")]
-    pub(crate) fn tls(&self) -> Option<&origine_tls::TlsStream<crate::sockstream::SocketTransport>> {
+    pub(crate) fn tls(&self) -> Option<&origine_tls::TlsStream<Rc<crate::sockstream::Under>>> {
         match &self.endpoint {
             Endpoint::Tls(t) => Some(&t.stream),
             _ => None,
@@ -200,7 +201,7 @@ impl Socket {
             #[cfg(feature = "tls")]
             Endpoint::Tls(t) => {
                 let _ = t.stream.shutdown().await;
-                t.inner.shutdown_write();
+                t.under.shutdown_write();
             }
             _ => self.shutdown_write(),
         }
@@ -220,7 +221,7 @@ impl Socket {
             Endpoint::Stream(s) => (s.local_addr().ok(), s.peer_addr().ok()),
             Endpoint::Datagram(d) => (d.local_addr().ok(), d.peer_addr().ok()),
             #[cfg(feature = "tls")]
-            Endpoint::Tls(t) => t.inner.addrs(),
+            Endpoint::Tls(t) => t.under.addrs(),
         }
     }
 
@@ -236,7 +237,7 @@ impl Socket {
                 let _ = stream.shutdown(Shutdown::Both);
             }
             #[cfg(feature = "tls")]
-            Endpoint::Tls(t) => t.inner.shutdown(),
+            Endpoint::Tls(t) => t.under.shutdown(),
             Endpoint::Listener(_) | Endpoint::Datagram(_) => {}
         }
     }

@@ -41,7 +41,7 @@ check of `examples/` were not run.
    `ModuleError: app:/blocked.js: Error: Unexpected: blocked by policy`. The code is wrapped, so a caller that checks
    for `ImportError` codes does not find it. Reproduced in `examples/graph/inline-source`.
 4. **Client sessions never resume.** `tls.client({ sessions })` is accepted, but `tls.server` has no option to issue
-   session tickets, so every handshake is full and `tls.info(socket).resumed` is `false`. The `TlsSessions` doc says that
+   session tickets, so every handshake is full and `stream.info().resumed` is `false`. The `TlsSessions` doc says that
    without it no session is resumed; it does not say that a server which issues no tickets makes it moot. Reproduced in
    `examples/tls/resumption`.
 5. **`writeMove` returns nothing.** `fileWriteMoveAll` resolves `undefined`, while the other writes return the count. The

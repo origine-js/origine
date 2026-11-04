@@ -201,7 +201,7 @@ See [`docs/cppgc-research.md`](../../../../docs/cppgc-research.md) for the heap 
 
 ## `tls.*` (TLS, `needs = "runtime"`, feature `tls`)
 
-Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values are the classes `RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient` and `TlsServer` (see above; installed as `native.tls.<Class>`). `TlsClient.connect(stream, { servername })` / `TlsServer.accept(stream)` are native members: they take a native stream (`sockstream::StreamArg`: a `TcpStreamUnshaped`, or an idle `PullTcpStream` / `EventTcpStream`, recognised by its cppgc `TypeId`), take its socket out (the object is consumed) and run the handshake on its runtime over a `SocketTransport` (`Socket::recv` / `send`, so it works over a TLS socket too), without entering JS. The result is a new `TcpStreamUnshaped` over `Socket::over_tls`. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
+Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/docs/tls.md`](../../../../src/js/docs/tls.md). Parsed values are the classes `RootPki`, `Identity`, `ClientAuth`, `TlsSessions`, `TlsClient` and `TlsServer` (see above; installed as `native.tls.<Class>`). `TlsClient.connect(stream, { servername, io? })` / `TlsServer.accept(stream, { io? })` are native members: given a native stream (`sockstream::StreamArg::Native`: a TCP or TLS stream, unshaped or idle shaped, recognised by its cppgc `TypeId`) they take its socket out (the object is consumed) and run the handshake on its runtime over `Under::Socket` (`Socket::recv` / `send`, so it works over a TLS socket too), without entering JS; given any other object they adopt it as a `JsStream` (`Under::Js`: its JS methods are called from completions on the isolate thread) on the `io` the options name (required then). The result is a `TlsStreamUnshaped` over `Socket::over_tls`; `.pulling()` / `.evented()` give `PullTlsStream` / `EventTlsStream`, whose members are the TCP classes' (`stream.rs` holds the shared bodies) plus `info()`. TLS failures map to one errno each (`CertificateRejected` / `TlsAlert` / `NoApplicationProtocol` / `ProtocolError` / `UnexpectedEof` / `InvalidData` / `InvalidInput` / `BrokenPipe`), the detail in the error's `subject`.
 
 | Native | Args | Returns |
 |---|---|---|
@@ -209,10 +209,10 @@ Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/doc
 | `tls.Identity` | installer | class: `fromPem(cert, key)`, `fromDer({ cert[], key })` (`InvalidData` for a bad pair), `release()` |
 | `tls.ClientAuth` | installer | class: `none()`, `require(roots)` |
 | `tls.TlsSessions` | installer | class: `create({ limit })` (a positive integer), `release()` |
-| `tls.TlsClient` / `tls.TlsServer` | installer | classes: `connect(stream, { servername })` / `accept(stream)` (Promise `TcpStreamUnshaped`), `release()` |
+| `tls.TlsClient` / `tls.TlsServer` | installer | classes: `connect(stream, { servername, io? })` / `accept(stream, { io? })` (Promise `TlsStreamUnshaped`), `release()` |
+| `tls.TlsStreamUnshaped` / `tls.PullTlsStream` / `tls.EventTlsStream` | installer | classes: the members of the TCP stream classes plus `info()` (frozen `{ alpn, version ('tls1.2' \| 'tls1.3'), servername, resumed, peer: Uint8Array[] }`; `BadHandle` once closed or consumed) |
 | `tls.client` | `{ roots, identity?, alpn?: string[], sessions? }` | a `TlsClient` |
 | `tls.server` | `{ identities (at least one), clientAuth, alpn?: string[] }` | a `TlsServer` |
-| `tls.info` | `stream` (any shape) | frozen `{ alpn, version ('tls1.2' \| 'tls1.3'), servername, resumed, peer: Uint8Array[] }`; `BadHandle` for a plain or closed stream |
 
 ## `http.*` (HTTP/2, `needs = "runtime"`, feature `http`)
 

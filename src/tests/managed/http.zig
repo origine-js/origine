@@ -139,7 +139,7 @@ test "http: h2 over TLS with ALPN" {
         \\  const clientTls = tls.client({ roots: tls.RootPki.fromPem(bytes(CA)), alpn: ['h2'] });
         \\  const serverTls = tls.server({ identities: [tls.Identity.fromPem(bytes(SERVER), bytes(KEY))], clientAuth: tls.ClientAuth.none(), alpn: ['h2'] });
         \\  const { a, b } = await secure(api, io, clientTls, serverTls);
-        \\  out.alpn = tls.info(a).alpn === 'h2' && tls.info(b).alpn === 'h2';
+        \\  out.alpn = a.info().alpn === 'h2' && b.info().alpn === 'h2';
         \\  const client = api.http.session(a, { role: 'client', mode: 'pull', limits });
         \\  const server = api.http.session(b, { role: 'server', mode: 'pull', limits });
         \\  out.consumed = a.closed && b.closed;

@@ -108,7 +108,11 @@ pub(crate) static NATIVES: &[RawNative] = &[
     #[cfg(feature = "tls")]
     tls::NATIVE_TLS_SERVER,
     #[cfg(feature = "tls")]
-    tls::NATIVE_TLS_INFO,
+    tls::CLASS_TLS_STREAM_UNSHAPED,
+    #[cfg(feature = "tls")]
+    tls::CLASS_PULL_TLS_STREAM,
+    #[cfg(feature = "tls")]
+    tls::CLASS_EVENT_TLS_STREAM,
     #[cfg(feature = "http")]
     http::NATIVE_HTTP_SESSION,
     #[cfg(feature = "http")]

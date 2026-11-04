@@ -130,6 +130,7 @@ fn http_session(
         1 => Role::Server,
         _ => return Err(NativeError::Errno(errno::INVALID_INPUT)),
     };
+    let stream = stream.native()?;
     let lp = stream.conn()?.io.lp(host)?;
     let (io, socket) = stream.take()?;
     if io.owner != key {

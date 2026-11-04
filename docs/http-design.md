@@ -6,7 +6,7 @@ Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, an
 
 | Area | State |
 | --- | --- |
-| `api.tls` | Built: TLS 1.2/1.3 over `api.net` sockets, pull and event mode, Rust-defined value classes |
+| `api.tls` | Built: TLS 1.2/1.3 over any stream (native, TLS over TLS, or duck-typed JS), `TlsStreamUnshaped` / `PullTlsStream` / `EventTlsStream`, Rust-defined classes |
 | `api.http` | Built: HTTP/2 sessions, `connect` / `serve`, pull and event mode, client pool, redirects, `fetch` |
 | `api.dns` | Built: `system`, `udp`, `tcp`, DoT, DoH, resolver cache, presets (`origine:@std/dns/presets`) |
 | `origine:@std/net` | Built: `IpAddr`, `SocketAddr` |
@@ -40,7 +40,7 @@ Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, an
                        oio loop (io_uring · kqueue · threaded)
 ```
 
-Each protocol is an internal Rust crate; the natives (`rust/crates/origine_api`) and the DNS resolver sit on the same crates, so a lookup over DoT or DoH never goes through JS: `origine_api` implements the resolver's `Exchange` over UDP, TCP, `origine_tls` and `origine_h2` directly, and `api.http` is not involved in DoH. `api.tls` and `api.http` take a native stream (a `TcpStreamUnshaped`, or an idle shaped stream) and consume it: the engine reads and writes its socket in Rust (`sockstream.rs`, the `Transport` bridge) without entering JS. A TLS handshake makes a new `TcpStreamUnshaped` over the TLS stream, which is why everything a stream offers works on a TLS one. There is no socket table: every network object is a cppgc instance (see [io in native](#io-in-native)).
+Each protocol is an internal Rust crate; the natives (`rust/crates/origine_api`) and the DNS resolver sit on the same crates, so a lookup over DoT or DoH never goes through JS: `origine_api` implements the resolver's `Exchange` over UDP, TCP, `origine_tls` and `origine_h2` directly, and `api.http` is not involved in DoH. `api.tls` and `api.http` take a native stream (a TCP or TLS stream, unshaped or idle shaped) and consume it: the engine reads and writes its socket in Rust (`sockstream.rs`, the `Transport` bridge) without entering JS. A TLS handshake makes a `TlsStreamUnshaped`, whose shaped classes share the members (and the Rust code) of the TCP ones; a TLS stream is itself a native stream, so TLS over TLS and h2 over TLS go through the same bridge. `api.tls` also takes a duck-typed JS stream through a slower adapter. There is no socket table: every network object is a cppgc instance (see [io in native](#io-in-native)).
 
 ### Build flags
 
@@ -82,15 +82,24 @@ members that need JS (async iterators, `Symbol.asyncDispose`, `buffer()` making 
 - **Handlers are held natively** (`Global<Function>` in the Host's hubs) and called from the loop, one event at a
   time, in order; a returned promise is not awaited (backpressure is the bounded read-ahead and `pause()`).
 - **The `Transport` bridge** (`sockstream.rs`): an engine given a native stream (recognised by its cppgc `TypeId`)
-  takes its socket and does its I/O in Rust; `api.tls` and `api.http.session` work this way. Duck-typed JS streams
-  are not accepted yet (`TypeError`).
+  takes its socket and does its I/O in Rust; `api.tls` and `api.http.session` work this way.
+- **Duck-typed streams** (`sockstream.rs`, `JsStream`; `api.tls` only so far): any other object with `read(length)`
+  or `readInto(buffer)`, `queued.put(bytes)` / `queued.drained()`, `end(side)` and `close()` is a stream the engine
+  calls from the loop: each call is a completion run on the isolate thread, its promise settles native callbacks that
+  wake the engine's task. The object lives in the Host (`JsStreams`, keyed by an id that never reaches JS) and is
+  dropped with its TLS stream or its runtime; tasks hold no `Global`. Having no runtime of its own, it needs the
+  caller's `io` (required for such a stream, refused when it names another runtime than a native stream's).
+- **No narrowing.** `api.io` is `{ create }`: the embedder's `Config.runtime` is the only limit (`api.io.narrow` was
+  removed). The async fs hears that a runtime closed through one realm-wide hook (`native.io.link`).
 - **Addresses** are `SocketAddr`s, crossing as octets, port and scope id; nothing is resolved, and the network
   ceiling is checked at `listen` / `bind` / `connect` and on every datagram destination.
 
 ## `api.tls`
 
 - **Explicit trust and sessions.** `roots` is required (no default trust; `RootPki.bundled()` is the Mozilla set compiled in), resumption exists only with a `TlsSessions` the caller passes, a server needs `clientAuth` (`none()` or `require(roots)`). A server presents the first identity valid for the client's SNI name, else its first; the client then refuses it (`NotValidForName`), so a wrong name fails on the client, not silently.
-- **`connect` / `accept` consume the native stream** and return a new `TcpStreamUnshaped` over TLS, which takes its shape like any stream. Consuming makes the transfer of ownership visible and rules out two readers on one stream; a stream with a read pending, bytes queued, a handler or an ended side is refused before it is touched. There is no kernel lane under TLS, so `direct.write` always takes 0 and `queued` is the way to send.
+- **`connect` / `accept` consume the native stream** and return a `TlsStreamUnshaped`, which takes its shape (`PullTlsStream`, `EventTlsStream`) like any stream. Consuming makes the transfer of ownership visible and rules out two readers on one stream; a stream with a read pending, bytes queued, a handler or an ended side is refused before it is touched. There is no kernel lane under TLS, so `direct.write` always takes 0 and `queued` is the way to send.
+- **TLS streams are their own classes** with the TCP members plus `info()` (what the handshake settled). The class says what the bytes are, and `info()` lives on the object whose state it reads, so there is no `api.tls.info(stream)` that would have to answer for plain streams.
+- **Duck-typed streams take `io`.** A stream that is not native is read through its JS methods (a turn and a copy per call) on the runtime the caller names: `io` is required then, and only then (a native stream runs on its own, and naming another `Io` is a `TypeError`). The adapter writes with `queued.put` and waits on `queued.drained()` for the rest, the contract the native `SendQueue` has too.
 - **Truncation is an error.** `read` is empty only after `close_notify`; a connection cut earlier is `UnexpectedEof`, also during the handshake. `end('write')` sends `close_notify` and is a half close.
 - **Errors keep one meaning each**: `CertificateRejected` (with the reason as `subject`), `TlsAlert`, `NoApplicationProtocol`, `ProtocolError`, `UnexpectedEof`, `InvalidData` (bad certificate or key), `InvalidInput` (bad server name).
 - Backpressure comes from rustls' bounded buffers (16 KiB plaintext, 64 KiB output); a cancelled write that already handed a record to the transport poisons the stream.

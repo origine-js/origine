@@ -1,4 +1,6 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_zig//zig:defs.bzl", "zig_configure", "zig_library", "zig_static_library", "zig_test")
+load("//build/bazel:zig_options.bzl", "zig_options")
 
 zig_library(
     name = "safe",
@@ -39,4 +41,155 @@ zig_configure(
 zig_test(
     name = "safe_test",
     deps = [":safe"],
+)
+
+# The programs: a Zig host (origine, origine-snapshot) linked by the C++ toolchain (V8's Clang and
+# ld64.lld) with the Rust staticlib (//rust:origine_native), V8 and the native libraries.
+
+
+# `origine_config`: the compiled-in features, as build.zig's `config` options.
+zig_options(
+    name = "origine_config_zig",
+    constants = {
+        "typescript": "bool = true",
+        "http": "bool = true",
+        "tls": "bool = true",
+        "dns": "bool = true",
+        "quic": "bool = true",
+        "user_snapshot_compressed": "bool = false",
+        "user_codecache_compressed": "bool = false",
+    },
+)
+
+zig_library(
+    name = "origine_config",
+    main = ":origine_config_zig",
+    import_name = "origine_config",
+)
+
+# `build_options`: the engine snapshot's embedding and seed.
+zig_options(
+    name = "build_options_zig",
+    constants = {
+        "has_snapshot": "bool = true",
+        "engine_snapshot_compressed": "bool = false",
+        "v8_sandbox": "bool = true",
+    } | select({
+        "//build/bazel/settings:opt": {"snapshot_seeded": "bool = false"},
+        "//conditions:default": {"snapshot_seeded": "bool = true"},
+    }),
+    settings = {"//build/bazel/settings:snapshot_seed": "snapshot_seed: u32"},
+)
+
+zig_library(
+    name = "build_options",
+    main = ":build_options_zig",
+    import_name = "build_options",
+)
+
+zig_library(
+    name = "engine",
+    main = "engine.zig",
+    import_name = "@engine",
+    deps = ["//lib/v8_zig:v8", "//lib/v8_zig:diagnostics"],
+)
+
+zig_library(
+    name = "managed",
+    main = "managed.zig",
+    srcs = glob(["managed/**/*.zig", "api/**/*.zig", "repl/**/*.zig", "fs_light/**/*.zig", "api.zig", "repl.zig"]),
+    extra_srcs = glob(["js/**/*.js", "repl/**/*.js"]),
+    import_name = "@managed",
+    deps = [
+        ":io",
+        ":origine_config",
+        "//lib/lz4",
+        "//lib/v8_zig:diagnostics",
+        "//lib/v8_zig:util",
+        "//lib/v8_zig:v8",
+    ],
+)
+
+_HOST_DEPS = [
+    ":build_options",
+    ":engine",
+    ":io",
+    ":managed",
+    "//lib/lz4",
+    "//lib/v8_zig:diagnostics",
+    "//lib/v8_zig:util",
+    "//lib/v8_zig:v8",
+]
+
+# What a program that runs the engine links besides its Zig root, each once: the Rust staticlib
+# and the native libraries it and the Zig host call.
+_NATIVE_DEPS = [
+    ":io_native",
+    "//lib/aws-lc:aws_lc_crypto",
+    "//lib/v8_zig/binding:icu_raw",
+    "//rust:origine_native",
+    "@origine_mimalloc//:mimalloc",
+    "@origine_nghttp2//:nghttp2",
+    "@v8//:origine_binding_icu",
+]
+
+
+
+zig_static_library(
+    name = "snapshot_tool_main",
+    main = "snapshot_tool.zig",
+    deps = _HOST_DEPS,
+    compiler_runtime = "include",
+    # libc: std.start exports the C `main` the program starts from.
+    zigopts = ["-lc"],
+)
+
+cc_binary(
+    name = "origine-snapshot",
+    deps = [":snapshot_tool_main"] + _NATIVE_DEPS,
+)
+
+# The tool is a src, not a `tools` entry: it must be the target configuration's build (the same
+# V8 as the program the blob is embedded in), not a second, exec-configured V8.
+genrule(
+    name = "engine_snapshot",
+    srcs = [":origine-snapshot"],
+    outs = ["engine.snapshot"],
+    cmd = "$(execpath :origine-snapshot) $@",
+)
+
+# The blob as a link object exporting `origine_snapshot_*` (main.zig declares them), so the
+# blob is not an input of the host's own compilation.
+genrule(
+    name = "snapshot_provider_zig",
+    outs = ["snapshot_provider.zig"],
+    cmd = """cat > $@ <<'EOF'
+const bytes = @embedFile("engine.snapshot");
+const blob: [bytes.len]u8 align(16) = bytes.*;
+pub export const origine_snapshot_present: bool = true;
+pub export const origine_snapshot_blob: [*]const u8 = &blob;
+pub export const origine_snapshot_len: usize = blob.len;
+pub export const origine_snapshot_compressed: bool = false;
+EOF""",
+)
+
+zig_static_library(
+    name = "snapshot_provider",
+    main = ":snapshot_provider_zig",
+    extra_srcs = [":engine_snapshot"],
+)
+
+zig_static_library(
+    name = "origine_main",
+    main = "main.zig",
+    deps = _HOST_DEPS,
+    compiler_runtime = "include",
+    # libc: std.start exports the C `main` the program starts from.
+    zigopts = ["-lc"],
+)
+
+cc_binary(
+    name = "origine",
+    deps = [":origine_main", ":snapshot_provider"] + _NATIVE_DEPS,
+    visibility = ["//visibility:public"],
 )

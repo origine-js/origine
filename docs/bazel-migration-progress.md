@@ -114,8 +114,47 @@ chain with the pinned compilers and links using V8's LLVM linker.
 - `build/bazel/sync-rust-deps.py` reads locked Cargo metadata and generates
   registry dependency specifications and local feature mappings. It supports
   `--check` and uses the original lockfile; it does not rewrite manifests.
-- `origine_repl`, API proc macros, Rusty V8/generated bindings, the native
-  aggregate, and the main Zig module graph are not yet migrated.
+- The whole Rust graph is now in Bazel (2026-11-04), one `Rustc` action per crate: `origine_api_macros`
+  (proc macro), `origine_repl`, `v8` (rusty_v8), `origine_api` and `origine_native`. Editing one crate
+  recompiles that crate and its dependents only.
+  - rusty_v8's bindings come from `//lib/v8_zig/rusty_v8:binding` (`v8_bindgen`, `build/bazel/bindgen.bzl`):
+    a tool on the bindgen 0.73.2 library runs with the C++ toolchain's own `c++-compile` command line for
+    `@v8//:origine_binding_icu` (includes, defines, libc++, SDK), instead of build.rs reading GN's
+    `compile_commands.json`. `rusty_v8/bindgen_config.rs` holds the bindgen options; build.rs and the tool
+    both include it. libclang is the selected Xcode's (`@origine_macos_sdk//:libclang.dylib`, digest
+    tracked); V8's Clang bundle ships none. Against Cargo's bindings: the same declarations, except V8's
+    version string (`15.8.30` vs `15.8.30-lightpanda`: GN sets `v8_embedder_string` in
+    `lib/v8_zig/build-tools/gn/.gn`, which V8's Bazel build does not support) and the absence of doc
+    comments (V8's headers are `-isystem` under Bazel).
+  - The C++ shim (`lib/v8_zig/binding`) is `@v8//:origine_binding`, added to V8's package by
+    `build/bazel/patches/v8/0004-origine-binding.patch` so it compiles with V8's flags, as GN's `v8_zig` does.
+    Its `../../src/...` includes are now V8-root-relative (works with GN too). Not compiled yet.
+  - `origine_native` is an rlib, not a staticlib: rules_rust's staticlib bundles every native dependency
+    (V8, abseil, ICU, AWS-LC, mimalloc), where Cargo used `-bundle`. The program's cc link will take the
+    crates and the native libraries once each.
+- The program builds with Bazel (2026-11-04): `bazel build --config=fast //src:origine` (`just bazel-build`).
+  All 50 `examples/**/init.{js,ts}` behave as with the Zig-built binary (exit code and output; only ephemeral
+  port numbers differ), and the Rust/Zig tests pass. Not yet: ThinLTO across languages, compressed ICU,
+  typed feature settings, `-c opt`/small configurations, size and startup measurement.
+  - Zig: `@v8`, `@util`, `@diagnostics` (lib/v8_zig), `@mimalloc` (lib/mimalloc), `@lz4`, `@io`, `@engine`,
+    `@managed` (src); `origine_config` and `build_options` are generated (`build/bazel/zig_options.bzl`).
+    Zig modules have no C dependencies: rules_zig would run translate-c over them (and Zig 0.17 has no
+    `@cImport`), and the Zig code declares its externs itself. The `aws_lc` module of build.zig is dead
+    (nothing imports it; its `@cImport` no longer compiles) and has no Bazel counterpart.
+  - The snapshot seed is a build setting, `--//build/bazel/settings:snapshot_seed` (default `0x3c3d6918`),
+    used unless `-c opt`, as build.zig does. `origine-snapshot` runs as a genrule *src* (target
+    configuration, the program's own V8); the blob becomes the `snapshot_provider` object.
+  - The link: `cc_binary` (V8's Clang and ld64.lld) of the Zig root, `//rust:origine_native` and the native
+    libraries, each once. `origine_native` is the one `rust_static_library`: every Rust crate, Temporal's
+    included, with one std and the allocator shim rustc writes for a staticlib. No Rust library declares
+    a native library (they would be bundled into the staticlib); the program and the tests that need one
+    (`io_test`, `alloc_test`, `tls_test`, `h2_test`) link them. Nothing from rules_rust is patched.
+  - ICU: the raw provider (`//lib/v8_zig/binding:icu_raw`, `.incbin` of `icudtl.dat`); build.zig's default
+    is the compressed one, which needs Python `zstandard` through rules_python.
+  - V8 is compiled once: `0005-mksnapshot-target-config.patch` and `0006-generators-target-config.patch`
+    build mksnapshot, Torque and the generators in the target configuration (Origine builds natively only),
+    so they link the objects libv8 is made of instead of an exec-configured copy. 6 exec-configured C++
+    compiles remain.
 
 ### Commands and justfile
 

@@ -12,3 +12,18 @@ test_suite(
         "//rust:core-tests",
     ],
 )
+
+# Every Bazel test (`just bazel-test`).
+test_suite(
+    name = "tests",
+    tests = [
+        ":bootstrap-tests",
+        "//rust/crates/origine_api_macros:macros_test",
+        "//rust/crates/origine_dns:dns_test",
+        "//rust/crates/origine_h2:h2_test",
+        "//rust/crates/origine_oxc:oxc_test",
+        "//rust/crates/origine_repl:repl_test",
+        "//rust/crates/origine_tls:tls_test",
+        "//rust/crates/origine_transport:transport_test",
+    ],
+)

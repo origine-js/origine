@@ -1,0 +1,25 @@
+diff --git a/bazel/defs.bzl b/bazel/defs.bzl
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -413,17 +413,19 @@
+ _v8_mksnapshot = rule(
+     implementation = _mksnapshot,
+     attrs = {
+         "args": attr.string_list(),
++        # Origine builds natively only: mksnapshot runs on the target, so it is built in the
++        # target configuration and links the very objects libv8 does, instead of a second,
++        # exec-configured V8. V8 already picks the CPU from the platform (v8_configure_target_cpu).
+         "tool": attr.label(
+             mandatory = True,
+             allow_files = True,
+             executable = True,
+-            cfg = "exec",
++            cfg = "target",
+         ),
+         "target_os": attr.string(mandatory = True),
+         "_icu_data": attr.label(default = "@origine_icu//:common/icudtl.dat", allow_single_file = True),
+         "prefix": attr.string(mandatory = True),
+         "suffix": attr.string(mandatory = True),
+     },
+-    cfg = v8_target_cpu_transition,
+ )

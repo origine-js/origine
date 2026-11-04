@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+# The Zig view of the patched mimalloc (`@mimalloc`). It declares the C functions itself; the
+# program links @origine_mimalloc//:mimalloc (a cc dependency here would run translate-c on
+# every mimalloc header).
+zig_library(
+    name = "mimalloc",
+    main = "src/mimalloc.zig",
+    srcs = glob(["src/**/*.zig"]),
+    import_name = "@mimalloc",
+    visibility = ["//visibility:public"],
+)

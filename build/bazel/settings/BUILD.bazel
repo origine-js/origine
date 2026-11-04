@@ -1,0 +1,15 @@
+load("@bazel_skylib//rules:common_settings.bzl", "int_flag")
+
+package(default_visibility = ["//visibility:public"])
+
+# V8's --random-seed for the engine snapshot of debug-style builds (they also pass --predictable),
+# so an unchanged rebuild reproduces the blob. `-c opt` keeps V8's random seed.
+int_flag(
+    name = "snapshot_seed",
+    build_setting_default = 0x3c3d6918,
+)
+
+config_setting(
+    name = "opt",
+    values = {"compilation_mode": "opt"},
+)

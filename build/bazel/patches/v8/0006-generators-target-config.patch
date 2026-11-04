@@ -1,0 +1,58 @@
+diff --git a/bazel/v8-generators.bzl b/bazel/v8-generators.bzl
+--- a/bazel/v8-generators.bzl
++++ b/bazel/v8-generators.bzl
+@@ -89,11 +89,15 @@
+ 
+-def _v8_torque_pointer_compression_transition_impl(_settings, attr):
++def _v8_torque_pointer_compression_transition_impl(settings, attr):
++    # "none" already means pointer compression on arm64 and x64 (is_v8_enable_pointer_compression),
++    # the only targets Origine builds: keep the configuration, so Torque shares its objects with V8.
++    if attr.pointer_compression and settings["//:v8_enable_pointer_compression"] == "none":
++        return {}
+     return {
+         "//:v8_enable_pointer_compression": str(attr.pointer_compression),
+     }
+ 
+ _v8_torque_pointer_compression_transition = transition(
+     implementation = _v8_torque_pointer_compression_transition_impl,
+-    inputs = [],
++    inputs = ["//:v8_enable_pointer_compression"],
+     outputs = ["//:v8_enable_pointer_compression"],
+ )
+@@ -118,9 +122,10 @@
+         "definition_extras": attr.string_list(),
+         "initializer_extras": attr.string_list(),
++        # Origine builds natively only: Torque runs in the target configuration (see mksnapshot).
+         "tool": attr.label(
+             mandatory = True,
+             providers = [V8ToolInfo],
+-            cfg = "exec",
++            cfg = "target",
+         ),
+         "args": attr.string_list(),
+         "layout_json": attr.label(
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -4839,18 +4839,17 @@
+ genrule(
+     name = "generated_bytecode_builtins_list",
+-    srcs = [],
++    # srcs, not tools: built in the target configuration, sharing V8's objects (native builds only).
++    srcs = [":bytecode_builtins_list_generator"],
+     outs = ["builtins-generated/bytecodes-builtins-list.h"],
+     cmd = "$(location :bytecode_builtins_list_generator) $@",
+     cmd_bat = "$(location :bytecode_builtins_list_generator) $@",
+-    tools = [":bytecode_builtins_list_generator"],
+ )
+ 
+ genrule(
+     name = "generated_regexp_special_case",
+-    srcs = [],
++    srcs = [":regexp_special_case_generator"],
+     outs = ["src/regexp/special-case.cc"],
+     cmd = "$(location :regexp_special_case_generator) $@",
+     cmd_bat = "$(location :regexp_special_case_generator) $@",
+-    tools = [":regexp_special_case_generator"],
+ )
+ 

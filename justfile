@@ -101,8 +101,17 @@ format:
     zig fmt build.zig src
     vpx {{oxfmt}} {{js_paths}}
 
-# Bazel (migration in progress; docs/bazel-migration-progress.md). The recipes above stay the way to
-# build and run the app until the Bazel graph covers it.
+# Bazel (migration in progress; docs/bazel-migration-progress.md). Bazel builds and runs origine
+# (`bazel-build`, `bazel-run`); the Zig recipes above stay until the remaining gates pass (release
+# ThinLTO, compressed ICU, feature settings, size and startup).
+
+# Build origine with Bazel (bazel-bin/src/origine). `config` is debug, safe, fast or small (.bazelrc).
+bazel-build config="fast" *args:
+    bazel build --config={{config}} //src:origine {{args}}
+
+# Run the Bazel-built origine (arguments follow the init path, as for `run`).
+bazel-run *args:
+    bazel run --config=fast //src:origine -- {{args}}
 
 # Fetch the pinned V8 source and apply its patch series, without compiling it; prints where it is.
 bazel-patch-v8:
@@ -112,6 +121,24 @@ bazel-patch-v8:
 # Build V8 with Bazel; source and patch changes invalidate its actions.
 bazel-build-v8 *args:
     bazel build --config=fast @v8//:icu/v8 {{args}}
+
+# Every Bazel test: Zig, Rust (core, networking, OXC, REPL, macros) and the ThinLTO probe.
+bazel-test *args:
+    bazel test --config=fast //:tests {{args}}
+
+# Run every example (`examples/**/init.{js,ts}`) on the Bazel-built origine; prints the ones that fail.
+bazel-examples:
+    #!/usr/bin/env bash
+    set -u
+    bazel build --config=fast //src:origine
+    bin="$(bazel cquery --config=fast --output=files //src:origine 2>/dev/null)"
+    home="$(mktemp -d)"
+    failed=0
+    for init in $(fd -t f '^init\.(js|ts)$' examples | sort); do
+        if ! HOME="$home" timeout 30 "$bin" "$init" >/dev/null 2>&1; then echo "failed: $init"; failed=1; fi
+    done
+    rm -rf "$home"
+    exit $failed
 
 # The migrated core targets and the three-language ThinLTO acceptance probe.
 bazel-test-bootstrap *args:

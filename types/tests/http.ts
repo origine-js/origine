@@ -2,6 +2,9 @@
 import { SocketAddr } from 'origine:@std/net';
 import type {
   Api,
+  EventH2Session,
+  H2Frame,
+  PullH2Session,
   ClientPool,
   ClientSession,
   FetchResponse,
@@ -22,7 +25,56 @@ export async function main(api: Api): Promise<void> {
   const server: PullServerSession = api.http.session(accepted, { role: 'server', mode: 'pull', limits });
   await client.ready();
 
-  const headers = new api.http.HeaderList().put('accept', '*/*').put('x-dup', '1').put('x-dup', '2');
+  const headers = api.http.fields.of([
+    ['accept', '*/*'],
+    ['x-dup', '1'],
+  ]);
+  headers.put('x-dup', '2');
+  // @ts-expect-error a HeaderList is made by `of`
+  new api.http.fields();
+
+  // Frame level: the caller picks the protocol table.
+  const settings = {
+    headerTableSize: 4096,
+    enablePush: false,
+    maxConcurrentStreams: 100,
+    initialWindowSize: 65535,
+    maxFrameSize: 16384,
+    maxHeaderListSize: 16384,
+    enableConnectProtocol: false,
+    noRfc7540Priorities: false,
+  };
+  const h2options = { settings, window: 1 << 20, batch: 4096, padding: 0, extensions: [], frames: 'parsed' } as const;
+  const h2 = api.http.protocols.h2;
+  const h2client: PullH2Session = h2.client(await io.tcp.connect(listener.localAddr), h2options).pulling();
+  const h2server: EventH2Session = h2.server(await listener.accept(), h2options).evented();
+  const stream: number = h2client.submitHeaders(
+    0,
+    api.http.fields.of([
+      [':method', 'GET'],
+      [':path', '/'],
+    ]),
+    { endStream: false },
+  );
+  await h2client.submitData(stream, new Uint8Array(1), { endStream: true, padding: 8 });
+  const frame: H2Frame | undefined = await h2client.next();
+  if (frame?.type === 'data') {
+    h2client.consume(frame.streamId, frame.data.length);
+    frame.data.unref();
+  }
+  h2server.register('headers', event => {
+    const path: string | undefined = event.headers.get(':path');
+    void path;
+  });
+  h2server.register('close', () => {});
+  const remote: number = h2client.remoteSettings.maxConcurrentStreams;
+  void remote;
+  // @ts-expect-error every setting is explicit
+  h2.client(plain, { ...h2options, settings: { headerTableSize: 4096 } });
+  // @ts-expect-error `frames` is 'parsed' or 'raw'
+  h2.client(plain, { ...h2options, frames: 'bytes' });
+  // @ts-expect-error no such event
+  h2server.register('request', () => {});
   const exchange = client.open({ method: 'GET', scheme: 'http', authority: 'example.test', path: '/' }, { headers });
   const first = await server.accept();
   first?.respond({ status: 200, headers, body: 'stream' });

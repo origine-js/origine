@@ -27,8 +27,8 @@ export async function main(api) {
     const server = http.serve(io, { listen: { port: 0 }, tls: serverTls, mode: 'pull', limits });
     const serving = (async () => {
       for await (const exchange of server) {
-        for (let event; (event = await exchange.next()); ) if (event.type === 'headers' && event.endStream) break;
-        exchange.respond({ status: 200, headers: new http.HeaderList().put('content-type', 'text/plain'), body: 'stream' });
+        for (let event; (event = await exchange.next());) if (event.type === 'headers' && event.endStream) break;
+        exchange.respond({ status: 200, headers: http.fields.of([['content-type', 'text/plain']]), body: 'stream' });
         await exchange.send(encodeUtf8('secure hello'));
         exchange.finish();
         break;
@@ -36,11 +36,18 @@ export async function main(api) {
     })();
 
     // The name must be one the certificate is valid for: `servername` defaults to `host`, and `host` is an IP literal.
-    const client = await http.connect(io, { host: '127.0.0.1', port: server.port, tls: clientTls, servername: 'localhost', mode: 'pull', limits });
+    const client = await http.connect(io, {
+      host: '127.0.0.1',
+      port: server.port,
+      tls: clientTls,
+      servername: 'localhost',
+      mode: 'pull',
+      limits,
+    });
     const exchange = client.open({ method: 'GET', scheme: 'https', authority: 'localhost', path: '/secure' });
     let status;
     let body = '';
-    for (let event; (event = await exchange.next()); ) {
+    for (let event; (event = await exchange.next());) {
       if (event.type === 'headers' && event.status !== undefined) status = event.status;
       if (event.type === 'data') {
         body += decodeUtf8(event.data);

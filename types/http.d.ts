@@ -1,22 +1,265 @@
-import type { Mode, NativeStream, BytesLike, Registration } from './net.d.ts';
+import type { Mode, NativeStream, BytesLike, Registration, Lease } from './net.d.ts';
 import type { Io } from './io.d.ts';
-import type { TlsClient, TlsServer } from './tls.d.ts';
+import type { DuckStream, TlsClient, TlsServer } from './tls.d.ts';
 
 /**
- * An ordered sequence of header fields, not a map: duplicates and order are kept. Names are lowercase tokens;
- * values are UTF-8 strings without CR, LF or NUL. One you build is packed into a single buffer and crosses
- * into the native once; one you receive is frozen.
+ * `api.http.fields`: an ordered sequence of header fields, not a map: duplicates and order are kept. A class
+ * defined natively (`new` throws; make one with {@link HeaderList.of}); fields are checked when they are put: names
+ * are lowercase tokens and not connection-specific, values are strings without CR, LF or NUL (`InvalidInput`
+ * otherwise), and pseudo header fields (`:method`, `:status`, ...) may only lead the list, as on the wire. A list a
+ * session received is sealed: `put` on it is a `TypeError`.
  */
-export declare class HeaderList implements Iterable<[name: string, value: string]> {
-  constructor();
-  /** Appends a field and returns the list. A received list throws `TypeError`; a bad name or value does too. */
-  put(name: string, value: string): this;
+export declare class HeaderList implements Iterable<readonly [name: string, value: string]> {
+  private constructor();
+  /** A new list of `pairs`, in order (`[]` for an empty one). */
+  static of(pairs: readonly (readonly [name: string, value: string])[]): HeaderList;
+  /** Appends a field. */
+  put(name: string, value: string): void;
   readonly length: number;
-  [Symbol.iterator](): IterableIterator<[name: string, value: string]>;
+  [Symbol.iterator](): IterableIterator<readonly [name: string, value: string]>;
+  /** The fields, a frozen array of frozen pairs (a new array each call). */
+  entries(): readonly (readonly [name: string, value: string])[];
   /** The first value of `name` (case-insensitive), or `undefined`. */
   get(name: string): string | undefined;
-  getAll(name: string): string[];
+  getAll(name: string): readonly string[];
   has(name: string): boolean;
+}
+
+// ---- api.http.protocols.h2: frame-level HTTP/2 ----
+
+/** Every SETTINGS parameter (RFC 9113 section 6.5.2, RFC 8441, RFC 9218), each one explicit. */
+export interface H2Settings {
+  readonly headerTableSize: number;
+  readonly enablePush: boolean;
+  readonly maxConcurrentStreams: number;
+  readonly initialWindowSize: number;
+  readonly maxFrameSize: number;
+  /** Also the largest header block accepted; a bigger one resets its stream with `ENHANCE_YOUR_CALM`. */
+  readonly maxHeaderListSize: number;
+  readonly enableConnectProtocol: boolean;
+  readonly noRfc7540Priorities: boolean;
+}
+
+/** Options of `h2.client` / `h2.server`; every one required but `io`, no defaults. */
+export interface H2Options {
+  /** The SETTINGS frame the session starts with. */
+  readonly settings: H2Settings;
+  /** The connection's receive window, at least 65535. */
+  readonly window: number;
+  /** A header block is delivered in `headers` events of about this many bytes. */
+  readonly batch: number;
+  /** Bytes of padding added to every HEADERS and DATA frame (0: none); a submit may say otherwise. */
+  readonly padding: number;
+  /** Extension frame types (not 0 to 9, ALTSVC or ORIGIN) received as `unknown` events; other unknown types are dropped. */
+  readonly extensions: readonly number[];
+  /** `'parsed'`: header blocks must be valid HTTP messages (RFC 9113 section 8). `'raw'`: any block, as it comes. */
+  readonly frames: 'parsed' | 'raw';
+  /** The runtime of a {@link DuckStream} (required for one; a native stream runs on its own). */
+  readonly io?: Io;
+}
+
+/** What `submitHeaders` / `submitData` send with. */
+export interface H2SendOptions {
+  readonly endStream: boolean;
+  /** Bytes of padding for this frame (the session's `padding` otherwise). */
+  readonly padding?: number;
+}
+
+export type H2StreamState = 'idle' | 'open' | 'reserved_local' | 'reserved_remote' | 'half_closed_local' | 'half_closed_remote' | 'closed';
+
+/** A received frame (or a stream's end), a frozen object; `type` names it. */
+export type H2Frame =
+  | {
+      readonly type: 'settings';
+      readonly ack: boolean;
+      readonly entries: readonly (readonly [name: keyof H2Settings | number, value: number])[];
+    }
+  | {
+      readonly type: 'headers';
+      readonly streamId: number;
+      readonly category: 'request' | 'response' | 'push_response' | 'headers' | 'push_promise';
+      /** This batch of the block (sealed), pseudo header fields first. */
+      readonly headers: HeaderList;
+      /** The block's last batch; `endStream`, `padding` and `priority` are its. */
+      readonly last: boolean;
+      readonly endStream: boolean;
+      readonly padding: number;
+      readonly priority?: { readonly dependsOn: number; readonly weight: number; readonly exclusive: boolean };
+    }
+  /** One DATA frame. Give its bytes back with `consume` once used, or the peer stops sending. */
+  | { readonly type: 'data'; readonly streamId: number; readonly data: Lease; readonly endStream: boolean; readonly padding: number }
+  | {
+      readonly type: 'priority';
+      readonly streamId: number;
+      readonly dependsOn: number;
+      readonly weight: number;
+      readonly exclusive: boolean;
+    }
+  | { readonly type: 'priority_update'; readonly streamId: number; readonly value: string }
+  | { readonly type: 'rst_stream'; readonly streamId: number; readonly code: number }
+  | { readonly type: 'push_promise'; readonly streamId: number; readonly promisedStreamId: number }
+  | { readonly type: 'ping'; readonly data: Uint8Array; readonly ack: boolean }
+  | { readonly type: 'goaway'; readonly lastStreamId: number; readonly code: number; readonly debug: Uint8Array }
+  | { readonly type: 'window_update'; readonly streamId: number; readonly increment: number }
+  | { readonly type: 'altsvc'; readonly streamId: number; readonly origin: string; readonly value: string }
+  | { readonly type: 'origin'; readonly origins: readonly string[] }
+  | {
+      readonly type: 'unknown';
+      readonly frameType: number;
+      readonly flags: number;
+      readonly streamId: number;
+      readonly payload: Uint8Array;
+    }
+  /** A frame nghttp2 refused (and answered as RFC 9113 says); `reason` is its text. */
+  | { readonly type: 'invalid'; readonly frameType: number; readonly streamId: number; readonly reason: string }
+  /** The stream is over: `code` 0, or the error code of its reset. */
+  | { readonly type: 'closed'; readonly streamId: number; readonly code: number };
+
+/** The submits and the info both session shapes have. Submits throw `BadHandle` once the session is closed. */
+export interface H2SessionBase extends AsyncDisposable {
+  /** Queues a header block on `streamId`, or on a new stream (`0`, a client); returns the stream id. A block that does not end the stream opens its DATA; one on a stream whose DATA is still queued is sent after it, as trailers, and must end the stream. */
+  submitHeaders(streamId: number, headers: HeaderList, options: H2SendOptions): number;
+  /** Queues DATA (copied now) and resolves once it was packed into frames, inside the peer's windows; rejects when the stream or the session ends first. */
+  submitData(streamId: number, data: BytesLike, options: H2SendOptions): Promise<void>;
+  /** A client's RFC 9218 PRIORITY_UPDATE (`value` a Priority field value, `u=3, i`); `InvalidInput` until the peer set `noRfc7540Priorities`. nghttp2 sends no RFC 7540 PRIORITY frames. */
+  submitPriority(streamId: number, value: string): void;
+  submitRst(streamId: number, code: number): void;
+  /** A SETTINGS frame with some parameters, any time. */
+  submitSettings(settings: Partial<H2Settings>): void;
+  /** A PING of exactly 8 bytes; with `ack`, the answer to one (PINGs are not answered for you). */
+  submitPing(data: BytesLike, options: { readonly ack: boolean }): void;
+  submitGoaway(lastStreamId: number, code: number, debug: BytesLike): void;
+  /** A WINDOW_UPDATE of 1 to 2**31-1 for `streamId` (0: the connection). */
+  submitWindowUpdate(streamId: number, increment: number): void;
+  /** A server's PUSH_PROMISE on `streamId` (the client must have set `enablePush`); returns the promised stream id. */
+  submitPush(streamId: number, headers: HeaderList): number;
+  submitAltsvc(streamId: number, origin: string, value: string): void;
+  submitOrigin(origins: readonly string[]): void;
+  /** A frame of an extension type. */
+  submitExtension(frameType: number, flags: number, streamId: number, payload: BytesLike): void;
+  /** Gives `bytes` of received DATA back to the stream's and the connection's windows. */
+  consume(streamId: number, bytes: number): void;
+  /** Our settings as the peer acknowledged them. */
+  readonly localSettings: H2Settings;
+  /** The peer's, as last received. */
+  readonly remoteSettings: H2Settings;
+  streamState(streamId: number): H2StreamState;
+  /** Bytes we may send and bytes the peer may send us on `streamId` (0: the connection). */
+  windows(streamId: number): { readonly send: number; readonly receive: number };
+  readonly nextStreamId: number;
+  readonly closed: boolean;
+  /** Ends the session now (no GOAWAY: submit one first for a graceful end). Idempotent. */
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** A session that flows nothing yet; its SETTINGS are queued. */
+export declare class H2SessionUnshaped implements AsyncDisposable {
+  private constructor();
+  readonly closed: boolean;
+  /** Consumes this object: the session read with promises. */
+  pulling(): PullH2Session;
+  /** Consumes this object: the session that calls handlers. */
+  evented(): EventH2Session;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** A session read with `next()`. */
+export declare class PullH2Session implements H2SessionBase, AsyncIterable<H2Frame> {
+  private constructor();
+  /** The next frame event; `undefined` once the session is over; rejects once with the failure of a session that failed. */
+  next(): Promise<H2Frame | undefined>;
+  [Symbol.asyncIterator](): AsyncIterableIterator<H2Frame>;
+  submitHeaders(streamId: number, headers: HeaderList, options: H2SendOptions): number;
+  submitData(streamId: number, data: BytesLike, options: H2SendOptions): Promise<void>;
+  submitPriority(streamId: number, value: string): void;
+  submitRst(streamId: number, code: number): void;
+  submitSettings(settings: Partial<H2Settings>): void;
+  submitPing(data: BytesLike, options: { readonly ack: boolean }): void;
+  submitGoaway(lastStreamId: number, code: number, debug: BytesLike): void;
+  submitWindowUpdate(streamId: number, increment: number): void;
+  submitPush(streamId: number, headers: HeaderList): number;
+  submitAltsvc(streamId: number, origin: string, value: string): void;
+  submitOrigin(origins: readonly string[]): void;
+  submitExtension(frameType: number, flags: number, streamId: number, payload: BytesLike): void;
+  consume(streamId: number, bytes: number): void;
+  readonly localSettings: H2Settings;
+  readonly remoteSettings: H2Settings;
+  streamState(streamId: number): H2StreamState;
+  windows(streamId: number): { readonly send: number; readonly receive: number };
+  readonly nextStreamId: number;
+  readonly closed: boolean;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** The events of an {@link EventH2Session}: every frame type, `error` (the session failed) and `close` (it is over). */
+export type H2Events = { [T in H2Frame['type']]: [frame: Extract<H2Frame, { type: T }>] } & { error: [error: unknown]; close: [] };
+
+/** What `EventH2Session.register` returns. */
+export interface H2Registration {
+  /** Removes the handler; `true` if it was registered. */
+  unregister(): boolean;
+}
+
+/**
+ * A session that calls handlers held natively, from the loop, one event at a time, in order; events wait while it is
+ * paused or no handler is registered. Handler rules as in `api.net` (a returned promise is not awaited).
+ */
+export declare class EventH2Session implements H2SessionBase {
+  private constructor();
+  register<K extends keyof H2Events>(event: K, handler: (...args: H2Events[K]) => unknown): H2Registration;
+  pause(): void;
+  resume(): void;
+  /** `true` after `pause()` or while no handler is registered. */
+  readonly paused: boolean;
+  submitHeaders(streamId: number, headers: HeaderList, options: H2SendOptions): number;
+  submitData(streamId: number, data: BytesLike, options: H2SendOptions): Promise<void>;
+  submitPriority(streamId: number, value: string): void;
+  submitRst(streamId: number, code: number): void;
+  submitSettings(settings: Partial<H2Settings>): void;
+  submitPing(data: BytesLike, options: { readonly ack: boolean }): void;
+  submitGoaway(lastStreamId: number, code: number, debug: BytesLike): void;
+  submitWindowUpdate(streamId: number, increment: number): void;
+  submitPush(streamId: number, headers: HeaderList): number;
+  submitAltsvc(streamId: number, origin: string, value: string): void;
+  submitOrigin(origins: readonly string[]): void;
+  submitExtension(frameType: number, flags: number, streamId: number, payload: BytesLike): void;
+  consume(streamId: number, bytes: number): void;
+  readonly localSettings: H2Settings;
+  readonly remoteSettings: H2Settings;
+  streamState(streamId: number): H2StreamState;
+  windows(streamId: number): { readonly send: number; readonly receive: number };
+  readonly nextStreamId: number;
+  readonly closed: boolean;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/**
+ * `api.http.protocols.h2`: HTTP/2 over a stream, frame by frame. The caller negotiates (TLS ALPN with `api.tls`,
+ * `stream.info().alpn`) and picks the table; nothing is negotiated here.
+ */
+export interface H2Protocol {
+  readonly H2SessionUnshaped: typeof H2SessionUnshaped;
+  readonly PullH2Session: typeof PullH2Session;
+  readonly EventH2Session: typeof EventH2Session;
+  /** A client session over `stream`: a native stream (consumed; one nothing is using) or a {@link DuckStream} with `options.io`. */
+  client(stream: NativeStream | DuckStream, options: H2Options): H2SessionUnshaped;
+  server(stream: NativeStream | DuckStream, options: H2Options): H2SessionUnshaped;
+}
+
+/** `api.http.protocols.h3`: the same shape over a QUIC connection; every call throws `Unsupported` until QUIC exists. */
+export interface H3Protocol {
+  client(connection: unknown, options: unknown): never;
+  server(connection: unknown, options: unknown): never;
+}
+
+/** `api.http.protocols`, keyed by ALPN id. */
+export interface HttpProtocols {
+  readonly h2: H2Protocol;
+  readonly h3: H3Protocol;
 }
 
 /** Sizes in bytes (a count for `streams`); all required, no defaults. */
@@ -340,7 +583,10 @@ export declare class FetchResponse {
 
 /** `api.http` (needs an `io`; built with `-Dhttp`, on by default). */
 export interface HttpCap {
-  readonly HeaderList: typeof HeaderList;
+  /** The header field list class. */
+  readonly fields: typeof HeaderList;
+  /** The protocol tables, keyed by ALPN id. */
+  readonly protocols: HttpProtocols;
   readonly ClientExchange: typeof ClientExchange;
   readonly ServerExchange: typeof ServerExchange;
   readonly PullClientExchange: typeof PullClientExchange;

@@ -216,7 +216,18 @@ Source: [`tls.rs`](../src/tls.rs); semantics and the guest surface: [`src/js/doc
 
 ## `http.*` (HTTP/2, `needs = "runtime"`, feature `http`)
 
-Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../../../../src/js/docs/http.md). A session is `origine_h2::Connection` plus the task that runs its `Driver` on the socket's runtime, over a plain stream socket or a TLS stream, either of which `http.session` takes out of a native stream object (`StreamArg` and `SocketTransport` in [`sockstream.rs`](../src/sockstream.rs), shared with `tls.*`). Streams are `Exchange`s in the session's table by stream id; a header list crosses as one packed buffer (`name_len u16 \| value_len u32 \| name \| value`, re-validated on entry). The driver's pending read counts as work, so a session keeps the program alive until `destroy`. Errors: stream/session over `BrokenPipe`, bad field `InvalidInput`, protocol breaks `ProtocolError` (detail in `subject`), a dead transport its own errno with the message as `subject`.
+Frame level ([`h2.rs`](../src/h2.rs), [`fields.rs`](../src/fields.rs)): `http.h2Client(stream, options)` / `http.h2Server` take a `StreamArg` (native, consumed; or duck-typed with `options.io`, `sockstream::StreamArg::transport`) and return an `H2SessionUnshaped` over `origine_h2::FrameConn`; `.pulling()` / `.evented()` start the `FrameDriver` task over `Rc<Under>`. `PullH2Session.next()` is an `Op` over `FrameConn::next`; an `EventH2Session` keeps its handlers in `HostState::h2_hubs` and is delivered by completions the connection's notify hook queues (one at a time, a microtask checkpoint after each). Frame events are frozen objects (`JsFrame`); DATA payloads become `Lease`s through the glue's maker (`http.link`). Sessions register with their `IoCore` as `Closable`s, so the runtime's `close()` ends them. `http.HeaderList` is the `api.http.fields` class over `origine_h2::FieldList`; the message-level natives below take and return it too.
+
+| Native | Args | Returns |
+|---|---|---|
+| `http.h2Client` / `http.h2Server` | `stream`, `{ settings, window, batch, padding, extensions, frames, io? }` | an `H2SessionUnshaped` |
+| `http.link` | `lease(arrayBuffer)` | once per realm: the maker of DATA leases |
+| `http.HeaderList` | installer | class: `of(pairs)`, `put`, `get`, `getAll`, `has`, `length`, `entries()` |
+| `http.H2SessionUnshaped` / `http.PullH2Session` / `http.EventH2Session` / `http.H2Registration` | installer | the session classes (see `src/js/docs/http.md`) |
+
+Message level (stage 5 removes it):
+
+Source: [`http.rs`](../src/http.rs); guest surface: [`src/js/docs/http.md`](../../../../src/js/docs/http.md). A session is `origine_h2::Connection` plus the task that runs its `Driver` on the socket's runtime, over a plain stream socket or a TLS stream, either of which `http.session` takes out of a native stream object (`StreamArg` and `Under` in [`sockstream.rs`](../src/sockstream.rs), shared with `tls.*`). Streams are `Exchange`s in the session's table by stream id; a header list crosses as a `HeaderList` instance (pseudo header fields refused). The driver's pending read counts as work, so a session keeps the program alive until `destroy`. Errors: stream/session over `BrokenPipe`, bad field `InvalidInput`, protocol breaks `ProtocolError` (detail in `subject`), a dead transport its own errno with the message as `subject`.
 
 | Native | Args | Returns |
 |---|---|---|

@@ -1,4 +1,4 @@
-# `api.http`: HTTP/2 sessions
+# `api.http`: HTTP/2
 
 `api.http` exists wherever `api.net` does and is built with `-Dhttp` (on by default; without it the getter throws `PermissionDenied`). HTTP/2 only (nghttp2), over a pull-mode [`api.net`](net.md) socket (cleartext h2c, for loopback) or a [`api.tls`](tls.md) socket negotiated with ALPN `h2`. Design and decisions: [docs/http-design.md](../../../docs/http-design.md). The Rust side: [`origine_h2`](../../../rust/crates/origine_h2/docs/README.md), natives in [natives.md](../../../rust/crates/origine_api/docs/natives.md#http-http2-needs--runtime).
 
@@ -14,7 +14,7 @@ const client = http.session(connectedSocket, { role: 'client', mode: 'pull', lim
       if (ev.type === 'headers' && ev.endStream) break;
       if (ev.type === 'data') exchange.consume(ev.data.length);
     }
-    exchange.respond({ status: 200, headers: new http.HeaderList().put('content-type', 'text/plain'), body: 'stream' });
+    exchange.respond({ status: 200, headers: http.fields.of([['content-type', 'text/plain']]), body: 'stream' });
     await exchange.send(new Uint8Array([104, 105]));
     exchange.finish();
   }
@@ -26,6 +26,39 @@ for (let ev; (ev = await get.next()); ) if (ev.type === 'data') get.consume(ev.d
 await client.close();
 ```
 
+## `protocols.h2`: HTTP/2 frame by frame
+
+`api.http.protocols` is a table of protocol tables keyed by ALPN id: `h2` (nghttp2) and `h3` (same shape; every call throws `Unsupported` until QUIC exists). The caller negotiates: build TLS with [`api.tls`](tls.md) and your own `alpn` list, read `stream.info().alpn`, pick `api.http.protocols[alpn]`; over cleartext (h2c) pick `h2` yourself. Nothing is negotiated inside `api.http`.
+
+```js
+const { h2 } = api.http.protocols;
+const settings = { headerTableSize: 4096, enablePush: false, maxConcurrentStreams: 100, initialWindowSize: 65535,
+  maxFrameSize: 16384, maxHeaderListSize: 16384, enableConnectProtocol: false, noRfc7540Priorities: false };
+const options = { settings, window: 1 << 20, batch: 4096, padding: 0, extensions: [], frames: 'parsed' };
+const client = h2.client(stream, options).pulling();        // consumes `stream`
+const id = client.submitHeaders(0, api.http.fields.of([[':method', 'GET'], [':scheme', 'https'],
+  [':authority', 'example.test'], [':path', '/']]), { endStream: true });
+for await (const frame of client) {
+  if (frame.type === 'headers' && frame.streamId === id) console.log(frame.headers.get(':status'));
+  if (frame.type === 'data') { client.consume(frame.streamId, frame.data.length); frame.data.unref(); }
+  if (frame.type === 'closed' && frame.streamId === id) break;
+}
+client.submitGoaway(0, 0, new Uint8Array(0));
+await client.close();
+```
+
+- **Sessions.** `h2.client(stream, options)` / `h2.server(stream, options)` take a native stream (TCP or TLS, consumed; one nothing is using) or a duck-typed stream (see [tls.md](tls.md); `options.io` is required for one), and return an `H2SessionUnshaped`: its SETTINGS are queued, nothing flows. `pulling()` gives a `PullH2Session` (`next()` and `for await`), `evented()` an `EventH2Session` (`register(type, handler)`, `pause()`, `resume()`, `paused`; handlers as in [net](net.md): one event at a time, in order, a returned promise is not awaited; events wait while no handler is registered). The classes are `h2.H2SessionUnshaped`, `h2.PullH2Session` and `h2.EventH2Session`, defined in Rust and owned by the garbage collector; `close()` (or the `io`'s) ends the session now and the object answers `BadHandle`.
+- **Options, all required** but `io`: `settings` (every SETTINGS parameter), `window` (the connection's receive window, at least 65535), `batch` (header blocks arrive in batches of about this many bytes), `padding` (bytes of padding on every HEADERS and DATA frame, 0 for none), `extensions` (extension frame types received as `unknown` events), `frames` (`'parsed'`: header blocks must be valid HTTP messages; `'raw'`: nghttp2's HTTP messaging rules are off).
+- **Frames in.** Every event is a frozen object whose `type` names it: `settings` (`ack`, `entries` as `[name, value]` pairs), `headers` (`streamId`, `category`: `request` / `response` / `push_response` / `headers` / `push_promise`, `headers`: a sealed `HeaderList` of this batch with pseudo header fields first, `last`, `endStream`, `padding`, `priority?`), `data` (`streamId`, `data`: a `Lease` of the frame's payload, `endStream`, `padding`), `priority`, `priority_update`, `rst_stream`, `push_promise` (`promisedStreamId`, after its `headers`), `ping` (`data`, `ack`), `goaway` (`lastStreamId`, `code`, `debug`), `window_update`, `altsvc`, `origin`, `unknown` (`frameType`, `flags`, `streamId`, `payload`), `invalid` (a frame nghttp2 refused, with its `reason`) and `closed` (a stream is over, `code`). An event session also has `error` and `close`; `next()` rejects once with the failure, then answers `undefined`.
+- **Frames out.** Stateless submits on the session: `submitHeaders(streamId | 0, headers, { endStream, padding? })` (0 opens a stream, a client's; a block that does not end the stream opens its DATA; one on a stream with DATA still queued is sent after it as trailers and must end the stream), `submitData(streamId, bytes, { endStream, padding? })` (copies; resolves once packed into frames inside the peer's windows: that is the backpressure), `submitPriority(streamId, value)` (RFC 9218 PRIORITY_UPDATE, a client's; `InvalidInput` until the peer set `noRfc7540Priorities`: nghttp2 1.68 sends no RFC 7540 PRIORITY frames), `submitRst`, `submitSettings(partial)` (any time), `submitPing(8 bytes, { ack })`, `submitGoaway(lastStreamId, code, debug)`, `submitWindowUpdate(streamId | 0, increment)`, `submitPush(streamId, headers)` (returns the promised id), `submitAltsvc`, `submitOrigin`, `submitExtension(type, flags, streamId, payload)`.
+- **Nothing implicit.** PINGs are not answered for you (answer with `submitPing(data, { ack: true })`), received DATA stays unacknowledged until `consume(streamId, bytes)` (or a `submitWindowUpdate`), and no GOAWAY is sent on `close()`.
+- **Info.** `localSettings` (as the peer acknowledged them), `remoteSettings`, `streamState(id)`, `windows(id)` (`{ send, receive }`; 0 is the connection), `nextStreamId`, `closed`.
+- **Cost notes.** A DATA payload is copied once into V8 memory for its `Lease`; a header batch is one `HeaderList`. A duck-typed stream adds a turn of the loop and a copy per read and write.
+
+## `fields`: `HeaderList`
+
+`api.http.fields` is `HeaderList`, a class defined in Rust: `HeaderList.of([[name, value], ...])` makes one (`new` throws), `put(name, value)` appends, `get` / `getAll` / `has` (case-insensitive), `length`, `entries()` and iteration read it. Fields are checked when put (`InvalidInput`): lowercase token names, no connection-specific field, values without CR, LF or NUL, pseudo header fields only before the others. A list a session received is sealed (`put` is a `TypeError`).
+
 ## `connect` and `serve`
 
 `await http.connect(io, { host?, port, tls?, servername?, mode, limits })` dials (`host` is an IP address, default `127.0.0.1`, checked against the [network ceiling](../../../docs/net-grant.md): loopback only by default) and resolves a `ClientSession` once the peer's SETTINGS arrived, so it can be used at once. With `tls` (a `TlsClient` whose `alpn` includes `'h2'`) the connection is TLS, `servername` (default `host`) is checked, and the peer must negotiate `h2`, else `NoApplicationProtocol` and the connection is closed. A failed dial or handshake closes the socket it made.
@@ -34,7 +67,7 @@ await client.close();
 
 ## Headers are a stream of fields
 
-`HeaderList` is an ordered sequence, not a map: `put(name, value)` appends (duplicates and order are kept), `get`, `getAll`, `has` (case-insensitive) and iteration read it. Names must be lowercase tokens and values UTF-8 strings without CR, LF or NUL (`TypeError`); connection-specific fields (`connection`, `keep-alive`, `transfer-encoding`, `upgrade`, `te` other than `trailers`) are refused (`InvalidInput`). A list you build is packed into one buffer and crosses into the native once, at `open`, `respond` or `finish`. A header block you receive arrives as `headers` events in batches of about `limits.batch` bytes (`last` ends the block, `endStream` with it means the peer is done); the pseudo headers (`method`, `scheme`, `authority`, `path`, `status`) are properties of the first batch.
+`HeaderList` (`api.http.fields`, above) is an ordered sequence, not a map. The message-level API below takes one for `open`, `respond` and `finish`, without pseudo header fields (they travel separately here). A header block you receive arrives as `headers` events in batches of about `limits.batch` bytes (`last` ends the block, `endStream` with it means the peer is done); the pseudo headers (`method`, `scheme`, `authority`, `path`, `status`) are properties of the first batch.
 
 ## Sessions and streams
 

@@ -7,7 +7,7 @@ Why `api.tls`, `api.http` and `api.dns` look the way they do, what was built, an
 | Area | State |
 | --- | --- |
 | `api.tls` | Built: TLS 1.2/1.3 over any stream (native, TLS over TLS, or duck-typed JS), `TlsStreamUnshaped` / `PullTlsStream` / `EventTlsStream`, Rust-defined classes |
-| `api.http` | Built: HTTP/2 sessions, `connect` / `serve`, pull and event mode, client pool, redirects, `fetch` |
+| `api.http` | Built: `protocols.h2` (frame-level HTTP/2 sessions over any stream, pull and event mode), `fields` (`HeaderList`, native); `protocols.h3` declared (`Unsupported`); the message-level sessions, `connect` / `serve`, pool, redirects and `fetch` stay until native fetch (stages 4 and 5) |
 | `api.dns` | Built: `system`, `udp`, `tcp`, DoT, DoH, resolver cache, presets (`origine:@std/dns/presets`) |
 | `origine:@std/net` | Built: `IpAddr`, `SocketAddr` |
 | Network ceiling | Built, see [net-grant.md](net-grant.md) |
@@ -106,8 +106,16 @@ members that need JS (async iterators, `Symbol.asyncDispose`, `buffer()` making 
 
 ## `api.http`
 
+- **A table per protocol, keyed by ALPN id.** `api.http.protocols.h2` (nghttp2) and `.h3` (declared, `Unsupported` until the QUIC session): the caller negotiates TLS with its own ALPN list and picks `protocols[stream.info().alpn]`. Nothing is negotiated inside `api.http`.
+- **Frame level, nothing implied.** An h2 session (`origine_h2::FrameSession`, a cppgc class per shape) reports every frame as an event and takes every frame as a stateless submit; PINGs are not answered for the caller, received DATA is acknowledged only by `consume` or `submitWindowUpdate`, `close()` sends no GOAWAY, and every SETTINGS parameter is a required option. `frames: 'raw'` turns off nghttp2's HTTP messaging rules; `'parsed'` keeps them.
+- **Header blocks keep their pseudo header fields** in wire order (`HeaderList` allows them before the other fields), so a frame-level block is one list both ways.
+- **Priorities are RFC 9218.** nghttp2 1.68 sends no RFC 7540 priorities (its `submit_priority` and the HEADERS priority are no-ops), so `submitPriority` sends PRIORITY_UPDATE and refuses (`InvalidInput`) until the peer set `noRfc7540Priorities` rather than sending nothing; received RFC 7540 PRIORITY frames are still reported.
+- **DATA is a `Lease`**, one copy into V8 memory per frame, released with `unref()` like a net `data` chunk.
+- **`submitData` resolves when the bytes were packed into frames**, which happens inside the peer's windows: awaiting it is the backpressure, not awaiting it pipelines.
+- **Sessions run over `Under`** (a native socket or a duck-typed stream), like TLS, so h2 runs over TCP, TLS, TLS over TLS or a JS stream with `io`.
+
 - **Sessions are the core; the rest is built on them.** `http.session(socket, { role, mode, limits })` is HTTP/2 over a socket you provide (it consumes it). `connect` and `serve` add dialing, TLS with ALPN `h2` and listening; `pool` and `fetch` add reuse and redirects. There is no `cleartext` option: a `TlsServer` makes every connection TLS and no `tls` means h2c, so a server never mixes the two.
-- **Headers are a stream of fields, not a map.** `HeaderList` is one packed buffer, ordered, duplicates kept; the whole list crosses into the native once, because nghttp2's HPACK encoder wants it complete. Received blocks arrive as `headers` events in batches of about `limits.batch`, so a huge block never sits in memory as one value; `limits.headers` bounds it (a block over it resets the stream with `ENHANCE_YOUR_CALM`). Connection-specific fields are refused.
+- **Headers are a stream of fields, not a map.** `HeaderList` (`api.http.fields`) is a native class over `origine_h2::FieldList`, ordered, duplicates kept, checked when a field is put; a submit hands nghttp2's HPACK encoder the whole list at once. Received blocks arrive as `headers` events in batches of about `limits.batch`, so a huge block never sits in memory as one value; `limits.headers` bounds it (a block over it resets the stream with `ENHANCE_YOUR_CALM`). Connection-specific fields are refused.
 - **Flow control is the backpressure.** nghttp2 runs with automatic window updates off: received data stays unacknowledged until the caller says `consume(bytes)`, so a slow reader slows the peer. `send` waits while a stream already has `limits.window` bytes queued. `fetch` does this for you per chunk.
 - **Limits have no defaults** (`streams`, `headers`, `window`, `connection`, `batch`), and so do the pool's (`limit`, `perKey`, `idle`, `queue`) and the redirect rules: a hidden default is a footgun at a trust boundary.
 - **Modes are types.** `mode: 'pull'` gives `Pull*` classes (`next()`, `accept()`), `'event'` gives `Event*` classes (`register`). Events of one object are delivered one at a time, in order. A `ClientSession` serves both; the write side is shared.

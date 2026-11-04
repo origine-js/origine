@@ -19,7 +19,7 @@ const limits = { streams: 100, headers: 16384, window: 65535, connection: 1 << 2
 const readRequest = async exchange => {
   let head;
   let body = '';
-  for (let event; (event = await exchange.next()); ) {
+  for (let event; (event = await exchange.next());) {
     if (event.type === 'headers' && event.method !== undefined) head = event;
     if (event.type === 'data') {
       body += decodeUtf8(event.data);
@@ -63,7 +63,7 @@ export async function main(api) {
       for await (const exchange of server) {
         const request = await readRequest(exchange);
         const answer = route(request, base);
-        const headers = new http.HeaderList();
+        const headers = http.fields.of([]);
         if (answer.location) headers.put('location', answer.location);
         headers.put('content-type', 'text/plain');
         exchange.respond({ status: answer.status, headers, body: 'stream' });
@@ -80,11 +80,20 @@ export async function main(api) {
     };
 
     // Follows a 301 to /hello and reads the body to the end.
-    const moved = await http.fetch(pool, { method: 'GET', url: `${base}/moved`, redirect: { limit: 5, strip: ['authorization', 'cookie'] } });
+    const moved = await http.fetch(pool, {
+      method: 'GET',
+      url: `${base}/moved`,
+      redirect: { limit: 5, strip: ['authorization', 'cookie'] },
+    });
     eprintln(`fetch /moved: status ${moved.status}, redirected ${moved.redirected}, body "${await text(moved)}"`);
 
     // A 303 turns POST into GET: the redirected request has no body and the method is GET.
-    const seeOther = await http.fetch(pool, { method: 'POST', url: `${base}/moved-post`, body: encodeUtf8('ignored'), redirect: { limit: 5, strip: [] } });
+    const seeOther = await http.fetch(pool, {
+      method: 'POST',
+      url: `${base}/moved-post`,
+      body: encodeUtf8('ignored'),
+      redirect: { limit: 5, strip: [] },
+    });
     eprintln(`POST /moved-post with 303: the method after the redirect is GET ("${await text(seeOther)}")`);
 
     // limit 0 follows nothing: the 3xx response is returned as it is.
@@ -100,7 +109,12 @@ export async function main(api) {
     eprintln(`redirect.limit 1 with two hops: ${tooMany}`);
 
     // A body of bytes is sent as it is; the echo route answers with what it received.
-    const echo = await http.fetch(pool, { method: 'POST', url: `${base}/echo`, body: encodeUtf8('ping'), redirect: { limit: 0, strip: [] } });
+    const echo = await http.fetch(pool, {
+      method: 'POST',
+      url: `${base}/echo`,
+      body: encodeUtf8('ping'),
+      redirect: { limit: 0, strip: [] },
+    });
     const echoed = await text(echo);
     eprintln(`echo: got "${echoed}" (${echoed.length} bytes)`);
 

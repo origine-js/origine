@@ -31,7 +31,7 @@ export async function main(api) {
           if (event.type === 'headers' && event.endStream) break;
           if (event.type === 'data') exchange.consume(event.data.length);
         }
-        exchange.respond({ status: 200, headers: new http.HeaderList().put('content-type', 'text/plain'), body: 'stream' });
+        exchange.respond({ status: 200, headers: http.fields.of([['content-type', 'text/plain']]), body: 'stream' });
         await exchange.send(encodeUtf8('hi'));
         exchange.finish();
         eprintln(`server: ${request.method} ${request.path} -> 200, sent 2 bytes`);

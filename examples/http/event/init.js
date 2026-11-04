@@ -24,7 +24,7 @@ export async function main(api) {
       exchange.register('headers', event => {
         if (event.method === undefined) return;
         eprintln(`server: ${event.method} ${event.path} answered`);
-        exchange.respond({ status: 200, headers: new http.HeaderList().put('content-type', 'text/plain'), body: 'stream' });
+        exchange.respond({ status: 200, headers: http.fields.of([['content-type', 'text/plain']]), body: 'stream' });
         exchange.send(encodeUtf8('event mode')).then(() => exchange.finish());
       });
       exchange.register('data', event => exchange.consume(event.data.length));

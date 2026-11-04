@@ -43,7 +43,8 @@ Before migration work, the checkout already had changes in `build.zig`,
 `rust/build.zig`, `src/main.zig`, and `src/snapshot_tool.zig`, plus an untracked
 `docs/build-graph.md`. Those changes have been preserved without editing them.
 
-The user supplied `justfile.zig-build-system.old`; it remains untouched. Added
+The justfile keeps the Zig build's recipes (`build`, `run`, `test`, `check`, ...) unchanged; the Bazel ones are
+prefixed `bazel-` beside them. Added
 BUILD files under `lib/aws-lc` and `lib/v8_zig` are currently untracked changes
 inside those submodules. They must be included in the eventual delivery rather
 than lost when updating submodules. No migration commit or cutover has occurred.
@@ -84,7 +85,7 @@ chain with the pinned compilers and links using V8's LLVM linker.
 ### Source repositories, V8, and native libraries
 
 - Bazel fetches V8 15.8.30, applies the existing ordered 11-patch series, and
-  fetches pinned supporting sources directly (`just patch-v8` fetches it alone). Normal repository rules do not read or modify `.lp-cache`.
+  fetches pinned supporting sources directly (`just bazel-patch-v8` fetches it alone). Normal repository rules do not read or modify `.lp-cache`.
 - Extended V8's existing Bazel graph for this configuration, ICU, Temporal,
   private libc++, mimalloc, compiler headers, and generated inspector sources.
 - Added source builds for LZ4, mimalloc, nghttp2, AWS-LC, ICU, libc++, and
@@ -118,16 +119,16 @@ chain with the pinned compilers and links using V8's LLVM linker.
 
 ### Commands and justfile
 
-Homebrew Bazelisk is installed. `.bazelversion` selects Bazel 8.4.2. The updated
-`justfile` adds Homebrew and Vite Plus to its PATH and provides:
+Homebrew Bazelisk is installed. `.bazelversion` selects Bazel 8.4.2. The `justfile` keeps every
+Zig build recipe (`build`, `run`, `test`, `check`, ...) and adds, prefixed `bazel-`:
 
-- `just patch-v8`, `just build-v8`.
-- `just test-bootstrap`, `just test-io`, `just test-core`, `just test-net`,
-  `just test-oxc`, and `just test-lto`.
-- `just sync-rust-deps` and `just check-rust-deps`.
-- Existing Cargo Miri, formatting, and type-check workflows.
+- `just bazel-patch-v8`, `just bazel-build-v8`.
+- `just bazel-test-bootstrap`, `just bazel-test-io`, `just bazel-test-core`, `just bazel-test-net`,
+  `just bazel-test-oxc`, and `just bazel-test-lto`.
+- `just bazel-sync-rust-deps` and `just bazel-check-rust-deps`.
+- `just bazel-bump-v8 <version>`.
 
-Application build/run and the full runtime checks remain in the user's backup.
+Application build/run and the full runtime checks stay on the Zig recipes until cutover.
 There is no `//:origine`, `//:origine-snapshot`, `//:deps`, or complete root test
 suite yet. Do not document these as working commands.
 
@@ -136,7 +137,7 @@ suite yet. Do not document these as working commands.
 | Check | Result and scope |
 | --- | --- |
 | Homebrew Bazelisk | Selected/downloaded Bazel 8.4.2 successfully. |
-| `just test-bootstrap` | All 8 targets passed through Homebrew Bazelisk: ThinLTO probe, LZ4, Rust allocator/core/fs/I/O, Zig I/O, Zig safety. |
+| `just bazel-test-bootstrap` | All 8 targets passed through Homebrew Bazelisk: ThinLTO probe, LZ4, Rust allocator/core/fs/I/O, Zig I/O, Zig safety. |
 | Networking | TLS, H2, and DNS tests passed together; transport test also passed separately. |
 | OXC | Its Bazel test passed. |
 | Native libraries | AWS-LC crypto and nghttp2 builds passed; libc++/libc++abi archives built. Full V8 linkage remains unverified. |
@@ -165,7 +166,7 @@ extension, `repositories.bzl`, `icu_rules.bzl` and `platform_config.bzl` are rem
 
 | Pin | Where, and how it moves |
 | --- | --- |
-| V8, ICU, libc++, libc++abi, LLVM libc, buildtools, dragonbox, fp16, fast_float, simdutf; the Clang bundle | `git_source`/`http_archive` in `MODULE.bazel`. `just bump-v8 <version>` (`build/bazel/bump_v8.py`, a uv script) rewrites every `chromium.googlesource.com/<repo>@<commit>` there from V8's `DEPS` at that tag, and the Clang URL and digest. Run against 15.8.30 it leaves the file unchanged. |
+| V8, ICU, libc++, libc++abi, LLVM libc, buildtools, dragonbox, fp16, fast_float, simdutf; the Clang bundle | `git_source`/`http_archive` in `MODULE.bazel`. `just bazel-bump-v8 <version>` (`build/bazel/bump_v8.py`, a uv script) rewrites every `chromium.googlesource.com/<repo>@<commit>` there from V8's `DEPS` at that tag, and the Clang URL and digest. Run against 15.8.30 it leaves the file unchanged. |
 | Rust toolchain and digests | `rust.toolchain` in `MODULE.bazel`; keep it in step with `rust/rust-toolchain.toml` (Cargo still uses it). |
 | Zig, lz4, mimalloc, nghttp2, `temporal_capi` headers | Literal in `MODULE.bazel`. During migration the Zig build still pins its own copies. |
 | `aws-lc-sys` symbol prefix | Literal in `lib/aws-lc/aws-lc-sys/BUILD.bazel`, next to the vendored crate it names. |
@@ -175,7 +176,7 @@ extension, `repositories.bzl`, `icu_rules.bzl` and `platform_config.bzl` are rem
 patch series applied in name order from workspace directories, which it watches (`watch_tree`), so the
 submodule patch directories need no `BUILD.bazel`. V8 fetches its own `third_party/llvm-libc/src` at the DEPS
 commit instead of symlinking into `@libcxx`. ICU's upstream `BUILD.bazel` files under `source/` are removed and
-one root `icu.BUILD.bazel` builds the libraries. `just patch-v8` is `bazel fetch --repo=@v8` and prints the path.
+one root `icu.BUILD.bazel` builds the libraries. `just bazel-patch-v8` is `bazel fetch --repo=@v8` and prints the path.
 
 ### V8 overlay patch (revised 2026-11-04)
 
@@ -212,7 +213,7 @@ V8, ICU and libc++ trees are byte-identical apart from the overlay lines above. 
   the generator uses that value only as the logical include prefix (`.crdtp.dir`) and finds its templates
   from its own location. The patch keeps the original `third_party/inspector_protocol`; generated headers now
   include `third_party/inspector_protocol/crdtp/...`. 
-- **`@v8//:icu/v8` now builds** (`just build-v8`, ~6,180 actions, from a clean fetch). Two more gaps in upstream's
+- **`@v8//:icu/v8` now builds** (`just bazel-build-v8`, ~6,180 actions, from a clean fetch). Two more gaps in upstream's
   Bazel overlay were fixed with small patches (`v8-cppgc-caged-heap.patch` adds the caged-heap sources GN compiles
   but `BUILD.bazel` omits; `v8-mksnapshot-icu.patch` runs mksnapshot with `icudtl.dat` beside it, as V8 expects).
   Upstream's `BUILD.bazel` is not kept at parity with `BUILD.gn`; compare their source lists on every V8 bump.
@@ -299,12 +300,12 @@ does not replace the full migration acceptance gates.
 Done since the first checkpoint:
 
 - Pins: first derived by `pins.py`, then (branch `bazel-cleanup`) moved into `MODULE.bazel` with
-  `just bump-v8` (see "Dependency pins").
+  `just bazel-bump-v8` (see "Dependency pins").
 - Git-by-commit fetches replace googlesource tarball digests (those are not byte-stable).
 - Toolchain values centralized (`platform.bzl`, `cxx_runtime.bzl`); the Clang resource directory is found from its headers.
 - V8 builds: inspector generator fixed, caged-heap sources added, mksnapshot given its ICU data
   (now `build/bazel/patches/v8/`).
-- Verified: `just test-bootstrap` (8/8) before the V8 patches; `bazel build --config=fast @v8//:icu/v8` succeeds
+- Verified: `just bazel-test-bootstrap` (8/8) before the V8 patches; `bazel build --config=fast @v8//:icu/v8` succeeds
   (~6,180 actions). Not verified after the V8 patches: networking/OXC tests, the bootstrap suite.
 
 Open decisions and risks:

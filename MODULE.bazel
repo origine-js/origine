@@ -1,7 +1,7 @@
 module(name = "origine", version = "0.0.0")
 
 # Every external pin of the build is in this file. Chromium sources (V8, ICU, libc++, LLVM) follow
-# V8's DEPS: `just bump-v8 <version>` rewrites them. The rest are ordinary Bzlmod/archive pins.
+# V8's DEPS: `just bazel-bump-v8 <version>` rewrites them. The rest are ordinary Bzlmod/archive pins.
 
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")

@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["rich==14.2.0"]
 # ///
-"""Move the Chromium pins in MODULE.bazel to a V8 release: `just bump-v8 15.9.1`.
+"""Move the Chromium pins in MODULE.bazel to a V8 release: `just bazel-bump-v8 15.9.1`.
 
 Every `https://chromium.googlesource.com/<repository>@<commit>` string in MODULE.bazel is matched by
 repository against the DEPS file of that V8 tag and given its commit; V8 itself gets the tag's commit.
@@ -145,7 +145,7 @@ def main() -> None:
         return
     MODULE.write_text(text)
     console.print(changes)
-    console.print("[bold]Updated MODULE.bazel.[/] Review the diff, then rebuild V8 (`just build-v8`); the patch series may need updating.")
+    console.print("[bold]Updated MODULE.bazel.[/] Review the diff, then rebuild V8 (`just bazel-build-v8`); the patch series may need updating.")
 
 
 if __name__ == "__main__":

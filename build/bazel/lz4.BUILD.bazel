@@ -1,10 +1,11 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@origine//build/bazel:opt.bzl", "c_opt")
 
 cc_library(
     name = "lz4",
     srcs = ["lib/lz4.c", "lib/lz4hc.c"],
     hdrs = glob(["lib/*.h"]) + ["lib/lz4.c"],
     includes = ["lib"],
-    copts = ["-std=c99"],
+    copts = ["-std=c99"] + c_opt("lz4"),
     visibility = ["//visibility:public"],
 )

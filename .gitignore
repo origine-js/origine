@@ -10,3 +10,5 @@ __codecache__/
 __codecache__/
 /examples/graph/cache/cache/
 /examples/**/work/
+/build/bazel/local-profiles.toml
+/build/bazel/__pycache__/

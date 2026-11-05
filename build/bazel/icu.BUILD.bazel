@@ -1,4 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@origine//build/bazel:opt.bzl", "c_opt")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -28,7 +29,7 @@ cc_library(
     includes = ["source/common"],
     defines = DEFINES,
     local_defines = ["U_COMMON_IMPLEMENTATION", "U_ICUDATAENTRY_IN_COMMON"],
-    copts = ["-Wno-deprecated-declarations"],
+    copts = ["-Wno-deprecated-declarations"] + c_opt("icu"),
     alwayslink = True,
 )
 
@@ -38,7 +39,7 @@ cc_library(
     hdrs = glob(["source/i18n/**/*.h"]),
     includes = ["source/i18n"],
     local_defines = ["U_I18N_IMPLEMENTATION"],
-    copts = ["-Wno-deprecated-declarations"],
+    copts = ["-Wno-deprecated-declarations"] + c_opt("icu"),
     deps = [":icuuc"],
     alwayslink = True,
 )
@@ -48,6 +49,7 @@ cc_library(
     srcs = ["source/stubdata/stubdata.cpp"],
     hdrs = ["source/stubdata/stubdata.h"],
     local_defines = ["U_COMMON_IMPLEMENTATION"],
+    copts = c_opt("icu"),
     deps = [":icuuc"],
     alwayslink = True,
 )

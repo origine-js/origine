@@ -1,4 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@origine//build/bazel:opt.bzl", "c_opt")
 load("@origine//build/bazel:cxx_runtime.bzl", "LIBCXXABI_DEFINES", "LIBCXX_DEFINES", "RUNTIME_COPTS")
 
 package(default_visibility = ["//visibility:public"])
@@ -24,7 +25,7 @@ cc_library(
     name = "libc++abi",
     srcs = glob(["libcxxabi/src/*.cpp"], exclude = ["libcxxabi/src/cxa_noexception.cpp", "libcxxabi/src/stdlib_new_delete.cpp"]),
     hdrs = [":headers"] + glob(["libcxxabi/src/**/*.h", "libcxxabi/src/**/*.def", "libcxx/src/include/**"]),
-    copts = RUNTIME_COPTS,
+    copts = RUNTIME_COPTS + c_opt("libcxx"),
     local_defines = LIBCXXABI_DEFINES,
     includes = ["libcxxabi/src", "libcxx/src"],
     linkstatic = True,
@@ -34,7 +35,7 @@ cc_library(
     name = "libc++",
     srcs = glob(["libcxx/src/*.cpp", "libcxx/src/filesystem/*.cpp"]),
     hdrs = [":headers"] + glob(["libcxx/src/**/*.h", "libcxx/src/**/*.ipp"]),
-    copts = RUNTIME_COPTS,
+    copts = RUNTIME_COPTS + c_opt("libcxx"),
     local_defines = LIBCXX_DEFINES,
     includes = ["libcxx/src", "libcxx/src/filesystem"],
     deps = [":libc++abi"],

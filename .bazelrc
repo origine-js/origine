@@ -5,6 +5,12 @@ build --show_result=10
 build --@rules_rust//rust/toolchain/channel:channel=nightly
 test --test_output=errors
 
+# Local disk cache, shared by every output base and profile: switching between dev and a release
+# profile (whose C/C++ and Rust become bitcode in the same output paths) reuses earlier results
+# instead of recompiling. Kept under 20 GB by Bazel's own garbage collection.
+build --disk_cache=~/.cache/bazel-disk/origine
+build --experimental_disk_cache_gc_max_size=20G
+
 # V8 options (build settings of @v8//:BUILD.bazel) where Origine differs from upstream's defaults.
 build --@v8//:v8_use_metagen=false
 build --@v8//:v8_typed_array_max_size_in_heap=0

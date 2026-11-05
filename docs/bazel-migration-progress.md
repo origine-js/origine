@@ -173,10 +173,37 @@ Homebrew Bazelisk is installed. `.bazelversion` selects Bazel 8.4.2. The `justfi
   invocation passes everything: rules_zig's global mode, a mode per module
   (`--//build/bazel/opt:<module>=<mode>`: Zig `debug|safe|fast|small`, Rust `0|1|2|3|s|z`, declared in
   `build/bazel/opt.bzl`, which `zig_opt`/`rust_opt` turn into `zigopts`/`rustc_flags`), one flag per feature and
-  per compression option (`//build/bazel/settings`), and `--copt=-Os` for `release-smaller`. The Python profile
+  per compression option (`//build/bazel/settings`), and `--copt=-Os` for `release-smaller` (the only global
+  C flag left: it also reaches `abseil-cpp` and `highway`, which have no flag of their own). The Python profile
   models list every module (checked against `opt.bzl`); the flag defaults equal `dev`, so a plain
   `bazel build //src:origine` builds the dev profile. Features and compression are loaded from
   `build/bazel/features.bzl`.
+- `just i` (alias of `just interactive`) is a Textual app (`build/bazel/tui.py`) over the same model
+  (`build/bazel/model.py`). The state is one immutable `Selection`: a template (any profile or preset) plus
+  overrides; every widget is drawn from it. Left: templates. Middle: Features (ticking one ticks what it
+  `requires`), Compression and Optimization, a table of every Zig module, Rust crate and C/C++ library with the
+  template's level next to the current one: `/` filters, `c` shows changed rows only, Space marks rows (on a
+  section header: the whole section), then a level key sets them all (Zig `d s f m`; Rust `0 1 2 3 s z`; C/C++
+  `i 0 1 2 3 s z`, `i` = inherit). Right: the changes from the template (Delete reverts one), the preview and, under
+  it, the command line. Keys: `b` build, `r` run (args field), `B` build in the app (streams Bazel's build events),
+  `p` print the command, `y` copy it, `s` save a preset, `ctrl+r` reset. The tests/examples checkboxes run after
+  `b` (`tests` is `zig build test`). Without edited modules the command is `just build <template> [-F …] [-C …]`;
+  with them it is the raw `bazel build …` line, and saving a preset gives it a `just build <name>` spelling.
+- Presets: `build/bazel/profiles.toml` (committed, shared) and `build/bazel/local-profiles.toml` (gitignored) hold
+  `[name]` tables (`extends`, `doc`, `features`, `compression`, `zig_mode`, `compilation_mode`, and
+  `[name.overrides]` of `"kind:module" = "level"`; format and loader in `model.py`). Stock profiles load first,
+  then shared, then local; each may extend any before it, and a name already taken is an error, as is any
+  unknown module or level (the message names the file and the preset). A preset is an ordinary profile:
+  `just build <name>`, `just run <name>`, `just show` and the TUI's template list all see it. Saving from the TUI
+  rewrites the file from its parsed tables, so hand-written comments in it are not kept.
+- `build/bazel/bazel_events.py` is the build-event stream, free of terminal code: `run_bazel` runs Bazel with
+  `--build_event_json_file`, tails the file (partial lines are held back) and yields typed events (`Started`,
+  `Progress`, `TargetCompleted`, `ActionCompleted`, `Finished`, `Exited`; unknown events become `Other`);
+  `BuildState.apply` reduces them to counters, the `[N / M]` progress and the last output lines. Until the first
+  event it forwards Bazel's own stderr, which is where "waiting for another command" appears. The TUI's build
+  screen uses it; any other front end can.
+- Tests are plain scripts, no pytest: `uv run --script build/bazel/tests/test_model.py`, `test_bazel_events.py`
+  (on the recorded `lz4.bep.json` and a stand-in `bazel`) and `test_tui.py` (Textual's pilot, headless).
 - Tests compile their module as the test root (rules_zig's mode), so they stay debug whatever the profile.
 - `just bazel-patch-v8`, `just bazel-build-v8`, `just bazel-bump-v8 <version>`.
 - `just bazel-sync-rust-deps` and `just bazel-check-rust-deps`.
@@ -231,6 +258,34 @@ submodule patch directories need no `BUILD.bazel`. V8 fetches its own `third_par
 commit instead of symlinking into `@libcxx`. ICU's upstream `BUILD.bazel` files under `source/` are removed and
 one root `icu.BUILD.bazel` builds the libraries. `just bazel-patch-v8` is `bazel fetch --repo=@v8` and prints the path.
 
+### C/C++ optimization: one flag per library
+
+Every C/C++ library built from source here has its own flag, `--//build/bazel/opt:c_<library>=<level>`, next to
+the Zig and Rust ones. Levels: `inherit|0|1|2|3|s|z`. `inherit` adds nothing, so `--compilation_mode` decides
+(the toolchain's `opt` feature is `-O2 -DNDEBUG`, `dbg` is `-O0 -g`); any other level appends `-O<level>` to the
+library's `copts`, after the toolchain flags, so it wins. `NDEBUG` and `-g` stay with `--compilation_mode`.
+
+| Flag | What it covers |
+| --- | --- |
+| `c_v8` | everything compiled in V8's package: V8, the binding shim, Torque and mksnapshot, `simdutf`, ... |
+| `c_icu` | `icuuc`, `icui18n` and `stubdata` |
+| `c_libcxx` | libc++ and libc++abi (Chromium's, shared by V8, Rust and Zig) |
+| `c_mimalloc`, `c_lz4`, `c_nghttp2` | the libraries of the same name |
+| `c_zstd` | the ICU data decoder; default `s` (it was a hard-coded `-Os`) |
+| `c_icu_compressed`, `c_icu_raw` | the two ICU data providers of `lib/v8_zig/binding`; compressed defaults to `s` |
+| `c_aws_lc` | AWS-LC crypto, s2n-bignum and ssl (`jitterentropy` stays `-O0`, as upstream requires) |
+
+Defaults live in `C_LIBRARIES` in `build/bazel/opt.bzl` and equal what `dev` sets, so no profile changed: the
+new flags only let a profile or `just i` tune a library. The `abseil-cpp` and `highway` modules are built by
+their own packages and have no flag; they follow `--compilation_mode` and the global `--copt`.
+
+Adding a library: add it to `C_LIBRARIES` (its `opt/BUILD.bazel` settings are generated), end its `copts` with
+`+ c_opt("<name>")` (load `c_opt` from `@origine//build/bazel:opt.bzl` in external build files, `//build/bazel:opt.bzl`
+in-repo), and give it a name that is one library, never a group. `build.py` reads the same dict, so `just show`
+and `just i` list it and the profile models fail to load until every profile covers it. V8 is the exception in
+how the flag gets in: `patches/v8/0007-c-opt-level.patch` appends `c_opt("v8")` to the `copts` V8's `defs.bzl`
+gives every V8 target.
+
 ### V8 overlay patch (revised 2026-11-04)
 
 `build/bazel/patches/v8/` holds the overlay series (`0001-bazel-overlay`, `0002-cppgc-caged-heap`,
@@ -281,6 +336,22 @@ V8, ICU and libc++ trees are byte-identical apart from the overlay lines above. 
 - Third-party library flags (`mimalloc`, `nghttp2` `HAVE_*`, ICU, AWS-LC defines) are copied from the Zig
   build files and V8/AWS-LC sources, not derived. They are in BUILD files next to the targets.
 - `bazel_dep` versions and the `rules_zig`/`highway` patches are ordinary Bzlmod pins.
+
+## Cross-language ThinLTO and the disk cache (2026-11-04)
+
+- Release profiles (`lto = True` in `build/bazel/model.py`) make every input of the final link LLVM bitcode:
+  C/C++ through `--features=origine_thin_lto` (V8's objects already had it, so V8 stays cached), Rust through
+  `extra_rustc_flag=-Clinker-plugin-lto` (registry crates included), and Zig through `zig_lto_library`
+  (`build/bazel/zig_lto.bzl`): Zig 0.17 cannot write an LTO object for Mach-O (`-flto` needs LLD, which it does
+  not support for Mach-O), so it emits `-femit-llvm-bc` and the pinned Clang makes it a ThinLTO object
+  (`-flto=thin -x ir`), linked with `//build/bazel:zig_compiler_rt` and the Zig modules' C dependencies. The link
+  adds build.zig's release options (`--icf=all`, `-enable-merge-functions`, `-x`). `release-balanced`: 53.1 MB
+  with LTO against 69.1 MB without, all 50 examples pass. Not yet: IR evidence of cross-language imports on the
+  real program; the bitcode targets macOS 27.2 (host) while the floor is 15.0 (lld warns).
+- The Zig build had no cross-language LTO: Zig was a native object, Rust a native staticlib (Cargo's own
+  `lto = "thin"`) pre-linked with `clang -r`, and only V8 was bitcode.
+- `.bazelrc` sets a local disk cache (`~/.cache/bazel-disk/origine`, 20 GB GC limit): switching dev ↔
+  release-balanced went from ~90 s of recompiling (both write bitcode/native objects to the same paths) to 2–4 s.
 
 ## Remaining work and acceptance gates
 

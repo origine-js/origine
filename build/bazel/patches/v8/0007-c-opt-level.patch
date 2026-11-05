@@ -1,0 +1,20 @@
+diff --git a/bazel/defs.bzl b/bazel/defs.bzl
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -11,6 +11,7 @@
+ load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
+ load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+ load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
++load("@origine//build/bazel:opt.bzl", "c_opt")
+ 
+ FlagInfo = provider("The value of an option.",
+ fields = ["value"])
+@@ -189,7 +190,7 @@
+             ],
+             "//conditions:default": [
+             ],
+-        }),
++        }) + c_opt("v8"),
+         includes = ["include"],
+         linkopts = select({
+             "@v8//bazel/config:is_windows": [

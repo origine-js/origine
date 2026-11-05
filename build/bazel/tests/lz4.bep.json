@@ -1,0 +1,13 @@
+{"id":{"started":{}},"started":{"command":"build","buildToolVersion":"8.4.2"}}
+{"id":{"progress":{}},"progress":{"stderr":"Computing main repo mapping: \nLoading: \nLoading: 0 packages loaded\n"}}
+{"id":{"progress":{"opaqueCount":1}},"progress":{}}
+{"id":{"progress":{"opaqueCount":2}},"progress":{"stderr":"Analyzing: target @@+_repo_rules+origine_lz4//:lz4 (0 packages loaded, 0 targets configured)\nAnalyzing: target @@+_repo_rules+origine_lz4//:lz4 (0 packages loaded, 0 targets configured)\n\n"}}
+{"id":{"progress":{"opaqueCount":3}},"progress":{}}
+{"id":{"actionCompleted":{"primaryOutput":"bazel-out/stable-status.txt","configuration":{"id":"system"}}},"action":{"success":true,"primaryOutput":{"uri":"file:///private/var/tmp/_bazel_cyan/6a6378e347b6726a9432cee96ec75041/execroot/_main/bazel-out/stable-status.txt"},"configuration":{"id":"none"},"type":"BazelWorkspaceStatusAction"}}
+{"id":{"progress":{"opaqueCount":4}},"progress":{}}
+{"id":{"targetConfigured":{"label":"@@+_repo_rules+origine_lz4//:lz4"}},"configured":{"targetKind":"cc_library rule"}}
+{"id":{"progress":{"opaqueCount":5}},"progress":{"stderr":"INFO: Analyzed target @@+_repo_rules+origine_lz4//:lz4 (1 packages loaded, 5 targets configured).\n"}}
+{"id":{"targetCompleted":{"label":"@@+_repo_rules+origine_lz4//:lz4","configuration":{"id":"dee999da149334331cd8bcb390ceb67362b5518c640d1b9b7722c0bdcd5d0a88"}}},"completed":{"success":true,"outputGroup":[{"name":"default","fileSets":[{"id":"0"}]}]}}
+{"id":{"progress":{"opaqueCount":6}},"progress":{"stderr":"INFO: Found 1 target...\n"}}
+{"id":{"buildFinished":{}},"finished":{"overallSuccess":true,"finishTimeMillis":"1793802361669","exitCode":{"name":"SUCCESS"},"finishTime":"2026-11-04T14:26:01.669Z"}}
+{"id":{"progress":{"opaqueCount":7}},"progress":{"stderr":"Target @@+_repo_rules+origine_lz4//:lz4 up-to-date:\n  bazel-bin/external/+_repo_rules+origine_lz4/liblz4.a\n  bazel-bin/external/+_repo_rules+origine_lz4/liblz4.pic.a\nINFO: Elapsed time: 0.168s, Critical Path: 0.00s\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nINFO: \n"}}

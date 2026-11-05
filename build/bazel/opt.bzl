@@ -3,7 +3,8 @@
 Bazel knows no profiles: build.py states the mode of every module on each invocation
 (`--//build/bazel/opt:<module>=<mode>`); the defaults here are what `dev` sets, so a plain
 `bazel build` builds the same thing. A module is a Zig library (debug|safe|fast|small, `-O<mode>`)
-or a Rust crate (0|1|2|3|s|z, `-Copt-level=<v>`, with debug assertions at 0).
+a Rust crate (0|1|2|3|s|z, `-Copt-level=<v>`, with debug assertions at 0) or a C/C++ library
+(inherit|0|1|2|3|s|z, `-O<level>`; `c_<library>`).
 """
 
 # Zig module -> default mode.
@@ -42,6 +43,36 @@ RUST_CRATES = {
 }
 
 RUST_LEVELS = ["0", "1", "2", "3", "s", "z"]
+
+# C/C++ library -> default level: "inherit" adds nothing, so `--compilation_mode` decides (`-O2
+# -DNDEBUG` with opt, `-O0 -g` with dbg); any other level adds `-O<level>` after it. Each entry is one
+# library built from source here (one flag each, never shared): v8 (V8 and everything it compiles in
+# its own package: the binding shim, Torque, mksnapshot, simdutf, ...), icu, libcxx (libc++ and
+# libc++abi), mimalloc, lz4, nghttp2, zstd (the ICU data decoder), icu_compressed and icu_raw (the
+# two ICU data providers of lib/v8_zig/binding), aws_lc (crypto, s2n-bignum and ssl; jitterentropy
+# stays -O0 as upstream requires). The `abseil-cpp` and `highway` modules have none: they follow
+# `--compilation_mode`.
+C_LIBRARIES = {
+    "v8": "inherit",
+    "icu": "inherit",
+    "libcxx": "inherit",
+    "mimalloc": "inherit",
+    "lz4": "inherit",
+    "nghttp2": "inherit",
+    "zstd": "s",
+    "icu_compressed": "s",
+    "icu_raw": "inherit",
+    "aws_lc": "inherit",
+}
+
+C_LEVELS = ["inherit", "0", "1", "2", "3", "s", "z"]
+
+def c_opt(library):
+    """`copts` for a C/C++ library: its `-O<level>`, or nothing for "inherit". Put it last in `copts`."""
+    return select({
+        Label("//build/bazel/opt:c_{}_{}".format(library, level)): ([] if level == "inherit" else ["-O" + level])
+        for level in C_LEVELS
+    })
 
 def zig_opt(module):
     """`zigopts` for a Zig module: its `-O<mode>`."""

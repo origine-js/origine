@@ -1,4 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@origine//build/bazel:opt.bzl", "c_opt")
 
 # Only the decoder, as lib/v8_zig/build/zstd.build.zig's `addSources`: no compression, dictionary
 # training, legacy formats or CLI.
@@ -18,6 +19,6 @@ cc_library(
     ] + glob(["lib/**/*.h"]),
     hdrs = ["lib/zstd.h"],
     includes = ["lib"],
-    copts = ["-std=c99", "-Os", "-DZSTD_DISABLE_ASM", "-DZSTD_LEGACY_SUPPORT=0", "-DZSTD_STRIP_ERROR_STRINGS"],
+    copts = ["-std=c99", "-DZSTD_DISABLE_ASM", "-DZSTD_LEGACY_SUPPORT=0", "-DZSTD_STRIP_ERROR_STRINGS"] + c_opt("zstd"),
     visibility = ["//visibility:public"],
 )

@@ -1,3 +1,5 @@
+load("@rules_zig//zig:defs.bzl", "zig_static_library")
+
 exports_files([
     "highway.patch",
     "icu.BUILD.bazel",
@@ -13,5 +15,14 @@ exports_files([
 platform(
     name = "macos_arm64",
     constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
+    visibility = ["//visibility:public"],
+)
+
+# Zig's compiler runtime alone (native), for programs whose Zig code is ThinLTO bitcode
+# (zig_lto.bzl): bitcode does not carry it.
+zig_static_library(
+    name = "zig_compiler_rt",
+    main = "empty.zig",
+    compiler_runtime = "include",
     visibility = ["//visibility:public"],
 )

@@ -2,6 +2,7 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_zig//zig:defs.bzl", "zig_configure", "zig_library", "zig_static_library", "zig_test")
 load("//build/bazel:features.bzl", "FEATURES", "if_feature")
 load("//build/bazel:opt.bzl", "zig_opt")
+load("//build/bazel:zig_lto.bzl", "zig_lto_library")
 load("//build/bazel:zig_options.bzl", "zig_options")
 
 zig_library(
@@ -32,8 +33,9 @@ zig_test(
     zigopts = ["-lc"],
 )
 
-zig_static_library(
+zig_lto_library(
     name = "io_native_unconfigured",
+    module = "io_native",
     main = "io/lib.zig",
     deps = [":io"],
     zigopts = ["-lc", "-fllvm"],
@@ -157,8 +159,9 @@ _NATIVE_DEPS = [
 
 
 
-zig_static_library(
+zig_lto_library(
     name = "snapshot_tool_main",
+    module = "snapshot_tool_main",
     main = "snapshot_tool.zig",
     deps = _HOST_DEPS,
     compiler_runtime = "include",
@@ -210,8 +213,9 @@ zig_static_library(
     extra_srcs = [":engine_snapshot"],
 )
 
-zig_static_library(
+zig_lto_library(
     name = "origine_main",
+    module = "origine_main",
     main = "main.zig",
     deps = _HOST_DEPS,
     compiler_runtime = "include",

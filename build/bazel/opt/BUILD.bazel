@@ -1,5 +1,5 @@
-load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
-load("//build/bazel:opt.bzl", "RUST_CRATES", "RUST_LEVELS", "ZIG_MODES", "ZIG_MODULES")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
+load("//build/bazel:opt.bzl", "C_LEVELS", "C_LIBRARIES", "RUST_CRATES", "RUST_LEVELS", "ZIG_MODES", "ZIG_MODULES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -19,3 +19,17 @@ package(default_visibility = ["//visibility:public"])
     )
     for crate, default in RUST_CRATES.items()
 ]
+
+[
+    (
+        string_flag(name = "c_" + library, build_setting_default = default, values = C_LEVELS),
+        [config_setting(name = "c_{}_{}".format(library, level), flag_values = {":c_" + library: level}) for level in C_LEVELS],
+    )
+    for library, default in C_LIBRARIES.items()
+]
+
+# Whether the program's Zig code joins the final ThinLTO link as bitcode (//build/bazel:zig_lto.bzl).
+# build/bazel/build.py sets it with the rest of a profile's LTO flags.
+bool_flag(name = "lto", build_setting_default = False)
+
+config_setting(name = "lto_on", flag_values = {":lto": "true"})

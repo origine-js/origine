@@ -210,6 +210,7 @@ STOCK_PROFILES = {
         profile(
             "release-balanced", "balanced between size and performance",
             critical_zig=None, host_zig="small", critical_rust="3", host_rust="s",
+            compression=frozenset({"icu"}),
             lto=True,
         ),
         profile(
